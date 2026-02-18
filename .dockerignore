@@ -1,0 +1,9 @@
+.git
+.idea
+.DS_Store
+.claude
+node_modules
+LICENSE
+README.md
+.gitignore
+.dockerignore

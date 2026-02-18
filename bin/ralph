@@ -122,7 +122,7 @@ build_claude_args() {
   fi
 }
 
-rm .ralph.stop
+rm -f .ralph.stop
 
 iter=0
 while true; do

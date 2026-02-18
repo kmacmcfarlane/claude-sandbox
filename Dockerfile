@@ -40,5 +40,9 @@ RUN useradd -m -s /bin/bash claude
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
+COPY bin/ /opt/claude-sandbox/bin/
+COPY lib/ /opt/claude-sandbox/lib/
+RUN chmod +x /opt/claude-sandbox/bin/*
+
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["claude"]

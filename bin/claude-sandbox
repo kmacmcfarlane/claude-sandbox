@@ -11,10 +11,11 @@
 # The project is mounted at its REAL host path inside the container so that
 # docker compose volumes (which the host daemon resolves) work correctly.
 #
-set -euo pipefail
+set -euox  pipefail
 
 REAL_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 REPO_ROOT="$(cd "$(dirname "$REAL_PATH")/.." && pwd)"
+echo REPO_ROOT=${REPO_ROOT}
 IMAGE_NAME="claude-sandbox"
 
 # ---------------------------------------------------------------------------
@@ -45,14 +46,14 @@ DOCKER_GID="$(stat -c '%g' /var/run/docker.sock 2>/dev/null || echo '')"
 NEEDS_BUILD=false
 if ! docker image inspect "$IMAGE_NAME" >/dev/null 2>&1; then
     NEEDS_BUILD=true
-elif [ "$REPO_ROOT/docker/Dockerfile" -nt "$(docker image inspect -f '{{.Created}}' "$IMAGE_NAME" 2>/dev/null || echo '1970')" ]; then
+elif [ "$REPO_ROOT/Dockerfile" -nt "$(docker image inspect -f '{{.Created}}' "$IMAGE_NAME" 2>/dev/null || echo '1970')" ]; then
     # Rough heuristic: rebuild if Dockerfile is newer than image creation time
     NEEDS_BUILD=true
 fi
 
 if [ "$NEEDS_BUILD" = true ]; then
     echo "Building $IMAGE_NAME image..."
-    docker build -t "$IMAGE_NAME" "$REPO_ROOT/docker"
+    docker build -t "$IMAGE_NAME" "$REPO_ROOT"
 fi
 
 # ---------------------------------------------------------------------------
@@ -104,11 +105,13 @@ fi
 # ---------------------------------------------------------------------------
 # Build container command
 # ---------------------------------------------------------------------------
+PROJECT_SLUG="$(basename "$PROJECT_DIR" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9._-]/-/g')"
+
 if [ "$RALPH_MODE" = true ]; then
-    CONTAINER_NAME="${IMAGE_NAME}-ralph"
-    CMD=("$REPO_ROOT/bin/ralph" "$@")
+    CONTAINER_NAME="${IMAGE_NAME}-${PROJECT_SLUG}-ralph"
+    CMD=("/opt/claude-sandbox/bin/ralph" "$@")
 else
-    CONTAINER_NAME="$IMAGE_NAME"
+    CONTAINER_NAME="${IMAGE_NAME}-${PROJECT_SLUG}"
     CMD=("claude" "$@")
 fi
 
