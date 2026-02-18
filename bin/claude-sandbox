@@ -11,7 +11,7 @@
 # The project is mounted at its REAL host path inside the container so that
 # docker compose volumes (which the host daemon resolves) work correctly.
 #
-set -euox  pipefail
+set -euo  pipefail
 
 REAL_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 REPO_ROOT="$(cd "$(dirname "$REAL_PATH")/.." && pwd)"
