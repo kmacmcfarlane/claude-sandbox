@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+#
+# Run Claude Code inside a sandboxed Docker container.
+#
+# Usage:
+#   claude-sandbox                     # launch claude interactively in $PWD
+#   claude-sandbox --resume            # pass args through to claude
+#   claude-sandbox --ralph [ralph-args]  # launch the ralph loop runner
+#   PROJECT_DIR=/other claude-sandbox  # launch claude in /other
+#
+# The project is mounted at its REAL host path inside the container so that
+# docker compose volumes (which the host daemon resolves) work correctly.
+#
+set -euo pipefail
+
+REAL_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+REPO_ROOT="$(cd "$(dirname "$REAL_PATH")/.." && pwd)"
+IMAGE_NAME="claude-sandbox"
+
+# ---------------------------------------------------------------------------
+# Parse --ralph flag (must come first; everything after goes to ralph)
+# ---------------------------------------------------------------------------
+RALPH_MODE=false
+if [ "${1:-}" = "--ralph" ]; then
+    RALPH_MODE=true
+    shift
+fi
+
+# ---------------------------------------------------------------------------
+# Resolve project directory (must be absolute for the same-path mount trick)
+# ---------------------------------------------------------------------------
+PROJECT_DIR="${PROJECT_DIR:-$(pwd)}"
+PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"
+
+# ---------------------------------------------------------------------------
+# Detect host IDs for permission mapping
+# ---------------------------------------------------------------------------
+HOST_UID="$(id -u)"
+HOST_GID="$(id -g)"
+DOCKER_GID="$(stat -c '%g' /var/run/docker.sock 2>/dev/null || echo '')"
+
+# ---------------------------------------------------------------------------
+# Build image if it doesn't exist (or if Dockerfile is newer)
+# ---------------------------------------------------------------------------
+NEEDS_BUILD=false
+if ! docker image inspect "$IMAGE_NAME" >/dev/null 2>&1; then
+    NEEDS_BUILD=true
+elif [ "$REPO_ROOT/docker/Dockerfile" -nt "$(docker image inspect -f '{{.Created}}' "$IMAGE_NAME" 2>/dev/null || echo '1970')" ]; then
+    # Rough heuristic: rebuild if Dockerfile is newer than image creation time
+    NEEDS_BUILD=true
+fi
+
+if [ "$NEEDS_BUILD" = true ]; then
+    echo "Building $IMAGE_NAME image..."
+    docker build -t "$IMAGE_NAME" "$REPO_ROOT/docker"
+fi
+
+# ---------------------------------------------------------------------------
+# Assemble volume mounts
+# ---------------------------------------------------------------------------
+VOLUMES=(
+    # Mount project at its real host path so docker-in-docker volume paths match
+    -v "$PROJECT_DIR:$PROJECT_DIR"
+
+    # Docker socket for host docker access
+    -v /var/run/docker.sock:/var/run/docker.sock
+)
+
+# Claude Code config directory (auth tokens, project memories, settings)
+if [ -d "$HOME/.claude" ]; then
+    VOLUMES+=(-v "$HOME/.claude:/home/claude/.claude")
+fi
+
+# Claude Code global state (onboarding, OAuth account, feature flags)
+if [ -f "$HOME/.claude.json" ]; then
+    VOLUMES+=(-v "$HOME/.claude.json:/home/claude/.claude.json")
+fi
+
+# Git config (for commits)
+if [ -f "$HOME/.gitconfig" ]; then
+    VOLUMES+=(-v "$HOME/.gitconfig:/home/claude/.gitconfig:ro")
+fi
+
+# SSH keys (for git remotes over SSH)
+if [ -d "$HOME/.ssh" ]; then
+    VOLUMES+=(-v "$HOME/.ssh:/home/claude/.ssh:ro")
+fi
+
+# ---------------------------------------------------------------------------
+# Claude environment file (Discord webhook, etc.)
+# ---------------------------------------------------------------------------
+ENV_FILE="$PROJECT_DIR/.env.claude-sandbox"
+if [ ! -f "$ENV_FILE" ]; then
+    echo "ERROR: Claude environment file not found: $ENV_FILE" >&2
+    echo "" >&2
+    echo "This file provides environment variables needed by Claude Code" >&2
+    echo "(e.g. DISCORD_WEBHOOK_URL for MCP server notifications)." >&2
+    echo "" >&2
+    echo "To create it, copy the example and fill in your values:" >&2
+    echo "  cp .env.claude-sandbox.example .env.claude-sandbox" >&2
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Build container command
+# ---------------------------------------------------------------------------
+if [ "$RALPH_MODE" = true ]; then
+    CONTAINER_NAME="${IMAGE_NAME}-ralph"
+    CMD=("$REPO_ROOT/bin/ralph" "$@")
+else
+    CONTAINER_NAME="$IMAGE_NAME"
+    CMD=("claude" "$@")
+fi
+
+# ---------------------------------------------------------------------------
+# Launch
+# ---------------------------------------------------------------------------
+exec docker run -it --rm \
+    "${VOLUMES[@]}" \
+    -w "$PROJECT_DIR" \
+    --env-file "$ENV_FILE" \
+    -e HOST_UID="$HOST_UID" \
+    -e HOST_GID="$HOST_GID" \
+    -e DOCKER_GID="$DOCKER_GID" \
+    -e ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}" \
+    --name "$CONTAINER_NAME" \
+    "$IMAGE_NAME" \
+    "${CMD[@]}"

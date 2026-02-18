@@ -1,0 +1,161 @@
+#!/bin/bash
+set -euo pipefail
+
+# Ralph loop runner for Claude Code
+#
+# Features:
+# - Fresh-context loop: re-invokes Claude Code each iteration
+# - Stop control: create a stop file (default: .ralph.stop) to halt
+# - Iteration limit: --limit N (default: unlimited)
+
+REAL_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+REPO_ROOT="$(cd "$(dirname "$REAL_PATH")/.." && pwd)"
+ROOT_DIR="$(pwd)"
+STOP_FILE="${STOP_FILE:-$ROOT_DIR/.ralph.stop}"
+PROMPT_FILE="${PROMPT_FILE:-$ROOT_DIR/agent/PROMPT.md}"
+CLAUDE_BIN="${CLAUDE_BIN:-claude}"
+
+LIMIT=""
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  ralph [options]
+
+Options:
+  --limit N                       Stop after N iterations (default: unlimited)
+  --stop-file PATH                Stop file path (default: <cwd>/.ralph.stop)
+  --prompt PATH                   Prompt file path (default: <cwd>/agent/PROMPT.md)
+  --claude-bin PATH               Claude Code CLI (default: claude)
+  --interactive                   Run claude interactively (default: non-interactive -p)
+  --dangerously-skip-permissions  Pass --dangerously-skip-permissions to claude
+  --resume                        Pass --resume flag to claude on first iteration
+
+Stop:
+  Create the stop file to halt the loop:
+    touch .ralph.stop
+
+  Remove it to allow running again:
+    rm .ralph.stop
+USAGE
+}
+
+NON_INTERACTIVE="-p"
+SKIP_PERMISSIONS=""
+RESUME=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --limit)
+      LIMIT="${2:-}"; shift 2;;
+    --stop-file)
+      STOP_FILE="${2:-}"; shift 2;;
+    --prompt)
+      PROMPT_FILE="${2:-}"; shift 2;;
+    --claude-bin)
+      CLAUDE_BIN="${2:-}"; shift 2;;
+    --interactive)
+      NON_INTERACTIVE=""; shift 1;;
+    --dangerously-skip-permissions)
+      SKIP_PERMISSIONS="--dangerously-skip-permissions"; shift 1;;
+    --resume)
+      RESUME="--resume"; shift 1;;
+    -h|--help)
+      usage; exit 0;;
+    *)
+      echo "Unknown argument: $1" >&2
+      usage
+      exit 2;;
+  esac
+done
+
+# Select mode-specific prompt addendum
+if [[ -n "$NON_INTERACTIVE" ]]; then
+  PROMPT_ADDENDUM="${PROMPT_FILE%/*}/PROMPT_AUTO.md"
+else
+  PROMPT_ADDENDUM="${PROMPT_FILE%/*}/PROMPT_INTERACTIVE.md"
+fi
+
+if [[ ! -f "$PROMPT_FILE" ]]; then
+  echo "PROMPT file not found: $PROMPT_FILE" >&2
+  exit 1
+fi
+
+if [[ ! -f "$PROMPT_ADDENDUM" ]]; then
+  echo "Prompt addendum not found: $PROMPT_ADDENDUM" >&2
+  exit 1
+fi
+
+if [[ -n "$LIMIT" ]]; then
+  if ! [[ "$LIMIT" =~ ^[0-9]+$ ]] || [[ "$LIMIT" -le 0 ]]; then
+    echo "--limit must be a positive integer" >&2
+    exit 2
+  fi
+fi
+
+if [[ -n "$NON_INTERACTIVE" ]]; then
+  MODE_LABEL="non-interactive"
+else
+  MODE_LABEL="interactive"
+fi
+
+echo "Ralph loop starting"
+echo "  repo:      $ROOT_DIR"
+echo "  prompt:    $PROMPT_FILE + $PROMPT_ADDENDUM"
+echo "  stop file: $STOP_FILE"
+echo "  claude:    $CLAUDE_BIN"
+echo "  mode:      $MODE_LABEL"
+echo "  skip-perm: $( [[ -n "$SKIP_PERMISSIONS" ]] && echo yes || echo no )"
+echo "  limit:     ${LIMIT:-unlimited}"
+
+cd "$ROOT_DIR"
+
+# Build claude args
+build_claude_args() {
+  CLAUDE_ARGS=()
+  [[ -n "$NON_INTERACTIVE" ]] && CLAUDE_ARGS+=("$NON_INTERACTIVE")
+  [[ -n "$SKIP_PERMISSIONS" ]] && CLAUDE_ARGS+=("$SKIP_PERMISSIONS")
+  [[ -n "$RESUME" ]] && CLAUDE_ARGS+=("$RESUME")
+  # In non-interactive mode, stream JSON events for visible progress
+  if [[ -n "$NON_INTERACTIVE" ]]; then
+    CLAUDE_ARGS+=(--verbose --output-format stream-json)
+  fi
+}
+
+rm .ralph.stop
+
+iter=0
+while true; do
+  if [[ -f "$STOP_FILE" ]]; then
+    echo "Stop file detected ($STOP_FILE). Exiting."
+    exit 0
+  fi
+
+  iter=$((iter + 1))
+  echo "---- iteration $iter ----"
+
+  build_claude_args
+
+  # Fresh context: new process each loop
+  (
+    echo "RESUME=$RESUME"
+    echo "Launching claude ${CLAUDE_ARGS[*]}"
+    if [[ -n "$NON_INTERACTIVE" ]]; then
+      cat "$PROMPT_FILE" "$PROMPT_ADDENDUM" | "$CLAUDE_BIN" "${CLAUDE_ARGS[@]}" | node "$REPO_ROOT/lib/stream-filter.js"
+    else
+      cat "$PROMPT_FILE" "$PROMPT_ADDENDUM" | "$CLAUDE_BIN" "${CLAUDE_ARGS[@]}"
+    fi
+  ) || {
+    rc=$?
+    echo "Claude process exited non-zero (rc=$rc). Exiting."
+    exit "$rc"
+  }
+
+  if [[ -n "$LIMIT" && "$iter" -ge "$LIMIT" ]]; then
+    echo "Iteration limit reached ($LIMIT). Exiting."
+    exit 0
+  fi
+
+  sleep 3
+  RESUME=""
+done

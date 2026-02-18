@@ -1,0 +1,7 @@
+.idea
+.DS_Store
+
+.claude/*
+!.claude/settings.json
+
+node_modules/
