@@ -145,3 +145,7 @@ docker rmi claude-sandbox
 |---|---|---|
 | `PROJECT_DIR` | `$(pwd)` | Project directory to mount |
 | `ANTHROPIC_API_KEY` | (none) | Passed through to the container |
+
+## Part of kmac-claude-kit
+
+This repo is one component of [kmac-claude-kit](https://github.com/kmacmcfarlane/kmac-claude-kit), a toolkit for building software with Claude Code. See that repo for how claude-sandbox, [claude-templates](https://github.com/kmacmcfarlane/claude-templates), and [claude-skills](https://github.com/kmacmcfarlane/claude-skills) fit together.
