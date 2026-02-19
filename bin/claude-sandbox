@@ -91,15 +91,16 @@ fi
 # Claude environment file (Discord webhook, etc.)
 # ---------------------------------------------------------------------------
 ENV_FILE="$PROJECT_DIR/.env.claude-sandbox"
+ENV_ARGS=(--env-file "$ENV_FILE")
 if [ ! -f "$ENV_FILE" ]; then
-    echo "ERROR: Claude environment file not found: $ENV_FILE" >&2
+    ENV_ARGS=()
+    echo "WARNING: Claude environment file not found: $ENV_FILE" >&2
     echo "" >&2
     echo "This file provides environment variables needed by Claude Code" >&2
     echo "(e.g. DISCORD_WEBHOOK_URL for MCP server notifications)." >&2
     echo "" >&2
     echo "To create it, copy the example and fill in your values:" >&2
     echo "  cp .env.claude-sandbox.example .env.claude-sandbox" >&2
-    exit 1
 fi
 
 # ---------------------------------------------------------------------------
@@ -121,7 +122,7 @@ fi
 exec docker run -it --rm \
     "${VOLUMES[@]}" \
     -w "$PROJECT_DIR" \
-    --env-file "$ENV_FILE" \
+    "${ENV_ARGS[@]}" \
     -e HOST_UID="$HOST_UID" \
     -e HOST_GID="$HOST_GID" \
     -e DOCKER_GID="$DOCKER_GID" \
