@@ -6,7 +6,7 @@ set -euo pipefail
 # Features:
 # - Fresh-context loop: re-invokes Claude Code each iteration
 # - Stop control: create a stop file (default: .ralph.stop) to halt
-# - Iteration limit: --limit N (default: unlimited)
+# - Iteration limit: --limit N (default: 10)
 
 REAL_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 REPO_ROOT="$(cd "$(dirname "$REAL_PATH")/.." && pwd)"
@@ -15,7 +15,7 @@ STOP_FILE="${STOP_FILE:-$ROOT_DIR/.ralph.stop}"
 PROMPT_FILE="${PROMPT_FILE:-$ROOT_DIR/agent/PROMPT.md}"
 CLAUDE_BIN="${CLAUDE_BIN:-claude}"
 
-LIMIT=""
+LIMIT="10"
 
 usage() {
   cat <<'USAGE'
@@ -23,7 +23,7 @@ Usage:
   ralph [options]
 
 Options:
-  --limit N                       Stop after N iterations (default: unlimited)
+  --limit N                       Stop after N iterations (default: 10)
   --stop-file PATH                Stop file path (default: <cwd>/.ralph.stop)
   --prompt PATH                   Prompt file path (default: <cwd>/agent/PROMPT.md)
   --claude-bin PATH               Claude Code CLI (default: claude)
@@ -138,7 +138,6 @@ while true; do
 
   # Fresh context: new process each loop
   (
-    echo "RESUME=$RESUME"
     echo "Launching claude ${CLAUDE_ARGS[*]}"
     if [[ -n "$NON_INTERACTIVE" ]]; then
       cat "$PROMPT_FILE" "$PROMPT_ADDENDUM" | "$CLAUDE_BIN" "${CLAUDE_ARGS[@]}" | node "$REPO_ROOT/lib/stream-filter.js"
