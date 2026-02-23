@@ -106,6 +106,42 @@ if [ -d "$HOME/.ssh" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Extra mounts from .claude-sandbox.yaml
+# ---------------------------------------------------------------------------
+CONFIG_FILE="$PROJECT_DIR/.claude-sandbox.yaml"
+if [ -f "$CONFIG_FILE" ]; then
+    if ! command -v yq &>/dev/null; then
+        echo "Error: .claude-sandbox.yaml found but 'yq' is not installed." >&2
+        echo "" >&2
+        echo "yq is required to parse the config file. Install it with:" >&2
+        echo "  brew install yq          # macOS (Homebrew)" >&2
+        echo "  sudo snap install yq     # Ubuntu/Debian (snap)" >&2
+        echo "  go install github.com/mikefarah/yq/v4@latest  # Go" >&2
+        echo "" >&2
+        echo "More options: https://github.com/mikefarah/yq#install" >&2
+        exit 1
+    fi
+
+    MOUNT_COUNT=$(yq '.mounts | length' "$CONFIG_FILE")
+    for ((i = 0; i < MOUNT_COUNT; i++)); do
+        MOUNT_HOST=$(yq ".mounts[$i].host" "$CONFIG_FILE")
+        MOUNT_CONTAINER=$(yq ".mounts[$i].container" "$CONFIG_FILE")
+        MOUNT_WRITABLE=$(yq ".mounts[$i].writable // false" "$CONFIG_FILE")
+
+        if [ "$MOUNT_HOST" = "null" ] || [ "$MOUNT_CONTAINER" = "null" ]; then
+            echo "Error: mounts[$i] in $CONFIG_FILE requires both 'host' and 'container' fields" >&2
+            exit 1
+        fi
+
+        if [ "$MOUNT_WRITABLE" = "true" ]; then
+            VOLUMES+=(-v "$MOUNT_HOST:$MOUNT_CONTAINER")
+        else
+            VOLUMES+=(-v "$MOUNT_HOST:$MOUNT_CONTAINER:ro")
+        fi
+    done
+fi
+
+# ---------------------------------------------------------------------------
 # Claude environment file (Discord webhook, etc.)
 # ---------------------------------------------------------------------------
 ENV_FILE="$PROJECT_DIR/.env.claude-sandbox"

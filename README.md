@@ -54,6 +54,29 @@ directory. This file provides environment variables passed into the container (e
 `DISCORD_WEBHOOK_URL` for MCP server notifications). The launcher will exit with an
 error if this file is missing.
 
+## Extra mounts (`.claude-sandbox.yaml`)
+
+You can add extra volume mounts to the container by placing a `.claude-sandbox.yaml` file in your project root (next to `.env.claude-sandbox`). This is useful for mounting shared libraries, data directories, or other paths that Claude needs access to.
+
+```yaml
+mounts:
+  - host: /home/user/shared-libs
+    container: /home/user/shared-libs
+
+  - host: /data/datasets
+    container: /mnt/data
+    writable: true
+```
+
+Each mount entry has:
+- `host` — absolute path on the host (required)
+- `container` — absolute path inside the container (required)
+- `writable` — boolean, default `false` (mounts `:ro` unless set to `true`)
+
+See `.claude-sandbox.example.yaml` for a starter template.
+
+**Dependency:** Parsing requires [`yq`](https://github.com/mikefarah/yq) on the host. Install with `brew install yq`, `sudo snap install yq`, or `go install github.com/mikefarah/yq/v4@latest`.
+
 ## Makefile integration
 
 Here's an example of Makefile targets for a project using claude-sandbox via PATH:
@@ -88,6 +111,7 @@ The container only has access to:
 - `~/.claude.json` — global state (onboarding, OAuth account, feature flags)
 - `~/.gitconfig` — git identity (read-only)
 - `~/.ssh` — SSH keys for git remotes (read-only)
+- Any extra mounts defined in `.claude-sandbox.yaml`
 
 It cannot see or modify anything else on the host filesystem.
 

@@ -1,0 +1,17 @@
+# .claude-sandbox.yaml — extra volume mounts for the sandbox container
+#
+# Place this file in your project root (next to .env.claude-sandbox).
+# Requires 'yq' to be installed on the host.
+#
+# Each mount entry has:
+#   host:      absolute path on the host (required)
+#   container: absolute path inside the container (required)
+#   writable:  boolean, default false (mounts :ro unless true)
+
+mounts: []
+  # - host: /home/user/shared-libs
+  #   container: /home/user/shared-libs
+  #
+  # - host: /data/datasets
+  #   container: /mnt/data
+  #   writable: true
