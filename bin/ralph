@@ -6,7 +6,7 @@ set -euo pipefail
 # Features:
 # - Fresh-context loop: re-invokes Claude Code each iteration
 # - Stop control: create a stop file (default: .ralph.stop) to halt
-# - Iteration limit: --limit N (default: 10)
+# - Iteration limit: --limit N (default: 30)
 
 REAL_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 REPO_ROOT="$(cd "$(dirname "$REAL_PATH")/.." && pwd)"
@@ -15,7 +15,7 @@ STOP_FILE="${STOP_FILE:-$ROOT_DIR/.ralph.stop}"
 PROMPT_FILE="${PROMPT_FILE:-$ROOT_DIR/agent/PROMPT.md}"
 CLAUDE_BIN="${CLAUDE_BIN:-claude}"
 
-LIMIT="10"
+LIMIT="30"
 
 usage() {
   cat <<'USAGE'
