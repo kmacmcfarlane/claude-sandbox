@@ -7,6 +7,7 @@
 #   claude-sandbox --resume                 # pass args through to claude
 #   claude-sandbox --ralph [ralph-args]     # launch the ralph loop runner
 #   claude-sandbox --ralph --limit 5        # run ralph for 5 iterations
+#   claude-sandbox --ralph --log-context    # ralph with decision logging overlay
 #   PROJECT_DIR=/other claude-sandbox       # launch claude in /other
 #
 # The project is mounted at its REAL host path inside the container so that
@@ -24,6 +25,7 @@ IMAGE_NAME="claude-sandbox"
 # ---------------------------------------------------------------------------
 RALPH_MODE=false
 LIMIT=""
+LOG_CONTEXT=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -35,6 +37,8 @@ while [[ $# -gt 0 ]]; do
                 echo "Error: --limit requires a value" >&2; exit 2
             fi
             shift 2 ;;
+        --log-context)
+            LOG_CONTEXT=true; shift ;;
         *)
             break ;;
     esac
@@ -42,6 +46,11 @@ done
 
 if [[ -n "$LIMIT" && "$RALPH_MODE" = false ]]; then
     echo "Error: --limit is only valid with --ralph" >&2
+    exit 2
+fi
+
+if [[ "$LOG_CONTEXT" = true && "$RALPH_MODE" = false ]]; then
+    echo "Error: --log-context is only valid with --ralph" >&2
     exit 2
 fi
 
@@ -166,6 +175,7 @@ if [ "$RALPH_MODE" = true ]; then
     CONTAINER_NAME="${IMAGE_NAME}-${PROJECT_SLUG}-ralph"
     CMD=("/opt/claude-sandbox/bin/ralph")
     [[ -n "$LIMIT" ]] && CMD+=("--limit" "$LIMIT")
+    [[ "$LOG_CONTEXT" = true ]] && CMD+=("--log-context")
     CMD+=("$@")
 else
     CONTAINER_NAME="${IMAGE_NAME}-${PROJECT_SLUG}"
