@@ -41,6 +41,9 @@ claude-sandbox --ralph --dangerously-skip-permissions
 # Ralph with iteration limit:
 claude-sandbox --ralph --dangerously-skip-permissions --limit 5
 
+# Ralph with decision logging overlay:
+claude-sandbox --ralph --dangerously-skip-permissions --log-context
+
 # Point at a specific project:
 PROJECT_DIR=/home/you/projects/foo claude-sandbox
 ```
@@ -54,9 +57,21 @@ directory. This file provides environment variables passed into the container (e
 `DISCORD_WEBHOOK_URL` for MCP server notifications). The launcher will exit with an
 error if this file is missing.
 
-## Extra mounts (`.claude-sandbox.yaml`)
+## Configuration (`.claude-sandbox.yaml`)
 
-You can add extra volume mounts to the container by placing a `.claude-sandbox.yaml` file in your project root (next to `.env.claude-sandbox`). This is useful for mounting shared libraries, data directories, or other paths that Claude needs access to.
+Place a `.claude-sandbox.yaml` file in your project root (next to `.env.claude-sandbox`) to configure the sandbox container. See `.claude-sandbox.example.yaml` for a starter template.
+
+### Memory limit
+
+The container is capped at **8 GB** of RAM by default (swap disabled). If the container exceeds this limit, Docker OOM-kills it. Override with the `memoryLimit` key using Docker memory notation:
+
+```yaml
+memoryLimit: 16g
+```
+
+### Extra mounts
+
+You can add extra volume mounts to the container. This is useful for mounting shared libraries, data directories, or other paths that Claude needs access to.
 
 ```yaml
 mounts:
@@ -72,8 +87,6 @@ Each mount entry has:
 - `host` — absolute path on the host (required)
 - `container` — absolute path inside the container (required)
 - `writable` — boolean, default `false` (mounts `:ro` unless set to `true`)
-
-See `.claude-sandbox.example.yaml` for a starter template.
 
 **Dependency:** Parsing requires [`yq`](https://github.com/mikefarah/yq) on the host. Install with `brew install yq`, `sudo snap install yq`, or `go install github.com/mikefarah/yq/v4@latest`.
 
@@ -147,13 +160,26 @@ Ralph runs in non-interactive mode (`-p`) by default. Use `--interactive` to opt
 
 ### ralph options
 
-- `--limit N` — stop after N iterations (default: unlimited)
+- `--limit N` — stop after N iterations (default: 30)
 - `--stop-file PATH` — path to stop file (default: `<project-root>/.ralph.stop`)
 - `--prompt PATH` — prompt file (default: `<project-root>/agent/PROMPT.md`)
 - `--claude-bin PATH` — claude binary (default: `claude`)
 - `--interactive` — run claude interactively (default: non-interactive `-p`)
 - `--dangerously-skip-permissions` — pass `--dangerously-skip-permissions` to claude
 - `--resume` — pass `--resume` to claude on first iteration
+- `--log-context` — include `PROMPT_DEBUG.md` (decision logging overlay) between the prompt and addendum
+
+### Decision logging (`--log-context`)
+
+Pass `--log-context` to ralph to inject a `PROMPT_DEBUG.md` file into each iteration's prompt. This file lives alongside your main prompt file (e.g. `agent/PROMPT_DEBUG.md`) and is inserted between the prompt and the mode-specific addendum.
+
+Use this to add a decision-logging overlay — instructions that tell Claude to record its reasoning, trade-offs, or open questions to a log file as it works. This is useful for reviewing what happened during an unattended ralph run without digging through raw output.
+
+```bash
+claude-sandbox --ralph --dangerously-skip-permissions --log-context
+```
+
+Ralph will exit with an error if `--log-context` is passed but `PROMPT_DEBUG.md` doesn't exist. A ready-to-use `PROMPT_DEBUG.md` template is available in the [claude-templates](https://github.com/kmacmcfarlane/claude-templates) project.
 
 ## Rebuilding the image
 

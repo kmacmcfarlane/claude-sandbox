@@ -1,8 +1,14 @@
-# .claude-sandbox.yaml — extra volume mounts for the sandbox container
+# .claude-sandbox.yaml — configuration for the sandbox container
 #
 # Place this file in your project root (next to .env.claude-sandbox).
 # Requires 'yq' to be installed on the host.
-#
+
+# Container memory limit. Uses Docker memory notation (e.g. 512m, 8g, 16g).
+# Swap is disabled — the container is OOM-killed if it exceeds this limit.
+# Default: 8g
+# memoryLimit: 8g
+
+# Extra volume mounts.
 # Each mount entry has:
 #   host:      absolute path on the host (required)
 #   container: absolute path inside the container (required)

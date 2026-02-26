@@ -115,9 +115,11 @@ if [ -d "$HOME/.ssh" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Extra mounts from .claude-sandbox.yaml
+# Parse .claude-sandbox.yaml (memory limit, extra mounts, etc.)
 # ---------------------------------------------------------------------------
 CONFIG_FILE="$PROJECT_DIR/.claude-sandbox.yaml"
+MEMORY_LIMIT="8g"
+
 if [ -f "$CONFIG_FILE" ]; then
     if ! command -v yq &>/dev/null; then
         echo "Error: .claude-sandbox.yaml found but 'yq' is not installed." >&2
@@ -131,6 +133,13 @@ if [ -f "$CONFIG_FILE" ]; then
         exit 1
     fi
 
+    # Memory limit (default: 8g)
+    CONFIG_MEMORY=$(yq '.memoryLimit // ""' "$CONFIG_FILE")
+    if [ -n "$CONFIG_MEMORY" ]; then
+        MEMORY_LIMIT="$CONFIG_MEMORY"
+    fi
+
+    # Extra volume mounts
     MOUNT_COUNT=$(yq '.mounts | length' "$CONFIG_FILE")
     for ((i = 0; i < MOUNT_COUNT; i++)); do
         MOUNT_HOST=$(yq ".mounts[$i].host" "$CONFIG_FILE")
@@ -189,6 +198,8 @@ exec docker run -it --rm \
     "${VOLUMES[@]}" \
     -w "$PROJECT_DIR" \
     "${ENV_ARGS[@]}" \
+    --memory "$MEMORY_LIMIT" \
+    --memory-swap "$MEMORY_LIMIT" \
     -e HOST_UID="$HOST_UID" \
     -e HOST_GID="$HOST_GID" \
     -e DOCKER_GID="$DOCKER_GID" \
