@@ -111,11 +111,22 @@ echo "  limit:     ${LIMIT:-unlimited}"
 
 cd "$ROOT_DIR"
 
-# Initialize run log
-LOG_DIR="$ROOT_DIR/agents"
+# Initialize run log — prepend a new run object to the array
+LOG_DIR="$ROOT_DIR/agent"
 LOG_FILE="$LOG_DIR/ralph-runlog.json"
 mkdir -p "$LOG_DIR"
-printf '{"startedAt":"%s","iterations":[]}\n' "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" > "$LOG_FILE"
+if [[ ! -f "$LOG_FILE" ]]; then
+  printf '[]\n' > "$LOG_FILE"
+fi
+RUN_STARTED="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+node -e "
+  const fs = require('fs');
+  let runs = [];
+  try { runs = JSON.parse(fs.readFileSync('$LOG_FILE', 'utf8')); } catch {}
+  if (!Array.isArray(runs)) runs = [];
+  runs.unshift({ startedAt: '$RUN_STARTED', iterations: [] });
+  fs.writeFileSync('$LOG_FILE', JSON.stringify(runs, null, 2) + '\n');
+"
 echo "  run-log:   $LOG_FILE"
 
 # Build claude args
