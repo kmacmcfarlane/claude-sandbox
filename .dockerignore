@@ -7,3 +7,6 @@ LICENSE
 README.md
 .gitignore
 .dockerignore
+test/
+hooks/
+package.json

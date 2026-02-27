@@ -1,0 +1,7 @@
+{
+  "private": true,
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "prepare": "git config core.hooksPath hooks"
+  }
+}
