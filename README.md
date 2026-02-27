@@ -9,6 +9,7 @@ bin/
   claude-sandbox   Launcher: builds image, assembles mounts, runs the container
   ralph            Loop runner: fresh-context iterations with stop-file control
 lib/
+  run-logger.js    Transparent NDJSON passthrough that captures per-iteration metrics
   stream-filter.js Filters stream-json NDJSON into human-readable terminal output
 docker/
   Dockerfile       Image: Debian bookworm-slim + Docker CLI/compose, Node.js 22, Claude Code CLI
@@ -40,9 +41,6 @@ claude-sandbox --ralph --dangerously-skip-permissions
 
 # Ralph with iteration limit:
 claude-sandbox --ralph --dangerously-skip-permissions --limit 5
-
-# Ralph with decision logging overlay:
-claude-sandbox --ralph --dangerously-skip-permissions --log-context
 
 # Point at a specific project:
 PROJECT_DIR=/home/you/projects/foo claude-sandbox
@@ -167,19 +165,27 @@ Ralph runs in non-interactive mode (`-p`) by default. Use `--interactive` to opt
 - `--interactive` — run claude interactively (default: non-interactive `-p`)
 - `--dangerously-skip-permissions` — pass `--dangerously-skip-permissions` to claude
 - `--resume` — pass `--resume` to claude on first iteration
-- `--log-context` — include `PROMPT_DEBUG.md` (decision logging overlay) between the prompt and addendum
 
-### Decision logging (`--log-context`)
+### Run logging
 
-Pass `--log-context` to ralph to inject a `PROMPT_DEBUG.md` file into each iteration's prompt. This file lives alongside your main prompt file (e.g. `agent/PROMPT_DEBUG.md`) and is inserted between the prompt and the mode-specific addendum.
+Ralph automatically writes per-iteration metrics to `./agent/ralph-runlog.json` in the project directory. Each iteration captures:
 
-Use this to add a decision-logging overlay — instructions that tell Claude to record its reasoning, trade-offs, or open questions to a log file as it works. This is useful for reviewing what happened during an unattended ralph run without digging through raw output.
+- **Session ID** — for resuming with `claude --resume <id>`
+- **Timing** — start/end timestamps, total duration
+- **Token usage** — input and output tokens (including cache)
+- **Cost** — total USD cost
+- **Turns** — number of API round-trips
+- **Subagent breakdown** — per-subagent tokens, duration, and turns (enriched from stored JSONL files)
 
-```bash
-claude-sandbox --ralph --dangerously-skip-permissions --log-context
+To include a story ID and name in the log, emit a structured marker in your orchestrator's output:
+
+```
+<!-- story: S-028 — Contact CSV Import -->
 ```
 
-Ralph will exit with an error if `--log-context` is passed but `PROMPT_DEBUG.md` doesn't exist. A ready-to-use `PROMPT_DEBUG.md` template is available in the [claude-templates](https://github.com/kmacmcfarlane/claude-templates) project.
+The ticket prefix is flexible (e.g. `S-028`, `PROJ-42`, `BUG-7`). The title after `—` is optional.
+
+The log file is created fresh at the start of each ralph run.
 
 ## Rebuilding the image
 

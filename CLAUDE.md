@@ -16,6 +16,7 @@ Docker-based sandbox for running Claude Code with filesystem isolation and host 
 ```
 bin/claude-sandbox   # Main launcher — builds image, assembles mounts, runs container
 bin/ralph            # Loop runner — re-invokes Claude each iteration with fresh context
+lib/run-logger.js    # Transparent NDJSON passthrough — captures per-iteration metrics
 lib/stream-filter.js # Converts Claude NDJSON stream output to human-readable text
 entrypoint.sh        # Container entrypoint — UID/GID remapping via gosu
 Dockerfile           # Debian bookworm-slim + Docker CLI + Node 22 + Claude Code

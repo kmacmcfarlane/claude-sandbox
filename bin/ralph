@@ -7,7 +7,7 @@ set -euo pipefail
 # - Fresh-context loop: re-invokes Claude Code each iteration
 # - Stop control: create a stop file (default: .ralph.stop) to halt
 # - Iteration limit: --limit N (default: 30)
-# - Log context: --log-context appends PROMPT_DEBUG.md between prompt and addendum
+# - Run log: writes per-iteration metrics to ./agent/ralph-runlog.json
 
 REAL_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 REPO_ROOT="$(cd "$(dirname "$REAL_PATH")/.." && pwd)"
@@ -31,7 +31,6 @@ Options:
   --interactive                   Run claude interactively (default: non-interactive -p)
   --dangerously-skip-permissions  Pass --dangerously-skip-permissions to claude
   --resume                        Pass --resume flag to claude on first iteration
-  --log-context                   Include PROMPT_DEBUG.md (decision logging overlay)
 
 Stop:
   Create the stop file to halt the loop:
@@ -45,7 +44,6 @@ USAGE
 NON_INTERACTIVE="-p"
 SKIP_PERMISSIONS=""
 RESUME=""
-LOG_CONTEXT=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -63,8 +61,6 @@ while [[ $# -gt 0 ]]; do
       SKIP_PERMISSIONS="--dangerously-skip-permissions"; shift 1;;
     --resume)
       RESUME="--resume"; shift 1;;
-    --log-context)
-      LOG_CONTEXT="true"; shift 1;;
     -h|--help)
       usage; exit 0;;
     *)
@@ -91,17 +87,6 @@ if [[ ! -f "$PROMPT_ADDENDUM" ]]; then
   exit 1
 fi
 
-# Resolve log context overlay (PROMPT_DEBUG.md alongside prompt file)
-PROMPT_DEBUG=""
-if [[ -n "$LOG_CONTEXT" ]]; then
-  PROMPT_DEBUG="${PROMPT_FILE%/*}/PROMPT_DEBUG.md"
-  if [[ ! -f "$PROMPT_DEBUG" ]]; then
-    echo "Log context file not found: $PROMPT_DEBUG" >&2
-    echo "Create PROMPT_DEBUG.md alongside your prompt file to use --log-context." >&2
-    exit 1
-  fi
-fi
-
 if [[ -n "$LIMIT" ]]; then
   if ! [[ "$LIMIT" =~ ^[0-9]+$ ]] || [[ "$LIMIT" -le 0 ]]; then
     echo "--limit must be a positive integer" >&2
@@ -117,19 +102,21 @@ fi
 
 echo "Ralph loop starting"
 echo "  repo:      $ROOT_DIR"
-if [[ -n "$PROMPT_DEBUG" ]]; then
-  echo "  prompt:    $PROMPT_FILE + $PROMPT_DEBUG + $PROMPT_ADDENDUM"
-else
-  echo "  prompt:    $PROMPT_FILE + $PROMPT_ADDENDUM"
-fi
+echo "  prompt:    $PROMPT_FILE + $PROMPT_ADDENDUM"
 echo "  stop file: $STOP_FILE"
 echo "  claude:    $CLAUDE_BIN"
 echo "  mode:      $MODE_LABEL"
 echo "  skip-perm: $( [[ -n "$SKIP_PERMISSIONS" ]] && echo yes || echo no )"
-echo "  log-ctx:   $( [[ -n "$PROMPT_DEBUG" ]] && echo yes || echo no )"
 echo "  limit:     ${LIMIT:-unlimited}"
 
 cd "$ROOT_DIR"
+
+# Initialize run log
+LOG_DIR="$ROOT_DIR/agents"
+LOG_FILE="$LOG_DIR/ralph-runlog.json"
+mkdir -p "$LOG_DIR"
+printf '{"startedAt":"%s","iterations":[]}\n' "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" > "$LOG_FILE"
+echo "  run-log:   $LOG_FILE"
 
 # Build claude args
 build_claude_args() {
@@ -155,18 +142,23 @@ while true; do
   iter=$((iter + 1))
   echo "---- iteration $iter ----"
 
+  # Clear scratch directory (skip on --resume first iteration)
+  if [[ -z "$RESUME" ]]; then
+    rm -rf "$ROOT_DIR/.ralph-temp"
+  fi
+  mkdir -p "$ROOT_DIR/.ralph-temp"
+
   build_claude_args
 
-  # Build prompt file list: prompt [+ debug overlay] + addendum
-  PROMPT_FILES=("$PROMPT_FILE")
-  [[ -n "$PROMPT_DEBUG" ]] && PROMPT_FILES+=("$PROMPT_DEBUG")
-  PROMPT_FILES+=("$PROMPT_ADDENDUM")
+  PROMPT_FILES=("$PROMPT_FILE" "$PROMPT_ADDENDUM")
 
   # Fresh context: new process each loop
   (
     echo "Launching claude ${CLAUDE_ARGS[*]}"
     if [[ -n "$NON_INTERACTIVE" ]]; then
-      cat "${PROMPT_FILES[@]}" | "$CLAUDE_BIN" "${CLAUDE_ARGS[@]}" | node "$REPO_ROOT/lib/stream-filter.js"
+      cat "${PROMPT_FILES[@]}" | "$CLAUDE_BIN" "${CLAUDE_ARGS[@]}" \
+        | node "$REPO_ROOT/lib/run-logger.js" --log-file "$LOG_FILE" --iteration "$iter" \
+        | node "$REPO_ROOT/lib/stream-filter.js"
     else
       cat "${PROMPT_FILES[@]}" | "$CLAUDE_BIN" "${CLAUDE_ARGS[@]}"
     fi
