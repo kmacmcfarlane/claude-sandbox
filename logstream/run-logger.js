@@ -12,6 +12,12 @@
 
 const STORY_RE = /<!-- story: ([A-Za-z]+-\d+)\s*(?:—\s*(.+?))?\s*-->/;
 
+const QUOTA_PATTERNS = [
+  { pattern: /usage.limit/i, status: 'quota_exhausted' },
+  { pattern: /rate.limit|rate_limit/i, status: 'rate_limit' },
+  { pattern: /overloaded/i, status: 'rate_limit' },
+];
+
 function formatDuration(ms) {
   if (ms == null) return null;
   const totalSeconds = Math.round(ms / 1000);
@@ -29,6 +35,7 @@ function createState() {
   return {
     storyId: null,
     storyName: null,
+    quotaStatus: null,
     taskDispatches: new Map(),
     resultEvent: null,
   };
@@ -42,11 +49,21 @@ function processEvent(event, state) {
     case 'assistant': {
       const content = (event.message && event.message.content) || [];
       for (const block of content) {
-        if (block.type === 'text' && block.text && !state.storyId) {
-          const m = STORY_RE.exec(block.text);
-          if (m) {
-            state.storyId = m[1];
-            state.storyName = m[2] || null;
+        if (block.type === 'text' && block.text) {
+          if (!state.storyId) {
+            const m = STORY_RE.exec(block.text);
+            if (m) {
+              state.storyId = m[1];
+              state.storyName = m[2] || null;
+            }
+          }
+          if (!state.quotaStatus) {
+            for (const { pattern, status } of QUOTA_PATTERNS) {
+              if (pattern.test(block.text)) {
+                state.quotaStatus = status;
+                break;
+              }
+            }
           }
         }
         if (block.type === 'tool_use' && block.name === 'Task') {
@@ -132,12 +149,15 @@ if (require.main === module) {
 
   let logFile = null;
   let iteration = null;
+  let quotaStatusFile = null;
 
   for (let i = 2; i < process.argv.length; i++) {
     if (process.argv[i] === '--log-file' && process.argv[i + 1]) {
       logFile = process.argv[++i];
     } else if (process.argv[i] === '--iteration' && process.argv[i + 1]) {
       iteration = parseInt(process.argv[++i], 10);
+    } else if (process.argv[i] === '--quota-status-file' && process.argv[i + 1]) {
+      quotaStatusFile = process.argv[++i];
     }
   }
 
@@ -168,6 +188,14 @@ if (require.main === module) {
     } catch (err) {
       process.stderr.write('run-logger: failed to write log: ' + err.message + '\n');
     }
+
+    if (quotaStatusFile) {
+      try {
+        fs.writeFileSync(quotaStatusFile, (state.quotaStatus || 'ok') + '\n');
+      } catch (err) {
+        process.stderr.write('run-logger: failed to write quota status: ' + err.message + '\n');
+      }
+    }
   }
 
   // Catch SIGINT so we flush the log before the pipeline is torn down
@@ -192,4 +220,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { formatDuration, STORY_RE, createState, processEvent, buildLogEntry };
+module.exports = { formatDuration, STORY_RE, QUOTA_PATTERNS, createState, processEvent, buildLogEntry };

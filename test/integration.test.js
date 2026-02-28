@@ -60,6 +60,130 @@ describe('run-logger.js CLI', () => {
       (err) => err.status === 2,
     );
   });
+
+  it('writes "ok" to quota-status-file for normal events', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'run-logger-quota-'));
+    const logFile = path.join(tmpDir, 'run.json');
+    const quotaFile = path.join(tmpDir, 'quota-status');
+
+    const input = [
+      JSON.stringify({ type: 'system' }),
+      JSON.stringify({
+        type: 'assistant',
+        message: { content: [{ type: 'text', text: 'Hello, working normally.' }] },
+      }),
+      JSON.stringify({
+        type: 'result',
+        session_id: 'sess_ok',
+        num_turns: 1,
+        duration_ms: 1000,
+        total_cost_usd: 0.001,
+        usage: { input_tokens: 50, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 20 },
+      }),
+    ].join('\n') + '\n';
+
+    execFileSync(
+      process.execPath,
+      [path.join(ROOT, 'logstream/run-logger.js'), '--log-file', logFile, '--iteration', '1', '--quota-status-file', quotaFile],
+      { input, encoding: 'utf8' },
+    );
+
+    const status = fs.readFileSync(quotaFile, 'utf8').trim();
+    assert.equal(status, 'ok');
+
+    fs.rmSync(tmpDir, { recursive: true });
+  });
+
+  it('writes "quota_exhausted" to quota-status-file on usage limit message', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'run-logger-quota-'));
+    const logFile = path.join(tmpDir, 'run.json');
+    const quotaFile = path.join(tmpDir, 'quota-status');
+
+    const input = [
+      JSON.stringify({ type: 'system' }),
+      JSON.stringify({
+        type: 'assistant',
+        message: { content: [{ type: 'text', text: 'Claude usage limit reached. Your limit will reset at 2pm.' }] },
+      }),
+      JSON.stringify({
+        type: 'result',
+        session_id: 'sess_quota',
+        num_turns: 1,
+        duration_ms: 500,
+        usage: { input_tokens: 10, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 5 },
+      }),
+    ].join('\n') + '\n';
+
+    execFileSync(
+      process.execPath,
+      [path.join(ROOT, 'logstream/run-logger.js'), '--log-file', logFile, '--iteration', '1', '--quota-status-file', quotaFile],
+      { input, encoding: 'utf8' },
+    );
+
+    const status = fs.readFileSync(quotaFile, 'utf8').trim();
+    assert.equal(status, 'quota_exhausted');
+
+    fs.rmSync(tmpDir, { recursive: true });
+  });
+
+  it('writes "rate_limit" to quota-status-file on rate limit message', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'run-logger-quota-'));
+    const logFile = path.join(tmpDir, 'run.json');
+    const quotaFile = path.join(tmpDir, 'quota-status');
+
+    const input = [
+      JSON.stringify({ type: 'system' }),
+      JSON.stringify({
+        type: 'assistant',
+        message: { content: [{ type: 'text', text: 'API Error: Rate limit reached' }] },
+      }),
+      JSON.stringify({
+        type: 'result',
+        session_id: 'sess_rate',
+        num_turns: 1,
+        duration_ms: 200,
+        usage: { input_tokens: 10, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 5 },
+      }),
+    ].join('\n') + '\n';
+
+    execFileSync(
+      process.execPath,
+      [path.join(ROOT, 'logstream/run-logger.js'), '--log-file', logFile, '--iteration', '1', '--quota-status-file', quotaFile],
+      { input, encoding: 'utf8' },
+    );
+
+    const status = fs.readFileSync(quotaFile, 'utf8').trim();
+    assert.equal(status, 'rate_limit');
+
+    fs.rmSync(tmpDir, { recursive: true });
+  });
+
+  it('does not create quota-status-file when flag is omitted', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'run-logger-quota-'));
+    const logFile = path.join(tmpDir, 'run.json');
+    const quotaFile = path.join(tmpDir, 'quota-status');
+
+    const input = [
+      JSON.stringify({ type: 'system' }),
+      JSON.stringify({
+        type: 'result',
+        session_id: 'sess_no_flag',
+        num_turns: 1,
+        duration_ms: 100,
+        usage: { input_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 3 },
+      }),
+    ].join('\n') + '\n';
+
+    execFileSync(
+      process.execPath,
+      [path.join(ROOT, 'logstream/run-logger.js'), '--log-file', logFile, '--iteration', '1'],
+      { input, encoding: 'utf8' },
+    );
+
+    assert.equal(fs.existsSync(quotaFile), false);
+
+    fs.rmSync(tmpDir, { recursive: true });
+  });
 });
 
 describe('stream-filter.js CLI', () => {

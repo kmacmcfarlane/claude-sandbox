@@ -2,7 +2,7 @@
 
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
-const { formatDuration, STORY_RE, createState, processEvent, buildLogEntry } = require('../logstream/run-logger');
+const { formatDuration, STORY_RE, QUOTA_PATTERNS, createState, processEvent, buildLogEntry } = require('../logstream/run-logger');
 
 describe('formatDuration', () => {
   it('returns null for null/undefined', () => {
@@ -199,5 +199,86 @@ describe('buildLogEntry', () => {
     assert.equal(entry.tokensIn, 0);
     assert.equal(entry.tokensOut, 0);
     assert.deepEqual(entry.subagents, []);
+  });
+});
+
+describe('quota detection', () => {
+  it('detects "usage limit reached" as quota_exhausted', () => {
+    const state = createState();
+    processEvent({
+      type: 'assistant',
+      message: { content: [{ type: 'text', text: 'Claude usage limit reached. Your limit will reset at 2pm.' }] },
+    }, state);
+    assert.equal(state.quotaStatus, 'quota_exhausted');
+  });
+
+  it('detects "Usage Limit" case-insensitively', () => {
+    const state = createState();
+    processEvent({
+      type: 'assistant',
+      message: { content: [{ type: 'text', text: "You've hit a Usage Limit for this period." }] },
+    }, state);
+    assert.equal(state.quotaStatus, 'quota_exhausted');
+  });
+
+  it('detects "rate limit" as rate_limit', () => {
+    const state = createState();
+    processEvent({
+      type: 'assistant',
+      message: { content: [{ type: 'text', text: 'API Error: Rate limit reached' }] },
+    }, state);
+    assert.equal(state.quotaStatus, 'rate_limit');
+  });
+
+  it('detects "rate_limit" (underscore) as rate_limit', () => {
+    const state = createState();
+    processEvent({
+      type: 'assistant',
+      message: { content: [{ type: 'text', text: 'Error type: rate_limit_error' }] },
+    }, state);
+    assert.equal(state.quotaStatus, 'rate_limit');
+  });
+
+  it('detects "overloaded" as rate_limit', () => {
+    const state = createState();
+    processEvent({
+      type: 'assistant',
+      message: { content: [{ type: 'text', text: 'The API is temporarily overloaded' }] },
+    }, state);
+    assert.equal(state.quotaStatus, 'rate_limit');
+  });
+
+  it('does not trigger on unrelated text', () => {
+    const state = createState();
+    processEvent({
+      type: 'assistant',
+      message: { content: [{ type: 'text', text: 'Here is how to implement pagination with a page limit of 50.' }] },
+    }, state);
+    assert.equal(state.quotaStatus, null);
+  });
+
+  it('only captures first quota signal', () => {
+    const state = createState();
+    processEvent({
+      type: 'assistant',
+      message: { content: [{ type: 'text', text: 'Claude usage limit reached.' }] },
+    }, state);
+    processEvent({
+      type: 'assistant',
+      message: { content: [{ type: 'text', text: 'API Error: Rate limit reached' }] },
+    }, state);
+    assert.equal(state.quotaStatus, 'quota_exhausted');
+  });
+
+  it('quotaStatus defaults to null', () => {
+    const state = createState();
+    assert.equal(state.quotaStatus, null);
+  });
+
+  it('QUOTA_PATTERNS is exported and has expected entries', () => {
+    assert.ok(Array.isArray(QUOTA_PATTERNS));
+    assert.ok(QUOTA_PATTERNS.length >= 3);
+    assert.equal(QUOTA_PATTERNS[0].status, 'quota_exhausted');
+    assert.equal(QUOTA_PATTERNS[1].status, 'rate_limit');
   });
 });

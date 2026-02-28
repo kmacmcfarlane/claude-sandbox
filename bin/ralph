@@ -24,7 +24,7 @@ Usage:
   ralph [options]
 
 Options:
-  --limit N                       Stop after N iterations (default: 10)
+  --limit N                       Stop after N iterations (default: 30)
   --stop-file PATH                Stop file path (default: <cwd>/.ralph.stop)
   --prompt PATH                   Prompt file path (default: <cwd>/agent/PROMPT.md)
   --claude-bin PATH               Claude Code CLI (default: claude)
@@ -33,6 +33,12 @@ Options:
   --resume                        Pass --resume flag to claude on first iteration
   --runlog-file [PATH]            Run log path (default: ./agent/ralph-runlog.json)
   --raw-log [PATH]                Raw NDJSON base path (default: ./agent/ralph-rawlog)
+
+Quota retry:
+  --max-retries N                 Consecutive rate-limit retries before exiting (default: 5)
+  --retry-delay N                 Initial backoff delay in seconds (default: 30)
+  --quota-pause N                 Seconds between re-probes on quota exhaustion (default: 300)
+  --quota-max-wait N              Max seconds to wait for quota reset (default: 18000 = 5h)
 
 Stop:
   Create the stop file to halt the loop:
@@ -48,6 +54,10 @@ SKIP_PERMISSIONS=""
 RESUME=""
 RUNLOG_FILE=""
 RAW_LOG_BASE=""
+MAX_RETRIES="5"
+RETRY_DELAY="30"
+QUOTA_PAUSE="300"
+QUOTA_MAX_WAIT="18000"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -82,6 +92,14 @@ while [[ $# -gt 0 ]]; do
         shift 1
       fi
       ;;
+    --max-retries)
+      MAX_RETRIES="${2:-}"; shift 2;;
+    --retry-delay)
+      RETRY_DELAY="${2:-}"; shift 2;;
+    --quota-pause)
+      QUOTA_PAUSE="${2:-}"; shift 2;;
+    --quota-max-wait)
+      QUOTA_MAX_WAIT="${2:-}"; shift 2;;
     -h|--help)
       usage; exit 0;;
     *)
@@ -165,8 +183,108 @@ build_claude_args() {
   fi
 }
 
+# ---------------------------------------------------------------------------
+# Discord notification helper (no-ops if DISCORD_WEBHOOK_URL is unset)
+# ---------------------------------------------------------------------------
+notify_discord() {
+  local message="$1"
+  if [[ -n "${DISCORD_WEBHOOK_URL:-}" ]]; then
+    local payload
+    payload=$(jq -n --arg content "$message" '{ content: $content }')
+    curl -s -H "Content-Type: application/json" \
+      -d "$payload" "$DISCORD_WEBHOOK_URL" >/dev/null 2>&1 || true
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Classify iteration outcome using quota-status file and stderr
+# Returns: "ok", "quota_exhausted", "rate_limit", or "error"
+# ---------------------------------------------------------------------------
+QUOTA_STATUS_FILE="$ROOT_DIR/.ralph-temp/quota-status"
+STDERR_FILE="$ROOT_DIR/.ralph-temp/stderr"
+
+classify_outcome() {
+  local exit_code="$1"
+
+  # Check quota status file written by run-logger.js
+  local file_status=""
+  if [[ -f "$QUOTA_STATUS_FILE" ]]; then
+    file_status="$(cat "$QUOTA_STATUS_FILE" | tr -d '[:space:]')"
+  fi
+
+  if [[ "$file_status" = "quota_exhausted" ]]; then
+    echo "quota_exhausted"
+    return
+  fi
+
+  if [[ "$file_status" = "rate_limit" ]]; then
+    echo "rate_limit"
+    return
+  fi
+
+  # Check stderr for rate limit patterns (catches API-level errors not in JSON stream)
+  if [[ -f "$STDERR_FILE" ]]; then
+    if grep -qi 'rate.limit\|rate_limit\|usage.limit\|overloaded' "$STDERR_FILE" 2>/dev/null; then
+      if grep -qi 'usage.limit' "$STDERR_FILE" 2>/dev/null; then
+        echo "quota_exhausted"
+      else
+        echo "rate_limit"
+      fi
+      return
+    fi
+  fi
+
+  if [[ "$exit_code" -eq 0 ]]; then
+    echo "ok"
+  else
+    echo "error"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Probe whether quota has been restored
+# Runs a minimal claude invocation and checks for quota messages
+# Returns 0 if quota is restored, 1 if still exhausted
+# ---------------------------------------------------------------------------
+probe_quota() {
+  local probe_out
+  probe_out=$("$CLAUDE_BIN" -p "ping" --output-format stream-json 2>/dev/null | head -5) || true
+
+  if echo "$probe_out" | grep -qi 'usage.limit'; then
+    return 1
+  fi
+
+  # If we got any JSON result event, quota is restored
+  if echo "$probe_out" | grep -q '"type":"result"'; then
+    return 0
+  fi
+
+  # If we got valid JSON but no result, assume restored (short response)
+  if echo "$probe_out" | grep -q '"type"'; then
+    return 0
+  fi
+
+  # Unclear — assume still exhausted
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# Format seconds as human-readable duration
+# ---------------------------------------------------------------------------
+format_wait() {
+  local secs="$1"
+  if [[ "$secs" -ge 3600 ]]; then
+    echo "$((secs / 3600))h$((secs % 3600 / 60))m"
+  elif [[ "$secs" -ge 60 ]]; then
+    echo "$((secs / 60))m$((secs % 60))s"
+  else
+    echo "${secs}s"
+  fi
+}
+
 rm -f .ralph.stop
 
+retry_count=0
 iter=0
 while true; do
   if [[ -f "$STOP_FILE" ]]; then
@@ -187,22 +305,92 @@ while true; do
 
   PROMPT_FILES=("$PROMPT_FILE" "$PROMPT_ADDENDUM")
 
+  # Clear quota status from previous iteration
+  rm -f "$QUOTA_STATUS_FILE" "$STDERR_FILE"
+
   # Fresh context: new process each loop
+  rc=0
   (
     echo "Launching claude ${CLAUDE_ARGS[*]}"
     if [[ -n "$NON_INTERACTIVE" ]]; then
       cat "${PROMPT_FILES[@]}" | "$CLAUDE_BIN" "${CLAUDE_ARGS[@]}" \
         | node "$REPO_ROOT/logstream/raw-json-logger.js" --out "$RAW_LOG_FILE" \
         | node "$REPO_ROOT/logstream/run-logger.js" --log-file "$LOG_FILE" --iteration "$iter" \
+            --quota-status-file "$QUOTA_STATUS_FILE" \
         | node "$REPO_ROOT/logstream/stream-filter.js"
     else
       cat "${PROMPT_FILES[@]}" | "$CLAUDE_BIN" "${CLAUDE_ARGS[@]}"
     fi
-  ) || {
-    rc=$?
-    echo "Claude process exited non-zero (rc=$rc). Exiting."
-    exit "$rc"
-  }
+  ) 2>"$STDERR_FILE" || rc=$?
+
+  # Classify the outcome
+  outcome=$(classify_outcome "$rc")
+  PROJECT_NAME="$(basename "$ROOT_DIR")"
+
+  case "$outcome" in
+    ok)
+      retry_count=0
+      ;;
+
+    quota_exhausted)
+      echo "[quota] Usage limit detected. Parking until quota resets."
+      notify_discord "⏸ **${PROJECT_NAME}** — Quota exhausted at iteration ${iter}. Parking. Will probe every $(format_wait "$QUOTA_PAUSE") for up to $(format_wait "$QUOTA_MAX_WAIT")."
+      echo "[quota] Discord notified."
+
+      total_waited=0
+      while [[ "$total_waited" -lt "$QUOTA_MAX_WAIT" ]]; do
+        echo "[quota] Sleeping $(format_wait "$QUOTA_PAUSE") ($(format_wait "$total_waited") / $(format_wait "$QUOTA_MAX_WAIT") waited)..."
+        sleep "$QUOTA_PAUSE"
+        total_waited=$((total_waited + QUOTA_PAUSE))
+
+        echo "[quota] Probing quota status..."
+        if probe_quota; then
+          echo "[quota] Quota restored after $(format_wait "$total_waited")!"
+          notify_discord "▶ **${PROJECT_NAME}** — Quota restored after $(format_wait "$total_waited"). Resuming at iteration ${iter}."
+          echo "[quota] Discord notified."
+          break
+        fi
+        echo "[quota] Still exhausted."
+      done
+
+      if [[ "$total_waited" -ge "$QUOTA_MAX_WAIT" ]]; then
+        echo "[quota] Quota did not reset within $(format_wait "$QUOTA_MAX_WAIT"). Exiting."
+        notify_discord "⛔ **${PROJECT_NAME}** — Quota did not reset within $(format_wait "$QUOTA_MAX_WAIT"). Exiting at iteration ${iter}."
+        exit 0
+      fi
+
+      # Retry the same iteration (don't increment iter)
+      iter=$((iter - 1))
+      retry_count=0
+      ;;
+
+    rate_limit)
+      retry_count=$((retry_count + 1))
+      if [[ "$retry_count" -gt "$MAX_RETRIES" ]]; then
+        echo "[quota] Max retries exceeded ($MAX_RETRIES). Exiting."
+        notify_discord "⛔ **${PROJECT_NAME}** — Rate limit retries exhausted ($MAX_RETRIES) at iteration ${iter}. Exiting."
+        exit 1
+      fi
+
+      # Exponential backoff: delay * 2^(attempt-1), capped at 300s
+      delay=$((RETRY_DELAY * (1 << (retry_count - 1))))
+      [[ "$delay" -gt 300 ]] && delay=300
+      # Jitter: multiply by 0.75–1.0
+      jitter=$(( 75 + RANDOM % 26 ))
+      delay=$(( delay * jitter / 100 ))
+
+      echo "[quota] Rate limit detected. Retrying in $(format_wait "$delay") (attempt $retry_count/$MAX_RETRIES)..."
+      sleep "$delay"
+
+      # Retry the same iteration (don't increment iter)
+      iter=$((iter - 1))
+      ;;
+
+    *)
+      echo "Claude process exited non-zero (rc=$rc). Exiting."
+      exit "$rc"
+      ;;
+  esac
 
   if [[ -n "$LIMIT" && "$iter" -ge "$LIMIT" ]]; then
     echo "Iteration limit reached ($LIMIT). Exiting."
