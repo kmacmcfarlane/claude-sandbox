@@ -148,19 +148,12 @@ if (require.main === module) {
 
   const startedAt = new Date().toISOString();
   const state = createState();
+  let logWritten = false;
 
-  const rl = readline.createInterface({ input: process.stdin, terminal: false });
+  function flushLog() {
+    if (logWritten) return;
+    logWritten = true;
 
-  rl.on('line', (line) => {
-    process.stdout.write(line + '\n');
-
-    let e;
-    try { e = JSON.parse(line); } catch { return; }
-
-    processEvent(e, state);
-  });
-
-  rl.on('close', () => {
     const entry = buildLogEntry(state, iteration, startedAt);
 
     try {
@@ -175,6 +168,27 @@ if (require.main === module) {
     } catch (err) {
       process.stderr.write('run-logger: failed to write log: ' + err.message + '\n');
     }
+  }
+
+  // Catch SIGINT so we flush the log before the pipeline is torn down
+  process.on('SIGINT', () => {
+    flushLog();
+    process.exit(130);
+  });
+
+  const rl = readline.createInterface({ input: process.stdin, terminal: false });
+
+  rl.on('line', (line) => {
+    process.stdout.write(line + '\n');
+
+    let e;
+    try { e = JSON.parse(line); } catch { return; }
+
+    processEvent(e, state);
+  });
+
+  rl.on('close', () => {
+    flushLog();
   });
 }
 

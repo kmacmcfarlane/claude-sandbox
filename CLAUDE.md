@@ -7,7 +7,7 @@ Docker-based sandbox for running Claude Code with filesystem isolation and host 
 ## Key Architecture
 
 - **Same-path mounting:** Container sees the project at its real host path so `docker compose` volume resolution works correctly against the host daemon.
-- **Baked-in scripts:** `bin/` and `lib/` are copied into the Docker image at `/opt/claude-sandbox/`, not volume-mounted.
+- **Baked-in scripts:** `bin/` and `logstream/` are copied into the Docker image at `/opt/claude-sandbox/`, not volume-mounted.
 - **UID/GID remapping:** `entrypoint.sh` adjusts the container `claude` user to match host IDs so files have correct ownership.
 - **Fresh-context iterations:** Ralph runs Claude as a new process each iteration, not session continuation.
 
@@ -16,8 +16,8 @@ Docker-based sandbox for running Claude Code with filesystem isolation and host 
 ```
 bin/claude-sandbox   # Main launcher — builds image, assembles mounts, runs container
 bin/ralph            # Loop runner — re-invokes Claude each iteration with fresh context
-lib/run-logger.js    # Transparent NDJSON passthrough — captures per-iteration metrics
-lib/stream-filter.js # Converts Claude NDJSON stream output to human-readable text
+logstream/run-logger.js    # Transparent NDJSON passthrough — captures per-iteration metrics
+logstream/stream-filter.js # Converts Claude NDJSON stream output to human-readable text
 entrypoint.sh        # Container entrypoint — UID/GID remapping via gosu
 Dockerfile           # Debian bookworm-slim + Docker CLI + Node 22 + Claude Code
 ```

@@ -2,7 +2,7 @@
 
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
-const { formatDuration, STORY_RE, createState, processEvent, buildLogEntry } = require('../lib/run-logger');
+const { formatDuration, STORY_RE, createState, processEvent, buildLogEntry } = require('../logstream/run-logger');
 
 describe('formatDuration', () => {
   it('returns null for null/undefined', () => {

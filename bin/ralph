@@ -192,9 +192,9 @@ while true; do
     echo "Launching claude ${CLAUDE_ARGS[*]}"
     if [[ -n "$NON_INTERACTIVE" ]]; then
       cat "${PROMPT_FILES[@]}" | "$CLAUDE_BIN" "${CLAUDE_ARGS[@]}" \
-        | node "$REPO_ROOT/lib/raw-json-logger.js" --out "$RAW_LOG_FILE" \
-        | node "$REPO_ROOT/lib/run-logger.js" --log-file "$LOG_FILE" --iteration "$iter" \
-        | node "$REPO_ROOT/lib/stream-filter.js"
+        | node "$REPO_ROOT/logstream/raw-json-logger.js" --out "$RAW_LOG_FILE" \
+        | node "$REPO_ROOT/logstream/run-logger.js" --log-file "$LOG_FILE" --iteration "$iter" \
+        | node "$REPO_ROOT/logstream/stream-filter.js"
     else
       cat "${PROMPT_FILES[@]}" | "$CLAUDE_BIN" "${CLAUDE_ARGS[@]}"
     fi

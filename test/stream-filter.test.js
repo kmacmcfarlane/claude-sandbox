@@ -2,7 +2,7 @@
 
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
-const { formatTokens, renderEvent } = require('../lib/stream-filter');
+const { formatTokens, renderEvent } = require('../logstream/stream-filter');
 
 describe('formatTokens', () => {
   it('returns null for null/undefined', () => {

@@ -8,9 +8,10 @@ Run Claude Code inside a Docker container with filesystem isolation and host Doc
 bin/
   claude-sandbox   Launcher: builds image, assembles mounts, runs the container
   ralph            Loop runner: fresh-context iterations with stop-file control
-lib/
-  run-logger.js    Transparent NDJSON passthrough that captures per-iteration metrics
-  stream-filter.js Filters stream-json NDJSON into human-readable terminal output
+logstream/
+  raw-json-logger.js  Transparent NDJSON passthrough that writes every line to a timestamped file
+  run-logger.js       Transparent NDJSON passthrough that captures per-iteration metrics
+  stream-filter.js    Filters stream-json NDJSON into human-readable terminal output
 docker/
   Dockerfile       Image: Debian bookworm-slim + Docker CLI/compose, Node.js 22, Claude Code CLI
   entrypoint.sh    Remaps container user UID/GID to match the host; grants Docker socket access
@@ -166,16 +167,29 @@ Ralph runs in non-interactive mode (`-p`) by default. Use `--interactive` to opt
 - `--dangerously-skip-permissions` — pass `--dangerously-skip-permissions` to claude
 - `--resume` — pass `--resume` to claude on first iteration
 
-### Run logging
+### Logging
 
-Ralph automatically writes per-iteration metrics to `./agent/ralph-runlog.json` in the project directory. Each iteration captures:
+Ralph produces two logs per run: a **run log** (structured metrics) and a **raw log** (complete NDJSON stream). Both sit in `./agent/` by default.
+
+In non-interactive mode, Claude's output flows through a three-stage pipeline:
+
+```
+claude --output-format stream-json
+  | raw-json-logger.js   → writes every NDJSON line to the raw log file
+  | run-logger.js        → accumulates metrics, writes summary to the run log on exit
+  | stream-filter.js     → renders human-readable output to the terminal
+```
+
+#### Run log (`ralph-runlog.json`)
+
+Per-iteration metrics appended to `./agent/ralph-runlog.json`. Each iteration captures:
 
 - **Session ID** — for resuming with `claude --resume <id>`
 - **Timing** — start/end timestamps, total duration
 - **Token usage** — input and output tokens (including cache)
 - **Cost** — total USD cost
 - **Turns** — number of API round-trips
-- **Subagent breakdown** — per-subagent tokens, duration, and turns (enriched from stored JSONL files)
+- **Subagent breakdown** — per-subagent tokens, duration, and model
 
 To include a story ID and name in the log, emit a structured marker in your orchestrator's output:
 
@@ -185,7 +199,17 @@ To include a story ID and name in the log, emit a structured marker in your orch
 
 The ticket prefix is flexible (e.g. `S-028`, `PROJ-42`, `BUG-7`). The title after `—` is optional.
 
-The log file is created fresh at the start of each ralph run.
+Override the path with `--runlog-file <path>`.
+
+#### Raw log (`ralph-rawlog_<timestamp>`)
+
+Every NDJSON line from Claude is written verbatim to `./agent/ralph-rawlog_<YYYYMMDDHHmmSS>`. A new file is created for each ralph run. This is useful for debugging or replaying the full stream when the summarized run log doesn't have enough detail.
+
+Lines are flushed synchronously, so the raw log is complete even if the process is interrupted.
+
+Override the base path with `--raw-log <path>` (the timestamp suffix is always appended).
+
+You should add an entry to your .gitignore or .dockerignore to prevent these files from being sent to source control or docker container builds.
 
 ## Rebuilding the image
 

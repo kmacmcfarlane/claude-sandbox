@@ -32,7 +32,7 @@ describe('run-logger.js CLI', () => {
 
     const stdout = execFileSync(
       process.execPath,
-      [path.join(ROOT, 'lib/run-logger.js'), '--log-file', logFile, '--iteration', '1'],
+      [path.join(ROOT, 'logstream/run-logger.js'), '--log-file', logFile, '--iteration', '1'],
       { input, encoding: 'utf8' },
     );
 
@@ -56,7 +56,7 @@ describe('run-logger.js CLI', () => {
 
   it('exits with code 2 on missing arguments', () => {
     assert.throws(
-      () => execFileSync(process.execPath, [path.join(ROOT, 'lib/run-logger.js')], { encoding: 'utf8' }),
+      () => execFileSync(process.execPath, [path.join(ROOT, 'logstream/run-logger.js')], { encoding: 'utf8' }),
       (err) => err.status === 2,
     );
   });
@@ -95,7 +95,7 @@ describe('stream-filter.js CLI', () => {
 
     const stdout = execFileSync(
       process.execPath,
-      [path.join(ROOT, 'lib/stream-filter.js')],
+      [path.join(ROOT, 'logstream/stream-filter.js')],
       { input, encoding: 'utf8' },
     );
 
@@ -111,7 +111,7 @@ describe('stream-filter.js CLI', () => {
     const input = 'not json\n{"type":"system"}\n';
     const stdout = execFileSync(
       process.execPath,
-      [path.join(ROOT, 'lib/stream-filter.js')],
+      [path.join(ROOT, 'logstream/stream-filter.js')],
       { input, encoding: 'utf8' },
     );
     // Should not crash — system events produce no output

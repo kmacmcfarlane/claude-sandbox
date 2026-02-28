@@ -26,7 +26,7 @@ RUN install -m 0755 -d /etc/apt/keyrings \
        docker-compose-plugin \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Node.js LTS (for Claude Code CLI)
+# Install Node.js LTS (for Claude Code CLI and output filters)
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
@@ -41,7 +41,7 @@ COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
 COPY bin/ /opt/claude-sandbox/bin/
-COPY lib/ /opt/claude-sandbox/lib/
+COPY logstream/ /opt/claude-sandbox/logstream/
 RUN chmod +x /opt/claude-sandbox/bin/*
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
