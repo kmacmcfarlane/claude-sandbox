@@ -87,7 +87,7 @@ describe('processEvent', () => {
       message: {
         content: [{
           type: 'tool_use', name: 'Task', id: 'tu_1',
-          input: { description: 'research', subagent_type: 'Explore' },
+          input: { description: 'research', subagent_type: 'Explore', model: 'haiku' },
         }],
       },
     }, state);
@@ -95,6 +95,21 @@ describe('processEvent', () => {
     const d = state.taskDispatches.get('tu_1');
     assert.equal(d.description, 'research');
     assert.equal(d.subagentType, 'Explore');
+    assert.equal(d.model, 'haiku');
+  });
+
+  it('defaults model to null when not specified', () => {
+    const state = createState();
+    processEvent({
+      type: 'assistant',
+      message: {
+        content: [{
+          type: 'tool_use', name: 'Task', id: 'tu_1',
+          input: { description: 'research', subagent_type: 'Explore' },
+        }],
+      },
+    }, state);
+    assert.equal(state.taskDispatches.get('tu_1').model, null);
   });
 
   it('ignores non-Task tool_use blocks', () => {
@@ -154,7 +169,7 @@ describe('buildLogEntry', () => {
     };
     state.taskDispatches.set('tu_1', {
       toolUseId: 'tu_1', description: 'research', subagentType: 'Explore',
-      durationMs: 10000, tokensIn: 300, tokensOut: 100,
+      model: 'sonnet', durationMs: 10000, tokensIn: 300, tokensOut: 100,
     });
 
     const entry = buildLogEntry(state, 1, '2025-01-01T00:00:00.000Z');
@@ -171,6 +186,7 @@ describe('buildLogEntry', () => {
     assert.equal(entry.costUsd, 0.05);
     assert.equal(entry.subagents.length, 1);
     assert.equal(entry.subagents[0].description, 'research');
+    assert.equal(entry.subagents[0].model, 'sonnet');
     assert.equal(entry.subagents[0].duration, '10s');
   });
 

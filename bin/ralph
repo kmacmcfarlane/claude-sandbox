@@ -7,7 +7,7 @@ set -euo pipefail
 # - Fresh-context loop: re-invokes Claude Code each iteration
 # - Stop control: create a stop file (default: .ralph.stop) to halt
 # - Iteration limit: --limit N (default: 30)
-# - Run log: writes per-iteration metrics to ./agent/ralph-runlog.json
+# - Run log: writes per-iteration metrics (default: ./agent/ralph-runlog.json)
 
 REAL_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 REPO_ROOT="$(cd "$(dirname "$REAL_PATH")/.." && pwd)"
@@ -31,6 +31,8 @@ Options:
   --interactive                   Run claude interactively (default: non-interactive -p)
   --dangerously-skip-permissions  Pass --dangerously-skip-permissions to claude
   --resume                        Pass --resume flag to claude on first iteration
+  --runlog-file [PATH]            Run log path (default: ./agent/ralph-runlog.json)
+  --raw-log [PATH]                Raw NDJSON base path (default: ./agent/ralph-rawlog)
 
 Stop:
   Create the stop file to halt the loop:
@@ -44,6 +46,8 @@ USAGE
 NON_INTERACTIVE="-p"
 SKIP_PERMISSIONS=""
 RESUME=""
+RUNLOG_FILE=""
+RAW_LOG_BASE=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -61,6 +65,23 @@ while [[ $# -gt 0 ]]; do
       SKIP_PERMISSIONS="--dangerously-skip-permissions"; shift 1;;
     --resume)
       RESUME="--resume"; shift 1;;
+    --runlog-file)
+      RUNLOG_FILE="${2:-}"
+      if [[ -n "$RUNLOG_FILE" && "$RUNLOG_FILE" != --* ]]; then
+        shift 2
+      else
+        RUNLOG_FILE="./agent/ralph-runlog.json"
+        shift 1
+      fi
+      ;;
+    --raw-log)
+      RAW_LOG_BASE="${2:-}"
+      if [[ -n "$RAW_LOG_BASE" && "$RAW_LOG_BASE" != --* ]]; then
+        shift 2
+      else
+        shift 1
+      fi
+      ;;
     -h|--help)
       usage; exit 0;;
     *)
@@ -112,9 +133,8 @@ echo "  limit:     ${LIMIT:-unlimited}"
 cd "$ROOT_DIR"
 
 # Initialize run log — prepend a new run object to the array
-LOG_DIR="$ROOT_DIR/agent"
-LOG_FILE="$LOG_DIR/ralph-runlog.json"
-mkdir -p "$LOG_DIR"
+LOG_FILE="${RUNLOG_FILE:-./agent/ralph-runlog.json}"
+mkdir -p "$(dirname "$LOG_FILE")"
 if [[ ! -f "$LOG_FILE" ]]; then
   printf '[]\n' > "$LOG_FILE"
 fi
@@ -128,6 +148,10 @@ node -e "
   fs.writeFileSync('$LOG_FILE', JSON.stringify(runs, null, 2) + '\n');
 "
 echo "  run-log:   $LOG_FILE"
+
+# Raw JSON log setup (always enabled)
+RAW_LOG_FILE="${RAW_LOG_BASE:-./agent/ralph-rawlog}_$(date +%Y%m%d%H%M%S)"
+echo "  raw-log:   $RAW_LOG_FILE"
 
 # Build claude args
 build_claude_args() {
@@ -168,6 +192,7 @@ while true; do
     echo "Launching claude ${CLAUDE_ARGS[*]}"
     if [[ -n "$NON_INTERACTIVE" ]]; then
       cat "${PROMPT_FILES[@]}" | "$CLAUDE_BIN" "${CLAUDE_ARGS[@]}" \
+        | node "$REPO_ROOT/lib/raw-json-logger.js" --out "$RAW_LOG_FILE" \
         | node "$REPO_ROOT/lib/run-logger.js" --log-file "$LOG_FILE" --iteration "$iter" \
         | node "$REPO_ROOT/lib/stream-filter.js"
     else
