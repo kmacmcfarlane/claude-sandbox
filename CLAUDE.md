@@ -19,13 +19,20 @@ bin/ralph            # Loop runner — re-invokes Claude each iteration with fre
 logstream/run-logger.js    # Transparent NDJSON passthrough — captures per-iteration metrics
 logstream/stream-filter.js # Converts Claude NDJSON stream output to human-readable text
 entrypoint.sh        # Container entrypoint — UID/GID remapping via gosu
-Dockerfile           # Debian bookworm-slim + Docker CLI + Node 22 + Claude Code
+Dockerfile           # Debian bookworm-slim + Python 3 venv + Docker CLI + Node 22 + Claude Code
 ```
 
 ## Commits
 
 - Use format: `<action>: <description>` (e.g. `added:`, `fixed:`, `removed:`)
 - Do NOT include `Co-Authored-By` lines in commit messages.
+
+## Python Environment
+
+- Python 3 + venv at `/opt/claude-sandbox/venv` (`VIRTUAL_ENV` env var set, venv bin prepended to `PATH`)
+- Pre-installed: `ruamel.yaml` (for round-trip YAML preservation in agent tooling scripts)
+- To add packages: `pip install <package>` (resolves to venv pip via PATH)
+- Do NOT use `--break-system-packages` — always install into the venv
 
 ## Development Notes
 

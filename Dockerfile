@@ -11,7 +11,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     jq \
     less \
     openssh-client \
+    python3 \
+    python3-pip \
+    python3-venv \
     && rm -rf /var/lib/apt/lists/*
+
+# Python virtual environment for agent tooling (backlog CRUD, etc.)
+ENV VIRTUAL_ENV=/opt/claude-sandbox/venv
+RUN python3 -m venv $VIRTUAL_ENV \
+    && $VIRTUAL_ENV/bin/pip install --no-cache-dir 'ruamel.yaml>=0.18,<1.0'
+ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
 # Install Docker CLI + compose plugin (no daemon)
 RUN install -m 0755 -d /etc/apt/keyrings \
