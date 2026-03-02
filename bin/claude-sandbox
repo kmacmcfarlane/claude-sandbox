@@ -86,8 +86,9 @@ VOLUMES=(
 )
 
 # Claude Code config directory (auth tokens, project memories, settings)
-if [ -d "$HOME/.claude" ]; then
-    VOLUMES+=(-v "$HOME/.claude:/home/claude/.claude")
+CLAUDE_CONFIG_HOST="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+if [ -d "$CLAUDE_CONFIG_HOST" ]; then
+    VOLUMES+=(-v "$CLAUDE_CONFIG_HOST:/home/claude/.claude")
 fi
 
 # Claude Code global state (onboarding, OAuth account, feature flags)
