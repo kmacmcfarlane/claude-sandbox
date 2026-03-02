@@ -5,3 +5,5 @@
 !.claude/settings.json
 
 node_modules/
+
+.env.claude-sandbox
