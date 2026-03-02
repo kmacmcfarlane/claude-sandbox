@@ -50,12 +50,10 @@ function processEvent(event, state) {
       const content = (event.message && event.message.content) || [];
       for (const block of content) {
         if (block.type === 'text' && block.text) {
-          if (!state.storyId) {
-            const m = STORY_RE.exec(block.text);
-            if (m) {
-              state.storyId = m[1];
-              state.storyName = m[2] || null;
-            }
+          const m = STORY_RE.exec(block.text);
+          if (m) {
+            state.storyId = m[1];
+            state.storyName = m[2] || null;
           }
           if (!state.quotaStatus) {
             for (const { pattern, status } of QUOTA_PATTERNS) {

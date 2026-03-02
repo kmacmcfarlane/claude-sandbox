@@ -67,7 +67,7 @@ describe('processEvent', () => {
     assert.equal(state.storyName, 'Build widget');
   });
 
-  it('only captures first story marker', () => {
+  it('captures the latest story marker', () => {
     const state = createState();
     processEvent({
       type: 'assistant',
@@ -77,7 +77,8 @@ describe('processEvent', () => {
       type: 'assistant',
       message: { content: [{ type: 'text', text: '<!-- story: FEAT-2 — Second -->' }] },
     }, state);
-    assert.equal(state.storyId, 'FEAT-1');
+    assert.equal(state.storyId, 'FEAT-2');
+    assert.equal(state.storyName, 'Second');
   });
 
   it('tracks Task tool_use dispatches', () => {
