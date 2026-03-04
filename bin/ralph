@@ -282,6 +282,32 @@ format_wait() {
   fi
 }
 
+# ---------------------------------------------------------------------------
+# Lock file — prevent concurrent ralph loops on the same project
+# ---------------------------------------------------------------------------
+LOCK_FILE="$ROOT_DIR/.ralph.lock"
+
+cleanup() {
+  rm -f "$LOCK_FILE"
+}
+
+acquire_lock() {
+  if [[ -f "$LOCK_FILE" ]]; then
+    local existing_pid
+    existing_pid=$(jq -r '.pid // empty' "$LOCK_FILE" 2>/dev/null)
+    if [[ -n "$existing_pid" ]] && kill -0 "$existing_pid" 2>/dev/null; then
+      echo "Another ralph loop is active, PID $existing_pid" >&2
+      exit 1
+    else
+      echo "Warning: Stale lock file found (PID ${existing_pid:-unknown} is dead). Reclaiming." >&2
+    fi
+  fi
+  printf '{ "pid": %d, "started_at": "%s" }\n' "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$LOCK_FILE"
+  trap cleanup EXIT
+}
+
+acquire_lock
+
 rm -f .ralph.stop
 
 retry_count=0
