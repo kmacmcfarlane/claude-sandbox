@@ -150,7 +150,7 @@ Pass `--ralph` as the **first** argument to `claude-sandbox` to launch the ralph
 claude-sandbox --ralph --dangerously-skip-permissions --limit 5
 
 # Stop the loop gracefully (from the project directory):
-touch .ralph.stop
+touch .ralph/stop
 ```
 
 The container runs under a separate name (`claude-sandbox-ralph`) so it won't conflict with an interactive `claude-sandbox` session.
@@ -160,7 +160,7 @@ Ralph runs in non-interactive mode (`-p`) by default. Use `--interactive` to opt
 ### ralph options
 
 - `--limit N` — stop after N iterations (default: 30)
-- `--stop-file PATH` — path to stop file (default: `<project-root>/.ralph.stop`)
+- `--stop-file PATH` — path to stop file (default: `.ralph/stop`)
 - `--prompt PATH` — prompt file (default: `<project-root>/agent/PROMPT.md`)
 - `--claude-bin PATH` — claude binary (default: `claude`)
 - `--interactive` — run claude interactively (default: non-interactive `-p`)
@@ -169,7 +169,7 @@ Ralph runs in non-interactive mode (`-p`) by default. Use `--interactive` to opt
 
 ### Logging
 
-Ralph produces two logs per run: a **run log** (structured metrics) and a **raw log** (complete NDJSON stream). Both sit in `./agent/` by default.
+Ralph produces two logs per run: a **run log** (structured metrics) and a **raw log** (complete NDJSON stream). Both sit in `.ralph/` by default.
 
 In non-interactive mode, Claude's output flows through a three-stage pipeline:
 
@@ -180,9 +180,9 @@ claude --output-format stream-json
   | stream-filter.js     → renders human-readable output to the terminal
 ```
 
-#### Run log (`ralph-runlog.json`)
+#### Run log (`runlog.json`)
 
-Per-iteration metrics appended to `./agent/ralph-runlog.json`. Each iteration captures:
+Per-iteration metrics appended to `.ralph/runlog.json`. Each iteration captures:
 
 - **Session ID** — for resuming with `claude --resume <id>`
 - **Timing** — start/end timestamps, total duration
@@ -201,15 +201,15 @@ The ticket prefix is flexible (e.g. `S-028`, `PROJ-42`, `BUG-7`). The title afte
 
 Override the path with `--runlog-file <path>`.
 
-#### Raw log (`ralph-rawlog_<timestamp>`)
+#### Raw logs (`.ralph/runlogs/`)
 
-Every NDJSON line from Claude is written verbatim to `./agent/ralph-rawlog_<YYYYMMDDHHmmSS>`. A new file is created for each ralph run. This is useful for debugging or replaying the full stream when the summarized run log doesn't have enough detail.
+Every NDJSON line from Claude is written verbatim to `.ralph/runlogs/rawlog_<YYYYMMDDHHmmSS>`. A new file is created for each ralph run. This is useful for debugging or replaying the full stream when the summarized run log doesn't have enough detail.
 
 Lines are flushed synchronously, so the raw log is complete even if the process is interrupted.
 
 Override the base path with `--raw-log <path>` (the timestamp suffix is always appended).
 
-You should add an entry to your .gitignore or .dockerignore to prevent these files from being sent to source control or docker container builds.
+The entire `.ralph/` directory should be gitignored — it contains only runtime state.
 
 ## Rebuilding the image
 

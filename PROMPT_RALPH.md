@@ -11,17 +11,38 @@ You are running inside a **ralph loop** — a fresh Claude Code process is spawn
 
 ## Stopping the Loop
 
-Create a **`.ralph.stop`** file in the project root to halt the loop cleanly. Ralph checks for this file at the start of each iteration and exits if it exists. Example:
+Create a **`.ralph/stop`** file to halt the loop cleanly. Ralph checks for this file at the start of each iteration and exits if it exists. Example:
 
 ```bash
-touch .ralph.stop
+touch .ralph/stop
 ```
+
+## Ralph Runtime Directory
+
+All ralph runtime files live under `.ralph/` in the project root (gitignored):
+
+```
+.ralph/
+  stop                              # touch to halt the loop (checked each iteration)
+  lock                              # PID lock preventing concurrent loops
+  runlog.json                       # structured per-iteration metrics (persistent across runs)
+  runlogs/                          # raw NDJSON stream logs
+    rawlog_<YYYYMMDDHHmmSS>         # one file per ralph run (persistent)
+  temp/                             # scratch space (wiped each iteration)
+    quota-status                    # "ok", "quota_exhausted", or "rate_limit"
+    stderr                          # captured stderr from claude process
+```
+
+- **Run metrics:** `.ralph/runlog.json` — array of runs with per-iteration duration, tokens, cost, story marker, and subagent details
+- **Debug a run:** read the corresponding `.ralph/runlogs/rawlog_*` file for the full NDJSON stream
+- **Do not store persistent state in `.ralph/temp/`** — it is wiped at the start of every iteration
+- Prompt files remain in `./agent/` (e.g. `agent/PROMPT.md`) — these are inputs, not runtime outputs
 
 ## Maintaining State Across Iterations
 
 - **Git** is the primary state mechanism — commit your work so the next iteration can see it.
 - **Files on disk** persist between iterations (the working directory is not wiped).
-- **`.ralph-temp/`** is cleared at the start of each iteration — do not store anything important there.
+- **`.ralph/temp/`** is cleared at the start of each iteration — do not store anything important there.
 - **Conversation history is NOT preserved** — each iteration starts with zero context beyond the prompt files.
 
 ## Story Markers
@@ -32,7 +53,7 @@ Include a story marker in your first message so ralph's log pipeline can track w
 <!-- story: TASK-123 — Short description -->
 ```
 
-The run log (`agent/ralph-runlog.json`) captures the latest story marker per iteration along with duration, token usage, cost, and subagent details.
+The run log (`.ralph/runlog.json`) captures the latest story marker per iteration along with duration, token usage, cost, and subagent details.
 
 ---
 

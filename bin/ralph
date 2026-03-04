@@ -5,14 +5,14 @@ set -euo pipefail
 #
 # Features:
 # - Fresh-context loop: re-invokes Claude Code each iteration
-# - Stop control: create a stop file (default: .ralph.stop) to halt
+# - Stop control: create a stop file (default: .ralph/stop) to halt
 # - Iteration limit: --limit N (default: 30)
-# - Run log: writes per-iteration metrics (default: ./agent/ralph-runlog.json)
+# - Run log: writes per-iteration metrics (default: .ralph/runlog.json)
 
 REAL_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 REPO_ROOT="$(cd "$(dirname "$REAL_PATH")/.." && pwd)"
 ROOT_DIR="$(pwd)"
-STOP_FILE="${STOP_FILE:-$ROOT_DIR/.ralph.stop}"
+STOP_FILE="${STOP_FILE:-$ROOT_DIR/.ralph/stop}"
 PROMPT_FILE="${PROMPT_FILE:-$ROOT_DIR/agent/PROMPT.md}"
 CLAUDE_BIN="${CLAUDE_BIN:-claude}"
 
@@ -25,14 +25,14 @@ Usage:
 
 Options:
   --limit N                       Stop after N iterations (default: 30)
-  --stop-file PATH                Stop file path (default: <cwd>/.ralph.stop)
+  --stop-file PATH                Stop file path (default: .ralph/stop)
   --prompt PATH                   Prompt file path (default: <cwd>/agent/PROMPT.md)
   --claude-bin PATH               Claude Code CLI (default: claude)
   --interactive                   Run claude interactively (default: non-interactive -p)
   --dangerously-skip-permissions  Pass --dangerously-skip-permissions to claude
   --resume                        Pass --resume flag to claude on first iteration
-  --runlog-file [PATH]            Run log path (default: ./agent/ralph-runlog.json)
-  --raw-log [PATH]                Raw NDJSON base path (default: ./agent/ralph-rawlog)
+  --runlog-file [PATH]            Run log path (default: .ralph/runlog.json)
+  --raw-log [PATH]                Raw NDJSON base path (default: .ralph/runlogs/rawlog)
 
 Quota retry:
   --max-retries N                 Consecutive rate-limit retries before exiting (default: 5)
@@ -42,10 +42,10 @@ Quota retry:
 
 Stop:
   Create the stop file to halt the loop:
-    touch .ralph.stop
+    touch .ralph/stop
 
   Remove it to allow running again:
-    rm .ralph.stop
+    rm .ralph/stop
 USAGE
 }
 
@@ -80,7 +80,7 @@ while [[ $# -gt 0 ]]; do
       if [[ -n "$RUNLOG_FILE" && "$RUNLOG_FILE" != --* ]]; then
         shift 2
       else
-        RUNLOG_FILE="./agent/ralph-runlog.json"
+        RUNLOG_FILE=".ralph/runlog.json"
         shift 1
       fi
       ;;
@@ -150,9 +150,11 @@ echo "  limit:     ${LIMIT:-unlimited}"
 
 cd "$ROOT_DIR"
 
+# Ensure .ralph directory structure exists
+mkdir -p .ralph/temp .ralph/runlogs
+
 # Initialize run log — prepend a new run object to the array
-LOG_FILE="${RUNLOG_FILE:-./agent/ralph-runlog.json}"
-mkdir -p "$(dirname "$LOG_FILE")"
+LOG_FILE="${RUNLOG_FILE:-.ralph/runlog.json}"
 if [[ ! -f "$LOG_FILE" ]]; then
   printf '[]\n' > "$LOG_FILE"
 fi
@@ -168,7 +170,7 @@ node -e "
 echo "  run-log:   $LOG_FILE"
 
 # Raw JSON log setup (always enabled)
-RAW_LOG_FILE="${RAW_LOG_BASE:-./agent/ralph-rawlog}_$(date +%Y%m%d%H%M%S)"
+RAW_LOG_FILE="${RAW_LOG_BASE:-.ralph/runlogs/rawlog}_$(date +%Y%m%d%H%M%S)"
 echo "  raw-log:   $RAW_LOG_FILE"
 
 # Build claude args
@@ -200,8 +202,8 @@ notify_discord() {
 # Classify iteration outcome using quota-status file and stderr
 # Returns: "ok", "quota_exhausted", "rate_limit", or "error"
 # ---------------------------------------------------------------------------
-QUOTA_STATUS_FILE="$ROOT_DIR/.ralph-temp/quota-status"
-STDERR_FILE="$ROOT_DIR/.ralph-temp/stderr"
+QUOTA_STATUS_FILE="$ROOT_DIR/.ralph/temp/quota-status"
+STDERR_FILE="$ROOT_DIR/.ralph/temp/stderr"
 
 classify_outcome() {
   local exit_code="$1"
@@ -285,7 +287,7 @@ format_wait() {
 # ---------------------------------------------------------------------------
 # Lock file — prevent concurrent ralph loops on the same project
 # ---------------------------------------------------------------------------
-LOCK_FILE="$ROOT_DIR/.ralph.lock"
+LOCK_FILE="$ROOT_DIR/.ralph/lock"
 
 cleanup() {
   rm -f "$LOCK_FILE"
@@ -308,7 +310,7 @@ acquire_lock() {
 
 acquire_lock
 
-rm -f .ralph.stop
+rm -f .ralph/stop
 
 retry_count=0
 iter=0
@@ -323,9 +325,9 @@ while true; do
 
   # Clear scratch directory (skip on --resume first iteration)
   if [[ -z "$RESUME" ]]; then
-    rm -rf "$ROOT_DIR/.ralph-temp"
+    rm -rf "$ROOT_DIR/.ralph/temp"
   fi
-  mkdir -p "$ROOT_DIR/.ralph-temp"
+  mkdir -p "$ROOT_DIR/.ralph/temp"
 
   build_claude_args
 

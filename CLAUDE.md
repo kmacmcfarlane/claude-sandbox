@@ -22,6 +22,28 @@ entrypoint.sh        # Container entrypoint — UID/GID remapping via gosu
 Dockerfile           # Debian bookworm-slim + Python 3 venv + Docker CLI + Node 22 + Claude Code
 ```
 
+## Ralph Runtime Directory
+
+Ralph stores all runtime files under `.ralph/` in the project root. This directory is gitignored and contains only ephemeral state — never commit its contents.
+
+```
+.ralph/
+  stop                              # touch to halt the loop (checked each iteration)
+  lock                              # PID lock preventing concurrent loops
+  runlog.json                       # structured per-iteration metrics (persistent across runs)
+  runlogs/                          # raw NDJSON stream logs
+    rawlog_<YYYYMMDDHHmmSS>         # one file per ralph run (persistent)
+  temp/                             # scratch space (wiped each iteration)
+    quota-status                    # "ok", "quota_exhausted", or "rate_limit"
+    stderr                          # captured stderr from claude process
+```
+
+- **Stop the loop:** `touch .ralph/stop`
+- **Run metrics:** `.ralph/runlog.json` — array of runs with per-iteration duration, tokens, cost, story marker, and subagent details
+- **Debug a run:** read the corresponding `.ralph/runlogs/rawlog_*` file for the full NDJSON stream
+- **Do not store persistent state in `.ralph/temp/`** — it is wiped at the start of every iteration
+- Prompt files remain in `./agent/` (e.g. `agent/PROMPT.md`) — these are inputs, not runtime outputs
+
 ## Commits
 
 - Use format: `<action>: <description>` (e.g. `added:`, `fixed:`, `removed:`)
