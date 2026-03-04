@@ -312,14 +312,23 @@ while true; do
   rc=0
   (
     echo "Launching claude ${CLAUDE_ARGS[*]}"
+    # Concatenate prompt files with blank-line separators
+    concat_prompts() {
+      local first=1
+      for f in "${PROMPT_FILES[@]}"; do
+        [[ "$first" -eq 1 ]] && first=0 || printf '\n\n'
+        cat "$f"
+      done
+    }
+
     if [[ -n "$NON_INTERACTIVE" ]]; then
-      cat "${PROMPT_FILES[@]}" | "$CLAUDE_BIN" "${CLAUDE_ARGS[@]}" \
+      concat_prompts | "$CLAUDE_BIN" "${CLAUDE_ARGS[@]}" \
         | node "$REPO_ROOT/logstream/raw-json-logger.js" --out "$RAW_LOG_FILE" \
         | node "$REPO_ROOT/logstream/run-logger.js" --log-file "$LOG_FILE" --iteration "$iter" \
             --quota-status-file "$QUOTA_STATUS_FILE" \
         | node "$REPO_ROOT/logstream/stream-filter.js"
     else
-      cat "${PROMPT_FILES[@]}" | "$CLAUDE_BIN" "${CLAUDE_ARGS[@]}"
+      concat_prompts | "$CLAUDE_BIN" "${CLAUDE_ARGS[@]}"
     fi
   ) 2>"$STDERR_FILE" || rc=$?
 
