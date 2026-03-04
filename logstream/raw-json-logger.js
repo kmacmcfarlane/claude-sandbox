@@ -1,7 +1,14 @@
 #!/usr/bin/env node
 'use strict';
 
-// Transparent NDJSON passthrough that writes every line verbatim to a file.
+// NDJSON passthrough that wraps each line in a timestamped envelope and writes
+// it to a file.  Stdout passthrough remains unwrapped so downstream consumers
+// (run-logger, stream-filter) see the original Claude JSON.
+//
+// Envelope format (one per line in the output file):
+//   {"ts":"2026-03-04T12:00:00.123Z","event":{…original claude json…}}
+//
+// If a line isn't valid JSON the raw string is stored as the event value.
 //
 // Sits in the pipeline alongside other filters:
 //   claude | raw-json-logger.js --out <path> | ...
@@ -30,10 +37,18 @@ const fd = fs.openSync(outFile, 'w');
 const rl = readline.createInterface({ input: process.stdin, terminal: false });
 
 rl.on('line', (line) => {
-  // Pass through unchanged
+  // Pass through unchanged so downstream sees original Claude JSON
   process.stdout.write(line + '\n');
-  // Write raw line to file
-  fs.writeSync(fd, line + '\n');
+
+  // Wrap in timestamped envelope for the raw log file
+  let event;
+  try {
+    event = JSON.parse(line);
+  } catch {
+    event = line;
+  }
+  const envelope = JSON.stringify({ ts: new Date().toISOString(), event });
+  fs.writeSync(fd, envelope + '\n');
 });
 
 rl.on('close', () => {
