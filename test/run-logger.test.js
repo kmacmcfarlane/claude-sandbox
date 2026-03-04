@@ -276,10 +276,20 @@ describe('quota detection', () => {
     assert.equal(state.quotaStatus, null);
   });
 
+  it('detects "out of extra usage" in result event as quota_exhausted', () => {
+    const state = createState();
+    processEvent({
+      type: 'result',
+      result: "You're out of extra usage \u00b7 resets 11am (UTC)",
+    }, state);
+    assert.equal(state.quotaStatus, 'quota_exhausted');
+  });
+
   it('QUOTA_PATTERNS is exported and has expected entries', () => {
     assert.ok(Array.isArray(QUOTA_PATTERNS));
-    assert.ok(QUOTA_PATTERNS.length >= 3);
+    assert.ok(QUOTA_PATTERNS.length >= 4);
     assert.equal(QUOTA_PATTERNS[0].status, 'quota_exhausted');
-    assert.equal(QUOTA_PATTERNS[1].status, 'rate_limit');
+    assert.equal(QUOTA_PATTERNS[1].status, 'quota_exhausted');
+    assert.equal(QUOTA_PATTERNS[2].status, 'rate_limit');
   });
 });

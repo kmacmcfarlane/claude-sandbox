@@ -224,8 +224,8 @@ classify_outcome() {
 
   # Check stderr for rate limit patterns (catches API-level errors not in JSON stream)
   if [[ -f "$STDERR_FILE" ]]; then
-    if grep -qi 'rate.limit\|rate_limit\|usage.limit\|overloaded' "$STDERR_FILE" 2>/dev/null; then
-      if grep -qi 'usage.limit' "$STDERR_FILE" 2>/dev/null; then
+    if grep -qi 'rate.limit\|rate_limit\|usage.limit\|out of .* usage\|overloaded' "$STDERR_FILE" 2>/dev/null; then
+      if grep -qi 'usage.limit\|out of .* usage' "$STDERR_FILE" 2>/dev/null; then
         echo "quota_exhausted"
       else
         echo "rate_limit"
@@ -250,7 +250,7 @@ probe_quota() {
   local probe_out
   probe_out=$("$CLAUDE_BIN" -p "ping" --output-format stream-json 2>/dev/null | head -5) || true
 
-  if echo "$probe_out" | grep -qi 'usage.limit'; then
+  if echo "$probe_out" | grep -qi 'usage.limit\|out of .* usage'; then
     return 1
   fi
 

@@ -14,6 +14,7 @@ const STORY_RE = /<!-- story: ([A-Za-z]+-\d+)\s*(?:—\s*(.+?))?\s*-->/;
 
 const QUOTA_PATTERNS = [
   { pattern: /usage.limit/i, status: 'quota_exhausted' },
+  { pattern: /out of .* usage/i, status: 'quota_exhausted' },
   { pattern: /rate.limit|rate_limit/i, status: 'rate_limit' },
   { pattern: /overloaded/i, status: 'rate_limit' },
 ];
@@ -103,6 +104,15 @@ function processEvent(event, state) {
 
     case 'result': {
       state.resultEvent = event;
+      // Check the result text for quota patterns (e.g. "You're out of extra usage")
+      if (!state.quotaStatus && event.result) {
+        for (const { pattern, status } of QUOTA_PATTERNS) {
+          if (pattern.test(event.result)) {
+            state.quotaStatus = status;
+            break;
+          }
+        }
+      }
       break;
     }
   }
