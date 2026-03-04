@@ -104,13 +104,21 @@ if (require.main === module) {
   const toolNames = {};
   const rl = readline.createInterface({ input: process.stdin, terminal: false });
 
+  const MAX_LINES = 5;
+  const MAX_LINE_LEN = 2048;
+
   rl.on('line', (line) => {
     let e;
     try { e = JSON.parse(line); } catch { return; }
 
     const lines = renderEvent(e, toolNames);
-    for (const l of lines) {
-      process.stdout.write(l + '\n');
+    const capped = lines.length > MAX_LINES;
+    const visible = capped ? lines.slice(0, MAX_LINES) : lines;
+    for (const l of visible) {
+      process.stdout.write((l.length > MAX_LINE_LEN ? l.slice(0, MAX_LINE_LEN) + '…' : l) + '\n');
+    }
+    if (capped) {
+      process.stdout.write(DIM + '  … ' + (lines.length - MAX_LINES) + ' more lines' + RESET + '\n');
     }
   });
 }
