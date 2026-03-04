@@ -303,7 +303,7 @@ while true; do
 
   build_claude_args
 
-  PROMPT_FILES=("$PROMPT_FILE" "$PROMPT_ADDENDUM")
+  PROMPT_FILES=("$REPO_ROOT/PROMPT_RALPH.md" "$PROMPT_FILE" "$PROMPT_ADDENDUM")
 
   # Clear quota status from previous iteration
   rm -f "$QUOTA_STATUS_FILE" "$STDERR_FILE"
