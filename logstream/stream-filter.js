@@ -111,7 +111,9 @@ if (require.main === module) {
     let e;
     try { e = JSON.parse(line); } catch { return; }
 
-    const lines = renderEvent(e, toolNames);
+    // Flatten embedded newlines so each visual line counts toward the cap
+    const raw = renderEvent(e, toolNames);
+    const lines = raw.flatMap(l => l.split('\n'));
     const capped = lines.length > MAX_LINES;
     const visible = capped ? lines.slice(0, MAX_LINES) : lines;
     for (const l of visible) {
