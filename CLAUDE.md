@@ -10,6 +10,7 @@ Docker-based sandbox for running Claude Code with filesystem isolation and host 
 - **Baked-in scripts:** `bin/` and `logstream/` are copied into the Docker image at `/opt/claude-sandbox/`, not volume-mounted.
 - **UID/GID remapping:** `entrypoint.sh` adjusts the container `claude` user to match host IDs so files have correct ownership.
 - **Fresh-context iterations:** Ralph runs Claude as a new process each iteration, not session continuation.
+- **Container context injection:** `bin/claude-sandbox` builds a temp file by concatenating the host's `~/.claude/CLAUDE.md` (if any) with `container-context.md`, then bind-mounts it read-only over `/home/claude/.claude/CLAUDE.md` in the container. This gives every session (interactive or ralph) awareness of the container environment without modifying the host file. For ralph loops, `PROMPT_RALPH.md` is additionally piped as part of the prompt.
 
 ## Directory Structure
 
@@ -17,7 +18,8 @@ Docker-based sandbox for running Claude Code with filesystem isolation and host 
 bin/claude-sandbox   # Main launcher — builds image, assembles mounts, runs container
 bin/ralph            # Loop runner — re-invokes Claude each iteration with fresh context
 logstream/run-logger.js    # Transparent NDJSON passthrough — captures per-iteration metrics
-logstream/stream-filter.js # Converts Claude NDJSON stream output to human-readable text
+logstream/console-output.js # Converts Claude NDJSON stream output to human-readable text
+logstream/exit-on-result.js # Pipeline terminator — exits on result event to tear down stuck processes
 entrypoint.sh        # Container entrypoint — UID/GID remapping via gosu
 Dockerfile           # Debian bookworm-slim + Python 3 venv + Docker CLI + Node 22 + Claude Code
 ```
@@ -61,3 +63,4 @@ Ralph stores all runtime files under `.ralph/` in the project root. This directo
 - Scripts use `readlink -f` to resolve symlinks and find repo root.
 - Image auto-rebuilds if Dockerfile is newer than the cached image.
 - Missing `.env.claude-sandbox` logs a warning but doesn't fail.
+- `container-context.md` describes the container environment and is merged into `~/.claude/CLAUDE.md` for all sessions (interactive and ralph). Keep it up to date when the container environment changes (Dockerfile, entrypoint, installed software).
