@@ -3,7 +3,7 @@
 
 // NDJSON passthrough that wraps each line in a timestamped envelope and writes
 // it to a file.  Stdout passthrough remains unwrapped so downstream consumers
-// (run-logger, stream-filter) see the original Claude JSON.
+// (run-logger, console-output) see the original Claude JSON.
 //
 // Envelope format (one per line in the output file):
 //   {"ts":"2026-03-04T12:00:00.123Z","event":{…original claude json…}}

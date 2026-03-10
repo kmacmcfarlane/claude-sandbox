@@ -186,7 +186,7 @@ describe('run-logger.js CLI', () => {
   });
 });
 
-describe('stream-filter.js CLI', () => {
+describe('console-output.js CLI', () => {
   it('renders NDJSON events to human-readable output', () => {
     const input = [
       JSON.stringify({ type: 'system' }),
@@ -219,7 +219,7 @@ describe('stream-filter.js CLI', () => {
 
     const stdout = execFileSync(
       process.execPath,
-      [path.join(ROOT, 'logstream/stream-filter.js')],
+      [path.join(ROOT, 'logstream/console-output.js')],
       { input, encoding: 'utf8' },
     );
 
@@ -235,7 +235,7 @@ describe('stream-filter.js CLI', () => {
     const input = 'not json\n{"type":"system"}\n';
     const stdout = execFileSync(
       process.execPath,
-      [path.join(ROOT, 'logstream/stream-filter.js')],
+      [path.join(ROOT, 'logstream/console-output.js')],
       { input, encoding: 'utf8' },
     );
     // Should not crash — system events produce no output
