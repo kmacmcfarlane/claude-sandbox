@@ -40,18 +40,24 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Claude Code CLI
-RUN npm install -g @anthropic-ai/claude-code
 
 # Create non-root user (UID/GID adjusted at runtime by entrypoint)
 RUN useradd -m -s /bin/bash claude
 
-COPY entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh
+# Install Claude Code CLI
+USER claude
+RUN curl -fsSL https://claude.ai/install.sh | bash
+USER root
+RUN #chmod +x /home/claude/.local/bin/claude
+ENV PATH="/home/claude/.local/bin:$PATH"
+RUN echo $PATH
+
+COPY entrypoint.sh /home/claude/.local/bin/entrypoint.sh
+RUN chmod +x /home/claude/.local/bin/entrypoint.sh
 
 COPY bin/ /opt/claude-sandbox/bin/
 COPY logstream/ /opt/claude-sandbox/logstream/
 RUN chmod +x /opt/claude-sandbox/bin/*
 
-ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+ENTRYPOINT ["/home/claude/.local/bin/entrypoint.sh"]
 CMD ["claude"]
