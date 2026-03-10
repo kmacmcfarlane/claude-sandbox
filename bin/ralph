@@ -224,6 +224,16 @@ classify_outcome() {
     return
   fi
 
+  # If run-logger.js saw a result event and wrote "ok", the session completed
+  # successfully. Any non-zero pipeline exit code is just teardown noise (e.g.,
+  # SIGPIPE from exit-on-result.js tearing down the pipe, or Claude Code exiting
+  # non-zero after an is_error session). Trust the structured status over the
+  # exit code — the session ran to completion and ralph should continue.
+  if [[ "$file_status" = "ok" ]]; then
+    echo "ok"
+    return
+  fi
+
   # Check stderr for rate limit patterns (catches API-level errors not in JSON stream)
   if [[ -f "$STDERR_FILE" ]]; then
     if grep -qi 'rate.limit\|rate_limit\|usage.limit\|out of .* usage\|overloaded' "$STDERR_FILE" 2>/dev/null; then
@@ -354,7 +364,8 @@ while true; do
         | node "$REPO_ROOT/logstream/raw-json-logger.js" --out "$RAW_LOG_FILE" \
         | node "$REPO_ROOT/logstream/run-logger.js" --log-file "$LOG_FILE" --iteration "$iter" \
             --quota-status-file "$QUOTA_STATUS_FILE" \
-        | node "$REPO_ROOT/logstream/stream-filter.js"
+        | node "$REPO_ROOT/logstream/exit-on-result.js" \
+        | node "$REPO_ROOT/logstream/console-output.js"
     else
       concat_prompts | "$CLAUDE_BIN" "${CLAUDE_ARGS[@]}"
     fi

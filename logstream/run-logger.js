@@ -4,8 +4,8 @@
 // Transparent NDJSON passthrough that captures per-iteration metrics from
 // Claude Code's stream-json output and writes them to a run log file.
 //
-// Sits in the pipeline between claude and stream-filter.js:
-//   claude --output-format stream-json | run-logger.js | stream-filter.js
+// Sits in the pipeline between claude and console-output.js:
+//   claude --output-format stream-json | run-logger.js | console-output.js
 //
 // Usage:
 //   node run-logger.js --log-file <path> --iteration <N>
@@ -221,6 +221,12 @@ if (require.main === module) {
     try { e = JSON.parse(line); } catch { return; }
 
     processEvent(e, state);
+
+    // Flush immediately on result event so metrics are persisted before
+    // downstream exit-on-result.js tears down the pipeline via SIGPIPE.
+    if (e.type === 'result') {
+      flushLog();
+    }
   });
 
   rl.on('close', () => {

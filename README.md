@@ -11,7 +11,8 @@ bin/
 logstream/
   raw-json-logger.js  Transparent NDJSON passthrough that writes every line to a timestamped file
   run-logger.js       Transparent NDJSON passthrough that captures per-iteration metrics
-  stream-filter.js    Filters stream-json NDJSON into human-readable terminal output
+  console-output.js   Filters stream-json NDJSON into human-readable terminal output
+  exit-on-result.js   Pipeline terminator — exits on result event to tear down stuck processes
 docker/
   Dockerfile       Image: Debian bookworm-slim + Docker CLI/compose, Node.js 22, Claude Code CLI
   entrypoint.sh    Remaps container user UID/GID to match the host; grants Docker socket access
@@ -177,7 +178,8 @@ In non-interactive mode, Claude's output flows through a three-stage pipeline:
 claude --output-format stream-json
   | raw-json-logger.js   → writes every NDJSON line to the raw log file
   | run-logger.js        → accumulates metrics, writes summary to the run log on exit
-  | stream-filter.js     → renders human-readable output to the terminal
+  | exit-on-result.js    → exits on result event, tearing down the pipeline
+  | console-output.js    → renders human-readable output to the terminal
 ```
 
 #### Run log (`runlog.json`)
