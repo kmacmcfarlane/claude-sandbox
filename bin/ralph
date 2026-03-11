@@ -325,7 +325,7 @@ acquire_lock() {
     fi
   fi
   printf '{ "pid": %d, "started_at": "%s" }\n' "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$LOCK_FILE"
-  trap cleanup EXIT
+  trap 'if [[ "${RALPH_CLEAN_EXIT:-0}" -eq 0 ]]; then notify_discord "🔌 **$(basename "$ROOT_DIR")** — Loop killed by signal. Exiting."; fi; cleanup' EXIT
 }
 
 acquire_lock
@@ -337,7 +337,7 @@ iter=0
 while true; do
   if [[ -f "$STOP_FILE" ]]; then
     echo "Stop file detected ($STOP_FILE). Exiting."
-    exit 0
+    RALPH_CLEAN_EXIT=1; exit 0
   fi
 
   iter=$((iter + 1))
@@ -356,15 +356,38 @@ while true; do
   # Clear quota status from previous iteration
   rm -f "$QUOTA_STATUS_FILE" "$STDERR_FILE"
 
+  # Export prompt files as newline-separated env var for the timeout subshell
+  RALPH_PROMPT_FILES="$(printf '%s\n' "${PROMPT_FILES[@]}")"
+  export RALPH_PROMPT_FILES
+
   # Fresh context: new process each loop
+  # Outer timeout ensures the pipeline is killed even if claude ignores SIGPIPE
+  # after exit-on-result.js tears down the pipe. Default: watchdog + 2 min grace,
+  # or 2 hours if watchdog is disabled.
+  if [[ "$WATCHDOG_TIMEOUT" -gt 0 ]] 2>/dev/null; then
+    ITER_TIMEOUT=$((WATCHDOG_TIMEOUT * 60 + 120))
+  else
+    ITER_TIMEOUT="${ITERATION_TIMEOUT:-7200}"
+  fi
+
   rc=0
-  (
+  timeout --signal TERM --kill-after 30 "$ITER_TIMEOUT" bash -c '
+    set -o pipefail
+    REPO_ROOT="$1"; CLAUDE_BIN="$2"; RAW_LOG_FILE="$3"; LOG_FILE="$4"
+    iter="$5"; QUOTA_STATUS_FILE="$6"; WATCHDOG_TIMEOUT="$7"
+    NON_INTERACTIVE="$8"
+    shift 8
+    CLAUDE_ARGS=("$@")
+
+    # Prompt files are passed via RALPH_PROMPT_FILES env var (newline-separated)
+    IFS=$'"'"'\n'"'"' read -r -d "" -a PROMPT_FILES <<< "$RALPH_PROMPT_FILES" || true
+
     echo "Launching claude ${CLAUDE_ARGS[*]}"
     # Concatenate prompt files with blank-line separators
     concat_prompts() {
       local first=1
       for f in "${PROMPT_FILES[@]}"; do
-        [[ "$first" -eq 1 ]] && first=0 || printf '\n\n'
+        [[ "$first" -eq 1 ]] && first=0 || printf '"'"'\n\n'"'"'
         cat "$f"
       done
     }
@@ -389,7 +412,10 @@ while true; do
     else
       concat_prompts | "$CLAUDE_BIN" "${CLAUDE_ARGS[@]}"
     fi
-  ) 2>"$STDERR_FILE" || rc=$?
+  ' _ "$REPO_ROOT" "$CLAUDE_BIN" "$RAW_LOG_FILE" "$LOG_FILE" \
+      "$iter" "$QUOTA_STATUS_FILE" "$WATCHDOG_TIMEOUT" \
+      "$NON_INTERACTIVE" "${CLAUDE_ARGS[@]}" \
+    2>"$STDERR_FILE" || rc=$?
 
   # Classify the outcome
   outcome=$(classify_outcome "$rc")
@@ -424,7 +450,7 @@ while true; do
       if [[ "$total_waited" -ge "$QUOTA_MAX_WAIT" ]]; then
         echo "[quota] Quota did not reset within $(format_wait "$QUOTA_MAX_WAIT"). Exiting."
         notify_discord "⛔ **${PROJECT_NAME}** — Quota did not reset within $(format_wait "$QUOTA_MAX_WAIT"). Exiting at iteration ${iter}."
-        exit 0
+        RALPH_CLEAN_EXIT=1; exit 0
       fi
 
       # Retry the same iteration (don't increment iter)
@@ -437,7 +463,7 @@ while true; do
       if [[ "$retry_count" -gt "$MAX_RETRIES" ]]; then
         echo "[quota] Max retries exceeded ($MAX_RETRIES). Exiting."
         notify_discord "⛔ **${PROJECT_NAME}** — Rate limit retries exhausted ($MAX_RETRIES) at iteration ${iter}. Exiting."
-        exit 1
+        RALPH_CLEAN_EXIT=1; exit 1
       fi
 
       # Exponential backoff: delay * 2^(attempt-1), capped at 300s
@@ -462,13 +488,14 @@ while true; do
 
     *)
       echo "Claude process exited non-zero (rc=$rc). Exiting."
-      exit "$rc"
+      notify_discord "❌ **${PROJECT_NAME}** — Iteration ${iter} exited with error (rc=$rc). Loop stopped."
+      RALPH_CLEAN_EXIT=1; exit "$rc"
       ;;
   esac
 
   if [[ -n "$LIMIT" && "$iter" -ge "$LIMIT" ]]; then
     echo "Iteration limit reached ($LIMIT). Exiting."
-    exit 0
+    RALPH_CLEAN_EXIT=1; exit 0
   fi
 
   sleep 3

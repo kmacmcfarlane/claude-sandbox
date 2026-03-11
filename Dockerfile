@@ -57,6 +57,7 @@ RUN chmod +x /home/claude/.local/bin/entrypoint.sh
 
 COPY bin/ /opt/claude-sandbox/bin/
 COPY logstream/ /opt/claude-sandbox/logstream/
+COPY PROMPT_RALPH.md /opt/claude-sandbox/PROMPT_RALPH.md
 RUN chmod +x /opt/claude-sandbox/bin/*
 
 ENTRYPOINT ["/home/claude/.local/bin/entrypoint.sh"]

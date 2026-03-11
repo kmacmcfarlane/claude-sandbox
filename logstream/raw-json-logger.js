@@ -34,6 +34,15 @@ if (!outFile) {
 
 const fd = fs.openSync(outFile, 'w');
 
+// Exit cleanly on EPIPE (downstream pipe closed by exit-on-result.js)
+process.stdout.on('error', (err) => {
+  if (err.code === 'EPIPE') {
+    fs.closeSync(fd);
+    process.exit(0);
+  }
+  throw err;
+});
+
 const rl = readline.createInterface({ input: process.stdin, terminal: false });
 
 rl.on('line', (line) => {

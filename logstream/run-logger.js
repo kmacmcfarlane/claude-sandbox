@@ -212,6 +212,15 @@ if (require.main === module) {
     process.exit(130);
   });
 
+  // Exit cleanly on EPIPE (downstream pipe closed by exit-on-result.js)
+  process.stdout.on('error', (err) => {
+    if (err.code === 'EPIPE') {
+      flushLog();
+      process.exit(0);
+    }
+    throw err;
+  });
+
   const rl = readline.createInterface({ input: process.stdin, terminal: false });
 
   rl.on('line', (line) => {
