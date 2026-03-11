@@ -55,8 +55,9 @@ The Docker image is built automatically on first run.
 
 Each project that uses claude-sandbox needs a `.env.claude-sandbox` file in its root
 directory. This file provides environment variables passed into the container (e.g.
-`DISCORD_WEBHOOK_URL` for MCP server notifications). The launcher will exit with an
-error if this file is missing.
+`DISCORD_WEBHOOK_URL` for MCP server notifications, `CLAUDE_NOTIFICATION_WEBHOOK_URL`
+for interactive session notification hooks). The launcher will exit with an error if
+this file is missing.
 
 ## Configuration (`.claude-sandbox.yaml`)
 
@@ -230,6 +231,7 @@ docker rmi claude-sandbox
 |---|---|---|
 | `PROJECT_DIR` | `$(pwd)` | Project directory to mount |
 | `ANTHROPIC_API_KEY` | (none) | Passed through to the container |
+| `CLAUDE_NOTIFICATION_WEBHOOK_URL` | (none) | Discord webhook for interactive notification hooks (permission prompts, idle) |
 
 ## Part of kmac-claude-kit
 
