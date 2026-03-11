@@ -170,6 +170,7 @@ Ralph runs in non-interactive mode (`-p`) by default. Use `--interactive` to opt
 - `--dangerously-skip-permissions` — pass `--dangerously-skip-permissions` to claude
 - `--resume` — pass `--resume` to claude on first iteration
 - `--watchdog-timeout N` — inactivity timeout in minutes (default: 15, 0 to disable)
+- `--iteration-timeout N` — hard iteration time limit in seconds (default: 7200 = 2h)
 
 ### Logging
 
@@ -209,11 +210,11 @@ Override the path with `--runlog-file <path>`.
 
 #### Raw logs (`.ralph/runlogs/`)
 
-Every NDJSON line from Claude is written verbatim to `.ralph/runlogs/rawlog_<YYYYMMDDHHmmSS>`. A new file is created for each ralph run. This is useful for debugging or replaying the full stream when the summarized run log doesn't have enough detail.
+Every NDJSON line from Claude is written verbatim to `.ralph/runlogs/rawlog_<YYYYMMDDHHmmSS>_iter<N>`. A new file is created for each iteration, so data from watchdog-killed or timed-out iterations is preserved for debugging.
 
 Lines are flushed synchronously, so the raw log is complete even if the process is interrupted.
 
-Override the base path with `--raw-log <path>` (the timestamp suffix is always appended).
+Override the base path with `--raw-log <path>` (the timestamp and iteration suffixes are always appended).
 
 The entire `.ralph/` directory should be gitignored — it contains only runtime state.
 

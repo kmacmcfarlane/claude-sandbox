@@ -37,10 +37,16 @@ const fd = fs.openSync(outFile, 'w');
 // Exit cleanly on EPIPE (downstream pipe closed by exit-on-result.js)
 process.stdout.on('error', (err) => {
   if (err.code === 'EPIPE') {
-    fs.closeSync(fd);
+    try { fs.closeSync(fd); } catch {}
     process.exit(0);
   }
   throw err;
+});
+
+// Flush and close on SIGTERM (outer timeout killing the pipeline)
+process.on('SIGTERM', () => {
+  try { fs.closeSync(fd); } catch {}
+  process.exit(143);
 });
 
 const rl = readline.createInterface({ input: process.stdin, terminal: false });

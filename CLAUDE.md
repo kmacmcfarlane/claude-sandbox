@@ -37,7 +37,7 @@ Ralph stores all runtime files under `.ralph/` in the project root. This directo
   lock                              # PID lock preventing concurrent loops
   runlog.json                       # structured per-iteration metrics (persistent across runs)
   runlogs/                          # raw NDJSON stream logs
-    rawlog_<YYYYMMDDHHmmSS>         # one file per ralph run (persistent)
+    rawlog_<YYYYMMDDHHmmSS>_iter<N> # one file per iteration (persistent)
   temp/                             # scratch space (wiped each iteration)
     quota-status                    # "ok", "quota_exhausted", or "rate_limit"
     stderr                          # captured stderr from claude process

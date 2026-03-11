@@ -206,10 +206,14 @@ if (require.main === module) {
     }
   }
 
-  // Catch SIGINT so we flush the log before the pipeline is torn down
+  // Catch SIGINT/SIGTERM so we flush the log before the pipeline is torn down
   process.on('SIGINT', () => {
     flushLog();
     process.exit(130);
+  });
+  process.on('SIGTERM', () => {
+    flushLog();
+    process.exit(143);
   });
 
   // Exit cleanly on EPIPE (downstream pipe closed by exit-on-result.js)

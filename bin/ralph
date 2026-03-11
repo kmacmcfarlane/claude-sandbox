@@ -34,6 +34,7 @@ Options:
   --runlog-file [PATH]            Run log path (default: .ralph/runlog.json)
   --raw-log [PATH]                Raw NDJSON base path (default: .ralph/runlogs/rawlog)
   --watchdog-timeout N            Inactivity timeout in minutes (default: 15, 0 to disable)
+  --iteration-timeout N           Hard iteration time limit in seconds (default: 7200 = 2h)
 
 Quota retry:
   --max-retries N                 Consecutive rate-limit retries before exiting (default: 5)
@@ -60,6 +61,7 @@ RETRY_DELAY="30"
 QUOTA_PAUSE="300"
 QUOTA_MAX_WAIT="18000"
 WATCHDOG_TIMEOUT="15"
+ITERATION_TIMEOUT=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -104,6 +106,8 @@ while [[ $# -gt 0 ]]; do
       QUOTA_MAX_WAIT="${2:-}"; shift 2;;
     --watchdog-timeout)
       WATCHDOG_TIMEOUT="${2:-}"; shift 2;;
+    --iteration-timeout)
+      ITERATION_TIMEOUT="${2:-}"; shift 2;;
     -h|--help)
       usage; exit 0;;
     *)
@@ -152,6 +156,7 @@ echo "  mode:      $MODE_LABEL"
 echo "  skip-perm: $( [[ -n "$SKIP_PERMISSIONS" ]] && echo yes || echo no )"
 echo "  limit:     ${LIMIT:-unlimited}"
 echo "  watchdog:  $( [[ "$WATCHDOG_TIMEOUT" -gt 0 ]] 2>/dev/null && echo "${WATCHDOG_TIMEOUT}m" || echo "disabled" )"
+echo "  iter-limit: $(format_wait "${ITERATION_TIMEOUT:-7200}")"
 
 cd "$ROOT_DIR"
 
@@ -174,9 +179,9 @@ node -e "
 "
 echo "  run-log:   $LOG_FILE"
 
-# Raw JSON log setup (always enabled)
-RAW_LOG_FILE="${RAW_LOG_BASE:-.ralph/runlogs/rawlog}_$(date +%Y%m%d%H%M%S)"
-echo "  raw-log:   $RAW_LOG_FILE"
+# Raw JSON log base path (per-iteration files generated inside the loop)
+RAW_LOG_BASE="${RAW_LOG_BASE:-.ralph/runlogs/rawlog}"
+echo "  raw-log:   ${RAW_LOG_BASE}_*"
 
 # Build claude args
 build_claude_args() {
@@ -209,6 +214,7 @@ notify_discord() {
 # ---------------------------------------------------------------------------
 QUOTA_STATUS_FILE="$ROOT_DIR/.ralph/temp/quota-status"
 STDERR_FILE="$ROOT_DIR/.ralph/temp/stderr"
+WATCHDOG_MARKER_FILE="$ROOT_DIR/.ralph/temp/watchdog-fired"
 
 classify_outcome() {
   local exit_code="$1"
@@ -251,8 +257,15 @@ classify_outcome() {
     fi
   fi
 
+  # Exit code 124 can come from either the activity watchdog or the outer
+  # timeout command. Distinguish them via the marker file that the watchdog
+  # writes before exiting.
   if [[ "$exit_code" -eq 124 ]]; then
-    echo "watchdog_timeout"
+    if [[ -f "$WATCHDOG_MARKER_FILE" ]]; then
+      echo "watchdog_timeout"
+    else
+      echo "iteration_timeout"
+    fi
     return
   fi
 
@@ -353,30 +366,30 @@ while true; do
 
   PROMPT_FILES=("$REPO_ROOT/PROMPT_RALPH.md" "$PROMPT_FILE" "$PROMPT_ADDENDUM")
 
-  # Clear quota status from previous iteration
-  rm -f "$QUOTA_STATUS_FILE" "$STDERR_FILE"
+  # Per-iteration raw log file
+  ITER_RAW_LOG="${RAW_LOG_BASE}_$(date +%Y%m%d%H%M%S)_iter${iter}"
+
+  # Clear status files from previous iteration
+  rm -f "$QUOTA_STATUS_FILE" "$STDERR_FILE" "$WATCHDOG_MARKER_FILE"
 
   # Export prompt files as newline-separated env var for the timeout subshell
   RALPH_PROMPT_FILES="$(printf '%s\n' "${PROMPT_FILES[@]}")"
   export RALPH_PROMPT_FILES
 
   # Fresh context: new process each loop
-  # Outer timeout ensures the pipeline is killed even if claude ignores SIGPIPE
-  # after exit-on-result.js tears down the pipe. Default: watchdog + 2 min grace,
-  # or 2 hours if watchdog is disabled.
-  if [[ "$WATCHDOG_TIMEOUT" -gt 0 ]] 2>/dev/null; then
-    ITER_TIMEOUT=$((WATCHDOG_TIMEOUT * 60 + 120))
-  else
-    ITER_TIMEOUT="${ITERATION_TIMEOUT:-7200}"
-  fi
+  # Outer timeout is a hard safety net for the entire iteration. It must be
+  # significantly larger than the watchdog timeout so active iterations are
+  # never killed by it. The watchdog handles inactivity; this catches truly
+  # stuck processes (e.g., watchdog itself hanging, or watchdog disabled).
+  ITER_TIMEOUT="${ITERATION_TIMEOUT:-7200}"
 
   rc=0
   timeout --signal TERM --kill-after 30 "$ITER_TIMEOUT" bash -c '
     set -o pipefail
     REPO_ROOT="$1"; CLAUDE_BIN="$2"; RAW_LOG_FILE="$3"; LOG_FILE="$4"
     iter="$5"; QUOTA_STATUS_FILE="$6"; WATCHDOG_TIMEOUT="$7"
-    NON_INTERACTIVE="$8"
-    shift 8
+    NON_INTERACTIVE="$8"; WATCHDOG_MARKER_FILE="$9"
+    shift 9
     CLAUDE_ARGS=("$@")
 
     # Prompt files are passed via RALPH_PROMPT_FILES env var (newline-separated)
@@ -400,6 +413,7 @@ while true; do
               --quota-status-file "$QUOTA_STATUS_FILE" \
           | node "$REPO_ROOT/logstream/exit-on-result.js" \
           | node "$REPO_ROOT/logstream/activity-watchdog.js" --timeout "$WATCHDOG_TIMEOUT" \
+              --marker-file "$WATCHDOG_MARKER_FILE" \
           | node "$REPO_ROOT/logstream/console-output.js"
       else
         concat_prompts | "$CLAUDE_BIN" "${CLAUDE_ARGS[@]}" \
@@ -412,9 +426,9 @@ while true; do
     else
       concat_prompts | "$CLAUDE_BIN" "${CLAUDE_ARGS[@]}"
     fi
-  ' _ "$REPO_ROOT" "$CLAUDE_BIN" "$RAW_LOG_FILE" "$LOG_FILE" \
+  ' _ "$REPO_ROOT" "$CLAUDE_BIN" "$ITER_RAW_LOG" "$LOG_FILE" \
       "$iter" "$QUOTA_STATUS_FILE" "$WATCHDOG_TIMEOUT" \
-      "$NON_INTERACTIVE" "${CLAUDE_ARGS[@]}" \
+      "$NON_INTERACTIVE" "$WATCHDOG_MARKER_FILE" "${CLAUDE_ARGS[@]}" \
     2>"$STDERR_FILE" || rc=$?
 
   # Classify the outcome
@@ -483,6 +497,12 @@ while true; do
     watchdog_timeout)
       echo "[watchdog] Iteration $iter timed out after ${WATCHDOG_TIMEOUT}m of inactivity. Continuing to next iteration."
       notify_discord "⏱ **${PROJECT_NAME}** — Iteration ${iter} killed by watchdog (${WATCHDOG_TIMEOUT}m inactivity). Continuing."
+      retry_count=0
+      ;;
+
+    iteration_timeout)
+      echo "[timeout] Iteration $iter hit hard time limit (${ITER_TIMEOUT}s). Continuing to next iteration."
+      notify_discord "⏱ **${PROJECT_NAME}** — Iteration ${iter} hit hard time limit ($(format_wait "$ITER_TIMEOUT")). Continuing."
       retry_count=0
       ;;
 
