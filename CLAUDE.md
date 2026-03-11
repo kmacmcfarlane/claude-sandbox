@@ -19,7 +19,8 @@ bin/claude-sandbox   # Main launcher — builds image, assembles mounts, runs co
 bin/ralph            # Loop runner — re-invokes Claude each iteration with fresh context
 logstream/run-logger.js    # Transparent NDJSON passthrough — captures per-iteration metrics
 logstream/console-output.js # Converts Claude NDJSON stream output to human-readable text
-logstream/exit-on-result.js # Pipeline terminator — exits on result event to tear down stuck processes
+logstream/exit-on-result.js    # Pipeline terminator — exits on result event to tear down stuck processes
+logstream/activity-watchdog.js # Inactivity watchdog — exits with code 124 after N minutes of silence
 entrypoint.sh        # Container entrypoint — UID/GID remapping via gosu
 Dockerfile           # Debian bookworm-slim + Python 3 venv + Docker CLI + Node 22 + Claude Code
 ```
@@ -64,3 +65,4 @@ Ralph stores all runtime files under `.ralph/` in the project root. This directo
 - Image auto-rebuilds if Dockerfile is newer than the cached image.
 - Missing `.env.claude-sandbox` logs a warning but doesn't fail.
 - `container-context.md` describes the container environment and is merged into `~/.claude/CLAUDE.md` for all sessions (interactive and ralph). Keep it up to date when the container environment changes (Dockerfile, entrypoint, installed software).
+- `README.md` is the user-facing documentation. Keep it up to date whenever you add, remove, or change features, CLI flags, pipeline stages, or directory structure.

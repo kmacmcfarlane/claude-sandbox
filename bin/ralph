@@ -33,6 +33,7 @@ Options:
   --resume                        Pass --resume flag to claude on first iteration
   --runlog-file [PATH]            Run log path (default: .ralph/runlog.json)
   --raw-log [PATH]                Raw NDJSON base path (default: .ralph/runlogs/rawlog)
+  --watchdog-timeout N            Inactivity timeout in minutes (default: 15, 0 to disable)
 
 Quota retry:
   --max-retries N                 Consecutive rate-limit retries before exiting (default: 5)
@@ -58,6 +59,7 @@ MAX_RETRIES="5"
 RETRY_DELAY="30"
 QUOTA_PAUSE="300"
 QUOTA_MAX_WAIT="18000"
+WATCHDOG_TIMEOUT="15"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -100,6 +102,8 @@ while [[ $# -gt 0 ]]; do
       QUOTA_PAUSE="${2:-}"; shift 2;;
     --quota-max-wait)
       QUOTA_MAX_WAIT="${2:-}"; shift 2;;
+    --watchdog-timeout)
+      WATCHDOG_TIMEOUT="${2:-}"; shift 2;;
     -h|--help)
       usage; exit 0;;
     *)
@@ -147,6 +151,7 @@ echo "  claude:    $CLAUDE_BIN"
 echo "  mode:      $MODE_LABEL"
 echo "  skip-perm: $( [[ -n "$SKIP_PERMISSIONS" ]] && echo yes || echo no )"
 echo "  limit:     ${LIMIT:-unlimited}"
+echo "  watchdog:  $( [[ "$WATCHDOG_TIMEOUT" -gt 0 ]] 2>/dev/null && echo "${WATCHDOG_TIMEOUT}m" || echo "disabled" )"
 
 cd "$ROOT_DIR"
 
@@ -244,6 +249,11 @@ classify_outcome() {
       fi
       return
     fi
+  fi
+
+  if [[ "$exit_code" -eq 124 ]]; then
+    echo "watchdog_timeout"
+    return
   fi
 
   if [[ "$exit_code" -eq 0 ]]; then
@@ -360,12 +370,22 @@ while true; do
     }
 
     if [[ -n "$NON_INTERACTIVE" ]]; then
-      concat_prompts | "$CLAUDE_BIN" "${CLAUDE_ARGS[@]}" \
-        | node "$REPO_ROOT/logstream/raw-json-logger.js" --out "$RAW_LOG_FILE" \
-        | node "$REPO_ROOT/logstream/run-logger.js" --log-file "$LOG_FILE" --iteration "$iter" \
-            --quota-status-file "$QUOTA_STATUS_FILE" \
-        | node "$REPO_ROOT/logstream/exit-on-result.js" \
-        | node "$REPO_ROOT/logstream/console-output.js"
+      if [[ "$WATCHDOG_TIMEOUT" -gt 0 ]] 2>/dev/null; then
+        concat_prompts | "$CLAUDE_BIN" "${CLAUDE_ARGS[@]}" \
+          | node "$REPO_ROOT/logstream/raw-json-logger.js" --out "$RAW_LOG_FILE" \
+          | node "$REPO_ROOT/logstream/run-logger.js" --log-file "$LOG_FILE" --iteration "$iter" \
+              --quota-status-file "$QUOTA_STATUS_FILE" \
+          | node "$REPO_ROOT/logstream/exit-on-result.js" \
+          | node "$REPO_ROOT/logstream/activity-watchdog.js" --timeout "$WATCHDOG_TIMEOUT" \
+          | node "$REPO_ROOT/logstream/console-output.js"
+      else
+        concat_prompts | "$CLAUDE_BIN" "${CLAUDE_ARGS[@]}" \
+          | node "$REPO_ROOT/logstream/raw-json-logger.js" --out "$RAW_LOG_FILE" \
+          | node "$REPO_ROOT/logstream/run-logger.js" --log-file "$LOG_FILE" --iteration "$iter" \
+              --quota-status-file "$QUOTA_STATUS_FILE" \
+          | node "$REPO_ROOT/logstream/exit-on-result.js" \
+          | node "$REPO_ROOT/logstream/console-output.js"
+      fi
     else
       concat_prompts | "$CLAUDE_BIN" "${CLAUDE_ARGS[@]}"
     fi
@@ -432,6 +452,12 @@ while true; do
 
       # Retry the same iteration (don't increment iter)
       iter=$((iter - 1))
+      ;;
+
+    watchdog_timeout)
+      echo "[watchdog] Iteration $iter timed out after ${WATCHDOG_TIMEOUT}m of inactivity. Continuing to next iteration."
+      notify_discord "⏱ **${PROJECT_NAME}** — Iteration ${iter} killed by watchdog (${WATCHDOG_TIMEOUT}m inactivity). Continuing."
+      retry_count=0
       ;;
 
     *)

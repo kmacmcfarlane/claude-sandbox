@@ -13,6 +13,7 @@ logstream/
   run-logger.js       Transparent NDJSON passthrough that captures per-iteration metrics
   console-output.js   Filters stream-json NDJSON into human-readable terminal output
   exit-on-result.js   Pipeline terminator — exits on result event to tear down stuck processes
+  activity-watchdog.js  Inactivity watchdog — exits with code 124 after N minutes of silence
 docker/
   Dockerfile       Image: Debian bookworm-slim + Docker CLI/compose, Node.js 22, Claude Code CLI
   entrypoint.sh    Remaps container user UID/GID to match the host; grants Docker socket access
@@ -167,6 +168,7 @@ Ralph runs in non-interactive mode (`-p`) by default. Use `--interactive` to opt
 - `--interactive` — run claude interactively (default: non-interactive `-p`)
 - `--dangerously-skip-permissions` — pass `--dangerously-skip-permissions` to claude
 - `--resume` — pass `--resume` to claude on first iteration
+- `--watchdog-timeout N` — inactivity timeout in minutes (default: 15, 0 to disable)
 
 ### Logging
 
@@ -176,10 +178,11 @@ In non-interactive mode, Claude's output flows through a three-stage pipeline:
 
 ```
 claude --output-format stream-json
-  | raw-json-logger.js   → writes every NDJSON line to the raw log file
-  | run-logger.js        → accumulates metrics, writes summary to the run log on exit
-  | exit-on-result.js    → exits on result event, tearing down the pipeline
-  | console-output.js    → renders human-readable output to the terminal
+  | raw-json-logger.js     → writes every NDJSON line to the raw log file
+  | run-logger.js          → accumulates metrics, writes summary to the run log on exit
+  | exit-on-result.js      → exits on result event, tearing down the pipeline
+  | activity-watchdog.js   → kills pipeline after N minutes of inactivity (default: 15m)
+  | console-output.js      → renders human-readable output to the terminal
 ```
 
 #### Run log (`runlog.json`)
