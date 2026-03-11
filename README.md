@@ -122,7 +122,7 @@ ralph-auto-resume:
 
 The container only has access to:
 - The project directory (read/write)
-- `~/.claude/` — auth tokens, settings, project memories
+- `~/.claude/` — auth tokens, project memories, sessions (read/write); `settings.json` is shadowed read-only with notification hooks merged in
 - `~/.claude.json` — global state (onboarding, OAuth account, feature flags)
 - `~/.gitconfig` — git identity (read-only)
 - `~/.ssh` — SSH keys for git remotes (read-only)

@@ -93,11 +93,31 @@ fi
 
 # Merge host CLAUDE.md with container context for in-container awareness
 CLAUDE_MD_TMP=$(mktemp)
-trap "rm -f '$CLAUDE_MD_TMP'" EXIT
+SETTINGS_TMP=$(mktemp)
+trap "rm -f '$CLAUDE_MD_TMP' '$SETTINGS_TMP'" EXIT
 cat "$CLAUDE_CONFIG_HOST/CLAUDE.md" 2>/dev/null >> "$CLAUDE_MD_TMP" || true
 printf '\n' >> "$CLAUDE_MD_TMP"
 cat "$REPO_ROOT/container-context.md" >> "$CLAUDE_MD_TMP"
 VOLUMES+=(-v "$CLAUDE_MD_TMP:/home/claude/.claude/CLAUDE.md:ro")
+
+# Merge notification hooks into user settings (shadowed read-only so host file is untouched)
+HOST_SETTINGS="$CLAUDE_CONFIG_HOST/settings.json"
+HOOKS_FRAGMENT="$REPO_ROOT/notification-hooks.json"
+if [ -f "$HOST_SETTINGS" ] && [ -f "$HOOKS_FRAGMENT" ]; then
+    docker run --rm \
+        -v "$HOST_SETTINGS:/input.json:ro" \
+        -v "$HOOKS_FRAGMENT:/hooks.json:ro" \
+        "$IMAGE_NAME" node -e '
+            const a = require("/input.json");
+            const b = require("/hooks.json");
+            console.log(JSON.stringify({ ...a, ...b }, null, 2));
+        ' > "$SETTINGS_TMP"
+    VOLUMES+=(-v "$SETTINGS_TMP:/home/claude/.claude/settings.json:ro")
+elif [ -f "$HOOKS_FRAGMENT" ]; then
+    # No host settings.json — use hooks fragment as-is
+    cp "$HOOKS_FRAGMENT" "$SETTINGS_TMP"
+    VOLUMES+=(-v "$SETTINGS_TMP:/home/claude/.claude/settings.json:ro")
+fi
 
 # Claude Code global state (onboarding, OAuth account, feature flags)
 CLAUDE_CONFIG_FILE_DIR=${CLAUDE_CONFIG_DIR:-$HOME}

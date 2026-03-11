@@ -11,6 +11,7 @@ Docker-based sandbox for running Claude Code with filesystem isolation and host 
 - **UID/GID remapping:** `entrypoint.sh` adjusts the container `claude` user to match host IDs so files have correct ownership.
 - **Fresh-context iterations:** Ralph runs Claude as a new process each iteration, not session continuation.
 - **Container context injection:** `bin/claude-sandbox` builds a temp file by concatenating the host's `~/.claude/CLAUDE.md` (if any) with `container-context.md`, then bind-mounts it read-only over `/home/claude/.claude/CLAUDE.md` in the container. This gives every session (interactive or ralph) awareness of the container environment without modifying the host file. For ralph loops, `PROMPT_RALPH.md` is additionally piped as part of the prompt.
+- **Settings shadow:** The launcher merges `notification-hooks.json` into the host's `~/.claude/settings.json` (via a throwaway `docker run` with Node), writes the result to a temp file, and bind-mounts it read-only over `~/.claude/settings.json` in the container. The host file is never modified. The rest of `~/.claude/` stays read-write for sessions, credentials, and history.
 
 ## Directory Structure
 
@@ -21,6 +22,7 @@ logstream/run-logger.js    # Transparent NDJSON passthrough — captures per-ite
 logstream/console-output.js # Converts Claude NDJSON stream output to human-readable text
 logstream/exit-on-result.js    # Pipeline terminator — exits on result event to tear down stuck processes
 logstream/activity-watchdog.js # Inactivity watchdog — exits with code 124 after N minutes of silence
+notification-hooks.json  # Hook fragment merged into container's settings.json at launch
 entrypoint.sh        # Container entrypoint — UID/GID remapping via gosu
 Dockerfile           # Debian bookworm-slim + Python 3 venv + Docker CLI + Node 22 + Claude Code
 ```
