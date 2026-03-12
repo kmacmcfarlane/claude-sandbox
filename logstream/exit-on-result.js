@@ -24,7 +24,19 @@ rl.on('line', (line) => {
   try { e = JSON.parse(line); } catch { return; }
 
   if (e.type === 'result') {
-    process.stderr.write('[exit-on-result] Conversation ended, exiting pipeline.\n');
-    process.exit(0);
+    process.stderr.write('[exit-on-result] Conversation ended, tearing down pipeline.\n');
+    // Kill all processes in our process group (created by timeout) after a
+    // short delay to let the result line (already written above) flush through
+    // stdout to downstream stages. run-logger has already processed this line
+    // and flushed metrics (it's upstream). Its SIGTERM handler also calls
+    // flushLog() as a safety net.
+    setTimeout(() => {
+      try { process.kill(0, 'SIGTERM'); } catch {}
+      process.exit(0);
+    }, 500);
   }
+});
+
+rl.on('close', () => {
+  process.exit(0);
 });

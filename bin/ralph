@@ -209,6 +209,20 @@ notify_discord() {
 }
 
 # ---------------------------------------------------------------------------
+# Format seconds as human-readable duration
+# ---------------------------------------------------------------------------
+format_wait() {
+  local secs="$1"
+  if [[ "$secs" -ge 3600 ]]; then
+    echo "$((secs / 3600))h$((secs % 3600 / 60))m"
+  elif [[ "$secs" -ge 60 ]]; then
+    echo "$((secs / 60))m$((secs % 60))s"
+  else
+    echo "${secs}s"
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # Classify iteration outcome using quota-status file and stderr
 # Returns: "ok", "quota_exhausted", "rate_limit", or "error"
 # ---------------------------------------------------------------------------
@@ -304,20 +318,6 @@ probe_quota() {
 }
 
 # ---------------------------------------------------------------------------
-# Format seconds as human-readable duration
-# ---------------------------------------------------------------------------
-format_wait() {
-  local secs="$1"
-  if [[ "$secs" -ge 3600 ]]; then
-    echo "$((secs / 3600))h$((secs % 3600 / 60))m"
-  elif [[ "$secs" -ge 60 ]]; then
-    echo "$((secs / 60))m$((secs % 60))s"
-  else
-    echo "${secs}s"
-  fi
-}
-
-# ---------------------------------------------------------------------------
 # Lock file — prevent concurrent ralph loops on the same project
 # ---------------------------------------------------------------------------
 LOCK_FILE="$ROOT_DIR/.ralph/lock"
@@ -385,6 +385,8 @@ while true; do
 
   rc=0
   timeout --signal TERM --kill-after 30 "$ITER_TIMEOUT" bash -c '
+    trap "kill 0 2>/dev/null; exit 130" INT
+    trap "kill 0 2>/dev/null; exit 143" TERM
     set -o pipefail
     REPO_ROOT="$1"; CLAUDE_BIN="$2"; RAW_LOG_FILE="$3"; LOG_FILE="$4"
     iter="$5"; QUOTA_STATUS_FILE="$6"; WATCHDOG_TIMEOUT="$7"

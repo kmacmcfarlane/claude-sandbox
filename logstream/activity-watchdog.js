@@ -44,4 +44,5 @@ rl.on('line', (line) => {
 
 rl.on('close', () => {
   clearTimeout(timer);
+  process.exit(0);
 });
