@@ -40,16 +40,23 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
+# Go toolchain (for gopls language server and Go-project backends)
+RUN curl -fsSL https://go.dev/dl/go1.25.6.linux-amd64.tar.gz | tar -C /usr/local -xz
+ENV PATH="/usr/local/go/bin:$PATH"
+
+# TypeScript language server
+RUN npm install -g typescript-language-server typescript
 
 # Create non-root user (UID/GID adjusted at runtime by entrypoint)
 RUN useradd -m -s /bin/bash claude
 
-# Install Claude Code CLI
+# Install Claude Code CLI and Go language server
 USER claude
 RUN curl -fsSL https://claude.ai/install.sh | bash
+RUN go install golang.org/x/tools/gopls@latest
 USER root
 RUN #chmod +x /home/claude/.local/bin/claude
-ENV PATH="/home/claude/.local/bin:$PATH"
+ENV PATH="/home/claude/.local/bin:/home/claude/go/bin:$PATH"
 RUN echo $PATH
 
 COPY entrypoint.sh /home/claude/.local/bin/entrypoint.sh

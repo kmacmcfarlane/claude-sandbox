@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+# setup-lsp-plugins — register LSP plugins with Claude Code at user scope.
+#
+# Works around https://github.com/anthropics/claude-code/issues/15148 where the
+# plugin loader doesn't extract lspServers config from marketplace.json. This
+# script manually registers gopls-lsp and typescript-lsp so the built-in LSP
+# tool can discover them.
+#
+# Safe to run multiple times — skips plugins that are already registered.
+# Requires a Claude Code session restart after first run.
+#
+# Usage:
+#   setup-lsp-plugins            # register both plugins
+#   setup-lsp-plugins --check    # exit 0 if both registered, 1 if not
+
+set -euo pipefail
+
+CLAUDE_DIR="${HOME}/.claude"
+PLUGINS_DIR="${CLAUDE_DIR}/plugins"
+INSTALLED_FILE="${PLUGINS_DIR}/installed_plugins.json"
+CACHE_DIR="${PLUGINS_DIR}/cache/claude-plugins-official"
+SETTINGS_FILE="${CLAUDE_DIR}/settings.json"
+
+# Plugins to register: name, version, binary check command
+PLUGINS=(
+  "gopls-lsp:1.0.0:gopls"
+  "typescript-lsp:1.0.0:typescript-language-server"
+)
+
+check_mode=false
+if [[ "${1:-}" == "--check" ]]; then
+  check_mode=true
+fi
+
+# Ensure jq is available
+if ! command -v jq &>/dev/null; then
+  echo "ERROR: jq is required but not found in PATH" >&2
+  exit 1
+fi
+
+# Check if a plugin is already registered in installed_plugins.json
+is_registered() {
+  local plugin_id="$1"
+  if [[ ! -f "$INSTALLED_FILE" ]]; then
+    return 1
+  fi
+  jq -e --arg id "${plugin_id}@claude-plugins-official" '.plugins[$id] | length > 0' "$INSTALLED_FILE" &>/dev/null
+}
+
+# Check if a plugin is enabled in settings.json
+is_enabled() {
+  local plugin_id="$1"
+  if [[ ! -f "$SETTINGS_FILE" ]]; then
+    return 1
+  fi
+  jq -e --arg id "${plugin_id}@claude-plugins-official" '.enabledPlugins[$id] == true' "$SETTINGS_FILE" &>/dev/null
+}
+
+# --check mode: just report status
+if $check_mode; then
+  all_ok=true
+  for entry in "${PLUGINS[@]}"; do
+    IFS=: read -r name version binary <<< "$entry"
+    registered=false
+    enabled=false
+    binary_ok=false
+    is_registered "$name" && registered=true
+    is_enabled "$name" && enabled=true
+    command -v "$binary" &>/dev/null && binary_ok=true
+    status="ok"
+    if ! $registered || ! $enabled || ! $binary_ok; then
+      status="MISSING"
+      all_ok=false
+    fi
+    echo "  ${name}: registered=${registered} enabled=${enabled} binary=${binary_ok} → ${status}"
+  done
+  $all_ok && exit 0 || exit 1
+fi
+
+# Ensure directories exist
+mkdir -p "$PLUGINS_DIR" "$CACHE_DIR"
+
+# Create installed_plugins.json if it doesn't exist
+if [[ ! -f "$INSTALLED_FILE" ]]; then
+  echo '{"version": 2, "plugins": {}}' > "$INSTALLED_FILE"
+fi
+
+timestamp=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
+changes_made=false
+
+for entry in "${PLUGINS[@]}"; do
+  IFS=: read -r name version binary <<< "$entry"
+  plugin_id="${name}@claude-plugins-official"
+
+  # Check binary availability
+  if ! command -v "$binary" &>/dev/null; then
+    echo "WARN: ${binary} not found in PATH — skipping ${name}" >&2
+    continue
+  fi
+
+  # Register in installed_plugins.json if not already present
+  if ! is_registered "$name"; then
+    install_path="${CACHE_DIR}/${name}/${version}"
+    mkdir -p "$install_path"
+
+    # Add a placeholder README if the cache dir is empty
+    if [[ ! -f "${install_path}/README.md" ]]; then
+      echo "# ${name}" > "${install_path}/README.md"
+    fi
+
+    # Add the plugin entry
+    tmp=$(mktemp)
+    jq --arg id "$plugin_id" \
+       --arg path "$install_path" \
+       --arg ver "$version" \
+       --arg ts "$timestamp" \
+       '.plugins[$id] = [{
+         "scope": "user",
+         "installPath": $path,
+         "version": $ver,
+         "installedAt": $ts,
+         "lastUpdated": $ts,
+         "gitCommitSha": ""
+       }]' "$INSTALLED_FILE" > "$tmp"
+    mv "$tmp" "$INSTALLED_FILE"
+    echo "Registered ${plugin_id} in installed_plugins.json"
+    changes_made=true
+  else
+    echo "Already registered: ${plugin_id}"
+  fi
+
+  # Enable in settings.json if not already enabled
+  if ! is_enabled "$name"; then
+    if [[ ! -f "$SETTINGS_FILE" ]]; then
+      echo '{}' > "$SETTINGS_FILE"
+    fi
+    tmp=$(mktemp)
+    jq --arg id "$plugin_id" '.enabledPlugins[$id] = true' "$SETTINGS_FILE" > "$tmp"
+    mv "$tmp" "$SETTINGS_FILE"
+    echo "Enabled ${plugin_id} in settings.json"
+    changes_made=true
+  else
+    echo "Already enabled: ${plugin_id}"
+  fi
+done
+
+if $changes_made; then
+  echo ""
+  echo "LSP plugins configured. Restart Claude Code for changes to take effect."
+else
+  echo ""
+  echo "All LSP plugins already configured. No changes needed."
+fi
