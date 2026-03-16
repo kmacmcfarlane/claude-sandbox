@@ -63,6 +63,20 @@ QUOTA_MAX_WAIT="18000"
 WATCHDOG_TIMEOUT="15"
 ITERATION_TIMEOUT=""
 
+# ---------------------------------------------------------------------------
+# Format seconds as human-readable duration
+# ---------------------------------------------------------------------------
+format_wait() {
+  local secs="$1"
+  if [[ "$secs" -ge 3600 ]]; then
+    echo "$((secs / 3600))h$((secs % 3600 / 60))m"
+  elif [[ "$secs" -ge 60 ]]; then
+    echo "$((secs / 60))m$((secs % 60))s"
+  else
+    echo "${secs}s"
+  fi
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --limit)
@@ -205,20 +219,6 @@ notify_discord() {
     payload=$(jq -n --arg content "$message" '{ content: $content }')
     curl -s -H "Content-Type: application/json" \
       -d "$payload" "$DISCORD_WEBHOOK_URL" >/dev/null 2>&1 || true
-  fi
-}
-
-# ---------------------------------------------------------------------------
-# Format seconds as human-readable duration
-# ---------------------------------------------------------------------------
-format_wait() {
-  local secs="$1"
-  if [[ "$secs" -ge 3600 ]]; then
-    echo "$((secs / 3600))h$((secs % 3600 / 60))m"
-  elif [[ "$secs" -ge 60 ]]; then
-    echo "$((secs / 60))m$((secs % 60))s"
-  else
-    echo "${secs}s"
   fi
 }
 
