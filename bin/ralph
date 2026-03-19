@@ -29,7 +29,8 @@ Options:
   --prompt PATH                   Prompt file path (default: <cwd>/agent/PROMPT.md)
   --claude-bin PATH               Claude Code CLI (default: claude)
   --interactive                   Run claude interactively (default: non-interactive -p)
-  --dangerously-skip-permissions  Pass --dangerously-skip-permissions to claude
+  --dangerous, --dangerously-skip-permissions
+                                Pass --dangerously-skip-permissions to claude
   --resume                        Pass --resume flag to claude on first iteration
   --runlog-file [PATH]            Run log path (default: .ralph/runlog.json)
   --raw-log [PATH]                Raw NDJSON base path (default: .ralph/runlogs/rawlog)
@@ -89,7 +90,7 @@ while [[ $# -gt 0 ]]; do
       CLAUDE_BIN="${2:-}"; shift 2;;
     --interactive)
       NON_INTERACTIVE=""; shift 1;;
-    --dangerously-skip-permissions)
+    --dangerous|--dangerously-skip-permissions)
       SKIP_PERMISSIONS="--dangerously-skip-permissions"; shift 1;;
     --resume)
       RESUME="--resume"; shift 1;;

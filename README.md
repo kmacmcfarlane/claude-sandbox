@@ -40,10 +40,10 @@ claude-sandbox
 claude-sandbox --resume
 
 # Launch the ralph loop runner (non-interactive by default):
-claude-sandbox --ralph --dangerously-skip-permissions
+claude-sandbox --ralph --dangerous
 
 # Ralph with iteration limit:
-claude-sandbox --ralph --dangerously-skip-permissions --limit 5
+claude-sandbox --ralph --dangerous --limit 5
 
 # Point at a specific project:
 PROJECT_DIR=/home/you/projects/foo claude-sandbox
@@ -110,10 +110,10 @@ ralph-resume:
 	claude-sandbox --ralph --interactive --resume
 
 ralph-auto:
-	claude-sandbox --ralph --dangerously-skip-permissions
+	claude-sandbox --ralph --dangerous
 
 ralph-auto-resume:
-	claude-sandbox --ralph --dangerously-skip-permissions --resume
+	claude-sandbox --ralph --dangerous --resume
 ```
 
 ## How it works
@@ -150,7 +150,7 @@ Pass `--ralph` as the **first** argument to `claude-sandbox` to launch the ralph
 
 ```bash
 # Run ralph in the sandbox (skip permissions, 5 iterations):
-claude-sandbox --ralph --dangerously-skip-permissions --limit 5
+claude-sandbox --ralph --dangerous --limit 5
 
 # Stop the loop gracefully (from the project directory):
 touch .ralph/stop
@@ -167,7 +167,7 @@ Ralph runs in non-interactive mode (`-p`) by default. Use `--interactive` to opt
 - `--prompt PATH` — prompt file (default: `<project-root>/agent/PROMPT.md`)
 - `--claude-bin PATH` — claude binary (default: `claude`)
 - `--interactive` — run claude interactively (default: non-interactive `-p`)
-- `--dangerously-skip-permissions` — pass `--dangerously-skip-permissions` to claude
+- `--dangerous`, `--dangerously-skip-permissions` — pass `--dangerously-skip-permissions` to claude
 - `--resume` — pass `--resume` to claude on first iteration
 - `--watchdog-timeout N` — inactivity timeout in minutes (default: 15, 0 to disable)
 - `--iteration-timeout N` — hard iteration time limit in seconds (default: 7200 = 2h)
