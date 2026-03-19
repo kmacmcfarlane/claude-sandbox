@@ -5,6 +5,7 @@
 # Usage:
 #   claude-sandbox                          # launch claude interactively in $PWD
 #   claude-sandbox --resume                 # pass args through to claude
+#   claude-sandbox --dangerous              # skip permission prompts (synonym for --dangerously-skip-permissions)
 #   claude-sandbox --ralph [ralph-args]     # launch the ralph loop runner
 #   claude-sandbox --ralph --limit 5        # run ralph for 5 iterations
 #   PROJECT_DIR=/other claude-sandbox       # launch claude in /other
@@ -24,6 +25,7 @@ IMAGE_NAME="claude-sandbox"
 # ---------------------------------------------------------------------------
 RALPH_MODE=false
 LIMIT=""
+SKIP_PERMISSIONS=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -35,6 +37,8 @@ while [[ $# -gt 0 ]]; do
                 echo "Error: --limit requires a value" >&2; exit 2
             fi
             shift 2 ;;
+        --dangerous|--dangerously-skip-permissions)
+            SKIP_PERMISSIONS="--dangerously-skip-permissions"; shift ;;
         *)
             break ;;
     esac
@@ -205,10 +209,13 @@ if [ "$RALPH_MODE" = true ]; then
     CONTAINER_NAME="${IMAGE_NAME}-${PROJECT_SLUG}-ralph"
     CMD=("/opt/claude-sandbox/bin/ralph")
     [[ -n "$LIMIT" ]] && CMD+=("--limit" "$LIMIT")
+    [[ -n "$SKIP_PERMISSIONS" ]] && CMD+=("$SKIP_PERMISSIONS")
     CMD+=("$@")
 else
     CONTAINER_NAME="${IMAGE_NAME}-${PROJECT_SLUG}"
-    CMD=("claude" "$@")
+    CMD=("claude")
+    [[ -n "$SKIP_PERMISSIONS" ]] && CMD+=("$SKIP_PERMISSIONS")
+    CMD+=("$@")
 fi
 
 # ---------------------------------------------------------------------------
