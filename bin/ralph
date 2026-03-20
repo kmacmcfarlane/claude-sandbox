@@ -351,6 +351,7 @@ iter=0
 while true; do
   if [[ -f "$STOP_FILE" ]]; then
     echo "Stop file detected ($STOP_FILE). Exiting."
+    notify_discord "🛑 **$(basename "$ROOT_DIR")** — Stop file detected. Loop exiting after iteration $((iter - 1))."
     RALPH_CLEAN_EXIT=1; exit 0
   fi
 
@@ -518,6 +519,7 @@ while true; do
 
   if [[ -n "$LIMIT" && "$iter" -ge "$LIMIT" ]]; then
     echo "Iteration limit reached ($LIMIT). Exiting."
+    notify_discord "🏁 **${PROJECT_NAME}** — Iteration limit reached ($LIMIT). Loop complete."
     RALPH_CLEAN_EXIT=1; exit 0
   fi
 
