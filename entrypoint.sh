@@ -23,4 +23,11 @@ fi
 # Ensure home directory ownership
 chown -R claude:claude /home/claude 2>/dev/null || true
 
+# Symlink host .claude dir so hardcoded paths (e.g. plugin installPath
+# values in installed_plugins.json) resolve inside the container.
+if [ -n "${HOST_HOME:-}" ] && [ "$HOST_HOME" != "/home/claude" ] && [ ! -e "$HOST_HOME/.claude" ]; then
+    mkdir -p "$HOST_HOME"
+    ln -s /home/claude/.claude "$HOST_HOME/.claude"
+fi
+
 exec gosu claude "$@"

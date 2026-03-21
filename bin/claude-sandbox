@@ -229,6 +229,7 @@ exec docker run -it --rm --init \
     --memory-swap "$MEMORY_LIMIT" \
     -e HOST_UID="$HOST_UID" \
     -e HOST_GID="$HOST_GID" \
+    -e HOST_HOME="$HOME" \
     -e DOCKER_GID="$DOCKER_GID" \
     -e ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}" \
     --name "$CONTAINER_NAME" \
