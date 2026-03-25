@@ -45,7 +45,8 @@ RUN curl -fsSL https://go.dev/dl/go1.25.6.linux-amd64.tar.gz | tar -C /usr/local
 ENV PATH="/usr/local/go/bin:$PATH"
 
 # TypeScript language server
-RUN npm install -g typescript-language-server typescript
+RUN npm install -g typescript-language-server typescript &&\
+    npm install -g @vtsls/language-server
 
 # Create non-root user (UID/GID adjusted at runtime by entrypoint)
 RUN useradd -m -s /bin/bash claude
@@ -66,6 +67,7 @@ COPY bin/ /opt/claude-sandbox/bin/
 COPY logstream/ /opt/claude-sandbox/logstream/
 COPY PROMPT_RALPH.md /opt/claude-sandbox/PROMPT_RALPH.md
 RUN chmod +x /opt/claude-sandbox/bin/*
+ENV PATH="/opt/claude-sandbox/bin:$PATH"
 
 ENTRYPOINT ["/home/claude/.local/bin/entrypoint.sh"]
 CMD ["claude"]
