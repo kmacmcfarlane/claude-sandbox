@@ -11,11 +11,17 @@ You are running inside a **claude-sandbox** Docker container (Debian bookworm-sl
   - Pre-installed: `ruamel.yaml`
   - Install packages with `pip install <package>` (no `--break-system-packages` needed)
 - **Claude Code CLI** — installed globally via npm
-- **Utilities:** curl, jq, less, make, openssh-client, gnupg
+- **Utilities:** curl, jq, less, make, gnupg
 
-Additional project-specific tools (language servers, compilers, runtimes) may be
-installed via a `Dockerfile.claude-sandbox` in the project root. Check `which` or
-`--version` to discover available tools.
+Additional project-specific tools (language servers, compilers, runtimes, ssh, etc.)
+may be installed via a `Dockerfile.claude-sandbox` in the project root. Check `which`
+or `--version` to discover available tools.
+
+## Missing Tools
+
+If you need a tool that is not installed, **stop and ask the user** (via the
+AskUserQuestion tool) before attempting workarounds. The user can add it to the
+project's `Dockerfile.claude-sandbox` for a permanent fix.
 
 ## LSP Setup
 
