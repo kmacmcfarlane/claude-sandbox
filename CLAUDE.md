@@ -12,6 +12,7 @@ Docker-based sandbox for running Claude Code with filesystem isolation and host 
 - **Fresh-context iterations:** Ralph runs Claude as a new process each iteration, not session continuation.
 - **Container context injection:** `bin/claude-sandbox` builds a temp file by concatenating the host's `~/.claude/CLAUDE.md` (if any) with `container-context.md`, then bind-mounts it read-only over `/home/claude/.claude/CLAUDE.md` in the container. This gives every session (interactive or ralph) awareness of the container environment without modifying the host file. For ralph loops, `PROMPT_RALPH.md` is additionally piped as part of the prompt.
 - **Settings shadow:** The launcher merges `notification-hooks.json` into the host's `~/.claude/settings.json` (via a throwaway `docker run` with Node), writes the result to a temp file, and bind-mounts it read-only over `~/.claude/settings.json` in the container. The host file is never modified. The rest of `~/.claude/` stays read-write for sessions, credentials, and history.
+- **Two-layer image:** The base image (`claude-sandbox`) provides sandbox infrastructure (OS, Node, Claude CLI, Docker CLI, Python venv, sandbox scripts). Projects place a `Dockerfile.claude-sandbox` in their root to add project-specific tools (Go, language servers, etc.) via `FROM claude-sandbox`. The launcher builds the child image automatically, tagged `claude-sandbox-{project-slug}`. Override the child Dockerfile location via `CLAUDE_SANDBOX_DOCKERFILE_DIR`/`CLAUDE_SANDBOX_DOCKERFILE` env vars or `dockerfileDir`/`dockerfile` keys in `.claude-sandbox.yaml`. Set `baseOnly: true` (or `CLAUDE_SANDBOX_BASE_ONLY=1`) to skip child Dockerfile detection.
 
 ## Directory Structure
 
@@ -24,7 +25,8 @@ logstream/exit-on-result.js    # Pipeline terminator — exits on result event t
 logstream/activity-watchdog.js # Inactivity watchdog — exits with code 124 after N minutes of silence
 notification-hooks.json  # Hook fragment merged into container's settings.json at launch
 entrypoint.sh        # Container entrypoint — UID/GID remapping via gosu
-Dockerfile           # Debian bookworm-slim + Python 3 venv + Docker CLI + Node 22 + Claude Code
+Dockerfile           # Base image: Debian bookworm-slim + Python 3 venv + Docker CLI + Node 22 + Claude Code
+Dockerfile.claude-sandbox.example  # Example child Dockerfile for project-specific tools
 ```
 
 ## Ralph Runtime Directory
@@ -64,7 +66,7 @@ Ralph stores all runtime files under `.ralph/` in the project root. This directo
 ## Development Notes
 
 - Scripts use `readlink -f` to resolve symlinks and find repo root.
-- Image auto-rebuilds if Dockerfile is newer than the cached image.
+- Base and child images auto-rebuild if their respective Dockerfiles are newer than the cached image. A base rebuild triggers a child rebuild.
 - Missing `.env.claude-sandbox` logs a warning but doesn't fail.
-- `container-context.md` describes the container environment and is merged into `~/.claude/CLAUDE.md` for all sessions (interactive and ralph). Keep it up to date when the container environment changes (Dockerfile, entrypoint, installed software).
+- `container-context.md` describes the base container environment and is merged into `~/.claude/CLAUDE.md` for all sessions (interactive and ralph). It covers base-image tools only; project-specific tools are discoverable at runtime. Keep it up to date when the base image changes.
 - `README.md` is the user-facing documentation. Keep it up to date whenever you add, remove, or change features, CLI flags, pipeline stages, or directory structure.

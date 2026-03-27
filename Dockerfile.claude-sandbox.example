@@ -1,0 +1,26 @@
+# Dockerfile.claude-sandbox — project-specific tools for claude-sandbox
+#
+# Place as Dockerfile.claude-sandbox in your project root (or configure the
+# path via .claude-sandbox.yaml or environment variables).
+#
+# The build context is the directory containing this file, so COPY instructions
+# reference your project directory.
+
+FROM claude-sandbox
+
+# --- Go toolchain -----------------------------------------------------------
+# RUN curl -fsSL https://go.dev/dl/go1.25.6.linux-amd64.tar.gz | tar -C /usr/local -xz
+# ENV PATH="/usr/local/go/bin:$PATH"
+
+# --- Go language server (gopls) — install as claude user for ~/go/bin --------
+# USER claude
+# RUN go install golang.org/x/tools/gopls@latest
+# USER root
+# ENV PATH="/home/claude/go/bin:$PATH"
+
+# --- TypeScript / JavaScript language servers --------------------------------
+# RUN npm install -g typescript-language-server typescript && \
+#     npm install -g @vtsls/language-server
+
+# --- Python packages (venv is already active from base image) ----------------
+# RUN pip install --no-cache-dir numpy pandas

@@ -18,7 +18,7 @@ set -euo  pipefail
 REAL_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 REPO_ROOT="$(cd "$(dirname "$REAL_PATH")/.." && pwd)"
 echo REPO_ROOT=${REPO_ROOT}
-IMAGE_NAME="claude-sandbox"
+BASE_IMAGE_NAME="claude-sandbox"
 
 # ---------------------------------------------------------------------------
 # Parse claude-sandbox flags; remaining args pass through to claude/ralph
@@ -63,19 +63,18 @@ HOST_GID="$(id -g)"
 DOCKER_GID="$(stat -c '%g' /var/run/docker.sock 2>/dev/null || echo '')"
 
 # ---------------------------------------------------------------------------
-# Build image if it doesn't exist (or if Dockerfile is newer)
+# Build base image if needed (must happen before volume assembly which uses it)
 # ---------------------------------------------------------------------------
-NEEDS_BUILD=false
-if ! docker image inspect "$IMAGE_NAME" >/dev/null 2>&1; then
-    NEEDS_BUILD=true
-elif [ "$REPO_ROOT/Dockerfile" -nt "$(docker image inspect -f '{{.Created}}' "$IMAGE_NAME" 2>/dev/null || echo '1970')" ]; then
-    # Rough heuristic: rebuild if Dockerfile is newer than image creation time
-    NEEDS_BUILD=true
+BASE_NEEDS_BUILD=false
+if ! docker image inspect "$BASE_IMAGE_NAME" >/dev/null 2>&1; then
+    BASE_NEEDS_BUILD=true
+elif [ "$REPO_ROOT/Dockerfile" -nt "$(docker image inspect -f '{{.Created}}' "$BASE_IMAGE_NAME" 2>/dev/null || echo '1970')" ]; then
+    BASE_NEEDS_BUILD=true
 fi
 
-if [ "$NEEDS_BUILD" = true ]; then
-    echo "Building $IMAGE_NAME image..."
-    docker build -t "$IMAGE_NAME" "$REPO_ROOT"
+if [ "$BASE_NEEDS_BUILD" = true ]; then
+    echo "Building $BASE_IMAGE_NAME base image..."
+    docker build -t "$BASE_IMAGE_NAME" "$REPO_ROOT"
 fi
 
 # ---------------------------------------------------------------------------
@@ -111,7 +110,7 @@ if [ -f "$HOST_SETTINGS" ] && [ -f "$HOOKS_FRAGMENT" ]; then
     docker run --rm \
         -v "$HOST_SETTINGS:/input.json:ro" \
         -v "$HOOKS_FRAGMENT:/hooks.json:ro" \
-        "$IMAGE_NAME" node -e '
+        "$BASE_IMAGE_NAME" node -e '
             const a = require("/input.json");
             const b = require("/hooks.json");
             console.log(JSON.stringify({ ...a, ...b }, null, 2));
@@ -185,6 +184,66 @@ if [ -f "$CONFIG_FILE" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Resolve child Dockerfile (project-specific tools layer)
+# Precedence: env var > .claude-sandbox.yaml > default
+# ---------------------------------------------------------------------------
+CONFIG_BASE_ONLY=""
+CONFIG_DOCKERFILE_DIR=""
+CONFIG_DOCKERFILE=""
+if [ -f "$CONFIG_FILE" ]; then
+    CONFIG_BASE_ONLY=$(yq '.baseOnly // ""' "$CONFIG_FILE")
+    CONFIG_DOCKERFILE_DIR=$(yq '.dockerfileDir // ""' "$CONFIG_FILE")
+    CONFIG_DOCKERFILE=$(yq '.dockerfile // ""' "$CONFIG_FILE")
+fi
+
+BASE_ONLY="${CLAUDE_SANDBOX_BASE_ONLY:-$CONFIG_BASE_ONLY}"
+CHILD_DOCKERFILE_DIR="${CLAUDE_SANDBOX_DOCKERFILE_DIR:-${CONFIG_DOCKERFILE_DIR:-$PROJECT_DIR}}"
+CHILD_DOCKERFILE_NAME="${CLAUDE_SANDBOX_DOCKERFILE:-${CONFIG_DOCKERFILE:-Dockerfile.claude-sandbox}}"
+CHILD_DOCKERFILE="${CHILD_DOCKERFILE_DIR}/${CHILD_DOCKERFILE_NAME}"
+
+USE_CHILD=false
+if [ "$BASE_ONLY" = "true" ] || [ "$BASE_ONLY" = "1" ]; then
+    USE_CHILD=false
+elif [ -f "$CHILD_DOCKERFILE" ]; then
+    USE_CHILD=true
+fi
+
+# ---------------------------------------------------------------------------
+# Build child image if a project Dockerfile exists, or fall back to base
+# ---------------------------------------------------------------------------
+PROJECT_SLUG="$(basename "$PROJECT_DIR" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9._-]/-/g')"
+
+if [ "$USE_CHILD" = true ]; then
+    CHILD_IMAGE_NAME="claude-sandbox-${PROJECT_SLUG}"
+
+    CHILD_NEEDS_BUILD=false
+    if ! docker image inspect "$CHILD_IMAGE_NAME" >/dev/null 2>&1; then
+        CHILD_NEEDS_BUILD=true
+    elif [ "$BASE_NEEDS_BUILD" = true ]; then
+        # Base was rebuilt — child must be rebuilt too
+        CHILD_NEEDS_BUILD=true
+    elif [ "$CHILD_DOCKERFILE" -nt "$(docker image inspect -f '{{.Created}}' "$CHILD_IMAGE_NAME" 2>/dev/null || echo '1970')" ]; then
+        CHILD_NEEDS_BUILD=true
+    fi
+
+    if [ "$CHILD_NEEDS_BUILD" = true ]; then
+        echo "Building $CHILD_IMAGE_NAME child image from $CHILD_DOCKERFILE..."
+        docker build -t "$CHILD_IMAGE_NAME" -f "$CHILD_DOCKERFILE" "$CHILD_DOCKERFILE_DIR"
+    fi
+
+    IMAGE_NAME="$CHILD_IMAGE_NAME"
+else
+    if [ "$BASE_ONLY" != "true" ] && [ "$BASE_ONLY" != "1" ]; then
+        echo "WARNING: No child Dockerfile found at $CHILD_DOCKERFILE" >&2
+        echo "  Project-specific tools (Go, TypeScript LSP, etc.) will not be available." >&2
+        echo "  Create a Dockerfile.claude-sandbox in your project root to add them," >&2
+        echo "  or set baseOnly: true in .claude-sandbox.yaml to suppress this warning." >&2
+        echo "" >&2
+    fi
+    IMAGE_NAME="$BASE_IMAGE_NAME"
+fi
+
+# ---------------------------------------------------------------------------
 # Claude environment file (Discord webhook, etc.)
 # ---------------------------------------------------------------------------
 ENV_FILE="$PROJECT_DIR/.env.claude-sandbox"
@@ -203,16 +262,14 @@ fi
 # ---------------------------------------------------------------------------
 # Build container command
 # ---------------------------------------------------------------------------
-PROJECT_SLUG="$(basename "$PROJECT_DIR" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9._-]/-/g')"
-
 if [ "$RALPH_MODE" = true ]; then
-    CONTAINER_NAME="${IMAGE_NAME}-${PROJECT_SLUG}-ralph"
+    CONTAINER_NAME="claude-sandbox-${PROJECT_SLUG}-ralph"
     CMD=("/opt/claude-sandbox/bin/ralph")
     [[ -n "$LIMIT" ]] && CMD+=("--limit" "$LIMIT")
     [[ -n "$SKIP_PERMISSIONS" ]] && CMD+=("$SKIP_PERMISSIONS")
     CMD+=("$@")
 else
-    CONTAINER_NAME="${IMAGE_NAME}-${PROJECT_SLUG}"
+    CONTAINER_NAME="claude-sandbox-${PROJECT_SLUG}"
     CMD=("claude")
     [[ -n "$SKIP_PERMISSIONS" ]] && CMD+=("$SKIP_PERMISSIONS")
     CMD+=("$@")

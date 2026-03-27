@@ -14,9 +14,9 @@ logstream/
   console-output.js   Filters stream-json NDJSON into human-readable terminal output
   exit-on-result.js   Pipeline terminator — exits on result event to tear down stuck processes
   activity-watchdog.js  Inactivity watchdog — exits with code 124 after N minutes of silence
-docker/
-  Dockerfile       Image: Debian bookworm-slim + Docker CLI/compose, Node.js 22, Claude Code CLI
-  entrypoint.sh    Remaps container user UID/GID to match the host; grants Docker socket access
+Dockerfile                          Base image: Debian + Docker CLI/compose, Node.js 22, Claude Code CLI
+Dockerfile.claude-sandbox.example   Example child Dockerfile for project-specific tools
+entrypoint.sh                       Remaps container user UID/GID to match the host; grants Docker socket access
 ```
 
 ## Installation
@@ -49,7 +49,7 @@ claude-sandbox --ralph --dangerous --limit 5
 PROJECT_DIR=/home/you/projects/foo claude-sandbox
 ```
 
-The Docker image is built automatically on first run.
+The base Docker image is built automatically on first run. If a `Dockerfile.claude-sandbox` exists in the project, a child image is built on top of it.
 
 ## Project setup
 
@@ -90,7 +90,49 @@ Each mount entry has:
 - `container` — absolute path inside the container (required)
 - `writable` — boolean, default `false` (mounts `:ro` unless set to `true`)
 
+### Child Dockerfile
+
+Configure the child Dockerfile location (env vars take precedence over YAML):
+
+```yaml
+dockerfileDir: /path/to/dir               # default: project root
+dockerfile: Dockerfile.claude-sandbox      # default filename
+```
+
+To use the base image only and suppress the missing-Dockerfile warning:
+
+```yaml
+baseOnly: true
+```
+
 **Dependency:** Parsing requires [`yq`](https://github.com/mikefarah/yq) on the host. Install with `brew install yq`, `sudo snap install yq`, or `go install github.com/mikefarah/yq/v4@latest`.
+
+## Project-specific tools (`Dockerfile.claude-sandbox`)
+
+Place a `Dockerfile.claude-sandbox` in your project root to install project-specific tools on top of the base image. It must start with `FROM claude-sandbox`.
+
+```dockerfile
+FROM claude-sandbox
+
+# Go toolchain
+RUN curl -fsSL https://go.dev/dl/go1.25.6.linux-amd64.tar.gz | tar -C /usr/local -xz
+ENV PATH="/usr/local/go/bin:$PATH"
+
+# TypeScript language server
+RUN npm install -g typescript-language-server typescript @vtsls/language-server
+
+# Go language server (install as claude user for ~/go/bin)
+USER claude
+RUN go install golang.org/x/tools/gopls@latest
+USER root
+ENV PATH="/home/claude/go/bin:$PATH"
+```
+
+The child image is built automatically and tagged `claude-sandbox-{project-slug}`. It rebuilds when the child Dockerfile changes or the base image is updated.
+
+If no `Dockerfile.claude-sandbox` is found, the launcher warns and uses the base image directly. Set `baseOnly: true` in `.claude-sandbox.yaml` (or `CLAUDE_SANDBOX_BASE_ONLY=1`) to suppress the warning.
+
+See `Dockerfile.claude-sandbox.example` in this repo for a commented template.
 
 ## Makefile integration
 
@@ -220,10 +262,11 @@ The entire `.ralph/` directory should be gitignored — it contains only runtime
 
 ## Rebuilding the image
 
-The image rebuilds automatically when `claude-sandbox` detects the Dockerfile is newer than the existing image. To force a rebuild:
+The base and child images rebuild automatically when their respective Dockerfiles are newer than the cached image. A base rebuild triggers a child rebuild. To force a full rebuild:
 
 ```bash
-docker rmi claude-sandbox
+docker rmi claude-sandbox-<your-project>   # remove child image
+docker rmi claude-sandbox                   # remove base image
 ```
 
 ## Environment variables
@@ -233,6 +276,9 @@ docker rmi claude-sandbox
 | `PROJECT_DIR` | `$(pwd)` | Project directory to mount |
 | `ANTHROPIC_API_KEY` | (none) | Passed through to the container |
 | `CLAUDE_NOTIFICATION_WEBHOOK_URL` | (none) | Discord webhook for interactive notification hooks (permission prompts, idle) |
+| `CLAUDE_SANDBOX_DOCKERFILE_DIR` | `$PROJECT_DIR` | Directory containing the child Dockerfile |
+| `CLAUDE_SANDBOX_DOCKERFILE` | `Dockerfile.claude-sandbox` | Filename of the child Dockerfile |
+| `CLAUDE_SANDBOX_BASE_ONLY` | (unset) | Set to `1` or `true` to skip child Dockerfile and use base image only |
 
 ## Part of kmac-claude-kit
 
