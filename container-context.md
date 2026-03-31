@@ -11,9 +11,9 @@ You are running inside a **claude-sandbox** Docker container (Debian bookworm-sl
   - Pre-installed: `ruamel.yaml`
   - Install packages with `pip install <package>` (no `--break-system-packages` needed)
 - **Claude Code CLI** — installed globally via npm
-- **Utilities:** curl, jq, less, make, gnupg
+- **Utilities:** curl, jq, less, make, gnupg, openssh-client
 
-Additional project-specific tools (language servers, compilers, runtimes, ssh, etc.)
+Additional project-specific tools (language servers, compilers, runtimes, etc.)
 may be installed via a `Dockerfile.claude-sandbox` in the project root. Check `which`
 or `--version` to discover available tools.
 
