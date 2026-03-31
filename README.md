@@ -39,11 +39,14 @@ claude-sandbox
 # Pass args through to claude:
 claude-sandbox --resume
 
+# Mount the host Docker socket (for projects that use docker compose, etc.):
+claude-sandbox --docker-socket
+
 # Launch the ralph loop runner (non-interactive by default):
-claude-sandbox --ralph --dangerous
+claude-sandbox --ralph --docker-socket --dangerous
 
 # Ralph with iteration limit:
-claude-sandbox --ralph --dangerous --limit 5
+claude-sandbox --ralph --docker-socket --dangerous --limit 5
 
 # Point at a specific project:
 PROJECT_DIR=/home/you/projects/foo claude-sandbox
@@ -140,22 +143,22 @@ Here's an example of Makefile targets for a project using claude-sandbox via PAT
 
 ```makefile
 claude:
-	claude-sandbox
+	claude-sandbox --docker-socket
 
 claude-resume:
-	claude-sandbox --resume
+	claude-sandbox --docker-socket --resume
 
 ralph:
-	claude-sandbox --ralph --interactive
+	claude-sandbox --docker-socket --ralph --interactive
 
 ralph-resume:
-	claude-sandbox --ralph --interactive --resume
+	claude-sandbox --docker-socket --ralph --interactive --resume
 
 ralph-auto:
-	claude-sandbox --ralph --dangerous
+	claude-sandbox --docker-socket --ralph --dangerous
 
 ralph-auto-resume:
-	claude-sandbox --ralph --dangerous --resume
+	claude-sandbox --docker-socket --ralph --dangerous --resume
 ```
 
 ## How it works
@@ -178,7 +181,9 @@ The project is mounted at its **real host path** inside the container (e.g., `-v
 
 ### Docker access
 
-The host Docker socket (`/var/run/docker.sock`) is mounted into the container, so Claude can run `docker compose`, `make up`, etc. The entrypoint adds the container user to the socket's group automatically.
+Pass `--docker-socket` (or set `CLAUDE_SANDBOX_DOCKER_SOCKET=1`) to mount the host Docker socket (`/var/run/docker.sock`) into the container. Without this flag, the socket is **not** mounted and Docker commands are unavailable inside the sandbox.
+
+When enabled, the entrypoint adds the container user to the socket's group automatically, so Claude can run `docker compose`, `make up`, etc.
 
 Note: Docker socket access is effectively root-equivalent on the host. This setup trusts Claude not to abuse it (e.g., launching a container that mounts `/` read-write). The goal is to prevent *accidental* damage to the host, not to defend against a deliberately adversarial agent.
 
@@ -191,8 +196,8 @@ The entrypoint remaps the `claude` user inside the container to match your host 
 Pass `--ralph` as the **first** argument to `claude-sandbox` to launch the ralph loop runner inside the sandbox instead of interactive claude. Everything after `--ralph` is forwarded to `ralph`.
 
 ```bash
-# Run ralph in the sandbox (skip permissions, 5 iterations):
-claude-sandbox --ralph --dangerous --limit 5
+# Run ralph in the sandbox (with Docker access, skip permissions, 5 iterations):
+claude-sandbox --ralph --docker-socket --dangerous --limit 5
 
 # Stop the loop gracefully (from the project directory):
 touch .ralph/stop
@@ -278,6 +283,7 @@ docker rmi claude-sandbox                   # remove base image
 | `CLAUDE_NOTIFICATION_WEBHOOK_URL` | (none) | Discord webhook for interactive notification hooks (permission prompts, idle) |
 | `CLAUDE_SANDBOX_DOCKERFILE_DIR` | `$PROJECT_DIR` | Directory containing the child Dockerfile |
 | `CLAUDE_SANDBOX_DOCKERFILE` | `Dockerfile.claude-sandbox` | Filename of the child Dockerfile |
+| `CLAUDE_SANDBOX_DOCKER_SOCKET` | (unset) | Set to `1` or `true` to mount the host Docker socket (equivalent to `--docker-socket`) |
 | `CLAUDE_SANDBOX_BASE_ONLY` | (unset) | Set to `1` or `true` to skip child Dockerfile and use base image only |
 
 ## Part of kmac-claude-kit

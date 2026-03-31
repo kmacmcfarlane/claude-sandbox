@@ -6,6 +6,7 @@
 #   claude-sandbox                          # launch claude interactively in $PWD
 #   claude-sandbox --resume                 # pass args through to claude
 #   claude-sandbox --dangerous              # skip permission prompts (synonym for --dangerously-skip-permissions)
+#   claude-sandbox --docker-socket           # mount the host Docker socket
 #   claude-sandbox --ralph [ralph-args]     # launch the ralph loop runner
 #   claude-sandbox --ralph --limit 5        # run ralph for 5 iterations
 #   PROJECT_DIR=/other claude-sandbox       # launch claude in /other
@@ -26,6 +27,7 @@ BASE_IMAGE_NAME="claude-sandbox"
 RALPH_MODE=false
 LIMIT=""
 SKIP_PERMISSIONS=""
+DOCKER_SOCKET="${CLAUDE_SANDBOX_DOCKER_SOCKET:-false}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -39,10 +41,17 @@ while [[ $# -gt 0 ]]; do
             shift 2 ;;
         --dangerous|--dangerously-skip-permissions)
             SKIP_PERMISSIONS="--dangerously-skip-permissions"; shift ;;
+        --docker-socket)
+            DOCKER_SOCKET=true; shift ;;
         *)
             break ;;
     esac
 done
+
+# Normalize env var values to boolean
+if [[ "$DOCKER_SOCKET" = "1" || "$DOCKER_SOCKET" = "true" ]]; then
+    DOCKER_SOCKET=true
+fi
 
 if [[ -n "$LIMIT" && "$RALPH_MODE" = false ]]; then
     echo "Error: --limit is only valid with --ralph" >&2
@@ -60,7 +69,10 @@ PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"
 # ---------------------------------------------------------------------------
 HOST_UID="$(id -u)"
 HOST_GID="$(id -g)"
-DOCKER_GID="$(stat -c '%g' /var/run/docker.sock 2>/dev/null || echo '')"
+DOCKER_GID=""
+if [ "$DOCKER_SOCKET" = true ]; then
+    DOCKER_GID="$(stat -c '%g' /var/run/docker.sock 2>/dev/null || echo '')"
+fi
 
 # ---------------------------------------------------------------------------
 # Build base image if needed (must happen before volume assembly which uses it)
@@ -83,10 +95,12 @@ fi
 VOLUMES=(
     # Mount project at its real host path so docker-in-docker volume paths match
     -v "$PROJECT_DIR:$PROJECT_DIR"
-
-    # Docker socket for host docker access
-    -v /var/run/docker.sock:/var/run/docker.sock
 )
+
+# Docker socket for host docker access (opt-in via --docker-socket)
+if [ "$DOCKER_SOCKET" = true ]; then
+    VOLUMES+=(-v /var/run/docker.sock:/var/run/docker.sock)
+fi
 
 # Claude Code config directory (auth tokens, project memories, settings)
 CLAUDE_CONFIG_HOST="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
