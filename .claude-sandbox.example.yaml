@@ -24,11 +24,14 @@ mounts: []
 
 # Child Dockerfile for project-specific tools.
 # The launcher looks for Dockerfile.claude-sandbox in the project root by default.
+# If not found, it walks parent directories (direnv-style) so monorepos or
+# workspaces can share a single child Dockerfile higher up in the tree.
 # Env vars CLAUDE_SANDBOX_DOCKERFILE_DIR / CLAUDE_SANDBOX_DOCKERFILE take precedence.
 #
 # dockerfileDir: /path/to/dir        # directory containing the child Dockerfile
 # dockerfile: Dockerfile.claude-sandbox  # filename of the child Dockerfile
 
 # Set to true to use the base image only (no child Dockerfile).
-# Suppresses the missing-Dockerfile warning. Env var CLAUDE_SANDBOX_BASE_ONLY=1 overrides.
+# Suppresses the missing-Dockerfile warning and skips the parent directory search.
+# Env var CLAUDE_SANDBOX_BASE_ONLY=1 overrides.
 # baseOnly: false

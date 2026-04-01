@@ -232,6 +232,19 @@ if [ "$BASE_ONLY" = "true" ] || [ "$BASE_ONLY" = "1" ]; then
     USE_CHILD=false
 elif [ -f "$CHILD_DOCKERFILE" ]; then
     USE_CHILD=true
+else
+    # Walk parent directories (direnv-style) looking for the Dockerfile
+    _search_dir="$(dirname "$CHILD_DOCKERFILE_DIR")"
+    while [ "$_search_dir" != "/" ]; do
+        if [ -f "$_search_dir/$CHILD_DOCKERFILE_NAME" ]; then
+            CHILD_DOCKERFILE_DIR="$_search_dir"
+            CHILD_DOCKERFILE="$_search_dir/$CHILD_DOCKERFILE_NAME"
+            USE_CHILD=true
+            echo "Found $CHILD_DOCKERFILE_NAME in parent directory: $_search_dir"
+            break
+        fi
+        _search_dir="$(dirname "$_search_dir")"
+    done
 fi
 
 # ---------------------------------------------------------------------------

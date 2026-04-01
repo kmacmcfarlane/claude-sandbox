@@ -136,7 +136,7 @@ ENV PATH="/home/claude/go/bin:$PATH"
 
 The child image is built automatically and tagged `claude-sandbox-{project-slug}`. It rebuilds when the child Dockerfile changes or the base image is updated.
 
-If no `Dockerfile.claude-sandbox` is found, the launcher warns and uses the base image directly. Set `baseOnly: true` in `.claude-sandbox.yaml` (or `CLAUDE_SANDBOX_BASE_ONLY=1`) to suppress the warning.
+If no `Dockerfile.claude-sandbox` is found in the project directory, the launcher walks parent directories (like direnv) looking for one. This lets you share a single child Dockerfile across multiple projects in a monorepo or workspace. If none is found anywhere up to `/`, the launcher warns and uses the base image directly. Set `baseOnly: true` in `.claude-sandbox.yaml` (or `CLAUDE_SANDBOX_BASE_ONLY=1`) to suppress the warning and skip the parent search.
 
 See `Dockerfile.claude-sandbox.example` in this repo for a commented template.
 
