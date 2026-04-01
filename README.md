@@ -42,6 +42,9 @@ claude-sandbox --resume
 # Mount the host Docker socket (for projects that use docker compose, etc.):
 claude-sandbox --docker-socket
 
+# Mount ~/.aws/ read-only (for AWS CLI/SDK access):
+claude-sandbox --aws
+
 # Launch the ralph loop runner (non-interactive by default):
 claude-sandbox --ralph --docker-socket --dangerous
 
@@ -171,6 +174,7 @@ The container only has access to:
 - `~/.claude.json` — global state (onboarding, OAuth account, feature flags)
 - `~/.gitconfig` — git identity (read-only)
 - `~/.ssh` — SSH keys for git remotes (read-only)
+- `~/.aws/` — AWS credentials and config (read-only, opt-in via `--aws`)
 - Any extra mounts defined in `.claude-sandbox.yaml`
 
 It cannot see or modify anything else on the host filesystem.
@@ -186,6 +190,10 @@ Pass `--docker-socket` (or set `CLAUDE_SANDBOX_DOCKER_SOCKET=1`) to mount the ho
 When enabled, the entrypoint adds the container user to the socket's group automatically, so Claude can run `docker compose`, `make up`, etc.
 
 Note: Docker socket access is effectively root-equivalent on the host. This setup trusts Claude not to abuse it (e.g., launching a container that mounts `/` read-write). The goal is to prevent *accidental* damage to the host, not to defend against a deliberately adversarial agent.
+
+### AWS access
+
+Pass `--aws` (or set `CLAUDE_SANDBOX_AWS=1`) to mount the host `~/.aws/` directory read-only into the container. This gives Claude access to your AWS credentials, config, and SSO cache so it can use the AWS CLI or SDKs. Without this flag, AWS configuration is not available inside the sandbox.
 
 ### UID/GID mapping
 
@@ -284,6 +292,7 @@ docker rmi claude-sandbox                   # remove base image
 | `CLAUDE_SANDBOX_DOCKERFILE_DIR` | `$PROJECT_DIR` | Directory containing the child Dockerfile |
 | `CLAUDE_SANDBOX_DOCKERFILE` | `Dockerfile.claude-sandbox` | Filename of the child Dockerfile |
 | `CLAUDE_SANDBOX_DOCKER_SOCKET` | (unset) | Set to `1` or `true` to mount the host Docker socket (equivalent to `--docker-socket`) |
+| `CLAUDE_SANDBOX_AWS` | (unset) | Set to `1` or `true` to mount `~/.aws/` read-only (equivalent to `--aws`) |
 | `CLAUDE_SANDBOX_BASE_ONLY` | (unset) | Set to `1` or `true` to skip child Dockerfile and use base image only |
 
 ## Part of kmac-claude-kit

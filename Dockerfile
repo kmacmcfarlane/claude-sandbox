@@ -31,6 +31,7 @@ RUN install -m 0755 -d /etc/apt/keyrings \
        > /etc/apt/sources.list.d/docker.list \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
+       unzip \
        docker-ce-cli \
        docker-compose-plugin \
     && rm -rf /var/lib/apt/lists/*
@@ -39,6 +40,12 @@ RUN install -m 0755 -d /etc/apt/keyrings \
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
+
+# AWS CLI v2
+RUN curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip && \
+    unzip -q /tmp/awscliv2.zip -d /tmp && \
+    /tmp/aws/install && \
+    rm -rf /tmp/aws /tmp/awscliv2.zip
 
 # Create non-root user (UID/GID adjusted at runtime by entrypoint)
 RUN useradd -m -s /bin/bash claude

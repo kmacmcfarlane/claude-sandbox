@@ -7,6 +7,7 @@
 #   claude-sandbox --resume                 # pass args through to claude
 #   claude-sandbox --dangerous              # skip permission prompts (synonym for --dangerously-skip-permissions)
 #   claude-sandbox --docker-socket           # mount the host Docker socket
+#   claude-sandbox --aws                     # mount ~/.aws/ read-only
 #   claude-sandbox --ralph [ralph-args]     # launch the ralph loop runner
 #   claude-sandbox --ralph --limit 5        # run ralph for 5 iterations
 #   PROJECT_DIR=/other claude-sandbox       # launch claude in /other
@@ -28,6 +29,7 @@ RALPH_MODE=false
 LIMIT=""
 SKIP_PERMISSIONS=""
 DOCKER_SOCKET="${CLAUDE_SANDBOX_DOCKER_SOCKET:-false}"
+AWS_MOUNT="${CLAUDE_SANDBOX_AWS:-false}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -43,6 +45,8 @@ while [[ $# -gt 0 ]]; do
             SKIP_PERMISSIONS="--dangerously-skip-permissions"; shift ;;
         --docker-socket)
             DOCKER_SOCKET=true; shift ;;
+        --aws)
+            AWS_MOUNT=true; shift ;;
         *)
             break ;;
     esac
@@ -51,6 +55,9 @@ done
 # Normalize env var values to boolean
 if [[ "$DOCKER_SOCKET" = "1" || "$DOCKER_SOCKET" = "true" ]]; then
     DOCKER_SOCKET=true
+fi
+if [[ "$AWS_MOUNT" = "1" || "$AWS_MOUNT" = "true" ]]; then
+    AWS_MOUNT=true
 fi
 
 if [[ -n "$LIMIT" && "$RALPH_MODE" = false ]]; then
@@ -100,6 +107,11 @@ VOLUMES=(
 # Docker socket for host docker access (opt-in via --docker-socket)
 if [ "$DOCKER_SOCKET" = true ]; then
     VOLUMES+=(-v /var/run/docker.sock:/var/run/docker.sock)
+fi
+
+# AWS credentials/config (opt-in via --aws)
+if [ "$AWS_MOUNT" = true ] && [ -d "$HOME/.aws" ]; then
+    VOLUMES+=(-v "$HOME/.aws:/home/claude/.aws:ro")
 fi
 
 # Claude Code config directory (auth tokens, project memories, settings)
