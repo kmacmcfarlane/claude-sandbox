@@ -22,6 +22,20 @@ REPO_ROOT="$(cd "$(dirname "$REAL_PATH")/.." && pwd)"
 echo REPO_ROOT=${REPO_ROOT}
 BASE_IMAGE_NAME="claude-sandbox"
 
+# Walk parent directories (direnv-style) looking for a file.
+# Usage: find_up <start_dir> <filename>
+# Prints the full path if found, empty string otherwise.
+find_up() {
+    local dir="$1" name="$2"
+    while [ "$dir" != "/" ]; do
+        if [ -f "$dir/$name" ]; then
+            echo "$dir/$name"
+            return
+        fi
+        dir="$(dirname "$dir")"
+    done
+}
+
 # ---------------------------------------------------------------------------
 # Parse claude-sandbox flags; remaining args pass through to claude/ralph
 # ---------------------------------------------------------------------------
@@ -175,7 +189,7 @@ fi
 # ---------------------------------------------------------------------------
 # Parse .claude-sandbox.yaml (memory limit, extra mounts, etc.)
 # ---------------------------------------------------------------------------
-CONFIG_FILE="$PROJECT_DIR/.claude-sandbox.yaml"
+CONFIG_FILE="$(find_up "$PROJECT_DIR" ".claude-sandbox.yaml")"
 MEMORY_LIMIT="8g"
 
 if [ -f "$CONFIG_FILE" ]; then
@@ -242,17 +256,13 @@ elif [ -f "$CHILD_DOCKERFILE" ]; then
     USE_CHILD=true
 else
     # Walk parent directories (direnv-style) looking for the Dockerfile
-    _search_dir="$(dirname "$CHILD_DOCKERFILE_DIR")"
-    while [ "$_search_dir" != "/" ]; do
-        if [ -f "$_search_dir/$CHILD_DOCKERFILE_NAME" ]; then
-            CHILD_DOCKERFILE_DIR="$_search_dir"
-            CHILD_DOCKERFILE="$_search_dir/$CHILD_DOCKERFILE_NAME"
-            USE_CHILD=true
-            echo "Found $CHILD_DOCKERFILE_NAME in parent directory: $_search_dir"
-            break
-        fi
-        _search_dir="$(dirname "$_search_dir")"
-    done
+    _found="$(find_up "$(dirname "$CHILD_DOCKERFILE_DIR")" "$CHILD_DOCKERFILE_NAME")"
+    if [ -n "$_found" ]; then
+        CHILD_DOCKERFILE_DIR="$(dirname "$_found")"
+        CHILD_DOCKERFILE="$_found"
+        USE_CHILD=true
+        echo "Found $CHILD_DOCKERFILE_NAME in parent directory: $CHILD_DOCKERFILE_DIR"
+    fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -293,11 +303,12 @@ fi
 # ---------------------------------------------------------------------------
 # Claude environment file (Discord webhook, etc.)
 # ---------------------------------------------------------------------------
-ENV_FILE="$PROJECT_DIR/.env.claude-sandbox"
-ENV_ARGS=(--env-file "$ENV_FILE")
-if [ ! -f "$ENV_FILE" ]; then
+ENV_FILE="$(find_up "$PROJECT_DIR" ".env.claude-sandbox")"
+if [ -n "$ENV_FILE" ]; then
+    ENV_ARGS=(--env-file "$ENV_FILE")
+else
     ENV_ARGS=()
-    echo "WARNING: Claude environment file not found: $ENV_FILE" >&2
+    echo "WARNING: .env.claude-sandbox not found in $PROJECT_DIR or any parent" >&2
     echo "" >&2
     echo "This file provides environment variables needed by Claude Code" >&2
     echo "(e.g. DISCORD_WEBHOOK_URL for MCP server notifications)." >&2

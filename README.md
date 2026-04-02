@@ -59,15 +59,14 @@ The base Docker image is built automatically on first run. If a `Dockerfile.clau
 
 ## Project setup
 
-Each project that uses claude-sandbox needs a `.env.claude-sandbox` file in its root
-directory. This file provides environment variables passed into the container (e.g.
+Each project that uses claude-sandbox needs a `.env.claude-sandbox` file. This file
+provides environment variables passed into the container (e.g.
 `DISCORD_WEBHOOK_URL` for MCP server notifications, `CLAUDE_NOTIFICATION_WEBHOOK_URL`
-for interactive session notification hooks). The launcher will exit with an error if
-this file is missing.
+for interactive session notification hooks).
 
 ## Configuration (`.claude-sandbox.yaml`)
 
-Place a `.claude-sandbox.yaml` file in your project root (next to `.env.claude-sandbox`) to configure the sandbox container. See `.claude-sandbox.example.yaml` for a starter template.
+Place a `.claude-sandbox.yaml` file in your project root to configure the sandbox container. See `.claude-sandbox.example.yaml` for a starter template.
 
 ### Memory limit
 
@@ -136,7 +135,11 @@ ENV PATH="/home/claude/go/bin:$PATH"
 
 The child image is built automatically and tagged `claude-sandbox-{project-slug}`. It rebuilds when the child Dockerfile changes or the base image is updated.
 
-If no `Dockerfile.claude-sandbox` is found in the project directory, the launcher walks parent directories (like direnv) looking for one. This lets you share a single child Dockerfile across multiple projects in a monorepo or workspace. If none is found anywhere up to `/`, the launcher warns and uses the base image directly. Set `baseOnly: true` in `.claude-sandbox.yaml` (or `CLAUDE_SANDBOX_BASE_ONLY=1`) to suppress the warning and skip the parent search.
+### Parent directory search
+
+`Dockerfile.claude-sandbox`, `.claude-sandbox.yaml`, and `.env.claude-sandbox` are all resolved by walking parent directories from the project root (like direnv). This lets you share config across multiple projects in a monorepo or workspace — place the files at the workspace root and every sub-project inherits them.
+
+If no `Dockerfile.claude-sandbox` is found anywhere up to `/`, the launcher warns and uses the base image directly. Set `baseOnly: true` in `.claude-sandbox.yaml` (or `CLAUDE_SANDBOX_BASE_ONLY=1`) to suppress the warning and skip the search.
 
 See `Dockerfile.claude-sandbox.example` in this repo for a commented template.
 
