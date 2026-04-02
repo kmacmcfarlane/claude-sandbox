@@ -171,11 +171,14 @@ ralph-auto-resume:
 The container only has access to:
 - The project directory (read/write)
 - `~/.claude/` — auth tokens, project memories, sessions (read/write); `settings.json` is shadowed read-only with notification hooks merged in
-- `~/.claude.json` — global state (onboarding, OAuth account, feature flags)
+- `~/.claude.json` — global state, OAuth account (read/write)
+- `~/.mcp.json` — user-scope MCP server config (read-only)
 - `~/.gitconfig` — git identity (read-only)
 - `~/.ssh` — SSH keys for git remotes (read-only)
 - `~/.aws/` — AWS credentials and config (read-only, opt-in via `--aws`)
 - Any extra mounts defined in `.claude-sandbox.yaml`
+
+When `CLAUDE_CONFIG_DIR` relocates the config directory (e.g. via direnv), `.claude.json` and `.mcp.json` are mounted from the parent of that directory — mirroring the standard `$HOME/.claude/` + `$HOME/.claude.json` + `$HOME/.mcp.json` layout.
 
 It cannot see or modify anything else on the host filesystem.
 

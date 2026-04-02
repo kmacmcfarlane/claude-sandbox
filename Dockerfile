@@ -56,8 +56,8 @@ RUN curl -fsSL https://claude.ai/install.sh | bash
 USER root
 ENV PATH="/home/claude/.local/bin:$PATH"
 
-COPY entrypoint.sh /home/claude/.local/bin/entrypoint.sh
-RUN chmod +x /home/claude/.local/bin/entrypoint.sh
+COPY entrypoint.sh /opt/claude-sandbox/bin/entrypoint.sh
+RUN chmod +x /opt/claude-sandbox/bin/entrypoint.sh
 
 COPY bin/ /opt/claude-sandbox/bin/
 COPY logstream/ /opt/claude-sandbox/logstream/
@@ -65,5 +65,5 @@ COPY PROMPT_RALPH.md /opt/claude-sandbox/PROMPT_RALPH.md
 RUN chmod +x /opt/claude-sandbox/bin/*
 ENV PATH="/opt/claude-sandbox/bin:$PATH"
 
-ENTRYPOINT ["/home/claude/.local/bin/entrypoint.sh"]
+ENTRYPOINT ["/opt/claude-sandbox/bin/entrypoint.sh"]
 CMD ["claude"]

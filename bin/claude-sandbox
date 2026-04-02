@@ -111,13 +111,15 @@ fi
 
 # AWS credentials/config (opt-in via --aws)
 if [ "$AWS_MOUNT" = true ] && [ -d "$HOME/.aws" ]; then
-    VOLUMES+=(-v "$HOME/.aws:/home/claude/.aws:ro")
+    VOLUMES+=(-v "$HOME/.aws:$HOME/.aws:ro")
 fi
 
 # Claude Code config directory (auth tokens, project memories, settings)
+# Mounted at its real host path so absolute paths recorded by Claude Code
+# (e.g. plugin installPath values) resolve identically inside the container.
 CLAUDE_CONFIG_HOST="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 if [ -d "$CLAUDE_CONFIG_HOST" ]; then
-    VOLUMES+=(-v "$CLAUDE_CONFIG_HOST:/home/claude/.claude")
+    VOLUMES+=(-v "$CLAUDE_CONFIG_HOST:$CLAUDE_CONFIG_HOST")
 fi
 
 # Merge host CLAUDE.md with container context for in-container awareness
@@ -127,7 +129,7 @@ trap "rm -f '$CLAUDE_MD_TMP' '$SETTINGS_TMP'" EXIT
 cat "$CLAUDE_CONFIG_HOST/CLAUDE.md" 2>/dev/null >> "$CLAUDE_MD_TMP" || true
 printf '\n' >> "$CLAUDE_MD_TMP"
 cat "$REPO_ROOT/container-context.md" >> "$CLAUDE_MD_TMP"
-VOLUMES+=(-v "$CLAUDE_MD_TMP:/home/claude/.claude/CLAUDE.md:ro")
+VOLUMES+=(-v "$CLAUDE_MD_TMP:$CLAUDE_CONFIG_HOST/CLAUDE.md:ro")
 
 # Merge notification hooks into user settings (shadowed read-only so host file is untouched)
 HOST_SETTINGS="$CLAUDE_CONFIG_HOST/settings.json"
@@ -141,27 +143,33 @@ if [ -f "$HOST_SETTINGS" ] && [ -f "$HOOKS_FRAGMENT" ]; then
             const b = require("/hooks.json");
             console.log(JSON.stringify({ ...a, ...b }, null, 2));
         ' > "$SETTINGS_TMP"
-    VOLUMES+=(-v "$SETTINGS_TMP:/home/claude/.claude/settings.json:ro")
+    VOLUMES+=(-v "$SETTINGS_TMP:$CLAUDE_CONFIG_HOST/settings.json:ro")
 elif [ -f "$HOOKS_FRAGMENT" ]; then
     # No host settings.json — use hooks fragment as-is
     cp "$HOOKS_FRAGMENT" "$SETTINGS_TMP"
-    VOLUMES+=(-v "$SETTINGS_TMP:/home/claude/.claude/settings.json:ro")
+    VOLUMES+=(-v "$SETTINGS_TMP:$CLAUDE_CONFIG_HOST/settings.json:ro")
 fi
 
-# Claude Code global state (onboarding, OAuth account, feature flags)
-CLAUDE_CONFIG_FILE_DIR=${CLAUDE_CONFIG_DIR:-$HOME}
-if [ -f "$CLAUDE_CONFIG_FILE_DIR/.claude.json" ]; then
-    VOLUMES+=(-v "$CLAUDE_CONFIG_FILE_DIR/.claude.json:/home/claude/.claude.json")
+# Sibling files alongside the config directory (.claude.json, .mcp.json).
+# Mirrors the $HOME pattern: $HOME/.claude/ sits next to $HOME/.claude.json
+# and $HOME/.mcp.json. When CLAUDE_CONFIG_DIR relocates the config dir,
+# the same sibling relationship applies at the parent of that directory.
+CONFIG_PARENT="$(dirname "$CLAUDE_CONFIG_HOST")"
+if [ -f "$CONFIG_PARENT/.claude.json" ]; then
+    VOLUMES+=(-v "$CONFIG_PARENT/.claude.json:$CONFIG_PARENT/.claude.json")
+fi
+if [ -f "$CONFIG_PARENT/.mcp.json" ]; then
+    VOLUMES+=(-v "$CONFIG_PARENT/.mcp.json:$CONFIG_PARENT/.mcp.json:ro")
 fi
 
 # Git config (for commits)
 if [ -f "$HOME/.gitconfig" ]; then
-    VOLUMES+=(-v "$HOME/.gitconfig:/home/claude/.gitconfig:ro")
+    VOLUMES+=(-v "$HOME/.gitconfig:$HOME/.gitconfig:ro")
 fi
 
 # SSH keys (for git remotes over SSH)
 if [ -d "$HOME/.ssh" ]; then
-    VOLUMES+=(-v "$HOME/.ssh:/home/claude/.ssh:ro")
+    VOLUMES+=(-v "$HOME/.ssh:$HOME/.ssh:ro")
 fi
 
 # ---------------------------------------------------------------------------
@@ -317,6 +325,11 @@ fi
 # ---------------------------------------------------------------------------
 # Launch
 # ---------------------------------------------------------------------------
+CLAUDE_CONFIG_DIR_ENV=()
+if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
+    CLAUDE_CONFIG_DIR_ENV=(-e "CLAUDE_CONFIG_DIR=$CLAUDE_CONFIG_DIR")
+fi
+
 exec docker run -it --rm --init \
     "${VOLUMES[@]}" \
     -w "$PROJECT_DIR" \
@@ -325,9 +338,12 @@ exec docker run -it --rm --init \
     --memory-swap "$MEMORY_LIMIT" \
     -e HOST_UID="$HOST_UID" \
     -e HOST_GID="$HOST_GID" \
+    -e HOST_USER="$(whoami)" \
     -e HOST_HOME="$HOME" \
+    -e HOME="$HOME" \
     -e DOCKER_GID="$DOCKER_GID" \
     -e ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}" \
+    "${CLAUDE_CONFIG_DIR_ENV[@]}" \
     --name "$CONTAINER_NAME" \
     "$IMAGE_NAME" \
     "${CMD[@]}"
