@@ -8,6 +8,24 @@
 # Default: 8g
 # memoryLimit: 8g
 
+# Host access — control which host resources are mounted into the container.
+# Each can also be enabled via CLI flags (--ssh, --git, --docker-socket, --aws)
+# or environment variables (CLAUDE_SANDBOX_HOST_ACCESS_*_ENABLED=1).
+# Precedence: CLI flag > env var > YAML.
+hostAccess:
+  # Mount ~/.ssh/ read-only (SSH keys for git remotes)
+  ssh:
+    enabled: false
+  # Mount ~/.gitconfig read-only (git identity)
+  git:
+    enabled: false
+  # Mount /var/run/docker.sock (host Docker daemon access)
+  dockerSocket:
+    enabled: false
+  # Mount ~/.aws/ read-only (AWS CLI/SDK credentials)
+  aws:
+    enabled: false
+
 # Extra volume mounts.
 # Each mount entry has:
 #   host:      absolute path on the host (required)

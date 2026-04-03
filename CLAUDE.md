@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Docker-based sandbox for running Claude Code with filesystem isolation and opt-in host Docker access (via `--docker-socket`). Part of the [kmac-claude-kit](https://github.com/kmacmcfarlane/kmac-claude-kit) ecosystem.
+Docker-based sandbox for running Claude Code with filesystem isolation and opt-in host access (Docker socket, AWS, git, SSH — via CLI flags, env vars, or `.claude-sandbox.yaml`). Part of the [kmac-claude-kit](https://github.com/kmacmcfarlane/kmac-claude-kit) ecosystem.
 
 ## Key Architecture
 

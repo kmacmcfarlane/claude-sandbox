@@ -5,9 +5,11 @@
 # Usage:
 #   claude-sandbox                          # launch claude interactively in $PWD
 #   claude-sandbox --resume                 # pass args through to claude
-#   claude-sandbox --dangerous              # skip permission prompts (synonym for --dangerously-skip-permissions)
+#   claude-sandbox --dangerous              # skip permission prompts
 #   claude-sandbox --docker-socket           # mount the host Docker socket
 #   claude-sandbox --aws                     # mount ~/.aws/ read-only
+#   claude-sandbox --git                     # mount ~/.gitconfig read-only
+#   claude-sandbox --ssh                     # mount ~/.ssh/ read-only
 #   claude-sandbox --ralph [ralph-args]     # launch the ralph loop runner
 #   claude-sandbox --ralph --limit 5        # run ralph for 5 iterations
 #   PROJECT_DIR=/other claude-sandbox       # launch claude in /other
@@ -42,8 +44,12 @@ find_up() {
 RALPH_MODE=false
 LIMIT=""
 SKIP_PERMISSIONS=""
-DOCKER_SOCKET="${CLAUDE_SANDBOX_DOCKER_SOCKET:-false}"
-AWS_MOUNT="${CLAUDE_SANDBOX_AWS:-false}"
+
+# Host access flags — CLI overrides (empty = not set by CLI)
+CLI_SSH=""
+CLI_GIT=""
+CLI_DOCKER_SOCKET=""
+CLI_AWS=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -57,22 +63,18 @@ while [[ $# -gt 0 ]]; do
             shift 2 ;;
         --dangerous|--dangerously-skip-permissions)
             SKIP_PERMISSIONS="--dangerously-skip-permissions"; shift ;;
-        --docker-socket)
-            DOCKER_SOCKET=true; shift ;;
-        --aws)
-            AWS_MOUNT=true; shift ;;
+        --host-access-ssh-enabled|--ssh)
+            CLI_SSH=true; shift ;;
+        --host-access-git-enabled|--git)
+            CLI_GIT=true; shift ;;
+        --host-access-docker-socket-enabled|--docker-socket)
+            CLI_DOCKER_SOCKET=true; shift ;;
+        --host-access-aws-enabled|--aws)
+            CLI_AWS=true; shift ;;
         *)
             break ;;
     esac
 done
-
-# Normalize env var values to boolean
-if [[ "$DOCKER_SOCKET" = "1" || "$DOCKER_SOCKET" = "true" ]]; then
-    DOCKER_SOCKET=true
-fi
-if [[ "$AWS_MOUNT" = "1" || "$AWS_MOUNT" = "true" ]]; then
-    AWS_MOUNT=true
-fi
 
 if [[ -n "$LIMIT" && "$RALPH_MODE" = false ]]; then
     echo "Error: --limit is only valid with --ralph" >&2
@@ -90,10 +92,6 @@ PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"
 # ---------------------------------------------------------------------------
 HOST_UID="$(id -u)"
 HOST_GID="$(id -g)"
-DOCKER_GID=""
-if [ "$DOCKER_SOCKET" = true ]; then
-    DOCKER_GID="$(stat -c '%g' /var/run/docker.sock 2>/dev/null || echo '')"
-fi
 
 # ---------------------------------------------------------------------------
 # Build base image if needed (must happen before volume assembly which uses it)
@@ -117,16 +115,6 @@ VOLUMES=(
     # Mount project at its real host path so docker-in-docker volume paths match
     -v "$PROJECT_DIR:$PROJECT_DIR"
 )
-
-# Docker socket for host docker access (opt-in via --docker-socket)
-if [ "$DOCKER_SOCKET" = true ]; then
-    VOLUMES+=(-v /var/run/docker.sock:/var/run/docker.sock)
-fi
-
-# AWS credentials/config (opt-in via --aws)
-if [ "$AWS_MOUNT" = true ] && [ -d "$HOME/.aws" ]; then
-    VOLUMES+=(-v "$HOME/.aws:$HOME/.aws:ro")
-fi
 
 # Claude Code config directory (auth tokens, project memories, settings)
 # Mounted at its real host path so absolute paths recorded by Claude Code
@@ -176,21 +164,17 @@ if [ -f "$CONFIG_PARENT/.mcp.json" ]; then
     VOLUMES+=(-v "$CONFIG_PARENT/.mcp.json:$CONFIG_PARENT/.mcp.json:ro")
 fi
 
-# Git config (for commits)
-if [ -f "$HOME/.gitconfig" ]; then
-    VOLUMES+=(-v "$HOME/.gitconfig:$HOME/.gitconfig:ro")
-fi
-
-# SSH keys (for git remotes over SSH)
-if [ -d "$HOME/.ssh" ]; then
-    VOLUMES+=(-v "$HOME/.ssh:$HOME/.ssh:ro")
-fi
 
 # ---------------------------------------------------------------------------
 # Parse .claude-sandbox.yaml (memory limit, extra mounts, etc.)
 # ---------------------------------------------------------------------------
 CONFIG_FILE="$(find_up "$PROJECT_DIR" ".claude-sandbox.yaml")"
 MEMORY_LIMIT="8g"
+
+YAML_SSH=""
+YAML_GIT=""
+YAML_DOCKER_SOCKET=""
+YAML_AWS=""
 
 if [ -f "$CONFIG_FILE" ]; then
     if ! command -v yq &>/dev/null; then
@@ -211,6 +195,12 @@ if [ -f "$CONFIG_FILE" ]; then
         MEMORY_LIMIT="$CONFIG_MEMORY"
     fi
 
+    # Host access settings
+    YAML_SSH=$(yq '.hostAccess.ssh.enabled // ""' "$CONFIG_FILE")
+    YAML_GIT=$(yq '.hostAccess.git.enabled // ""' "$CONFIG_FILE")
+    YAML_DOCKER_SOCKET=$(yq '.hostAccess.dockerSocket.enabled // ""' "$CONFIG_FILE")
+    YAML_AWS=$(yq '.hostAccess.aws.enabled // ""' "$CONFIG_FILE")
+
     # Extra volume mounts
     MOUNT_COUNT=$(yq '.mounts | length' "$CONFIG_FILE")
     for ((i = 0; i < MOUNT_COUNT; i++)); do
@@ -229,6 +219,44 @@ if [ -f "$CONFIG_FILE" ]; then
             VOLUMES+=(-v "$MOUNT_HOST:$MOUNT_CONTAINER:ro")
         fi
     done
+fi
+
+# ---------------------------------------------------------------------------
+# Resolve host access flags: CLI > env var > YAML
+# ---------------------------------------------------------------------------
+resolve_flag() {
+    local cli="$1" env="$2" yaml="$3"
+    # CLI takes precedence
+    if [[ -n "$cli" ]]; then echo "$cli"; return; fi
+    # Then env var
+    if [[ "$env" = "1" || "$env" = "true" || "$env" = "yes" ]]; then echo "true"; return; fi
+    # Then YAML
+    if [[ "$yaml" = "true" ]]; then echo "true"; return; fi
+    echo "false"
+}
+
+SSH_MOUNT=$(resolve_flag "$CLI_SSH" "${CLAUDE_SANDBOX_HOST_ACCESS_SSH_ENABLED:-}" "$YAML_SSH")
+GIT_MOUNT=$(resolve_flag "$CLI_GIT" "${CLAUDE_SANDBOX_HOST_ACCESS_GIT_ENABLED:-}" "$YAML_GIT")
+DOCKER_SOCKET=$(resolve_flag "$CLI_DOCKER_SOCKET" "${CLAUDE_SANDBOX_HOST_ACCESS_DOCKER_SOCKET_ENABLED:-}" "$YAML_DOCKER_SOCKET")
+AWS_MOUNT=$(resolve_flag "$CLI_AWS" "${CLAUDE_SANDBOX_HOST_ACCESS_AWS_ENABLED:-}" "$YAML_AWS")
+
+# Host access volume mounts (now that flags are resolved)
+if [ "$DOCKER_SOCKET" = true ]; then
+    VOLUMES+=(-v /var/run/docker.sock:/var/run/docker.sock)
+fi
+if [ "$AWS_MOUNT" = true ] && [ -d "$HOME/.aws" ]; then
+    VOLUMES+=(-v "$HOME/.aws:$HOME/.aws:ro")
+fi
+if [ "$GIT_MOUNT" = true ] && [ -f "$HOME/.gitconfig" ]; then
+    VOLUMES+=(-v "$HOME/.gitconfig:$HOME/.gitconfig:ro")
+fi
+if [ "$SSH_MOUNT" = true ] && [ -d "$HOME/.ssh" ]; then
+    VOLUMES+=(-v "$HOME/.ssh:$HOME/.ssh:ro")
+fi
+
+DOCKER_GID=""
+if [ "$DOCKER_SOCKET" = true ]; then
+    DOCKER_GID="$(stat -c '%g' /var/run/docker.sock 2>/dev/null || echo '')"
 fi
 
 # ---------------------------------------------------------------------------

@@ -2,23 +2,6 @@
 
 Run Claude Code inside a Docker container with filesystem isolation and host Docker access.
 
-## Layout
-
-```
-bin/
-  claude-sandbox   Launcher: builds image, assembles mounts, runs the container
-  ralph            Loop runner: fresh-context iterations with stop-file control
-logstream/
-  raw-json-logger.js  Transparent NDJSON passthrough that writes every line to a timestamped file
-  run-logger.js       Transparent NDJSON passthrough that captures per-iteration metrics
-  console-output.js   Filters stream-json NDJSON into human-readable terminal output
-  exit-on-result.js   Pipeline terminator — exits on result event to tear down stuck processes
-  activity-watchdog.js  Inactivity watchdog — exits with code 124 after N minutes of silence
-Dockerfile                          Base image: Debian + Docker CLI/compose, Node.js 22, Claude Code CLI
-Dockerfile.claude-sandbox.example   Example child Dockerfile for project-specific tools
-entrypoint.sh                       Remaps container user UID/GID to match the host; grants Docker socket access
-```
-
 ## Installation
 
 Add `bin/` to your PATH. For example, if you cloned this repo to `~/src/claude-sandbox`:
@@ -39,13 +22,19 @@ claude-sandbox
 # Pass args through to claude:
 claude-sandbox --resume
 
-# Mount the host Docker socket (for projects that use docker compose, etc.):
-claude-sandbox --docker-socket
+# Mount host resources:
+claude-sandbox --docker-socket           # host Docker socket
+claude-sandbox --aws                     # ~/.aws/ read-only
+claude-sandbox --git                     # ~/.gitconfig read-only
+claude-sandbox --ssh                     # ~/.ssh/ read-only
 
-# Mount ~/.aws/ read-only (for AWS CLI/SDK access):
-claude-sandbox --aws
+# Skip permission prompts:
+claude-sandbox --dangerous
 
-# Launch the ralph loop runner (non-interactive by default):
+# Combine flags:
+claude-sandbox --docker-socket --git --ssh --dangerous
+
+# Launch the ralph loop runner:
 claude-sandbox --ralph --docker-socket --dangerous
 
 # Ralph with iteration limit:
@@ -57,160 +46,40 @@ PROJECT_DIR=/home/you/projects/foo claude-sandbox
 
 The base Docker image is built automatically on first run. If a `Dockerfile.claude-sandbox` exists in the project, a child image is built on top of it.
 
-## Project setup
+## CLI reference
 
-Each project that uses claude-sandbox needs a `.env.claude-sandbox` file. This file
-provides environment variables passed into the container (e.g.
-`DISCORD_WEBHOOK_URL` for MCP server notifications, `CLAUDE_NOTIFICATION_WEBHOOK_URL`
-for interactive session notification hooks).
+### `claude-sandbox` flags
 
-## Configuration (`.claude-sandbox.yaml`)
+These flags are consumed by the launcher and control the container environment. They must come **before** any passthrough arguments.
 
-Place a `.claude-sandbox.yaml` file in your project root to configure the sandbox container. See `.claude-sandbox.example.yaml` for a starter template.
+| Flag | Alias | Description |
+|---|---|---|
+| `--host-access-docker-socket-enabled` | `--docker-socket` | Mount the host Docker socket |
+| `--host-access-aws-enabled` | `--aws` | Mount `~/.aws/` read-only |
+| `--host-access-git-enabled` | `--git` | Mount `~/.gitconfig` read-only |
+| `--host-access-ssh-enabled` | `--ssh` | Mount `~/.ssh/` read-only |
+| `--dangerous` | | Pass `--dangerously-skip-permissions` to claude/ralph |
+| `--ralph` | | Launch the ralph loop runner instead of interactive claude |
+| `--limit N` | | Stop ralph after N iterations (only valid with `--ralph`) |
 
-### Memory limit
+### Passthrough arguments
 
-The container is capped at **8 GB** of RAM by default (swap disabled). If the container exceeds this limit, Docker OOM-kills it. Override with the `memoryLimit` key using Docker memory notation:
-
-```yaml
-memoryLimit: 16g
-```
-
-### Extra mounts
-
-You can add extra volume mounts to the container. This is useful for mounting shared libraries, data directories, or other paths that Claude needs access to.
-
-```yaml
-mounts:
-  - host: /home/user/shared-libs
-    container: /home/user/shared-libs
-
-  - host: /data/datasets
-    container: /mnt/data
-    writable: true
-```
-
-Each mount entry has:
-- `host` — absolute path on the host (required)
-- `container` — absolute path inside the container (required)
-- `writable` — boolean, default `false` (mounts `:ro` unless set to `true`)
-
-### Child Dockerfile
-
-Configure the child Dockerfile location (env vars take precedence over YAML):
-
-```yaml
-dockerfileDir: /path/to/dir               # default: project root
-dockerfile: Dockerfile.claude-sandbox      # default filename
-```
-
-To use the base image only and suppress the missing-Dockerfile warning:
-
-```yaml
-baseOnly: true
-```
-
-**Dependency:** Parsing requires [`yq`](https://github.com/mikefarah/yq) on the host. Install with `brew install yq`, `sudo snap install yq`, or `go install github.com/mikefarah/yq/v4@latest`.
-
-## Project-specific tools (`Dockerfile.claude-sandbox`)
-
-Place a `Dockerfile.claude-sandbox` in your project root to install project-specific tools on top of the base image. It must start with `FROM claude-sandbox`.
-
-```dockerfile
-FROM claude-sandbox
-
-# Go toolchain
-RUN curl -fsSL https://go.dev/dl/go1.25.6.linux-amd64.tar.gz | tar -C /usr/local -xz
-ENV PATH="/usr/local/go/bin:$PATH"
-
-# TypeScript language server
-RUN npm install -g typescript-language-server typescript @vtsls/language-server
-
-# Go language server (install as claude user for ~/go/bin)
-USER claude
-RUN go install golang.org/x/tools/gopls@latest
-USER root
-ENV PATH="/home/claude/go/bin:$PATH"
-```
-
-The child image is built automatically and tagged `claude-sandbox-{project-slug}`. It rebuilds when the child Dockerfile changes or the base image is updated.
-
-### Parent directory search
-
-`Dockerfile.claude-sandbox`, `.claude-sandbox.yaml`, and `.env.claude-sandbox` are all resolved by walking parent directories from the project root (like direnv). This lets you share config across multiple projects in a monorepo or workspace — place the files at the workspace root and every sub-project inherits them.
-
-If no `Dockerfile.claude-sandbox` is found anywhere up to `/`, the launcher warns and uses the base image directly. Set `baseOnly: true` in `.claude-sandbox.yaml` (or `CLAUDE_SANDBOX_BASE_ONLY=1`) to suppress the warning and skip the search.
-
-See `Dockerfile.claude-sandbox.example` in this repo for a commented template.
-
-## Makefile integration
-
-Here's an example of Makefile targets for a project using claude-sandbox via PATH:
-
-```makefile
-claude:
-	claude-sandbox --docker-socket
-
-claude-resume:
-	claude-sandbox --docker-socket --resume
-
-ralph:
-	claude-sandbox --docker-socket --ralph --interactive
-
-ralph-resume:
-	claude-sandbox --docker-socket --ralph --interactive --resume
-
-ralph-auto:
-	claude-sandbox --docker-socket --ralph --dangerous
-
-ralph-auto-resume:
-	claude-sandbox --docker-socket --ralph --dangerous --resume
-```
-
-## How it works
-
-### Filesystem isolation
-
-The container only has access to:
-- The project directory (read/write)
-- `~/.claude/` — auth tokens, project memories, sessions (read/write); `settings.json` is shadowed read-only with notification hooks merged in
-- `~/.claude.json` — global state, OAuth account (read/write)
-- `~/.mcp.json` — user-scope MCP server config (read-only)
-- `~/.gitconfig` — git identity (read-only)
-- `~/.ssh` — SSH keys for git remotes (read-only)
-- `~/.aws/` — AWS credentials and config (read-only, opt-in via `--aws`)
-- Any extra mounts defined in `.claude-sandbox.yaml`
-
-When `CLAUDE_CONFIG_DIR` relocates the config directory (e.g. via direnv), `.claude.json` and `.mcp.json` are mounted from the parent of that directory — mirroring the standard `$HOME/.claude/` + `$HOME/.claude.json` + `$HOME/.mcp.json` layout.
-
-It cannot see or modify anything else on the host filesystem.
-
-### Same-path volume mounting
-
-The project is mounted at its **real host path** inside the container (e.g., `-v /home/you/project:/home/you/project`), not at a synthetic path like `/workspace`. This is critical because `docker compose` volume paths are resolved by the Docker daemon on the host. If the container saw the project at `/workspace`, the daemon would look for `/workspace/backend` on the host, which doesn't exist.
-
-### Docker access
-
-Pass `--docker-socket` (or set `CLAUDE_SANDBOX_DOCKER_SOCKET=1`) to mount the host Docker socket (`/var/run/docker.sock`) into the container. Without this flag, the socket is **not** mounted and Docker commands are unavailable inside the sandbox.
-
-When enabled, the entrypoint adds the container user to the socket's group automatically, so Claude can run `docker compose`, `make up`, etc.
-
-Note: Docker socket access is effectively root-equivalent on the host. This setup trusts Claude not to abuse it (e.g., launching a container that mounts `/` read-write). The goal is to prevent *accidental* damage to the host, not to defend against a deliberately adversarial agent.
-
-### AWS access
-
-Pass `--aws` (or set `CLAUDE_SANDBOX_AWS=1`) to mount the host `~/.aws/` directory read-only into the container. This gives Claude access to your AWS credentials, config, and SSO cache so it can use the AWS CLI or SDKs. Without this flag, AWS configuration is not available inside the sandbox.
-
-### UID/GID mapping
-
-The entrypoint remaps the `claude` user inside the container to match your host UID/GID, so files created or modified by Claude have correct ownership — no root-owned files left behind.
-
-## `--ralph` mode
-
-Pass `--ralph` as the **first** argument to `claude-sandbox` to launch the ralph loop runner inside the sandbox instead of interactive claude. Everything after `--ralph` is forwarded to `ralph`.
+Any arguments not listed above are passed through to `claude` (in interactive mode) or `ralph` (in `--ralph` mode). For example:
 
 ```bash
-# Run ralph in the sandbox (with Docker access, skip permissions, 5 iterations):
+# Pass --resume to claude:
+claude-sandbox --docker-socket --resume
+
+# Pass --interactive and --watchdog-timeout to ralph:
+claude-sandbox --ralph --docker-socket --dangerous --interactive --watchdog-timeout 30
+```
+
+## Ralph mode
+
+Pass `--ralph` to `claude-sandbox` to launch the ralph loop runner instead of interactive claude. Ralph re-invokes Claude as a new process each iteration, giving it fresh context every time.
+
+```bash
+# Run ralph with Docker access, skip permissions, 5 iterations:
 claude-sandbox --ralph --docker-socket --dangerous --limit 5
 
 # Stop the loop gracefully (from the project directory):
@@ -221,23 +90,40 @@ The container runs under a separate name (`claude-sandbox-ralph`) so it won't co
 
 Ralph runs in non-interactive mode (`-p`) by default. Use `--interactive` to opt out.
 
-### ralph options
+### Ralph flags
 
-- `--limit N` — stop after N iterations (default: 30)
-- `--stop-file PATH` — path to stop file (default: `.ralph/stop`)
-- `--prompt PATH` — prompt file (default: `<project-root>/agent/PROMPT.md`)
-- `--claude-bin PATH` — claude binary (default: `claude`)
-- `--interactive` — run claude interactively (default: non-interactive `-p`)
-- `--dangerous`, `--dangerously-skip-permissions` — pass `--dangerously-skip-permissions` to claude
-- `--resume` — pass `--resume` to claude on first iteration
-- `--watchdog-timeout N` — inactivity timeout in minutes (default: 15, 0 to disable)
-- `--iteration-timeout N` — hard iteration time limit in seconds (default: 7200 = 2h)
+These flags are passed through to ralph (after `--ralph` and any launcher flags).
+
+| Flag | Default | Description |
+|---|---|---|
+| `--limit N` | `30` | Stop after N iterations |
+| `--interactive` | off | Run claude interactively (default: non-interactive `-p`) |
+| `--dangerous` | off | Pass `--dangerously-skip-permissions` to claude |
+| `--resume` | off | Pass `--resume` to claude on first iteration |
+| `--prompt PATH` | `<project>/agent/PROMPT.md` | Prompt file |
+| `--stop-file PATH` | `.ralph/stop` | Path to stop file |
+| `--claude-bin PATH` | `claude` | Claude binary |
+| `--runlog-file PATH` | `.ralph/runlog.json` | Run log path |
+| `--raw-log PATH` | `.ralph/runlogs/rawlog` | Raw NDJSON base path |
+| `--watchdog-timeout N` | `15` | Inactivity timeout in minutes (0 to disable) |
+| `--iteration-timeout N` | `7200` | Hard iteration time limit in seconds (2h) |
+
+### Quota retry flags
+
+Control how ralph handles rate limits and quota exhaustion.
+
+| Flag | Default | Description |
+|---|---|---|
+| `--max-retries N` | `5` | Consecutive rate-limit retries before exiting |
+| `--retry-delay N` | `30` | Initial backoff delay in seconds |
+| `--quota-pause N` | `300` | Seconds between re-probes on quota exhaustion |
+| `--quota-max-wait N` | `18000` | Max seconds to wait for quota reset (5h) |
 
 ### Logging
 
 Ralph produces two logs per run: a **run log** (structured metrics) and a **raw log** (complete NDJSON stream). Both sit in `.ralph/` by default.
 
-In non-interactive mode, Claude's output flows through a three-stage pipeline:
+In non-interactive mode, Claude's output flows through a pipeline:
 
 ```
 claude --output-format stream-json
@@ -279,7 +165,178 @@ Override the base path with `--raw-log <path>` (the timestamp and iteration suff
 
 The entire `.ralph/` directory should be gitignored — it contains only runtime state.
 
-## Rebuilding the image
+## Configuration
+
+### `.env.claude-sandbox`
+
+Environment variables passed into the container (via `docker run --env-file`). This file provides secrets and webhook URLs that Claude or MCP servers need at runtime.
+
+```bash
+# Discord webhook for MCP notification server
+DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/YOUR_ID/YOUR_TOKEN
+
+# Discord webhook for Claude Code notification hooks (permission prompts, idle)
+CLAUDE_NOTIFICATION_WEBHOOK_URL=https://discord.com/api/webhooks/YOUR_ID/YOUR_TOKEN
+```
+
+Copy the example to get started:
+
+```bash
+cp .env.claude-sandbox.example .env.claude-sandbox
+```
+
+This file is gitignored — do not commit it.
+
+### `.claude-sandbox.yaml`
+
+Container configuration. Place in your project root. See `.claude-sandbox.example.yaml` for a starter template.
+
+**Dependency:** Parsing requires [`yq`](https://github.com/mikefarah/yq) on the host. Install with `brew install yq`, `sudo snap install yq`, or `go install github.com/mikefarah/yq/v4@latest`.
+
+#### Host access
+
+Control which host resources are mounted into the container. Each can be enabled via CLI flags, environment variables, or YAML. Precedence: CLI flag > env var > YAML.
+
+```yaml
+hostAccess:
+  ssh:
+    enabled: true
+  git:
+    enabled: true
+  dockerSocket:
+    enabled: true
+  aws:
+    enabled: true
+```
+
+#### Memory limit
+
+The container is capped at **8 GB** of RAM by default (swap disabled). If the container exceeds this limit, Docker OOM-kills it. Override with the `memoryLimit` key using Docker memory notation:
+
+```yaml
+memoryLimit: 16g
+```
+
+#### Extra mounts
+
+Add extra volume mounts to the container for shared libraries, data directories, or other paths.
+
+```yaml
+mounts:
+  - host: /home/user/shared-libs
+    container: /home/user/shared-libs
+
+  - host: /data/datasets
+    container: /mnt/data
+    writable: true
+```
+
+Each mount entry has:
+- `host` — absolute path on the host (required)
+- `container` — absolute path inside the container (required)
+- `writable` — boolean, default `false` (mounts `:ro` unless set to `true`)
+
+#### Child Dockerfile
+
+Configure the child Dockerfile location (env vars take precedence over YAML):
+
+```yaml
+dockerfileDir: /path/to/dir               # default: project root
+dockerfile: Dockerfile.claude-sandbox      # default filename
+```
+
+To use the base image only and suppress the missing-Dockerfile warning:
+
+```yaml
+baseOnly: true
+```
+
+### `Dockerfile.claude-sandbox`
+
+Place a `Dockerfile.claude-sandbox` in your project root to install project-specific tools on top of the base image. It must start with `FROM claude-sandbox`.
+
+```dockerfile
+FROM claude-sandbox
+
+# Go toolchain
+RUN curl -fsSL https://go.dev/dl/go1.25.6.linux-amd64.tar.gz | tar -C /usr/local -xz
+ENV PATH="/usr/local/go/bin:$PATH"
+
+# TypeScript language server
+RUN npm install -g typescript-language-server typescript @vtsls/language-server
+
+# Go language server (install as claude user for ~/go/bin)
+USER claude
+RUN go install golang.org/x/tools/gopls@latest
+USER root
+ENV PATH="/home/claude/go/bin:$PATH"
+```
+
+The child image is built automatically and tagged `claude-sandbox-{project-slug}`. It rebuilds when the child Dockerfile changes or the base image is updated.
+
+See `Dockerfile.claude-sandbox.example` in this repo for a commented template.
+
+### Parent directory search
+
+`Dockerfile.claude-sandbox`, `.claude-sandbox.yaml`, and `.env.claude-sandbox` are all resolved by walking parent directories from the project root (like direnv). This lets you share config across multiple projects in a monorepo or workspace — place the files at the workspace root and every sub-project inherits them.
+
+If no `Dockerfile.claude-sandbox` is found anywhere up to `/`, the launcher warns and uses the base image directly. Set `baseOnly: true` in `.claude-sandbox.yaml` (or `CLAUDE_SANDBOX_BASE_ONLY=1`) to suppress the warning and skip the search.
+
+### Environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `PROJECT_DIR` | `$(pwd)` | Project directory to mount |
+| `ANTHROPIC_API_KEY` | (none) | Passed through to the container |
+| `CLAUDE_NOTIFICATION_WEBHOOK_URL` | (none) | Discord webhook for interactive notification hooks (permission prompts, idle) |
+| `CLAUDE_SANDBOX_HOST_ACCESS_SSH_ENABLED` | (unset) | Mount `~/.ssh/` read-only (equivalent to `--ssh`) |
+| `CLAUDE_SANDBOX_HOST_ACCESS_GIT_ENABLED` | (unset) | Mount `~/.gitconfig` read-only (equivalent to `--git`) |
+| `CLAUDE_SANDBOX_HOST_ACCESS_DOCKER_SOCKET_ENABLED` | (unset) | Mount host Docker socket (equivalent to `--docker-socket`) |
+| `CLAUDE_SANDBOX_HOST_ACCESS_AWS_ENABLED` | (unset) | Mount `~/.aws/` read-only (equivalent to `--aws`) |
+| `CLAUDE_SANDBOX_DOCKERFILE_DIR` | `$PROJECT_DIR` | Directory containing the child Dockerfile |
+| `CLAUDE_SANDBOX_DOCKERFILE` | `Dockerfile.claude-sandbox` | Filename of the child Dockerfile |
+| `CLAUDE_SANDBOX_BASE_ONLY` | (unset) | Set to `1` or `true` to skip child Dockerfile and use base image only |
+
+## How it works
+
+### Filesystem isolation
+
+The container only has access to:
+- The project directory (read/write)
+- `~/.claude/` — auth tokens, project memories, sessions (read/write); `settings.json` is shadowed read-only with notification hooks merged in
+- `~/.claude.json` — global state, OAuth account (read/write)
+- `~/.mcp.json` — user-scope MCP server config (read-only)
+- `~/.gitconfig` — git identity (read-only, opt-in via `--git`)
+- `~/.ssh/` — SSH keys for git remotes (read-only, opt-in via `--ssh`)
+- `~/.aws/` — AWS credentials and config (read-only, opt-in via `--aws`)
+- `/var/run/docker.sock` — host Docker daemon (opt-in via `--docker-socket`)
+- Any extra mounts defined in `.claude-sandbox.yaml`
+
+When `CLAUDE_CONFIG_DIR` relocates the config directory (e.g. via direnv), `.claude.json` and `.mcp.json` are mounted from the parent of that directory — mirroring the standard `$HOME/.claude/` + `$HOME/.claude.json` + `$HOME/.mcp.json` layout.
+
+It cannot see or modify anything else on the host filesystem.
+
+### Same-path volume mounting
+
+The project is mounted at its **real host path** inside the container (e.g., `-v /home/you/project:/home/you/project`), not at a synthetic path like `/workspace`. This is critical because `docker compose` volume paths are resolved by the Docker daemon on the host. If the container saw the project at `/workspace`, the daemon would look for `/workspace/backend` on the host, which doesn't exist.
+
+### Host access mounts
+
+SSH, git, Docker socket, and AWS mounts are all opt-in. Enable them via CLI flags (`--ssh`, `--git`, `--docker-socket`, `--aws`), environment variables (`CLAUDE_SANDBOX_HOST_ACCESS_*_ENABLED`), or the `hostAccess` section in `.claude-sandbox.yaml`. Without explicitly enabling them, these resources are not available inside the sandbox.
+
+**Docker socket** — when enabled, the entrypoint adds the container user to the socket's group automatically, so Claude can run `docker compose`, `make up`, etc. Note: Docker socket access is effectively root-equivalent on the host. This setup trusts Claude not to abuse it (e.g., launching a container that mounts `/` read-write). The goal is to prevent *accidental* damage to the host, not to defend against a deliberately adversarial agent.
+
+**AWS** — mounts `~/.aws/` read-only, giving Claude access to your credentials, config, and SSO cache for the AWS CLI or SDKs.
+
+**Git** — mounts `~/.gitconfig` read-only so Claude can make commits with your identity.
+
+**SSH** — mounts `~/.ssh/` read-only so Claude can access git remotes over SSH.
+
+### UID/GID mapping
+
+The entrypoint remaps the `claude` user inside the container to match your host UID/GID, so files created or modified by Claude have correct ownership — no root-owned files left behind.
+
+### Image rebuilding
 
 The base and child images rebuild automatically when their respective Dockerfiles are newer than the cached image. A base rebuild triggers a child rebuild. To force a full rebuild:
 
@@ -288,18 +345,46 @@ docker rmi claude-sandbox-<your-project>   # remove child image
 docker rmi claude-sandbox                   # remove base image
 ```
 
-## Environment variables
+## Makefile integration
 
-| Variable | Default | Description |
-|---|---|---|
-| `PROJECT_DIR` | `$(pwd)` | Project directory to mount |
-| `ANTHROPIC_API_KEY` | (none) | Passed through to the container |
-| `CLAUDE_NOTIFICATION_WEBHOOK_URL` | (none) | Discord webhook for interactive notification hooks (permission prompts, idle) |
-| `CLAUDE_SANDBOX_DOCKERFILE_DIR` | `$PROJECT_DIR` | Directory containing the child Dockerfile |
-| `CLAUDE_SANDBOX_DOCKERFILE` | `Dockerfile.claude-sandbox` | Filename of the child Dockerfile |
-| `CLAUDE_SANDBOX_DOCKER_SOCKET` | (unset) | Set to `1` or `true` to mount the host Docker socket (equivalent to `--docker-socket`) |
-| `CLAUDE_SANDBOX_AWS` | (unset) | Set to `1` or `true` to mount `~/.aws/` read-only (equivalent to `--aws`) |
-| `CLAUDE_SANDBOX_BASE_ONLY` | (unset) | Set to `1` or `true` to skip child Dockerfile and use base image only |
+Here's an example of Makefile targets for a project using claude-sandbox via PATH:
+
+```makefile
+claude:
+	claude-sandbox --docker-socket --git --ssh
+
+claude-resume:
+	claude-sandbox --docker-socket --git --ssh --resume
+
+ralph:
+	claude-sandbox --docker-socket --git --ssh --ralph --interactive
+
+ralph-resume:
+	claude-sandbox --docker-socket --git --ssh --ralph --interactive --resume
+
+ralph-auto:
+	claude-sandbox --docker-socket --git --ssh --ralph --dangerous
+
+ralph-auto-resume:
+	claude-sandbox --docker-socket --git --ssh --ralph --dangerous --resume
+```
+
+## Directory structure
+
+```
+bin/
+  claude-sandbox   Launcher: builds image, assembles mounts, runs the container
+  ralph            Loop runner: fresh-context iterations with stop-file control
+logstream/
+  raw-json-logger.js  Transparent NDJSON passthrough that writes every line to a timestamped file
+  run-logger.js       Transparent NDJSON passthrough that captures per-iteration metrics
+  console-output.js   Filters stream-json NDJSON into human-readable terminal output
+  exit-on-result.js   Pipeline terminator — exits on result event to tear down stuck processes
+  activity-watchdog.js  Inactivity watchdog — exits with code 124 after N minutes of silence
+Dockerfile                          Base image: Debian + Docker CLI/compose, Node.js 22, Claude Code CLI
+Dockerfile.claude-sandbox.example   Example child Dockerfile for project-specific tools
+entrypoint.sh                       Remaps container user UID/GID to match the host; grants Docker socket access
+```
 
 ## Part of kmac-claude-kit
 
