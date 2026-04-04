@@ -3,15 +3,15 @@
 #
 # Works around https://github.com/anthropics/claude-code/issues/15148 where the
 # plugin loader doesn't extract lspServers config from marketplace.json. This
-# script manually registers gopls-lsp and typescript-lsp so the built-in LSP
-# tool can discover them.
+# script manually registers gopls-lsp, typescript-lsp, and pyright-lsp so the
+# built-in LSP tool can discover them.
 #
 # Safe to run multiple times — skips plugins that are already registered.
 # Requires a Claude Code session restart after first run.
 #
 # Usage:
-#   setup-lsp-plugins            # register both plugins
-#   setup-lsp-plugins --check    # exit 0 if both registered, 1 if not
+#   setup-lsp-plugins            # register all plugins
+#   setup-lsp-plugins --check    # exit 0 if all registered, 1 if not
 
 set -euo pipefail
 
@@ -25,6 +25,7 @@ SETTINGS_FILE="${CLAUDE_DIR}/settings.json"
 PLUGINS=(
   "gopls-lsp:1.0.0:gopls"
   "typescript-lsp:1.0.0:typescript-language-server"
+  "pyright-lsp:1.0.0:pyright"
 )
 
 check_mode=false
