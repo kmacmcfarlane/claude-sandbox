@@ -8,7 +8,8 @@ Docker-based sandbox for running Claude Code with filesystem isolation and opt-i
 
 - **Same-path mounting:** Container sees the project at its real host path so `docker compose` volume resolution works correctly against the host daemon.
 - **Baked-in scripts:** `bin/` and `logstream/` are copied into the Docker image at `/opt/claude-sandbox/`, not volume-mounted.
-- **Host user identity:** `entrypoint.sh` renames the container `claude` user to the host caller's username/home directory and adjusts UID/GID to match. This ensures file ownership is correct and that absolute paths (e.g. plugin `installPath` values in `installed_plugins.json`) resolve identically inside and outside the container.
+- **Host user identity:** `entrypoint.sh` renames the container `claude` user to the host caller's username/home directory and adjusts UID/GID to match. This ensures file ownership is correct and that absolute paths (e.g. plugin `installPath` values in `installed_plugins.json`) resolve identically inside and outside the container. The entrypoint also recursively chowns the home directory (skipping bind-mounted host paths discovered via `/proc/self/mountinfo`) so that files created as root during `docker build` are owned by the runtime user.
+- **Home directory convention:** The base image provides `/home/claude` as the home directory. Child Dockerfiles should use `/home/claude` (not a hardcoded host path like `/home/yourname`) for portability. Use `USER claude` for `RUN` steps that create files under the home dir, and end with `USER root` so the entrypoint has privileges for UID/GID remapping. At runtime, the entrypoint moves build-time files from `/home/claude` to the host home path (e.g. `/home/rt`), skipping anything already present (bind mounts are never overwritten), then symlinks `/home/claude → $TARGET_HOME` so hardcoded paths still resolve.
 - **Fresh-context iterations:** Ralph runs Claude as a new process each iteration, not session continuation.
 - **Container context injection:** `bin/claude-sandbox` builds a temp file by concatenating the host's `~/.claude/CLAUDE.md` (if any) with `container-context.md`, then bind-mounts it read-only over the config dir's `CLAUDE.md` in the container. This gives every session (interactive or ralph) awareness of the container environment without modifying the host file. For ralph loops, `PROMPT_RALPH.md` is additionally piped as part of the prompt.
 - **Sibling file mounting:** The launcher mounts `.claude.json` and `.mcp.json` from the parent of the config directory, mirroring the standard `$HOME/.claude/` + `$HOME/.claude.json` + `$HOME/.mcp.json` layout. When `CLAUDE_CONFIG_DIR` relocates the config dir, the same sibling relationship applies. This ensures MCP server discovery (which walks up from the working directory) and global state work identically inside the container.
@@ -27,7 +28,7 @@ logstream/exit-on-result.js    # Pipeline terminator — exits on result event t
 logstream/activity-watchdog.js # Inactivity watchdog — exits with code 124 after N minutes of silence
 notification-hooks.json  # Hook fragment merged into container's settings.json at launch
 entrypoint.sh        # Container entrypoint — UID/GID remapping via gosu
-Dockerfile           # Base image: Debian bookworm-slim + Python 3 venv + Docker CLI + Node 22 + Claude Code
+Dockerfile           # Base image: Debian bookworm-slim + build-essential + Python 3 venv + Docker CLI + Node 22 + Claude Code
 Dockerfile.claude-sandbox.example  # Example child Dockerfile for project-specific tools
 ```
 

@@ -18,10 +18,27 @@ Expert guidance for the claude-sandbox project — a Docker-based sandbox for ru
 ## Core Concepts
 
 ### Two-Layer Image System
-1. **Base image** (`claude-sandbox`): OS, Node 22, Claude CLI, Docker CLI, Python venv, sandbox scripts
+1. **Base image** (`claude-sandbox`): OS, build-essential, Node 22, Claude CLI, Docker CLI, Python venv, sandbox scripts
 2. **Child image** (`claude-sandbox-{project-slug}`): Project-specific tools via `Dockerfile.claude-sandbox` extending `FROM claude-sandbox`
 
 The launcher auto-builds both layers. Base rebuilds trigger child rebuilds.
+
+### Home Directory Convention
+The base image provides `/home/claude` as the build-time home directory. Child Dockerfiles should always use `/home/claude` for any paths under the home dir — never hardcode a host-specific path like `/home/yourname`.
+
+At runtime, the entrypoint:
+1. Renames the `claude` user to match the host caller (e.g. `rt`)
+2. Moves all build-time files from `/home/claude` to the host home path (e.g. `/home/rt`), skipping anything already present (bind mounts from the host are never overwritten)
+3. Symlinks `/home/claude → /home/rt` so any hardcoded paths still resolve
+4. Chowns all non-bind-mounted files to the host UID/GID
+
+Use `USER claude` for `RUN` steps that write to the home dir, and end with `USER root` so the entrypoint has privileges:
+
+```dockerfile
+USER claude
+RUN mkdir -p /home/claude/.cache/mytool && echo "config" > /home/claude/.cache/mytool/settings
+USER root
+```
 
 ### Same-Path Mounting
 The container sees the project at its real host path. This is critical for `docker compose` volume resolution against the host daemon.
@@ -84,9 +101,11 @@ mounts:
 4. Verify `Dockerfile.claude-sandbox` syntax if using child image
 
 ### File permission issues
-The entrypoint remaps UID/GID to match the host user. If files have wrong ownership:
-1. Check `entrypoint.sh` logs for UID/GID remapping
-2. Verify the host user's UID matches expectations: `id`
+The entrypoint remaps UID/GID and chowns all non-bind-mounted files under the home directory. If files have wrong ownership:
+1. Check that the child Dockerfile uses `/home/claude` (not a hardcoded host path)
+2. Check that `USER claude` / `USER root` bracketing is correct for home-dir writes
+3. Verify the host user's UID matches expectations: `id`
+4. If a tool can't write to `~/.cache` or similar, the entrypoint's chown may have missed it — check `entrypoint.sh` for the mountinfo-based prune logic
 
 ### Docker commands fail inside container
 Ensure `--docker-socket` flag or `hostAccess.dockerSocket.enabled: true` is set. The container talks to the host Docker daemon — there is no daemon inside.

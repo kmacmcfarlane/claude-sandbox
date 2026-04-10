@@ -2,6 +2,7 @@ FROM debian:bookworm-slim
 
 # Install base utilities
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
     ca-certificates \
     curl \
     git \

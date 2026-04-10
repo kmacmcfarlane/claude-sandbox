@@ -5,6 +5,17 @@
 #
 # The build context is the directory containing this file, so COPY instructions
 # reference your project directory.
+#
+# USER CONVENTION:
+#   The base image's entrypoint runs as root, remaps the "claude" user to match
+#   the host caller's UID/GID, then drops privileges via gosu. It also chowns
+#   all non-bind-mounted files under the home directory at startup.
+#
+#   - Use "USER claude" for RUN steps that create files under /home/claude
+#     (e.g. go install, pip install --user, writing to ~/.cache).
+#   - Use /home/claude (not a hardcoded host path like /home/yourname) so the
+#     image is portable across host users.
+#   - End with "USER root" so the entrypoint has the privileges it needs.
 
 FROM claude-sandbox
 
@@ -24,3 +35,9 @@ FROM claude-sandbox
 
 # --- Python packages (venv is already active from base image) ----------------
 # RUN pip install --no-cache-dir numpy pandas
+
+# --- Files under /home/claude (use USER claude so they're owned correctly) ---
+# USER claude
+# RUN mkdir -p /home/claude/.cache/myapp \
+#     && echo "hello" > /home/claude/.cache/myapp/config
+# USER root

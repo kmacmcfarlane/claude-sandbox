@@ -20,11 +20,33 @@ fi
 if [ "$TARGET_USER" != "claude" ]; then
     usermod -l "$TARGET_USER" -d "$TARGET_HOME" claude 2>/dev/null || true
     groupmod -n "$TARGET_USER" claude 2>/dev/null || true
-    mkdir -p "$TARGET_HOME"
-    chown "$TARGET_UID:$TARGET_GID" "$TARGET_HOME"
-else
-    chown -R claude:claude /home/claude 2>/dev/null || true
+
+    # Relocate build-time home (/home/claude) to the runtime home path
+    # (e.g. /home/rt). Child Dockerfiles use /home/claude; the entrypoint
+    # moves those files so they appear under the real $HOME at runtime.
+    # SAFETY: skip anything already present at $TARGET_HOME — bind mounts
+    # from the host (.claude, .ssh, .aws, .gitconfig) must never be
+    # overwritten or have their permissions changed.
+    if [ "$TARGET_HOME" != "/home/claude" ] && [ -d /home/claude ]; then
+        mkdir -p "$TARGET_HOME"
+        shopt -s dotglob nullglob
+        for item in /home/claude/*; do
+            base="$(basename "$item")"
+            [ -e "$TARGET_HOME/$base" ] || mv "$item" "$TARGET_HOME/"
+        done
+        shopt -u dotglob nullglob
+        rm -rf /home/claude
+        ln -s "$TARGET_HOME" /home/claude
+    fi
 fi
+
+# Own all non-bind-mounted files under the home dir so that files created
+# as root during `docker build` match the host user's UID/GID at runtime.
+PRUNE_ARGS=()
+while IFS= read -r mp; do
+    [[ "$mp" == "$TARGET_HOME"/* ]] && PRUNE_ARGS+=(-path "$mp" -prune -o)
+done < <(awk '{print $5}' /proc/self/mountinfo)
+find "$TARGET_HOME" "${PRUNE_ARGS[@]}" -print0 | xargs -0 chown "$TARGET_UID:$TARGET_GID" 2>/dev/null || true
 
 # Grant docker socket access by adding user to a group with the socket's GID
 if [ -n "$DOCKER_SOCKET_GID" ]; then

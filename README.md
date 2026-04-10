@@ -272,6 +272,24 @@ USER root
 ENV PATH="/home/claude/go/bin:$PATH"
 ```
 
+**Home directory convention:** Always use `/home/claude` in child Dockerfiles — never hardcode a host-specific path like `/home/yourname`. At runtime, the entrypoint:
+
+1. Renames the `claude` user to match the host caller
+2. Moves build-time files from `/home/claude` to the host home path (e.g. `/home/rt`), skipping anything already present so bind mounts from the host are never overwritten
+3. Symlinks `/home/claude → /home/rt` so hardcoded paths still resolve
+4. Chowns all non-bind-mounted files under the home dir to match the host UID/GID
+
+For `RUN` steps that create files under the home directory (caches, configs, user-local installs), bracket them with `USER claude` / `USER root`:
+
+```dockerfile
+USER claude
+RUN mkdir -p /home/claude/.cache/myapp \
+    && echo "config" > /home/claude/.cache/myapp/settings
+USER root
+```
+
+The final `USER` must be `root` so the entrypoint has privileges.
+
 The child image is built automatically and tagged `claude-sandbox-{project-slug}`. It rebuilds when the child Dockerfile changes or the base image is updated.
 
 See `Dockerfile.claude-sandbox.example` in this repo for a commented template.
@@ -334,7 +352,7 @@ SSH, git, Docker socket, and AWS mounts are all opt-in. Enable them via CLI flag
 
 ### UID/GID mapping
 
-The entrypoint remaps the `claude` user inside the container to match your host UID/GID, so files created or modified by Claude have correct ownership — no root-owned files left behind.
+The entrypoint remaps the `claude` user inside the container to match your host UID/GID, so files created or modified by Claude have correct ownership — no root-owned files left behind. It also recursively chowns all non-bind-mounted files under the home directory, so files created as root during `docker build` (in child Dockerfiles) are owned by the runtime user.
 
 ### Image rebuilding
 
@@ -381,7 +399,7 @@ logstream/
   console-output.js   Filters stream-json NDJSON into human-readable terminal output
   exit-on-result.js   Pipeline terminator — exits on result event to tear down stuck processes
   activity-watchdog.js  Inactivity watchdog — exits with code 124 after N minutes of silence
-Dockerfile                          Base image: Debian + Docker CLI/compose, Node.js 22, Claude Code CLI
+Dockerfile                          Base image: Debian + build-essential, Docker CLI/compose, Node.js 22, Claude Code CLI
 Dockerfile.claude-sandbox.example   Example child Dockerfile for project-specific tools
 entrypoint.sh                       Remaps container user UID/GID to match the host; grants Docker socket access
 ```
