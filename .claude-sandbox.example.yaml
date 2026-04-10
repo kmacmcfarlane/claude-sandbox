@@ -15,10 +15,10 @@
 hostAccess:
   # Mount ~/.ssh/ read-only (SSH keys for git remotes)
   ssh:
-    enabled: false
+    enabled: true
   # Mount ~/.gitconfig read-only (git identity)
   git:
-    enabled: false
+    enabled: true
   # Mount /var/run/docker.sock (host Docker daemon access)
   dockerSocket:
     enabled: false
