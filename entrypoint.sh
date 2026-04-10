@@ -1,6 +1,15 @@
 #!/bin/bash
 set -e
 
+# The entrypoint must run as root to remap UID/GID and chown files.
+# Child Dockerfiles must end with USER root — see README.md.
+if [ "$(id -u)" != "0" ]; then
+    echo "ERROR: entrypoint.sh must run as root." >&2
+    echo "Your Dockerfile.claude-sandbox likely ends with 'USER claude' instead of 'USER root'." >&2
+    echo "Add 'USER root' as the last line. See: https://github.com/kmacmcfarlane/claude-sandbox#dockerfileclaude-sandbox" >&2
+    exit 1
+fi
+
 TARGET_UID="${HOST_UID:-1000}"
 TARGET_GID="${HOST_GID:-1000}"
 TARGET_USER="${HOST_USER:-claude}"
