@@ -51,8 +51,50 @@ CLI_GIT=""
 CLI_DOCKER_SOCKET=""
 CLI_AWS=""
 
+usage() {
+    cat <<'EOF'
+Usage:
+  claude-sandbox                          # launch claude interactively in $PWD
+  claude-sandbox --resume                 # pass args through to claude
+  claude-sandbox --dangerous              # skip permission prompts
+  claude-sandbox --docker-socket          # mount the host Docker socket
+  claude-sandbox --aws                    # mount ~/.aws/ read-only
+  claude-sandbox --git                    # mount ~/.gitconfig read-only
+  claude-sandbox --ssh                    # mount ~/.ssh/ read-only
+  claude-sandbox --ralph [ralph-args]     # launch the ralph loop runner
+  claude-sandbox --ralph --limit 5        # run ralph for 5 iterations
+  PROJECT_DIR=/other claude-sandbox       # launch claude in /other
+
+Options:
+  --help, -h                Show this help message and exit
+  --ralph                   Launch the ralph loop runner instead of interactive claude
+  --limit N                 Run ralph for N iterations (only valid with --ralph)
+  --dangerous               Skip permission prompts (--dangerously-skip-permissions)
+  --docker-socket           Mount the host Docker socket into the container
+  --aws                     Mount ~/.aws/ read-only into the container
+  --git                     Mount ~/.gitconfig read-only into the container
+  --ssh                     Mount ~/.ssh/ read-only into the container
+
+Environment variables:
+  PROJECT_DIR                             Override the project directory (default: $PWD)
+  CLAUDE_CONFIG_DIR                       Override the Claude config directory
+  CLAUDE_SANDBOX_BASE_ONLY=1              Skip child Dockerfile detection
+  CLAUDE_SANDBOX_DOCKERFILE_DIR           Override child Dockerfile directory
+  CLAUDE_SANDBOX_DOCKERFILE               Override child Dockerfile name
+  CLAUDE_SANDBOX_HOST_ACCESS_SSH_ENABLED  Enable SSH mount via env var
+  CLAUDE_SANDBOX_HOST_ACCESS_GIT_ENABLED  Enable git mount via env var
+  CLAUDE_SANDBOX_HOST_ACCESS_DOCKER_SOCKET_ENABLED  Enable Docker socket mount via env var
+  CLAUDE_SANDBOX_HOST_ACCESS_AWS_ENABLED  Enable AWS mount via env var
+
+The project is mounted at its REAL host path inside the container so that
+docker compose volumes (which the host daemon resolves) work correctly.
+EOF
+}
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --help|-h)
+            usage; exit 0 ;;
         --ralph)
             RALPH_MODE=true; shift ;;
         --limit)
