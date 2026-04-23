@@ -255,6 +255,12 @@ if [ -f "$CONFIG_FILE" ]; then
             exit 1
         fi
 
+        # Skip mounts that duplicate the project directory (already mounted above)
+        if [ "$MOUNT_CONTAINER" = "$PROJECT_DIR" ]; then
+            echo "Skipping mounts[$i]: container path '$MOUNT_CONTAINER' duplicates project directory mount"
+            continue
+        fi
+
         if [ "$MOUNT_WRITABLE" = "true" ]; then
             VOLUMES+=(-v "$MOUNT_HOST:$MOUNT_CONTAINER")
         else
