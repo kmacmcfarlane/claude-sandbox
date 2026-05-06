@@ -295,6 +295,29 @@ fi
 if [ "$AWS_MOUNT" = true ] && [ -d "$HOME/.aws" ]; then
     VOLUMES+=(-v "$HOME/.aws:$HOME/.aws:ro")
 fi
+
+# Forward host AWS_* env vars when AWS access is enabled (e.g. direnv-set
+# profile/credentials paths). Allowlist only — keeps the trust boundary
+# explicit and avoids leaking arbitrary host env into the container.
+# Path-valued vars (AWS_SHARED_CREDENTIALS_FILE, AWS_CONFIG_FILE) get a
+# same-path read-only bind mount so they resolve inside the container.
+AWS_ENV=()
+if [ "$AWS_MOUNT" = true ]; then
+    for v in AWS_PROFILE AWS_DEFAULT_PROFILE AWS_REGION AWS_DEFAULT_REGION \
+             AWS_SHARED_CREDENTIALS_FILE AWS_CONFIG_FILE \
+             AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN \
+             AWS_ROLE_ARN AWS_WEB_IDENTITY_TOKEN_FILE AWS_ENDPOINT_URL; do
+        [ -n "${!v:-}" ] && AWS_ENV+=(-e "$v=${!v}")
+    done
+    for v in AWS_SHARED_CREDENTIALS_FILE AWS_CONFIG_FILE AWS_WEB_IDENTITY_TOKEN_FILE; do
+        path="${!v:-}"
+        if [ -n "$path" ] && [ -f "$path" ]; then
+            VOLUMES+=(-v "$path:$path:ro")
+        elif [ -n "$path" ]; then
+            echo "WARNING: $v=$path but file not found on host; skipping mount" >&2
+        fi
+    done
+fi
 if [ "$GIT_MOUNT" = true ] && [ -f "$HOME/.gitconfig" ]; then
     VOLUMES+=(-v "$HOME/.gitconfig:$HOME/.gitconfig:ro")
 fi
@@ -431,6 +454,7 @@ exec docker run -it --rm --init \
     -e DOCKER_GID="$DOCKER_GID" \
     -e ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}" \
     "${CLAUDE_CONFIG_DIR_ENV[@]}" \
+    "${AWS_ENV[@]}" \
     --name "$CONTAINER_NAME" \
     "$IMAGE_NAME" \
     "${CMD[@]}"
