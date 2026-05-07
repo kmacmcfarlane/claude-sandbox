@@ -35,4 +35,5 @@ one-time setup (idempotent). Use `setup-lsp-plugins --check` to verify status.
 - The project is mounted at its real host path so `docker compose` volume resolution works against the host daemon.
 - Files you create are owned by the host user (UID/GID remapping handled by the entrypoint).
 - `/home/claude` is symlinked to the host user's home directory (e.g. `/home/rt`). Both paths work. Build-time files from the Dockerfile are relocated here automatically.
+- **Discord MCP server** — baked in at `/opt/claude-sandbox/mcp/discord-notify/dist/index.mjs`. Provides the `send_discord_notification` tool when `DISCORD_WEBHOOK_URL` is set in `.env.claude-sandbox`. Configured via `~/.mcp.json` — no per-project setup needed.
 - You do NOT have sudo or root access.

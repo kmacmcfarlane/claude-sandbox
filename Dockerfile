@@ -67,5 +67,12 @@ COPY PROMPT_RALPH.md /opt/claude-sandbox/PROMPT_RALPH.md
 RUN chmod +x /opt/claude-sandbox/bin/*
 ENV PATH="/opt/claude-sandbox/bin:$PATH"
 
+# Discord notification MCP server (baked in so every project gets it for free)
+COPY mcp/discord-notify/ /opt/claude-sandbox/mcp/discord-notify/
+RUN cd /opt/claude-sandbox/mcp/discord-notify \
+    && npm install --production=false \
+    && npx esbuild index.mjs --bundle --platform=node --format=esm --outfile=dist/index.mjs \
+    && rm -rf node_modules
+
 ENTRYPOINT ["/opt/claude-sandbox/bin/entrypoint.sh"]
 CMD ["claude"]

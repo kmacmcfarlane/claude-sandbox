@@ -27,6 +27,7 @@ logstream/console-output.js # Converts Claude NDJSON stream output to human-read
 logstream/exit-on-result.js    # Pipeline terminator — exits on result event to tear down stuck processes
 logstream/activity-watchdog.js # Inactivity watchdog — exits with code 124 after N minutes of silence
 notification-hooks.json  # Hook fragment merged into container's settings.json at launch
+mcp/discord-notify/      # Discord notification MCP server — built into the base image
 entrypoint.sh        # Container entrypoint — UID/GID remapping via gosu
 Dockerfile           # Base image: Debian bookworm-slim + build-essential + Python 3 venv + Docker CLI + Node 22 + Claude Code
 Dockerfile.claude-sandbox.example  # Example child Dockerfile for project-specific tools

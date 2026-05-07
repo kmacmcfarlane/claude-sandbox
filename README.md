@@ -187,6 +187,29 @@ cp .env.claude-sandbox.example .env.claude-sandbox
 
 This file is gitignored — do not commit it.
 
+### Discord MCP server
+
+The base image includes a Discord notification MCP server at `/opt/claude-sandbox/mcp/discord-notify/dist/index.mjs`. It provides the `send_discord_notification` tool, which Claude (and ralph prompts) use to post status updates to Discord.
+
+**Setup:** Set `DISCORD_WEBHOOK_URL` in your `.env.claude-sandbox` and point `~/.mcp.json` at the baked-in path:
+
+```json
+{
+  "mcpServers": {
+    "discord": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["/opt/claude-sandbox/mcp/discord-notify/dist/index.mjs"],
+      "env": {
+        "DISCORD_WEBHOOK_URL": "${DISCORD_WEBHOOK_URL}"
+      }
+    }
+  }
+}
+```
+
+No per-project `.mcp.json` entry or `scripts/mcp/` directory is needed — every sandbox container gets the server automatically.
+
 ### `.claude-sandbox.yaml`
 
 Container configuration. Place in your project root. See `.claude-sandbox.example.yaml` for a starter template.
@@ -399,6 +422,8 @@ logstream/
   console-output.js   Filters stream-json NDJSON into human-readable terminal output
   exit-on-result.js   Pipeline terminator — exits on result event to tear down stuck processes
   activity-watchdog.js  Inactivity watchdog — exits with code 124 after N minutes of silence
+mcp/
+  discord-notify/       Discord notification MCP server — bundled + built into the base image
 Dockerfile                          Base image: Debian + build-essential, Docker CLI/compose, Node.js 22, Claude Code CLI
 Dockerfile.claude-sandbox.example   Example child Dockerfile for project-specific tools
 entrypoint.sh                       Remaps container user UID/GID to match the host; grants Docker socket access
