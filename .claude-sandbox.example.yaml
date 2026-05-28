@@ -58,3 +58,7 @@ mounts: []
 # Suppresses the missing-Dockerfile warning and skips the parent directory search.
 # Env var CLAUDE_SANDBOX_BASE_ONLY=1 overrides.
 # baseOnly: false
+
+# Disable the Claude Code version check at launch.
+# Also controllable via --no-update-check flag or CLAUDE_SANDBOX_NO_UPDATE_CHECK=1.
+# disableUpdateCheck: false

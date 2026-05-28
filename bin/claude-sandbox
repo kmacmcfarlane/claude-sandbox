@@ -322,6 +322,12 @@ if [ -f "$CONFIG_FILE" ]; then
     # Model override
     YAML_MODEL=$(yq '.model // ""' "$CONFIG_FILE")
 
+    # Disable update check
+    YAML_DISABLE_UPDATE_CHECK=$(yq '.disableUpdateCheck // ""' "$CONFIG_FILE")
+    if [[ "$YAML_DISABLE_UPDATE_CHECK" = "true" && "$NO_UPDATE_CHECK" = "false" ]]; then
+        NO_UPDATE_CHECK=true
+    fi
+
     # Host access settings
     YAML_SSH=$(yq '.hostAccess.ssh.enabled // ""' "$CONFIG_FILE")
     YAML_GIT=$(yq '.hostAccess.git.enabled // ""' "$CONFIG_FILE")
