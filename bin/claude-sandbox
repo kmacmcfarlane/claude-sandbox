@@ -197,7 +197,7 @@ fi
 # Check for Claude Code updates (skip with --no-update-check or env var)
 # ---------------------------------------------------------------------------
 if [ "$NO_UPDATE_CHECK" != "true" ] && [ "$NO_UPDATE_CHECK" != "1" ] && [ "$BASE_NEEDS_BUILD" = false ]; then
-    BAKED_VERSION=$(docker run --rm --entrypoint cat "$BASE_IMAGE_NAME" /opt/claude-sandbox/claude-version 2>/dev/null | tr -d '[:space:]' || echo "")
+    BAKED_VERSION=$(docker run --rm --entrypoint cat "$BASE_IMAGE_NAME" /opt/claude-sandbox/claude-version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || echo "")
     LATEST_VERSION=$(npm view @anthropic-ai/claude-code version 2>/dev/null || echo "")
 
     if [[ -n "$BAKED_VERSION" && -n "$LATEST_VERSION" && "$BAKED_VERSION" != "$LATEST_VERSION" ]]; then
