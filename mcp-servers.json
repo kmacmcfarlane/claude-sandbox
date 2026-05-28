@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "discord": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["/opt/claude-sandbox/mcp/discord-notify/dist/index.mjs"],
+      "env": {
+        "DISCORD_WEBHOOK_URL": "${DISCORD_WEBHOOK_URL}"
+      }
+    }
+  }
+}

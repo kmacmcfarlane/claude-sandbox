@@ -28,8 +28,15 @@ claude-sandbox --aws                     # ~/.aws/ read-only
 claude-sandbox --git                     # ~/.gitconfig read-only
 claude-sandbox --ssh                     # ~/.ssh/ read-only
 
+# Choose a model:
+claude-sandbox --model claude-opus-4-8
+claude-sandbox --model sonnet            # aliases work too
+
 # Skip permission prompts:
 claude-sandbox --dangerous
+
+# Force rebuild of base + child images:
+claude-sandbox --rebuild
 
 # Combine flags:
 claude-sandbox --docker-socket --git --ssh --dangerous
@@ -58,13 +65,16 @@ These flags are consumed by the launcher and control the container environment. 
 | `--host-access-aws-enabled` | `--aws` | Mount `~/.aws/` read-only |
 | `--host-access-git-enabled` | `--git` | Mount `~/.gitconfig` read-only |
 | `--host-access-ssh-enabled` | `--ssh` | Mount `~/.ssh/` read-only |
+| `--model MODEL` | | Model to use (alias like `opus` or full ID like `claude-opus-4-8`) |
 | `--dangerous` | | Pass `--dangerously-skip-permissions` to claude/ralph |
+| `--rebuild` | | Force rebuild of base and child images (uses `--no-cache`) |
+| `--no-update-check` | | Skip Claude Code version check at launch |
 | `--ralph` | | Launch the ralph loop runner instead of interactive claude |
 | `--limit N` | | Stop ralph after N iterations (only valid with `--ralph`) |
 
 ### Passthrough arguments
 
-Any arguments not listed above are passed through to `claude` (in interactive mode) or `ralph` (in `--ralph` mode). For example:
+Any arguments not listed above are passed through to `claude` (in interactive mode) or `ralph` (in `--ralph` mode). Unrecognized `--` flags are rejected; use `--` to force passthrough if needed. For example:
 
 ```bash
 # Pass --resume to claude:
@@ -97,6 +107,7 @@ These flags are passed through to ralph (after `--ralph` and any launcher flags)
 | Flag | Default | Description |
 |---|---|---|
 | `--limit N` | `30` | Stop after N iterations |
+| `--model MODEL` | (default) | Model to use (forwarded to claude as `--model`) |
 | `--interactive` | off | Run claude interactively (default: non-interactive `-p`) |
 | `--dangerous` | off | Pass `--dangerously-skip-permissions` to claude |
 | `--resume` | off | Pass `--resume` to claude on first iteration |
@@ -191,30 +202,21 @@ This file is gitignored — do not commit it.
 
 The base image includes a Discord notification MCP server at `/opt/claude-sandbox/mcp/discord-notify/dist/index.mjs`. It provides the `send_discord_notification` tool, which Claude (and ralph prompts) use to post status updates to Discord.
 
-**Setup:** Set `DISCORD_WEBHOOK_URL` in your `.env.claude-sandbox` and point `~/.mcp.json` at the baked-in path:
-
-```json
-{
-  "mcpServers": {
-    "discord": {
-      "type": "stdio",
-      "command": "node",
-      "args": ["/opt/claude-sandbox/mcp/discord-notify/dist/index.mjs"],
-      "env": {
-        "DISCORD_WEBHOOK_URL": "${DISCORD_WEBHOOK_URL}"
-      }
-    }
-  }
-}
-```
-
-No per-project `.mcp.json` entry or `scripts/mcp/` directory is needed — every sandbox container gets the server automatically.
+**Setup:** Set `DISCORD_WEBHOOK_URL` in your `.env.claude-sandbox`. The launcher automatically merges the Discord MCP server entry into the container's `.mcp.json` — no manual configuration needed. If you already have a `~/.mcp.json`, the sandbox entries are added alongside your existing servers (the host file is never modified).
 
 ### `.claude-sandbox.yaml`
 
 Container configuration. Place in your project root. See `.claude-sandbox.example.yaml` for a starter template.
 
 **Dependency:** Parsing requires [`yq`](https://github.com/mikefarah/yq) on the host. Install with `brew install yq`, `sudo snap install yq`, or `go install github.com/mikefarah/yq/v4@latest`.
+
+#### Model
+
+Override the model used by claude (and ralph). Accepts an alias or full model ID. The `--model` CLI flag takes precedence.
+
+```yaml
+model: claude-opus-4-8
+```
 
 #### Host access
 
@@ -337,6 +339,7 @@ If no `Dockerfile.claude-sandbox` is found anywhere up to `/`, the launcher warn
 | `CLAUDE_SANDBOX_DOCKERFILE_DIR` | `$PROJECT_DIR` | Directory containing the child Dockerfile |
 | `CLAUDE_SANDBOX_DOCKERFILE` | `Dockerfile.claude-sandbox` | Filename of the child Dockerfile |
 | `CLAUDE_SANDBOX_BASE_ONLY` | (unset) | Set to `1` or `true` to skip child Dockerfile and use base image only |
+| `CLAUDE_SANDBOX_NO_UPDATE_CHECK` | (unset) | Set to `1` or `true` to skip Claude Code version check at launch |
 
 ## How it works
 
@@ -379,11 +382,21 @@ The entrypoint remaps the `claude` user inside the container to match your host 
 
 ### Image rebuilding
 
-The base and child images rebuild automatically when their respective Dockerfiles are newer than the cached image. A base rebuild triggers a child rebuild. To force a full rebuild:
+The base and child images rebuild automatically when their respective Dockerfiles are newer than the cached image. A base rebuild triggers a child rebuild.
+
+**Claude Code version check:** On each launch, the launcher compares the Claude Code version baked into the image against the latest version on npm. If a newer version is available, it prompts:
+
+```
+Claude Code update available: 1.0.30 → 1.0.35
+Rebuild base image to update? [y/N]
+```
+
+Accepting triggers a `--no-cache` rebuild of the base image (and consequently the child image). Skip the check with `--no-update-check` or `CLAUDE_SANDBOX_NO_UPDATE_CHECK=1`.
+
+**Force rebuild:** Use `--rebuild` to force a full base + child rebuild without the version check prompt:
 
 ```bash
-docker rmi claude-sandbox-<your-project>   # remove child image
-docker rmi claude-sandbox                   # remove base image
+claude-sandbox --rebuild
 ```
 
 ## Makefile integration
@@ -427,6 +440,8 @@ mcp/
 Dockerfile                          Base image: Debian + build-essential, Docker CLI/compose, Node.js 22, Claude Code CLI
 Dockerfile.claude-sandbox.example   Example child Dockerfile for project-specific tools
 entrypoint.sh                       Remaps container user UID/GID to match the host; grants Docker socket access
+notification-hooks.json             Hook fragment merged into container's settings.json
+mcp-servers.json                    MCP server fragment merged into container's .mcp.json
 ```
 
 ## Part of kmac-claude-kit

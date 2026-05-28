@@ -51,6 +51,13 @@ CLI_GIT=""
 CLI_DOCKER_SOCKET=""
 CLI_AWS=""
 
+# Model override (forwarded to claude/ralph as --model)
+CLI_MODEL=""
+
+# Rebuild control
+FORCE_REBUILD=false
+NO_UPDATE_CHECK="${CLAUDE_SANDBOX_NO_UPDATE_CHECK:-false}"
+
 usage() {
     cat <<'EOF'
 Usage:
@@ -69,7 +76,10 @@ Options:
   --help, -h                Show this help message and exit
   --ralph                   Launch the ralph loop runner instead of interactive claude
   --limit N                 Run ralph for N iterations (only valid with --ralph)
+  --model MODEL             Model to use (alias like 'opus' or full ID like 'claude-opus-4-8')
   --dangerous               Skip permission prompts (--dangerously-skip-permissions)
+  --rebuild                 Force rebuild of base and child images
+  --no-update-check         Skip Claude Code version check
   --docker-socket           Mount the host Docker socket into the container
   --aws                     Mount ~/.aws/ read-only into the container
   --git                     Mount ~/.gitconfig read-only into the container
@@ -85,6 +95,7 @@ Environment variables:
   CLAUDE_SANDBOX_HOST_ACCESS_GIT_ENABLED  Enable git mount via env var
   CLAUDE_SANDBOX_HOST_ACCESS_DOCKER_SOCKET_ENABLED  Enable Docker socket mount via env var
   CLAUDE_SANDBOX_HOST_ACCESS_AWS_ENABLED  Enable AWS mount via env var
+  CLAUDE_SANDBOX_NO_UPDATE_CHECK          Skip Claude Code version check
 
 The project is mounted at its REAL host path inside the container so that
 docker compose volumes (which the host daemon resolves) work correctly.
@@ -103,6 +114,16 @@ while [[ $# -gt 0 ]]; do
                 echo "Error: --limit requires a value" >&2; exit 2
             fi
             shift 2 ;;
+        --model)
+            CLI_MODEL="${2:-}"
+            if [[ -z "$CLI_MODEL" ]]; then
+                echo "Error: --model requires a value" >&2; exit 2
+            fi
+            shift 2 ;;
+        --rebuild)
+            FORCE_REBUILD=true; shift ;;
+        --no-update-check)
+            NO_UPDATE_CHECK=true; shift ;;
         --dangerous|--dangerously-skip-permissions)
             SKIP_PERMISSIONS="--dangerously-skip-permissions"; shift ;;
         --host-access-ssh-enabled|--ssh)
@@ -113,6 +134,15 @@ while [[ $# -gt 0 ]]; do
             CLI_DOCKER_SOCKET=true; shift ;;
         --host-access-aws-enabled|--aws)
             CLI_AWS=true; shift ;;
+        --)
+            shift; break ;;
+        --*)
+            # Only allow known claude CLI flags through; reject anything else
+            KNOWN_PASSTHROUGH="--resume --continue --verbose --output-format --allowedTools --disallowTools --permission-prompt-tool --mcp-config --permission-mode --append-system-prompt --system-prompt --max-turns --print --input-format --model --fallback-model"
+            for _pt in $KNOWN_PASSTHROUGH; do
+                if [[ "$1" = "$_pt" ]]; then break 2; fi
+            done
+            echo "Error: unknown flag '$1'" >&2; exit 2 ;;
         *)
             break ;;
     esac
@@ -139,15 +169,48 @@ HOST_GID="$(id -g)"
 # Build base image if needed (must happen before volume assembly which uses it)
 # ---------------------------------------------------------------------------
 BASE_NEEDS_BUILD=false
-if ! docker image inspect "$BASE_IMAGE_NAME" >/dev/null 2>&1; then
+if [ "$FORCE_REBUILD" = true ]; then
     BASE_NEEDS_BUILD=true
-elif [ "$REPO_ROOT/Dockerfile" -nt "$(docker image inspect -f '{{.Created}}' "$BASE_IMAGE_NAME" 2>/dev/null || echo '1970')" ]; then
+elif ! docker image inspect "$BASE_IMAGE_NAME" >/dev/null 2>&1; then
     BASE_NEEDS_BUILD=true
+else
+    # Compare Dockerfile mtime against image creation time via a temp marker file
+    _img_created=$(docker image inspect -f '{{.Created}}' "$BASE_IMAGE_NAME" 2>/dev/null || echo "")
+    if [ -n "$_img_created" ]; then
+        _marker=$(mktemp)
+        touch -d "$_img_created" "$_marker" 2>/dev/null || true
+        if [ "$REPO_ROOT/Dockerfile" -nt "$_marker" ]; then
+            BASE_NEEDS_BUILD=true
+        fi
+        rm -f "$_marker"
+    fi
 fi
 
 if [ "$BASE_NEEDS_BUILD" = true ]; then
     echo "Building $BASE_IMAGE_NAME base image..."
-    docker build -t "$BASE_IMAGE_NAME" "$REPO_ROOT"
+    BUILD_ARGS=(-t "$BASE_IMAGE_NAME")
+    [[ "$FORCE_REBUILD" = true ]] && BUILD_ARGS+=(--no-cache)
+    docker build "${BUILD_ARGS[@]}" "$REPO_ROOT"
+fi
+
+# ---------------------------------------------------------------------------
+# Check for Claude Code updates (skip with --no-update-check or env var)
+# ---------------------------------------------------------------------------
+if [ "$NO_UPDATE_CHECK" != "true" ] && [ "$NO_UPDATE_CHECK" != "1" ] && [ "$BASE_NEEDS_BUILD" = false ]; then
+    BAKED_VERSION=$(docker run --rm --entrypoint cat "$BASE_IMAGE_NAME" /opt/claude-sandbox/claude-version 2>/dev/null | tr -d '[:space:]' || echo "")
+    LATEST_VERSION=$(npm view @anthropic-ai/claude-code version 2>/dev/null || echo "")
+
+    if [[ -n "$BAKED_VERSION" && -n "$LATEST_VERSION" && "$BAKED_VERSION" != "$LATEST_VERSION" ]]; then
+        echo ""
+        echo "Claude Code update available: $BAKED_VERSION → $LATEST_VERSION"
+        read -r -p "Rebuild base image to update? [y/N] " answer </dev/tty
+        if [[ "$answer" =~ ^[Yy]$ ]]; then
+            echo "Rebuilding $BASE_IMAGE_NAME base image..."
+            docker build --no-cache -t "$BASE_IMAGE_NAME" "$REPO_ROOT"
+            BASE_NEEDS_BUILD=true  # trigger child rebuild too
+        fi
+        echo ""
+    fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -169,7 +232,8 @@ fi
 # Merge host CLAUDE.md with container context for in-container awareness
 CLAUDE_MD_TMP=$(mktemp)
 SETTINGS_TMP=$(mktemp)
-trap "rm -f '$CLAUDE_MD_TMP' '$SETTINGS_TMP'" EXIT
+MCP_TMP=$(mktemp)
+trap "rm -f '$CLAUDE_MD_TMP' '$SETTINGS_TMP' '$MCP_TMP'" EXIT
 cat "$CLAUDE_CONFIG_HOST/CLAUDE.md" 2>/dev/null >> "$CLAUDE_MD_TMP" || true
 printf '\n' >> "$CLAUDE_MD_TMP"
 cat "$REPO_ROOT/container-context.md" >> "$CLAUDE_MD_TMP"
@@ -202,8 +266,25 @@ CONFIG_PARENT="$(dirname "$CLAUDE_CONFIG_HOST")"
 if [ -f "$CONFIG_PARENT/.claude.json" ]; then
     VOLUMES+=(-v "$CONFIG_PARENT/.claude.json:$CONFIG_PARENT/.claude.json")
 fi
-if [ -f "$CONFIG_PARENT/.mcp.json" ]; then
-    VOLUMES+=(-v "$CONFIG_PARENT/.mcp.json:$CONFIG_PARENT/.mcp.json:ro")
+# Merge sandbox MCP servers into user's .mcp.json (shadowed read-only)
+MCP_FRAGMENT="$REPO_ROOT/mcp-servers.json"
+HOST_MCP="$CONFIG_PARENT/.mcp.json"
+if [ -f "$HOST_MCP" ] && [ -f "$MCP_FRAGMENT" ]; then
+    docker run --rm \
+        -v "$HOST_MCP:/input.json:ro" \
+        -v "$MCP_FRAGMENT:/fragment.json:ro" \
+        "$BASE_IMAGE_NAME" node -e '
+            const a = require("/input.json");
+            const b = require("/fragment.json");
+            const merged = { ...a, mcpServers: { ...a.mcpServers, ...b.mcpServers } };
+            console.log(JSON.stringify(merged, null, 2));
+        ' > "$MCP_TMP"
+    VOLUMES+=(-v "$MCP_TMP:$CONFIG_PARENT/.mcp.json:ro")
+elif [ -f "$MCP_FRAGMENT" ]; then
+    cp "$MCP_FRAGMENT" "$MCP_TMP"
+    VOLUMES+=(-v "$MCP_TMP:$CONFIG_PARENT/.mcp.json:ro")
+elif [ -f "$HOST_MCP" ]; then
+    VOLUMES+=(-v "$HOST_MCP:$CONFIG_PARENT/.mcp.json:ro")
 fi
 
 
@@ -217,6 +298,7 @@ YAML_SSH=""
 YAML_GIT=""
 YAML_DOCKER_SOCKET=""
 YAML_AWS=""
+YAML_MODEL=""
 
 if [ -f "$CONFIG_FILE" ]; then
     if ! command -v yq &>/dev/null; then
@@ -236,6 +318,9 @@ if [ -f "$CONFIG_FILE" ]; then
     if [ -n "$CONFIG_MEMORY" ]; then
         MEMORY_LIMIT="$CONFIG_MEMORY"
     fi
+
+    # Model override
+    YAML_MODEL=$(yq '.model // ""' "$CONFIG_FILE")
 
     # Host access settings
     YAML_SSH=$(yq '.hostAccess.ssh.enabled // ""' "$CONFIG_FILE")
@@ -282,6 +367,9 @@ resolve_flag() {
     if [[ "$yaml" = "true" ]]; then echo "true"; return; fi
     echo "false"
 }
+
+# Resolve model: CLI > YAML
+MODEL="${CLI_MODEL:-$YAML_MODEL}"
 
 SSH_MOUNT=$(resolve_flag "$CLI_SSH" "${CLAUDE_SANDBOX_HOST_ACCESS_SSH_ENABLED:-}" "$YAML_SSH")
 GIT_MOUNT=$(resolve_flag "$CLI_GIT" "${CLAUDE_SANDBOX_HOST_ACCESS_GIT_ENABLED:-}" "$YAML_GIT")
@@ -378,8 +466,16 @@ if [ "$USE_CHILD" = true ]; then
     elif [ "$BASE_NEEDS_BUILD" = true ]; then
         # Base was rebuilt — child must be rebuilt too
         CHILD_NEEDS_BUILD=true
-    elif [ "$CHILD_DOCKERFILE" -nt "$(docker image inspect -f '{{.Created}}' "$CHILD_IMAGE_NAME" 2>/dev/null || echo '1970')" ]; then
-        CHILD_NEEDS_BUILD=true
+    else
+        _img_created=$(docker image inspect -f '{{.Created}}' "$CHILD_IMAGE_NAME" 2>/dev/null || echo "")
+        if [ -n "$_img_created" ]; then
+            _marker=$(mktemp)
+            touch -d "$_img_created" "$_marker" 2>/dev/null || true
+            if [ "$CHILD_DOCKERFILE" -nt "$_marker" ]; then
+                CHILD_NEEDS_BUILD=true
+            fi
+            rm -f "$_marker"
+        fi
     fi
 
     if [ "$CHILD_NEEDS_BUILD" = true ]; then
@@ -424,11 +520,13 @@ if [ "$RALPH_MODE" = true ]; then
     CMD=("/opt/claude-sandbox/bin/ralph")
     [[ -n "$LIMIT" ]] && CMD+=("--limit" "$LIMIT")
     [[ -n "$SKIP_PERMISSIONS" ]] && CMD+=("$SKIP_PERMISSIONS")
+    [[ -n "$MODEL" ]] && CMD+=("--model" "$MODEL")
     CMD+=("$@")
 else
     CONTAINER_NAME="claude-sandbox-${PROJECT_SLUG}"
     CMD=("claude")
     [[ -n "$SKIP_PERMISSIONS" ]] && CMD+=("$SKIP_PERMISSIONS")
+    [[ -n "$MODEL" ]] && CMD+=("--model" "$MODEL")
     CMD+=("$@")
 fi
 

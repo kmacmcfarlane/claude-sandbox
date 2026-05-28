@@ -52,11 +52,12 @@ RUN curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tm
 # Create non-root user (UID/GID adjusted at runtime by entrypoint)
 RUN useradd -m -s /bin/bash claude
 
-# Install Claude Code CLI
+# Install Claude Code CLI and record version as a Docker label
 USER claude
 RUN curl -fsSL https://claude.ai/install.sh | bash
 USER root
 ENV PATH="/home/claude/.local/bin:$PATH"
+RUN /home/claude/.local/bin/claude --version 2>/dev/null | head -1 > /opt/claude-sandbox/claude-version || echo "unknown" > /opt/claude-sandbox/claude-version
 
 COPY entrypoint.sh /opt/claude-sandbox/bin/entrypoint.sh
 RUN chmod +x /opt/claude-sandbox/bin/entrypoint.sh

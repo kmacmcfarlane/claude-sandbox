@@ -3,6 +3,11 @@
 # Place this file in your project root (next to .env.claude-sandbox).
 # Requires 'yq' to be installed on the host.
 
+# Model override. Forwarded to claude as --model.
+# Accepts an alias (e.g. 'opus', 'sonnet') or a full model ID (e.g. 'claude-opus-4-8').
+# CLI flag --model takes precedence over this value.
+# model: opus
+
 # Container memory limit. Uses Docker memory notation (e.g. 512m, 8g, 16g).
 # Swap is disabled — the container is OOM-killed if it exceeds this limit.
 # Default: 8g

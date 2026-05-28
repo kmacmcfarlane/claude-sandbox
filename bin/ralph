@@ -29,6 +29,7 @@ Options:
   --prompt PATH                   Prompt file path (default: <cwd>/agent/PROMPT.md)
   --claude-bin PATH               Claude Code CLI (default: claude)
   --interactive                   Run claude interactively (default: non-interactive -p)
+  --model MODEL                   Model to use (forwarded to claude as --model)
   --dangerous, --dangerously-skip-permissions
                                 Pass --dangerously-skip-permissions to claude
   --resume                        Pass --resume flag to claude on first iteration
@@ -55,6 +56,7 @@ USAGE
 NON_INTERACTIVE="-p"
 SKIP_PERMISSIONS=""
 RESUME=""
+MODEL=""
 RUNLOG_FILE=""
 RAW_LOG_BASE=""
 MAX_RETRIES="5"
@@ -88,6 +90,12 @@ while [[ $# -gt 0 ]]; do
       PROMPT_FILE="${2:-}"; shift 2;;
     --claude-bin)
       CLAUDE_BIN="${2:-}"; shift 2;;
+    --model)
+      MODEL="${2:-}"
+      if [[ -z "$MODEL" ]]; then
+        echo "Error: --model requires a value" >&2; exit 2
+      fi
+      shift 2;;
     --interactive)
       NON_INTERACTIVE=""; shift 1;;
     --dangerous|--dangerously-skip-permissions)
@@ -167,6 +175,7 @@ echo "  repo:      $ROOT_DIR"
 echo "  prompt:    $PROMPT_FILE + $PROMPT_ADDENDUM"
 echo "  stop file: $STOP_FILE"
 echo "  claude:    $CLAUDE_BIN"
+echo "  model:     $( [[ -n "$MODEL" ]] && echo "$MODEL" || echo "(default)" )"
 echo "  mode:      $MODE_LABEL"
 echo "  skip-perm: $( [[ -n "$SKIP_PERMISSIONS" ]] && echo yes || echo no )"
 echo "  limit:     ${LIMIT:-unlimited}"
@@ -203,6 +212,7 @@ build_claude_args() {
   CLAUDE_ARGS=()
   [[ -n "$NON_INTERACTIVE" ]] && CLAUDE_ARGS+=("$NON_INTERACTIVE")
   [[ -n "$SKIP_PERMISSIONS" ]] && CLAUDE_ARGS+=("$SKIP_PERMISSIONS")
+  [[ -n "$MODEL" ]] && CLAUDE_ARGS+=("--model" "$MODEL")
   [[ -n "$RESUME" ]] && CLAUDE_ARGS+=("$RESUME")
   # In non-interactive mode, stream JSON events for visible progress
   if [[ -n "$NON_INTERACTIVE" ]]; then
