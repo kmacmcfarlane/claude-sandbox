@@ -359,6 +359,25 @@ acquire_lock
 
 rm -f .ralph/stop
 
+# ---------------------------------------------------------------------------
+# Ctrl-C (SIGINT) handling — run child in background + wait so trap fires
+# immediately instead of being deferred until the foreground command exits.
+# ---------------------------------------------------------------------------
+CHILD_PID=""
+RALPH_INTERRUPTED=0
+
+handle_int() {
+  RALPH_INTERRUPTED=1
+  echo ""
+  echo "Interrupt received. Stopping..."
+  if [[ -n "$CHILD_PID" ]]; then
+    # timeout forwards SIGTERM to its child process group before exiting
+    kill -TERM "$CHILD_PID" 2>/dev/null || true
+    wait "$CHILD_PID" 2>/dev/null || true
+  fi
+}
+trap 'handle_int' INT
+
 retry_count=0
 iter=0
 while true; do
@@ -446,7 +465,18 @@ while true; do
   ' _ "$REPO_ROOT" "$CLAUDE_BIN" "$ITER_RAW_LOG" "$LOG_FILE" \
       "$iter" "$QUOTA_STATUS_FILE" "$WATCHDOG_TIMEOUT" \
       "$NON_INTERACTIVE" "$WATCHDOG_MARKER_FILE" "${CLAUDE_ARGS[@]}" \
-    2>"$STDERR_FILE" || rc=$?
+    2>"$STDERR_FILE" &
+  CHILD_PID=$!
+  wait $CHILD_PID 2>/dev/null || rc=$?
+  CHILD_PID=""
+
+  # Check for user interrupt (Ctrl-C)
+  if [[ "$RALPH_INTERRUPTED" -eq 1 ]]; then
+    echo "Interrupted. Exiting."
+    notify_discord "🛑 **$(basename "$ROOT_DIR")** — Loop interrupted by user at iteration ${iter}."
+    RALPH_CLEAN_EXIT=1
+    exit 0
+  fi
 
   # Classify the outcome
   outcome=$(classify_outcome "$rc")
