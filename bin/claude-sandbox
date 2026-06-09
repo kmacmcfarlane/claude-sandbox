@@ -203,7 +203,7 @@ if [ "$NO_UPDATE_CHECK" != "true" ] && [ "$NO_UPDATE_CHECK" != "1" ] && [ "$BASE
     if [[ -n "$BAKED_VERSION" && -n "$LATEST_VERSION" && "$BAKED_VERSION" != "$LATEST_VERSION" ]]; then
         echo ""
         echo "Claude Code update available: $BAKED_VERSION → $LATEST_VERSION"
-        read -r -p "Rebuild base image to update? [y/N] " answer </dev/tty
+        read -r -t 5 -p "Rebuild base image to update? [y/N] " answer </dev/tty || true
         if [[ "$answer" =~ ^[Yy]$ ]]; then
             echo "Rebuilding $BASE_IMAGE_NAME base image..."
             docker build --no-cache -t "$BASE_IMAGE_NAME" "$REPO_ROOT"
