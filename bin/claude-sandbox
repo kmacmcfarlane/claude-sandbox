@@ -239,7 +239,7 @@ printf '\n' >> "$CLAUDE_MD_TMP"
 cat "$REPO_ROOT/container-context.md" >> "$CLAUDE_MD_TMP"
 VOLUMES+=(-v "$CLAUDE_MD_TMP:$CLAUDE_CONFIG_HOST/CLAUDE.md:ro")
 
-# Merge notification hooks into user settings (shadowed read-only so host file is untouched)
+# Merge notification hooks into user settings (shadowed so host file is untouched)
 HOST_SETTINGS="$CLAUDE_CONFIG_HOST/settings.json"
 HOOKS_FRAGMENT="$REPO_ROOT/notification-hooks.json"
 if [ -f "$HOST_SETTINGS" ] && [ -f "$HOOKS_FRAGMENT" ]; then
@@ -251,11 +251,11 @@ if [ -f "$HOST_SETTINGS" ] && [ -f "$HOOKS_FRAGMENT" ]; then
             const b = require("/hooks.json");
             console.log(JSON.stringify({ ...a, ...b }, null, 2));
         ' > "$SETTINGS_TMP"
-    VOLUMES+=(-v "$SETTINGS_TMP:$CLAUDE_CONFIG_HOST/settings.json:ro")
+    VOLUMES+=(-v "$SETTINGS_TMP:$CLAUDE_CONFIG_HOST/settings.json")
 elif [ -f "$HOOKS_FRAGMENT" ]; then
     # No host settings.json — use hooks fragment as-is
     cp "$HOOKS_FRAGMENT" "$SETTINGS_TMP"
-    VOLUMES+=(-v "$SETTINGS_TMP:$CLAUDE_CONFIG_HOST/settings.json:ro")
+    VOLUMES+=(-v "$SETTINGS_TMP:$CLAUDE_CONFIG_HOST/settings.json")
 fi
 
 # Sibling files alongside the config directory (.claude.json, .mcp.json).
