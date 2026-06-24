@@ -63,9 +63,10 @@ Set in `.claude-sandbox/config.yaml`:
   ```
 
 - **`trackInHost: true` (your own repos):** the directory is tracked by the host
-  repo normally; no sidecar is created. The launcher only ensures
-  `.claude-sandbox/env` and `.claude-sandbox/temp/` are gitignored (secrets +
-  scratch). If you migrated with `git mv`, the files are already staged.
+  repo normally; no sidecar is created. The launcher ensures `.claude-sandbox/env`
+  (secrets), `.claude-sandbox/temp/` (scratch), and `.claude-sandbox/ralph/`
+  (ephemeral loop runtime) are gitignored; everything else is committed. If you
+  migrated with `git mv`, the tracked files are already staged.
 
 The `env` file (secrets) is gitignored in both modes regardless.
 

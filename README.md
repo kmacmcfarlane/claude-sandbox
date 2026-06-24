@@ -209,8 +209,9 @@ Set in `.claude-sandbox/config.yaml`. Controls how the directory is version-cont
   `.claude-sandbox/` for independent history. Nothing leaks into the host project's
   git history. Use for working on others' repos.
 - **`true` (your own projects):** the directory is tracked by the host repo; no
-  sidecar. The launcher only gitignores `.claude-sandbox/env` and
-  `.claude-sandbox/temp/` (secrets + scratch).
+  sidecar. The launcher gitignores `.claude-sandbox/env` (secrets),
+  `.claude-sandbox/temp/` (scratch), and `.claude-sandbox/ralph/` (ephemeral loop
+  runtime) — everything else under `.claude-sandbox/` is committed.
 
 ```yaml
 # trackInHost: true

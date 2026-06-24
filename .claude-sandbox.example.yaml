@@ -70,5 +70,6 @@ mounts: []
 #     git history. Commit sandbox changes with:
 #       git -C .claude-sandbox add -A && git -C .claude-sandbox commit -m "..."
 #   true: your own project. The directory is tracked by the host repo (no
-#     sidecar); only .claude-sandbox/env and .claude-sandbox/temp/ are gitignored.
+#     sidecar); .claude-sandbox/env, .claude-sandbox/temp/, and the ephemeral
+#     .claude-sandbox/ralph/ runtime are gitignored, everything else committed.
 # trackInHost: false
