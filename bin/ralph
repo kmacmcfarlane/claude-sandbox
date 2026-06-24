@@ -5,15 +5,22 @@ set -euo pipefail
 #
 # Features:
 # - Fresh-context loop: re-invokes Claude Code each iteration
-# - Stop control: create a stop file (default: .ralph/stop) to halt
+# - Stop control: create a stop file (default: <ralph-dir>/stop) to halt
 # - Iteration limit: --limit N (default: 30)
-# - Run log: writes per-iteration metrics (default: .ralph/runlog.json)
+# - Run log: writes per-iteration metrics (default: <ralph-dir>/runlog.json)
+#   where <ralph-dir> = .claude-sandbox/ralph (legacy fallback: ./.ralph)
 
 REAL_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 REPO_ROOT="$(cd "$(dirname "$REAL_PATH")/.." && pwd)"
 ROOT_DIR="$(pwd)"
-STOP_FILE="${STOP_FILE:-$ROOT_DIR/.ralph/stop}"
-PROMPT_FILE="${PROMPT_FILE:-$ROOT_DIR/agent/PROMPT.md}"
+
+# Resolve "foreign" paths: .claude-sandbox/<new> with a legacy ./<old> fallback.
+source "$(dirname "$REAL_PATH")/lib/paths.sh"
+RALPH_DIR="$(cs_resolve "$ROOT_DIR" ralph)"
+AGENT_DIR="$(cs_resolve "$ROOT_DIR" agent)"
+
+STOP_FILE="${STOP_FILE:-$RALPH_DIR/stop}"
+PROMPT_FILE="${PROMPT_FILE:-$AGENT_DIR/PROMPT.md}"
 CLAUDE_BIN="${CLAUDE_BIN:-claude}"
 
 LIMIT="30"
@@ -23,18 +30,21 @@ usage() {
 Usage:
   ralph [options]
 
+Paths default under .claude-sandbox/ralph/ (with a legacy ./.ralph/ fallback for
+un-migrated repos) and ./agent/ resolves to .claude-sandbox/agent/ likewise.
+
 Options:
   --limit N                       Stop after N iterations (default: 30)
-  --stop-file PATH                Stop file path (default: .ralph/stop)
-  --prompt PATH                   Prompt file path (default: <cwd>/agent/PROMPT.md)
+  --stop-file PATH                Stop file path (default: <ralph-dir>/stop)
+  --prompt PATH                   Prompt file path (default: <agent-dir>/PROMPT.md)
   --claude-bin PATH               Claude Code CLI (default: claude)
   --interactive                   Run claude interactively (default: non-interactive -p)
   --model MODEL                   Model to use (forwarded to claude as --model)
   --dangerous, --dangerously-skip-permissions
                                 Pass --dangerously-skip-permissions to claude
   --resume                        Pass --resume flag to claude on first iteration
-  --runlog-file [PATH]            Run log path (default: .ralph/runlog.json)
-  --raw-log [PATH]                Raw NDJSON base path (default: .ralph/runlogs/rawlog)
+  --runlog-file [PATH]            Run log path (default: <ralph-dir>/runlog.json)
+  --raw-log [PATH]                Raw NDJSON base path (default: <ralph-dir>/runlogs/rawlog)
   --watchdog-timeout N            Inactivity timeout in minutes (default: 15, 0 to disable)
   --iteration-timeout N           Hard iteration time limit in seconds (default: 7200 = 2h)
 
@@ -46,10 +56,10 @@ Quota retry:
 
 Stop:
   Create the stop file to halt the loop:
-    touch .ralph/stop
+    touch .claude-sandbox/ralph/stop      # or legacy: touch .ralph/stop
 
   Remove it to allow running again:
-    rm .ralph/stop
+    rm .claude-sandbox/ralph/stop
 USAGE
 }
 
@@ -107,7 +117,7 @@ while [[ $# -gt 0 ]]; do
       if [[ -n "$RUNLOG_FILE" && "$RUNLOG_FILE" != --* ]]; then
         shift 2
       else
-        RUNLOG_FILE=".ralph/runlog.json"
+        RUNLOG_FILE="$RALPH_DIR/runlog.json"
         shift 1
       fi
       ;;
@@ -184,11 +194,11 @@ echo "  iter-limit: $(format_wait "${ITERATION_TIMEOUT:-7200}")"
 
 cd "$ROOT_DIR"
 
-# Ensure .ralph directory structure exists
-mkdir -p .ralph/temp .ralph/runlogs
+# Ensure the ralph runtime directory structure exists
+mkdir -p "$RALPH_DIR/temp" "$RALPH_DIR/runlogs"
 
 # Initialize run log — prepend a new run object to the array
-LOG_FILE="${RUNLOG_FILE:-.ralph/runlog.json}"
+LOG_FILE="${RUNLOG_FILE:-$RALPH_DIR/runlog.json}"
 if [[ ! -f "$LOG_FILE" ]]; then
   printf '[]\n' > "$LOG_FILE"
 fi
@@ -204,7 +214,7 @@ node -e "
 echo "  run-log:   $LOG_FILE"
 
 # Raw JSON log base path (per-iteration files generated inside the loop)
-RAW_LOG_BASE="${RAW_LOG_BASE:-.ralph/runlogs/rawlog}"
+RAW_LOG_BASE="${RAW_LOG_BASE:-$RALPH_DIR/runlogs/rawlog}"
 echo "  raw-log:   ${RAW_LOG_BASE}_*"
 
 # Build claude args
@@ -237,9 +247,9 @@ notify_discord() {
 # Classify iteration outcome using quota-status file and stderr
 # Returns: "ok", "quota_exhausted", "rate_limit", or "error"
 # ---------------------------------------------------------------------------
-QUOTA_STATUS_FILE="$ROOT_DIR/.ralph/temp/quota-status"
-STDERR_FILE="$ROOT_DIR/.ralph/temp/stderr"
-WATCHDOG_MARKER_FILE="$ROOT_DIR/.ralph/temp/watchdog-fired"
+QUOTA_STATUS_FILE="$RALPH_DIR/temp/quota-status"
+STDERR_FILE="$RALPH_DIR/temp/stderr"
+WATCHDOG_MARKER_FILE="$RALPH_DIR/temp/watchdog-fired"
 
 classify_outcome() {
   local exit_code="$1"
@@ -331,7 +341,7 @@ probe_quota() {
 # ---------------------------------------------------------------------------
 # Lock file — prevent concurrent ralph loops on the same project
 # ---------------------------------------------------------------------------
-LOCK_FILE="$ROOT_DIR/.ralph/lock"
+LOCK_FILE="$RALPH_DIR/lock"
 
 cleanup() {
   rm -f "$LOCK_FILE"
@@ -357,7 +367,7 @@ acquire_lock() {
 
 acquire_lock
 
-rm -f .ralph/stop
+rm -f "$STOP_FILE"
 
 # ---------------------------------------------------------------------------
 # Ctrl-C (SIGINT) handling — run child in background + wait so trap fires
@@ -392,9 +402,9 @@ while true; do
 
   # Clear scratch directory (skip on --resume first iteration)
   if [[ -z "$RESUME" ]]; then
-    rm -rf "$ROOT_DIR/.ralph/temp"
+    rm -rf "$RALPH_DIR/temp"
   fi
-  mkdir -p "$ROOT_DIR/.ralph/temp"
+  mkdir -p "$RALPH_DIR/temp"
 
   build_claude_args
 

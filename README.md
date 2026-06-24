@@ -61,6 +61,7 @@ These flags are consumed by the launcher and control the container environment. 
 
 | Flag | Alias | Description |
 |---|---|---|
+| `--version` | | Print claude-sandbox version (host scripts + baked image) and exit |
 | `--host-access-docker-socket-enabled` | `--docker-socket` | Mount the host Docker socket |
 | `--host-access-aws-enabled` | `--aws` | Mount `~/.aws/` read-only |
 | `--host-access-git-enabled` | `--git` | Mount `~/.gitconfig` read-only |
@@ -93,7 +94,7 @@ Pass `--ralph` to `claude-sandbox` to launch the ralph loop runner instead of in
 claude-sandbox --ralph --docker-socket --dangerous --limit 5
 
 # Stop the loop gracefully (from the project directory):
-touch .ralph/stop
+touch .claude-sandbox/ralph/stop   # or legacy: touch .ralph/stop
 ```
 
 The container runs under a separate name (`claude-sandbox-ralph`) so it won't conflict with an interactive `claude-sandbox` session.
@@ -132,7 +133,7 @@ Control how ralph handles rate limits and quota exhaustion.
 
 ### Logging
 
-Ralph produces two logs per run: a **run log** (structured metrics) and a **raw log** (complete NDJSON stream). Both sit in `.ralph/` by default.
+Ralph produces two logs per run: a **run log** (structured metrics) and a **raw log** (complete NDJSON stream). Both sit in the ralph directory (`.claude-sandbox/ralph/`, or legacy `.ralph/`) by default.
 
 In non-interactive mode, Claude's output flows through a pipeline:
 
@@ -174,9 +175,49 @@ Lines are flushed synchronously, so the raw log is complete even if the process 
 
 Override the base path with `--raw-log <path>` (the timestamp and iteration suffixes are always appended).
 
-The entire `.ralph/` directory should be gitignored — it contains only runtime state.
+The entire ralph directory is runtime state. Under the consolidated layout it lives inside `.claude-sandbox/` (gitignored as a whole by default, or tracked when `trackInHost: true`); in the legacy layout `.ralph/` should be gitignored on its own.
 
 ## Configuration
+
+### File layout (`.claude-sandbox/`)
+
+claude-sandbox keeps its per-project "foreign" files under a single top-level
+`.claude-sandbox/` directory:
+
+| logical    | new (preferred)               | legacy fallback (still works) |
+|------------|-------------------------------|-------------------------------|
+| config     | `.claude-sandbox/config.yaml` | `./.claude-sandbox.yaml`      |
+| Dockerfile | `.claude-sandbox/Dockerfile`  | `./Dockerfile.claude-sandbox` |
+| env        | `.claude-sandbox/env`         | `./.env.claude-sandbox`       |
+| ralph      | `.claude-sandbox/ralph/`      | `./.ralph/`                   |
+| agent      | `.claude-sandbox/agent/`      | `./agent/`                    |
+| scratch    | `.claude-sandbox/temp/`       | (new only)                    |
+| reports    | `.claude-sandbox/reports/`    | (new only)                    |
+
+Every path resolves reverse-compatibly: `.claude-sandbox/<new>` if it exists →
+legacy `./<old>` if it exists → otherwise the new location. **Existing repos keep
+working unchanged** — migration is opt-in and per-path. See
+[MIGRATION.md](MIGRATION.md). The filenames below (`.env.claude-sandbox`,
+`.claude-sandbox.yaml`, …) refer to the same logical files in either location.
+
+#### `trackInHost` — host history vs. clean host repo
+
+Set in `.claude-sandbox/config.yaml`. Controls how the directory is version-controlled:
+
+- **`false` (default, foreign-safe):** the launcher adds `/.claude-sandbox/` to the
+  host `.gitignore` (prompting first) and initializes a **sidecar git repo** inside
+  `.claude-sandbox/` for independent history. Nothing leaks into the host project's
+  git history. Use for working on others' repos.
+- **`true` (your own projects):** the directory is tracked by the host repo; no
+  sidecar. The launcher only gitignores `.claude-sandbox/env` and
+  `.claude-sandbox/temp/` (secrets + scratch).
+
+```yaml
+# trackInHost: true
+```
+
+The `env` file is gitignored in both modes. Project-level `.claude/` (Claude Code
+agents/settings) is not moved — it stays at the project root by convention.
 
 ### `.env.claude-sandbox`
 
@@ -321,7 +362,7 @@ See `Dockerfile.claude-sandbox.example` in this repo for a commented template.
 
 ### Parent directory search
 
-`Dockerfile.claude-sandbox`, `.claude-sandbox.yaml`, and `.env.claude-sandbox` are all resolved by walking parent directories from the project root (like direnv). This lets you share config across multiple projects in a monorepo or workspace — place the files at the workspace root and every sub-project inherits them.
+The config, Dockerfile, and env files (in either the new `.claude-sandbox/` location or the legacy root location) are all resolved by walking parent directories from the project root (like direnv). At each level the new path is checked before the legacy one. This lets you share config across multiple projects in a monorepo or workspace — place the files at the workspace root and every sub-project inherits them.
 
 If no `Dockerfile.claude-sandbox` is found anywhere up to `/`, the launcher warns and uses the base image directly. Set `baseOnly: true` in `.claude-sandbox.yaml` (or `CLAUDE_SANDBOX_BASE_ONLY=1`) to suppress the warning and skip the search.
 
@@ -382,7 +423,19 @@ The entrypoint remaps the `claude` user inside the container to match your host 
 
 ### Image rebuilding
 
-The base and child images rebuild automatically when their respective Dockerfiles are newer than the cached image. A base rebuild triggers a child rebuild.
+The base and child images rebuild automatically when their respective Dockerfiles are newer than the cached image. The base **also** rebuilds when any baked source — `bin/`, `logstream/`, `entrypoint.sh`, `PROMPT_RALPH.md`, or `mcp/` — is newer than the image, so editing a launcher/ralph script is picked up on the next launch without `--rebuild`. A base rebuild triggers a child rebuild.
+
+### Versioning
+
+The launcher stamps each build with `git describe --tags --always --dirty`, baked into the image as `$CLAUDE_SANDBOX_VERSION`, `/opt/claude-sandbox/version`, and the `org.opencontainers.image.revision` label. Check it with:
+
+```bash
+claude-sandbox --version
+# claude-sandbox v0.3.1-4-gab12cd  (host scripts: /path/to/repo)
+#   image:        v0.3.1-4-gab12cd  (built 2026-06-24)
+```
+
+It prints the version of the **host scripts** (your checkout) and the **baked image** (what actually runs in the container), warning if they differ.
 
 **Claude Code version check:** On each launch, the launcher compares the Claude Code version baked into the image against the latest version on npm. If a newer version is available, it prompts:
 

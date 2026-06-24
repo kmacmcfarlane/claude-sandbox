@@ -62,3 +62,13 @@ mounts: []
 # Disable the Claude Code version check at launch.
 # Also controllable via --no-update-check flag or CLAUDE_SANDBOX_NO_UPDATE_CHECK=1.
 # disableUpdateCheck: false
+
+# How the .claude-sandbox/ directory is version-controlled.
+#   false (default): foreign-safe. The launcher gitignores /.claude-sandbox/ in
+#     the host repo and keeps an internal "sidecar" git repo for history. Use
+#     this when working on someone else's project — nothing leaks into their
+#     git history. Commit sandbox changes with:
+#       git -C .claude-sandbox add -A && git -C .claude-sandbox commit -m "..."
+#   true: your own project. The directory is tracked by the host repo (no
+#     sidecar); only .claude-sandbox/env and .claude-sandbox/temp/ are gitignored.
+# trackInHost: false

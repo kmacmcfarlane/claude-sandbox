@@ -15,14 +15,14 @@ You are running inside a **claude-sandbox** Docker container (Debian bookworm-sl
 - **Utilities:** curl, jq, less, gnupg, openssh-client
 
 Additional project-specific tools (language servers, compilers, runtimes, etc.)
-may be installed via a `Dockerfile.claude-sandbox` in the project root. Check `which`
-or `--version` to discover available tools.
+may be installed via the child Dockerfile (`.claude-sandbox/Dockerfile`, or legacy
+`./Dockerfile.claude-sandbox`). Check `which` or `--version` to discover available tools.
 
 ## Missing Tools
 
 If you need a tool that is not installed, **stop and ask the user** (via the
 AskUserQuestion tool) before attempting workarounds. The user can add it to the
-project's `Dockerfile.claude-sandbox` for a permanent fix.
+project's child Dockerfile (`.claude-sandbox/Dockerfile`) for a permanent fix.
 
 ## LSP Setup
 
@@ -35,5 +35,5 @@ one-time setup (idempotent). Use `setup-lsp-plugins --check` to verify status.
 - The project is mounted at its real host path so `docker compose` volume resolution works against the host daemon.
 - Files you create are owned by the host user (UID/GID remapping handled by the entrypoint).
 - `/home/claude` is symlinked to the host user's home directory (e.g. `/home/rt`). Both paths work. Build-time files from the Dockerfile are relocated here automatically.
-- **Discord MCP server** — baked in at `/opt/claude-sandbox/mcp/discord-notify/dist/index.mjs`. Provides the `send_discord_notification` tool when `DISCORD_WEBHOOK_URL` is set in `.env.claude-sandbox`. Configured via `~/.mcp.json` — no per-project setup needed.
+- **Discord MCP server** — baked in at `/opt/claude-sandbox/mcp/discord-notify/dist/index.mjs`. Provides the `send_discord_notification` tool when `DISCORD_WEBHOOK_URL` is set in the env file (`.claude-sandbox/env`, or legacy `.env.claude-sandbox`). Configured via `~/.mcp.json` — no per-project setup needed.
 - You do NOT have sudo or root access.

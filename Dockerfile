@@ -75,5 +75,13 @@ RUN cd /opt/claude-sandbox/mcp/discord-notify \
     && npx esbuild index.mjs --bundle --platform=node --format=esm --outfile=dist/index.mjs \
     && rm -rf node_modules
 
+# Stamp the claude-sandbox version (git describe, passed by the launcher) so it
+# is discoverable in-container ($CLAUDE_SANDBOX_VERSION / the version file) and on
+# the host (image label). Placed last so a changed version only rebuilds this layer.
+ARG CLAUDE_SANDBOX_VERSION=unknown
+RUN echo "$CLAUDE_SANDBOX_VERSION" > /opt/claude-sandbox/version
+ENV CLAUDE_SANDBOX_VERSION=$CLAUDE_SANDBOX_VERSION
+LABEL org.opencontainers.image.revision=$CLAUDE_SANDBOX_VERSION
+
 ENTRYPOINT ["/opt/claude-sandbox/bin/entrypoint.sh"]
 CMD ["claude"]
