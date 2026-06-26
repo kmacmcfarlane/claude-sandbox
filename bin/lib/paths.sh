@@ -143,9 +143,14 @@ SEED
     if [ "$track" = "true" ]; then
         # Host-tracked: no sidecar. Ignore secrets (env), scratch (temp/), and the
         # ralph runtime dir (runlog/runlogs/lock/stop) — ephemeral state that the
-        # legacy ./.ralph/ layout also kept out of the repo.
+        # legacy ./.ralph/ layout also kept out of the repo. The trailing
+        # negations defensively re-include the tracked config/Dockerfile in case
+        # the host repo has a bare `config.yaml`/`Dockerfile` ignore rule (common
+        # in Go projects) that would otherwise swallow them. Negations are no-ops
+        # when no such rule exists.
         [ "$host_is_git" = true ] && _cs_gitignore_add "$proj/.gitignore" \
-            ".claude-sandbox/env" ".claude-sandbox/temp/" ".claude-sandbox/ralph/"
+            ".claude-sandbox/env" ".claude-sandbox/temp/" ".claude-sandbox/ralph/" \
+            "!.claude-sandbox/config.yaml" "!.claude-sandbox/Dockerfile"
         return 0
     fi
 
