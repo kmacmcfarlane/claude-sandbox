@@ -262,6 +262,22 @@ if [ -d "$CLAUDE_CONFIG_HOST" ]; then
     VOLUMES+=(-v "$CLAUDE_CONFIG_HOST:$CLAUDE_CONFIG_HOST")
 fi
 
+# Share the host's direnv allow-records into the container READ-ONLY so an .envrc
+# you allowed on the host also loads in the agent's shells.
+#
+# SECURITY: :ro is deliberate. A writable mount would let the sandboxed agent
+# forge a direnv allow-record, which direnv on the HOST would then trust to
+# auto-run an attacker-controlled .envrc outside the sandbox. So `direnv allow`
+# must be run on the host — the container can read approvals, never grant them.
+#
+# entrypoint.sh merges /home/claude into $HOME around pre-created mount parents,
+# so mounting under ~/.local no longer hides the relocated claude binary.
+# No-op when direnv isn't used (the dir only exists once you've run direnv).
+DIRENV_DATA="$HOME/.local/share/direnv"
+if [ -d "$DIRENV_DATA" ]; then
+    VOLUMES+=(-v "$DIRENV_DATA:$DIRENV_DATA:ro")
+fi
+
 
 # Merge host CLAUDE.md with container context for in-container awareness
 CLAUDE_MD_TMP=$(mktemp)

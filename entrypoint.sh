@@ -38,10 +38,39 @@ if [ "$TARGET_USER" != "claude" ]; then
     # overwritten or have their permissions changed.
     if [ "$TARGET_HOME" != "/home/claude" ] && [ -d /home/claude ]; then
         mkdir -p "$TARGET_HOME"
+
+        # Bind-mount points under the target home — never recurse into or
+        # overwrite these (host-provided .claude, .aws, .ssh, .gitconfig, a
+        # direnv allow-state dir, etc.).
+        declare -A _CS_MOUNTS=()
+        while IFS= read -r _mp; do
+            case "$_mp" in "$TARGET_HOME"/*) _CS_MOUNTS["$_mp"]=1 ;; esac
+        done < <(awk '{print $5}' /proc/self/mountinfo)
+
+        # Merge /home/claude into $TARGET_HOME. Move any entry whose destination
+        # is absent; when the destination dir exists only because Docker
+        # pre-created it as a mount PARENT (e.g. ~/.local for a
+        # ~/.local/share/direnv mount), recurse and merge its children rather
+        # than skipping the whole subtree — otherwise build-time files such as
+        # the claude binary under ~/.local/bin get left behind. Actual bind
+        # mounts are never touched.
+        _cs_merge() {
+            local src="$1" dst="$2" child base
+            if [ -n "${_CS_MOUNTS[$dst]:-}" ]; then return; fi
+            if [ ! -e "$dst" ]; then mv "$src" "$dst"; return; fi
+            if [ -d "$src" ] && [ -d "$dst" ]; then
+                for child in "$src"/*; do
+                    [ -e "$child" ] || continue
+                    base="$(basename "$child")"
+                    _cs_merge "$child" "$dst/$base"
+                done
+            fi
+        }
+
         shopt -s dotglob nullglob
         for item in /home/claude/*; do
             base="$(basename "$item")"
-            [ -e "$TARGET_HOME/$base" ] || mv "$item" "$TARGET_HOME/"
+            _cs_merge "$item" "$TARGET_HOME/$base"
         done
         shopt -u dotglob nullglob
         rm -rf /home/claude
