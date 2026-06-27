@@ -594,6 +594,20 @@ if [ "$USE_CHILD" = true ]; then
             touch -d "$_img_created" "$_marker" 2>/dev/null || true
             if [ "$CHILD_DOCKERFILE" -nt "$_marker" ]; then
                 CHILD_NEEDS_BUILD=true
+            else
+                # Base image rebuilt out-of-band (in a prior launch / manually) is
+                # newer than the child — the child still carries the old base's
+                # layers (e.g. a stale entrypoint), so rebuild it.
+                _base_created=$(docker image inspect -f '{{.Created}}' "$BASE_IMAGE_NAME" 2>/dev/null || echo "")
+                if [ -n "$_base_created" ]; then
+                    _base_marker=$(mktemp)
+                    touch -d "$_base_created" "$_base_marker" 2>/dev/null || true
+                    if [ "$_base_marker" -nt "$_marker" ]; then
+                        echo "Base image is newer than child — rebuilding child."
+                        CHILD_NEEDS_BUILD=true
+                    fi
+                    rm -f "$_base_marker"
+                fi
             fi
             rm -f "$_marker"
         fi
