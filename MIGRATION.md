@@ -18,6 +18,7 @@ want, one repo at a time, and even mix old/new locations during the transition.
 | env        | `.claude-sandbox/env`         | `./.env.claude-sandbox`       |
 | ralph      | `.claude-sandbox/ralph/`      | `./.ralph/`                   |
 | agent      | `.claude-sandbox/agent/`      | `./agent/`                    |
+| agent tooling | `.claude-sandbox/scripts/backlog/`, `.claude-sandbox/scripts/worktree/` | `./scripts/backlog/`, `./scripts/worktree/` |
 | scratch    | `.claude-sandbox/temp/`       | (new only)                    |
 | reports    | `.claude-sandbox/reports/`    | (new only)                    |
 
@@ -37,7 +38,19 @@ git mv Dockerfile.claude-sandbox .claude-sandbox/Dockerfile    2>/dev/null || tr
 git mv .env.claude-sandbox       .claude-sandbox/env           2>/dev/null || true
 git mv .ralph                    .claude-sandbox/ralph         2>/dev/null || true
 git mv agent                     .claude-sandbox/agent         2>/dev/null || true
+
+# Agent tooling that references the backlog (move WITH agent/, not the whole scripts/):
+git mv scripts/backlog           .claude-sandbox/scripts/backlog   2>/dev/null || true
+git mv scripts/worktree          .claude-sandbox/scripts/worktree  2>/dev/null || true
 ```
+
+**Important — refactor the moved tooling's paths.** `scripts/backlog/backlog.py` and
+`scripts/worktree/merge_helper.py`/`worktree.py` hardcode `agent/backlog.yaml`. After
+moving `agent/`, repoint them to `.claude-sandbox/agent/...` (a resolver that prefers
+`.claude-sandbox/agent` with a legacy `agent/` fallback) and update their test files —
+otherwise the backlog tool breaks. Leave SHARED scripts (e.g. `scripts/compose-project-name.sh`,
+used by the Makefile/e2e via `./scripts/...`) at the repo root. Reference implementation:
+the refactored `backlog.py`/`merge_helper.py`/`worktree.py` in the migrated repos.
 
 The next `claude-sandbox` launch detects the `.claude-sandbox/` directory, creates
 the `temp/` and `reports/` skeleton, seeds `.claude-sandbox/CLAUDE.md`, and sets up
