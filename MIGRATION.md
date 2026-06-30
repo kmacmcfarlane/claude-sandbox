@@ -1,29 +1,27 @@
 # Migrating to the consolidated `.claude-sandbox/` layout
 
-claude-sandbox used to scatter its per-project "foreign" files across the host
-project's tracked tree (`./.claude-sandbox.yaml`, `./Dockerfile.claude-sandbox`,
-`./.env.claude-sandbox`, `./.ralph/`, `./agent/`). The consolidated layout moves
-them all under a single top-level `.claude-sandbox/` directory.
+> **The legacy scattered-root layout is NO LONGER SUPPORTED.** Current
+> claude-sandbox resolves its per-project files **only** under a single
+> top-level `.claude-sandbox/` directory. If your repo still keeps these files
+> at the project root (`./.claude-sandbox.yaml`, `./Dockerfile.claude-sandbox`,
+> `./.env.claude-sandbox`, `./.ralph/`, `./agent/`), the launcher will not find
+> them — you must migrate using the steps below.
 
-**Migration is opt-in.** The launcher resolves every path with a reverse-compatible
-fallback, so un-migrated repos keep working unchanged — you can migrate when you
-want, one repo at a time, and even mix old/new locations during the transition.
+claude-sandbox used to scatter its per-project "foreign" files across the host
+project's tracked tree. They now all live under `.claude-sandbox/`.
 
 ## Layout mapping
 
-| logical    | new (preferred)               | legacy fallback (still works) |
-|------------|-------------------------------|-------------------------------|
-| config     | `.claude-sandbox/config.yaml` | `./.claude-sandbox.yaml`      |
-| Dockerfile | `.claude-sandbox/Dockerfile`  | `./Dockerfile.claude-sandbox` |
-| env        | `.claude-sandbox/env`         | `./.env.claude-sandbox`       |
-| ralph      | `.claude-sandbox/ralph/`      | `./.ralph/`                   |
-| agent      | `.claude-sandbox/agent/`      | `./agent/`                    |
-| agent tooling | `.claude-sandbox/scripts/backlog/`, `.claude-sandbox/scripts/worktree/` | `./scripts/backlog/`, `./scripts/worktree/` |
-| scratch    | `.claude-sandbox/temp/`       | (new only)                    |
-| reports    | `.claude-sandbox/reports/`    | (new only)                    |
-
-Resolution order per path: `.claude-sandbox/<new>` if it exists → legacy `./<old>`
-if it exists → otherwise default to `.claude-sandbox/<new>`.
+| logical    | location (old → new)                                          |
+|------------|--------------------------------------------------------------|
+| config     | `./.claude-sandbox.yaml` → `.claude-sandbox/config.yaml`      |
+| Dockerfile | `./Dockerfile.claude-sandbox` → `.claude-sandbox/Dockerfile`  |
+| env        | `./.env.claude-sandbox` → `.claude-sandbox/env`               |
+| ralph      | `./.ralph/` → `.claude-sandbox/ralph/`                        |
+| agent      | `./agent/` → `.claude-sandbox/agent/`                         |
+| agent tooling | `./scripts/backlog/`, `./scripts/worktree/` → `.claude-sandbox/scripts/backlog/`, `.claude-sandbox/scripts/worktree/` |
+| scratch    | `.claude-sandbox/temp/` (new only)                           |
+| reports    | `.claude-sandbox/reports/` (new only)                        |
 
 ## How to migrate an existing repo
 
@@ -46,9 +44,8 @@ git mv scripts/worktree          .claude-sandbox/scripts/worktree  2>/dev/null |
 
 **Important — refactor the moved tooling's paths.** `scripts/backlog/backlog.py` and
 `scripts/worktree/merge_helper.py`/`worktree.py` hardcode `agent/backlog.yaml`. After
-moving `agent/`, repoint them to `.claude-sandbox/agent/...` (a resolver that prefers
-`.claude-sandbox/agent` with a legacy `agent/` fallback) and update their test files —
-otherwise the backlog tool breaks. Leave SHARED scripts (e.g. `scripts/compose-project-name.sh`,
+moving `agent/`, repoint them to `.claude-sandbox/agent/...` and update their test
+files — otherwise the backlog tool breaks. Leave SHARED scripts (e.g. `scripts/compose-project-name.sh`,
 used by the Makefile/e2e via `./scripts/...`) at the repo root. Reference implementation:
 the refactored `backlog.py`/`merge_helper.py`/`worktree.py` in the migrated repos.
 

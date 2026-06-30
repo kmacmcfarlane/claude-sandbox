@@ -51,7 +51,7 @@ claude-sandbox --ralph --docker-socket --dangerous --limit 5
 PROJECT_DIR=/home/you/projects/foo claude-sandbox
 ```
 
-The base Docker image is built automatically on first run. If a `Dockerfile.claude-sandbox` exists in the project, a child image is built on top of it.
+The base Docker image is built automatically on first run. If a `.claude-sandbox/Dockerfile` exists in the project, a child image is built on top of it.
 
 ## CLI reference
 
@@ -94,7 +94,7 @@ Pass `--ralph` to `claude-sandbox` to launch the ralph loop runner instead of in
 claude-sandbox --ralph --docker-socket --dangerous --limit 5
 
 # Stop the loop gracefully (from the project directory):
-touch .claude-sandbox/ralph/stop   # or legacy: touch .ralph/stop
+touch .claude-sandbox/ralph/stop
 ```
 
 The container runs under a separate name (`claude-sandbox-ralph`) so it won't conflict with an interactive `claude-sandbox` session.
@@ -112,11 +112,11 @@ These flags are passed through to ralph (after `--ralph` and any launcher flags)
 | `--interactive` | off | Run claude interactively (default: non-interactive `-p`) |
 | `--dangerous` | off | Pass `--dangerously-skip-permissions` to claude |
 | `--resume` | off | Pass `--resume` to claude on first iteration |
-| `--prompt PATH` | `<project>/agent/PROMPT.md` | Prompt file |
-| `--stop-file PATH` | `.ralph/stop` | Path to stop file |
+| `--prompt PATH` | `.claude-sandbox/agent/PROMPT.md` | Prompt file |
+| `--stop-file PATH` | `.claude-sandbox/ralph/stop` | Path to stop file |
 | `--claude-bin PATH` | `claude` | Claude binary |
-| `--runlog-file PATH` | `.ralph/runlog.json` | Run log path |
-| `--raw-log PATH` | `.ralph/runlogs/rawlog` | Raw NDJSON base path |
+| `--runlog-file PATH` | `.claude-sandbox/ralph/runlog.json` | Run log path |
+| `--raw-log PATH` | `.claude-sandbox/ralph/runlogs/rawlog` | Raw NDJSON base path |
 | `--watchdog-timeout N` | `15` | Inactivity timeout in minutes (0 to disable) |
 | `--iteration-timeout N` | `7200` | Hard iteration time limit in seconds (2h) |
 
@@ -133,7 +133,7 @@ Control how ralph handles rate limits and quota exhaustion.
 
 ### Logging
 
-Ralph produces two logs per run: a **run log** (structured metrics) and a **raw log** (complete NDJSON stream). Both sit in the ralph directory (`.claude-sandbox/ralph/`, or legacy `.ralph/`) by default.
+Ralph produces two logs per run: a **run log** (structured metrics) and a **raw log** (complete NDJSON stream). Both sit in the ralph directory (`.claude-sandbox/ralph/`) by default.
 
 In non-interactive mode, Claude's output flows through a pipeline:
 
@@ -148,7 +148,7 @@ claude --output-format stream-json
 
 #### Run log (`runlog.json`)
 
-Per-iteration metrics appended to `.ralph/runlog.json`. Each iteration captures:
+Per-iteration metrics appended to `.claude-sandbox/ralph/runlog.json`. Each iteration captures:
 
 - **Session ID** — for resuming with `claude --resume <id>`
 - **Timing** — start/end timestamps, total duration
@@ -167,38 +167,36 @@ The ticket prefix is flexible (e.g. `S-028`, `PROJ-42`, `BUG-7`). The title afte
 
 Override the path with `--runlog-file <path>`.
 
-#### Raw logs (`.ralph/runlogs/`)
+#### Raw logs (`.claude-sandbox/ralph/runlogs/`)
 
-Every NDJSON line from Claude is written verbatim to `.ralph/runlogs/rawlog_<YYYYMMDDHHmmSS>_iter<N>`. A new file is created for each iteration, so data from watchdog-killed or timed-out iterations is preserved for debugging.
+Every NDJSON line from Claude is written verbatim to `.claude-sandbox/ralph/runlogs/rawlog_<YYYYMMDDHHmmSS>_iter<N>`. A new file is created for each iteration, so data from watchdog-killed or timed-out iterations is preserved for debugging.
 
 Lines are flushed synchronously, so the raw log is complete even if the process is interrupted.
 
 Override the base path with `--raw-log <path>` (the timestamp and iteration suffixes are always appended).
 
-The entire ralph directory is runtime state. Under the consolidated layout it lives inside `.claude-sandbox/` (gitignored as a whole by default, or tracked when `trackInHost: true`); in the legacy layout `.ralph/` should be gitignored on its own.
+The entire ralph directory is runtime state. It lives inside `.claude-sandbox/` (gitignored as a whole by default, or tracked when `trackInHost: true`).
 
 ## Configuration
 
 ### File layout (`.claude-sandbox/`)
 
-claude-sandbox keeps its per-project "foreign" files under a single top-level
-`.claude-sandbox/` directory:
+claude-sandbox keeps all of its per-project "foreign" files under a single
+top-level `.claude-sandbox/` directory:
 
-| logical    | new (preferred)               | legacy fallback (still works) |
-|------------|-------------------------------|-------------------------------|
-| config     | `.claude-sandbox/config.yaml` | `./.claude-sandbox.yaml`      |
-| Dockerfile | `.claude-sandbox/Dockerfile`  | `./Dockerfile.claude-sandbox` |
-| env        | `.claude-sandbox/env`         | `./.env.claude-sandbox`       |
-| ralph      | `.claude-sandbox/ralph/`      | `./.ralph/`                   |
-| agent      | `.claude-sandbox/agent/`      | `./agent/`                    |
-| scratch    | `.claude-sandbox/temp/`       | (new only)                    |
-| reports    | `.claude-sandbox/reports/`    | (new only)                    |
+| logical    | location                      |
+|------------|-------------------------------|
+| config     | `.claude-sandbox/config.yaml` |
+| Dockerfile | `.claude-sandbox/Dockerfile`  |
+| env        | `.claude-sandbox/env`         |
+| ralph      | `.claude-sandbox/ralph/`      |
+| agent      | `.claude-sandbox/agent/`      |
+| scratch    | `.claude-sandbox/temp/`       |
+| reports    | `.claude-sandbox/reports/`    |
 
-Every path resolves reverse-compatibly: `.claude-sandbox/<new>` if it exists →
-legacy `./<old>` if it exists → otherwise the new location. **Existing repos keep
-working unchanged** — migration is opt-in and per-path. See
-[MIGRATION.md](MIGRATION.md). The filenames below (`.env.claude-sandbox`,
-`.claude-sandbox.yaml`, …) refer to the same logical files in either location.
+This is the only supported layout. Older repos that scattered these files across
+the project root (`./.claude-sandbox.yaml`, `./Dockerfile.claude-sandbox`, etc.)
+must be migrated — see [MIGRATION.md](MIGRATION.md).
 
 #### `trackInHost` — host history vs. clean host repo
 
@@ -220,7 +218,7 @@ Set in `.claude-sandbox/config.yaml`. Controls how the directory is version-cont
 The `env` file is gitignored in both modes. Project-level `.claude/` (Claude Code
 agents/settings) is not moved — it stays at the project root by convention.
 
-### `.env.claude-sandbox`
+### `.claude-sandbox/env`
 
 Environment variables passed into the container (via `docker run --env-file`). This file provides secrets and webhook URLs that Claude or MCP servers need at runtime.
 
@@ -235,7 +233,7 @@ CLAUDE_NOTIFICATION_WEBHOOK_URL=https://discord.com/api/webhooks/YOUR_ID/YOUR_TO
 Copy the example to get started:
 
 ```bash
-cp .env.claude-sandbox.example .env.claude-sandbox
+cp .env.claude-sandbox.example .claude-sandbox/env
 ```
 
 This file is gitignored — do not commit it.
@@ -244,11 +242,11 @@ This file is gitignored — do not commit it.
 
 The base image includes a Discord notification MCP server at `/opt/claude-sandbox/mcp/discord-notify/dist/index.mjs`. It provides the `send_discord_notification` tool, which Claude (and ralph prompts) use to post status updates to Discord.
 
-**Setup:** Set `DISCORD_WEBHOOK_URL` in your `.env.claude-sandbox`. The launcher automatically merges the Discord MCP server entry into the container's `.mcp.json` — no manual configuration needed. If you already have a `~/.mcp.json`, the sandbox entries are added alongside your existing servers (the host file is never modified).
+**Setup:** Set `DISCORD_WEBHOOK_URL` in your `.claude-sandbox/env`. The launcher automatically merges the Discord MCP server entry into the container's `.mcp.json` — no manual configuration needed. If you already have a `~/.mcp.json`, the sandbox entries are added alongside your existing servers (the host file is never modified).
 
-### `.claude-sandbox.yaml`
+### `.claude-sandbox/config.yaml`
 
-Container configuration. Place in your project root. See `.claude-sandbox.example.yaml` for a starter template.
+Container configuration. See `.claude-sandbox.example.yaml` for a starter template.
 
 **Dependency:** Parsing requires [`yq`](https://github.com/mikefarah/yq) on the host. Install with `brew install yq`, `sudo snap install yq`, or `go install github.com/mikefarah/yq/v4@latest`.
 
@@ -308,19 +306,19 @@ Each mount entry has:
 Configure the child Dockerfile location (env vars take precedence over YAML):
 
 ```yaml
-dockerfileDir: /path/to/dir               # default: project root
-dockerfile: Dockerfile.claude-sandbox      # default filename
+dockerfileDir: /path/to/dir   # directory holding the override Dockerfile
+dockerfile: Dockerfile        # override filename
 ```
 
-To use the base image only and suppress the missing-Dockerfile warning:
+These keys override the default `.claude-sandbox/Dockerfile` location (build context becomes `dockerfileDir`). To use the base image only and suppress the missing-Dockerfile warning:
 
 ```yaml
 baseOnly: true
 ```
 
-### `Dockerfile.claude-sandbox`
+### `.claude-sandbox/Dockerfile`
 
-Place a `Dockerfile.claude-sandbox` in your project root to install project-specific tools on top of the base image. It must start with `FROM claude-sandbox`.
+Place a `Dockerfile` under `.claude-sandbox/` to install project-specific tools on top of the base image. It must start with `FROM claude-sandbox`. The build context stays the project root, so `COPY` instructions reference the project.
 
 ```dockerfile
 FROM claude-sandbox
@@ -363,9 +361,9 @@ See `Dockerfile.claude-sandbox.example` in this repo for a commented template.
 
 ### Parent directory search
 
-The config, Dockerfile, and env files (in either the new `.claude-sandbox/` location or the legacy root location) are all resolved by walking parent directories from the project root (like direnv). At each level the new path is checked before the legacy one. This lets you share config across multiple projects in a monorepo or workspace — place the files at the workspace root and every sub-project inherits them.
+The config, Dockerfile, and env files (under `.claude-sandbox/`) are all resolved by walking parent directories from the project root (like direnv). This lets you share config across multiple projects in a monorepo or workspace — place a `.claude-sandbox/` at the workspace root and every sub-project inherits it.
 
-If no `Dockerfile.claude-sandbox` is found anywhere up to `/`, the launcher warns and uses the base image directly. Set `baseOnly: true` in `.claude-sandbox.yaml` (or `CLAUDE_SANDBOX_BASE_ONLY=1`) to suppress the warning and skip the search.
+If no `.claude-sandbox/Dockerfile` is found anywhere up to `/`, the launcher warns and uses the base image directly. Set `baseOnly: true` in `.claude-sandbox/config.yaml` (or `CLAUDE_SANDBOX_BASE_ONLY=1`) to suppress the warning and skip the search.
 
 ### Environment variables
 
@@ -379,7 +377,7 @@ If no `Dockerfile.claude-sandbox` is found anywhere up to `/`, the launcher warn
 | `CLAUDE_SANDBOX_HOST_ACCESS_DOCKER_SOCKET_ENABLED` | (unset) | Mount host Docker socket (equivalent to `--docker-socket`) |
 | `CLAUDE_SANDBOX_HOST_ACCESS_AWS_ENABLED` | (unset) | Mount `~/.aws/` read-only (equivalent to `--aws`) |
 | `CLAUDE_SANDBOX_DOCKERFILE_DIR` | `$PROJECT_DIR` | Directory containing the child Dockerfile |
-| `CLAUDE_SANDBOX_DOCKERFILE` | `Dockerfile.claude-sandbox` | Filename of the child Dockerfile |
+| `CLAUDE_SANDBOX_DOCKERFILE` | `Dockerfile` | Filename of the child Dockerfile |
 | `CLAUDE_SANDBOX_BASE_ONLY` | (unset) | Set to `1` or `true` to skip child Dockerfile and use base image only |
 | `CLAUDE_SANDBOX_NO_UPDATE_CHECK` | (unset) | Set to `1` or `true` to skip Claude Code version check at launch |
 
@@ -396,7 +394,7 @@ The container only has access to:
 - `~/.ssh/` — SSH keys for git remotes (read-only, opt-in via `--ssh`)
 - `~/.aws/` — AWS credentials and config (read-only, opt-in via `--aws`)
 - `/var/run/docker.sock` — host Docker daemon (opt-in via `--docker-socket`)
-- Any extra mounts defined in `.claude-sandbox.yaml`
+- Any extra mounts defined in `.claude-sandbox/config.yaml`
 
 When `CLAUDE_CONFIG_DIR` relocates the config directory (e.g. via direnv), `.claude.json` and `.mcp.json` are mounted from the parent of that directory — mirroring the standard `$HOME/.claude/` + `$HOME/.claude.json` + `$HOME/.mcp.json` layout.
 
@@ -408,7 +406,7 @@ The project is mounted at its **real host path** inside the container (e.g., `-v
 
 ### Host access mounts
 
-SSH, git, Docker socket, and AWS mounts are all opt-in. Enable them via CLI flags (`--ssh`, `--git`, `--docker-socket`, `--aws`), environment variables (`CLAUDE_SANDBOX_HOST_ACCESS_*_ENABLED`), or the `hostAccess` section in `.claude-sandbox.yaml`. Without explicitly enabling them, these resources are not available inside the sandbox.
+SSH, git, Docker socket, and AWS mounts are all opt-in. Enable them via CLI flags (`--ssh`, `--git`, `--docker-socket`, `--aws`), environment variables (`CLAUDE_SANDBOX_HOST_ACCESS_*_ENABLED`), or the `hostAccess` section in `.claude-sandbox/config.yaml`. Without explicitly enabling them, these resources are not available inside the sandbox.
 
 **Docker socket** — when enabled, the entrypoint adds the container user to the socket's group automatically, so Claude can run `docker compose`, `make up`, etc. Note: Docker socket access is effectively root-equivalent on the host. This setup trusts Claude not to abuse it (e.g., launching a container that mounts `/` read-write). The goal is to prevent *accidental* damage to the host, not to defend against a deliberately adversarial agent.
 

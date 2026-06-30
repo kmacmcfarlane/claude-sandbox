@@ -24,8 +24,8 @@ REPO_ROOT="$(cd "$(dirname "$REAL_PATH")/.." && pwd)"
 echo REPO_ROOT=${REPO_ROOT}
 BASE_IMAGE_NAME="claude-sandbox"
 
-# Single resolver for "foreign" file locations (.claude-sandbox/<new> with a
-# reverse-compatible fallback to the legacy ./<old> paths). See bin/lib/paths.sh.
+# Single resolver for "foreign" file locations under .claude-sandbox/.
+# See bin/lib/paths.sh.
 source "$(dirname "$REAL_PATH")/lib/paths.sh"
 
 # Version of the running scripts (git describe of the checkout). Baked into the
@@ -339,7 +339,7 @@ fi
 
 
 # ---------------------------------------------------------------------------
-# Parse .claude-sandbox.yaml (memory limit, extra mounts, etc.)
+# Parse .claude-sandbox/config.yaml (memory limit, extra mounts, etc.)
 # ---------------------------------------------------------------------------
 CONFIG_FILE="$(cs_find_up "$PROJECT_DIR" config)"
 MEMORY_LIMIT="8g"
@@ -353,7 +353,7 @@ YAML_TRACK_IN_HOST=""
 
 if [ -f "$CONFIG_FILE" ]; then
     if ! command -v yq &>/dev/null; then
-        echo "Error: .claude-sandbox.yaml found but 'yq' is not installed." >&2
+        echo "Error: .claude-sandbox/config.yaml found but 'yq' is not installed." >&2
         echo "" >&2
         echo "yq is required to parse the config file. Install it with:" >&2
         echo "  brew install yq          # macOS (Homebrew)" >&2
@@ -488,8 +488,8 @@ fi
 # .claude-sandbox/ layout lifecycle (skeleton, gitignore, sidecar) — see lib
 # ---------------------------------------------------------------------------
 LAYOUT_MODE="$(cs_layout_mode "$PROJECT_DIR")"
-# Greenfield + ralph: adopt the new layout so loop output lands in an ignored /
-# sidecar'd dir from the first iteration. Interactive greenfield is left alone.
+# Greenfield (none) + ralph: adopt the layout so loop output lands in an ignored
+# / sidecar'd dir from the first iteration. Interactive greenfield is left alone.
 if [ "$LAYOUT_MODE" = "none" ] && [ "$RALPH_MODE" = true ]; then
     mkdir -p "$(cs_sandbox_dir "$PROJECT_DIR")"
     LAYOUT_MODE="new"
@@ -500,7 +500,7 @@ fi
 
 # ---------------------------------------------------------------------------
 # Resolve child Dockerfile (project-specific tools layer)
-# Precedence: env var > .claude-sandbox.yaml > default
+# Precedence: env var > .claude-sandbox/config.yaml > default
 # ---------------------------------------------------------------------------
 CONFIG_BASE_ONLY=""
 CONFIG_DOCKERFILE_DIR=""
@@ -514,8 +514,8 @@ fi
 BASE_ONLY="${CLAUDE_SANDBOX_BASE_ONLY:-$CONFIG_BASE_ONLY}"
 
 # An explicit override (env var or yaml dockerfileDir/dockerfile) bypasses the
-# reverse-compatible resolver and is honored verbatim — build context stays the
-# override directory, preserving the historical behavior for advanced users.
+# resolver and is honored verbatim — build context stays the override directory,
+# preserving the historical behavior for advanced users.
 DOCKERFILE_OVERRIDE=false
 if [ -n "${CLAUDE_SANDBOX_DOCKERFILE_DIR:-}" ] || [ -n "${CLAUDE_SANDBOX_DOCKERFILE:-}" ] \
    || [ -n "$CONFIG_DOCKERFILE_DIR" ] || [ -n "$CONFIG_DOCKERFILE" ]; then
@@ -523,16 +523,15 @@ if [ -n "${CLAUDE_SANDBOX_DOCKERFILE_DIR:-}" ] || [ -n "${CLAUDE_SANDBOX_DOCKERF
 fi
 
 CHILD_DOCKERFILE_DIR="${CLAUDE_SANDBOX_DOCKERFILE_DIR:-${CONFIG_DOCKERFILE_DIR:-$PROJECT_DIR}}"
-CHILD_DOCKERFILE_NAME="${CLAUDE_SANDBOX_DOCKERFILE:-${CONFIG_DOCKERFILE:-Dockerfile.claude-sandbox}}"
+CHILD_DOCKERFILE_NAME="${CLAUDE_SANDBOX_DOCKERFILE:-${CONFIG_DOCKERFILE:-Dockerfile}}"
 CHILD_DOCKERFILE="${CHILD_DOCKERFILE_DIR}/${CHILD_DOCKERFILE_NAME}"
 # Build context defaults to the Dockerfile's directory (historical behavior).
 CHILD_BUILD_CONTEXT="$CHILD_DOCKERFILE_DIR"
 
 if [ "$DOCKERFILE_OVERRIDE" = false ]; then
-    # No override: resolve new (.claude-sandbox/Dockerfile) -> legacy
-    # (Dockerfile.claude-sandbox). The Dockerfile may live in the
-    # .claude-sandbox/ subdir, but the build context stays the PROJECT ROOT so
-    # COPY instructions still reference the project (as the example documents).
+    # No override: the child Dockerfile is .claude-sandbox/Dockerfile, but the
+    # build context stays the PROJECT ROOT so COPY instructions still reference
+    # the project (as the example documents).
     CHILD_DOCKERFILE="$(cs_resolve "$PROJECT_DIR" dockerfile)"
     CHILD_DOCKERFILE_NAME="$(basename "$CHILD_DOCKERFILE")"
     CHILD_DOCKERFILE_DIR="$(dirname "$CHILD_DOCKERFILE")"
@@ -555,19 +554,15 @@ elif [ "$DOCKERFILE_OVERRIDE" = true ]; then
         echo "Found $CHILD_DOCKERFILE_NAME in parent directory: $CHILD_DOCKERFILE_DIR"
     fi
 else
-    # No override: walk parents checking new + legacy at each level. The build
-    # context is the repo root that holds the Dockerfile (the parent of a
-    # .claude-sandbox/ dir, or the dir holding a legacy Dockerfile.claude-sandbox).
+    # No override: walk parents for a .claude-sandbox/Dockerfile. The build
+    # context is the repo root that holds it (the parent of the .claude-sandbox/
+    # dir) so COPY instructions still reference the project.
     _found="$(cs_find_up "$(dirname "$PROJECT_DIR")" dockerfile)"
     if [ -n "$_found" ]; then
         CHILD_DOCKERFILE="$_found"
         CHILD_DOCKERFILE_NAME="$(basename "$_found")"
         CHILD_DOCKERFILE_DIR="$(dirname "$_found")"
-        if [ "$(basename "$CHILD_DOCKERFILE_DIR")" = ".claude-sandbox" ]; then
-            CHILD_BUILD_CONTEXT="$(dirname "$CHILD_DOCKERFILE_DIR")"
-        else
-            CHILD_BUILD_CONTEXT="$CHILD_DOCKERFILE_DIR"
-        fi
+        CHILD_BUILD_CONTEXT="$(dirname "$CHILD_DOCKERFILE_DIR")"
         USE_CHILD=true
         echo "Found $CHILD_DOCKERFILE_NAME in parent directory: $CHILD_BUILD_CONTEXT"
     fi
@@ -623,8 +618,8 @@ else
     if [ "$BASE_ONLY" != "true" ] && [ "$BASE_ONLY" != "1" ]; then
         echo "WARNING: No child Dockerfile found at $CHILD_DOCKERFILE" >&2
         echo "  Project-specific tools (Go, TypeScript LSP, etc.) will not be available." >&2
-        echo "  Create .claude-sandbox/Dockerfile (or legacy ./Dockerfile.claude-sandbox)" >&2
-        echo "  to add them, or set baseOnly: true in your config to suppress this warning." >&2
+        echo "  Create .claude-sandbox/Dockerfile to add them, or set baseOnly: true" >&2
+        echo "  in your config to suppress this warning." >&2
         echo "" >&2
     fi
     IMAGE_NAME="$BASE_IMAGE_NAME"
@@ -638,13 +633,13 @@ if [ -n "$ENV_FILE" ]; then
     ENV_ARGS=(--env-file "$ENV_FILE")
 else
     ENV_ARGS=()
-    echo "WARNING: env file not found (.claude-sandbox/env or legacy .env.claude-sandbox) in $PROJECT_DIR or any parent" >&2
+    echo "WARNING: env file not found (.claude-sandbox/env) in $PROJECT_DIR or any parent" >&2
     echo "" >&2
     echo "This file provides environment variables needed by Claude Code" >&2
     echo "(e.g. DISCORD_WEBHOOK_URL for MCP server notifications)." >&2
     echo "" >&2
     echo "To create it, copy the example and fill in your values:" >&2
-    echo "  cp .env.claude-sandbox.example .env.claude-sandbox" >&2
+    echo "  cp .env.claude-sandbox.example .claude-sandbox/env" >&2
 fi
 
 # ---------------------------------------------------------------------------

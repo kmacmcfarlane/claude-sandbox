@@ -2,15 +2,8 @@
 #
 # paths.sh — single resolver for claude-sandbox "foreign" file locations.
 #
-# claude-sandbox layers agent/workflow tooling onto host projects. Historically
-# its files were scattered across the host's tracked tree (./.claude-sandbox.yaml,
-# ./Dockerfile.claude-sandbox, ./.env.claude-sandbox, ./.ralph/, ./agent/). The
-# consolidated layout moves them all under a single top-level .claude-sandbox/.
-#
-# Every logical path resolves reverse-compatibly:
-#   1. .claude-sandbox/<new>  if it exists  -> use it
-#   2. else legacy ./<old>    if it exists  -> use it   (un-migrated repos)
-#   3. else .claude-sandbox/<new>           -> default for creation
+# claude-sandbox layers agent/workflow tooling onto host projects. All of its
+# per-project files live under a single top-level .claude-sandbox/ directory.
 #
 # This is the ONE place foreign paths are mapped. Sourced by:
 #   - bin/claude-sandbox  (host launcher)
@@ -18,15 +11,14 @@
 #
 # No hardcoded foreign paths should live anywhere else.
 
-# Map a logical key to "<new-relative> <legacy-relative>" (space-separated;
-# neither side contains spaces).
+# Map a logical key to its relative path under the project root.
 _cs_foreign_map() {
     case "$1" in
-        config)     echo ".claude-sandbox/config.yaml .claude-sandbox.yaml" ;;
-        dockerfile) echo ".claude-sandbox/Dockerfile Dockerfile.claude-sandbox" ;;
-        env)        echo ".claude-sandbox/env .env.claude-sandbox" ;;
-        ralph)      echo ".claude-sandbox/ralph .ralph" ;;
-        agent)      echo ".claude-sandbox/agent agent" ;;
+        config)     echo ".claude-sandbox/config.yaml" ;;
+        dockerfile) echo ".claude-sandbox/Dockerfile" ;;
+        env)        echo ".claude-sandbox/env" ;;
+        ralph)      echo ".claude-sandbox/ralph" ;;
+        agent)      echo ".claude-sandbox/agent" ;;
         *)          return 2 ;;
     esac
 }
@@ -35,45 +27,32 @@ _cs_foreign_map() {
 cs_sandbox_dir() { printf '%s/.claude-sandbox\n' "$1"; }
 
 # cs_resolve <project_dir> <logical>
-# Prints the resolved absolute path following the new->legacy->new rule above.
+# Prints the resolved absolute path under .claude-sandbox/.
 cs_resolve() {
-    local proj="$1" logical="$2" pair new legacy
-    pair="$(_cs_foreign_map "$logical")" || { echo "cs_resolve: unknown logical '$logical'" >&2; return 2; }
-    new="${pair%% *}"; legacy="${pair##* }"
-    if [ -e "$proj/$new" ]; then
-        printf '%s\n' "$proj/$new"
-    elif [ -e "$proj/$legacy" ]; then
-        printf '%s\n' "$proj/$legacy"
-    else
-        printf '%s\n' "$proj/$new"
-    fi
+    local proj="$1" logical="$2" new
+    new="$(_cs_foreign_map "$logical")" || { echo "cs_resolve: unknown logical '$logical'" >&2; return 2; }
+    printf '%s\n' "$proj/$new"
 }
 
 # cs_find_up <start_dir> <logical>
-# Walk parent directories (direnv-style); at each level prefer the new path,
-# then the legacy path. Prints the first hit, empty string if none found.
+# Walk parent directories (direnv-style) checking the .claude-sandbox/ path at
+# each level. Prints the first hit, empty string if none found.
 cs_find_up() {
-    local dir="$1" logical="$2" pair new legacy
-    pair="$(_cs_foreign_map "$logical")" || { echo "cs_find_up: unknown logical '$logical'" >&2; return 2; }
-    new="${pair%% *}"; legacy="${pair##* }"
+    local dir="$1" logical="$2" new
+    new="$(_cs_foreign_map "$logical")" || { echo "cs_find_up: unknown logical '$logical'" >&2; return 2; }
     while [ "$dir" != "/" ]; do
         if [ -f "$dir/$new" ]; then printf '%s\n' "$dir/$new"; return; fi
-        if [ -f "$dir/$legacy" ]; then printf '%s\n' "$dir/$legacy"; return; fi
         dir="$(dirname "$dir")"
     done
 }
 
-# cs_layout_mode <project_dir> -> "new" | "legacy" | "none"
-#   new    : .claude-sandbox/ exists (repo has migrated / adopted the layout)
-#   legacy : a legacy foreign file exists at the project root (un-migrated)
-#   none   : neither (greenfield)
+# cs_layout_mode <project_dir> -> "new" | "none"
+#   new    : .claude-sandbox/ exists (repo has adopted the layout)
+#   none   : it does not (greenfield)
 cs_layout_mode() {
-    local proj="$1" sb f
+    local proj="$1" sb
     sb="$(cs_sandbox_dir "$proj")"
     if [ -d "$sb" ]; then echo new; return; fi
-    for f in .claude-sandbox.yaml Dockerfile.claude-sandbox .env.claude-sandbox .ralph agent; do
-        if [ -e "$proj/$f" ]; then echo legacy; return; fi
-    done
     echo none
 }
 
@@ -142,8 +121,8 @@ SEED
 
     if [ "$track" = "true" ]; then
         # Host-tracked: no sidecar. Ignore secrets (env), scratch (temp/), and the
-        # ralph runtime dir (runlog/runlogs/lock/stop) — ephemeral state that the
-        # legacy ./.ralph/ layout also kept out of the repo. The trailing
+        # ralph runtime dir (runlog/runlogs/lock/stop) — ephemeral state kept out
+        # of the repo. The trailing
         # negations defensively re-include the tracked config/Dockerfile in case
         # the host repo has a bare `config.yaml`/`Dockerfile` ignore rule (common
         # in Go projects) that would otherwise swallow them. Negations are no-ops

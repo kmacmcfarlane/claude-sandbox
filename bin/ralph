@@ -8,13 +8,13 @@ set -euo pipefail
 # - Stop control: create a stop file (default: <ralph-dir>/stop) to halt
 # - Iteration limit: --limit N (default: 30)
 # - Run log: writes per-iteration metrics (default: <ralph-dir>/runlog.json)
-#   where <ralph-dir> = .claude-sandbox/ralph (legacy fallback: ./.ralph)
+#   where <ralph-dir> = .claude-sandbox/ralph
 
 REAL_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 REPO_ROOT="$(cd "$(dirname "$REAL_PATH")/.." && pwd)"
 ROOT_DIR="$(pwd)"
 
-# Resolve "foreign" paths: .claude-sandbox/<new> with a legacy ./<old> fallback.
+# Resolve "foreign" paths under .claude-sandbox/.
 source "$(dirname "$REAL_PATH")/lib/paths.sh"
 RALPH_DIR="$(cs_resolve "$ROOT_DIR" ralph)"
 AGENT_DIR="$(cs_resolve "$ROOT_DIR" agent)"
@@ -30,8 +30,8 @@ usage() {
 Usage:
   ralph [options]
 
-Paths default under .claude-sandbox/ralph/ (with a legacy ./.ralph/ fallback for
-un-migrated repos) and ./agent/ resolves to .claude-sandbox/agent/ likewise.
+Paths default under .claude-sandbox/ralph/ and the prompt resolves under
+.claude-sandbox/agent/.
 
 Options:
   --limit N                       Stop after N iterations (default: 30)
@@ -56,7 +56,7 @@ Quota retry:
 
 Stop:
   Create the stop file to halt the loop:
-    touch .claude-sandbox/ralph/stop      # or legacy: touch .ralph/stop
+    touch .claude-sandbox/ralph/stop
 
   Remove it to allow running again:
     rm .claude-sandbox/ralph/stop

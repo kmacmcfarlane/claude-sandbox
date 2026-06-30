@@ -1,10 +1,10 @@
-# Dockerfile.claude-sandbox — project-specific tools for claude-sandbox
+# Dockerfile — project-specific tools for claude-sandbox
 #
-# Place as Dockerfile.claude-sandbox in your project root (or configure the
-# path via .claude-sandbox.yaml or environment variables).
+# Place as .claude-sandbox/Dockerfile in your project (or configure the
+# path via .claude-sandbox/config.yaml or environment variables).
 #
-# The build context is the directory containing this file, so COPY instructions
-# reference your project directory.
+# The build context is the project root, so COPY instructions reference your
+# project directory.
 #
 # USER CONVENTION:
 #   The base image's entrypoint runs as root, remaps the "claude" user to match
