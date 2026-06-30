@@ -195,8 +195,7 @@ top-level `.claude-sandbox/` directory:
 | reports    | `.claude-sandbox/reports/`    |
 
 This is the only supported layout. Older repos that scattered these files across
-the project root (`./.claude-sandbox.yaml`, `./Dockerfile.claude-sandbox`, etc.)
-must be migrated — see [MIGRATION.md](MIGRATION.md).
+the project root must be migrated — see [docs/MIGRATION.md](docs/MIGRATION.md).
 
 #### `trackInHost` — host history vs. clean host repo
 

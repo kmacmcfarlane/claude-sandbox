@@ -5,8 +5,8 @@ set -e
 # Child Dockerfiles must end with USER root — see README.md.
 if [ "$(id -u)" != "0" ]; then
     echo "ERROR: entrypoint.sh must run as root." >&2
-    echo "Your Dockerfile.claude-sandbox likely ends with 'USER claude' instead of 'USER root'." >&2
-    echo "Add 'USER root' as the last line. See: https://github.com/kmacmcfarlane/claude-sandbox#dockerfileclaude-sandbox" >&2
+    echo "Your .claude-sandbox/Dockerfile likely ends with 'USER claude' instead of 'USER root'." >&2
+    echo "Add 'USER root' as the last line. See: https://github.com/kmacmcfarlane/claude-sandbox#readme" >&2
     exit 1
 fi
 

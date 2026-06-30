@@ -6,9 +6,5 @@
 
 node_modules/
 
-.claude-sandbox.yaml
-.env.claude-sandbox
-.ralph/
-
 # Consolidated layout (foreign-safe default)
 /.claude-sandbox/

@@ -1,6 +1,6 @@
 ---
 name: sandbox
-description: "Guides setup, configuration, and troubleshooting of claude-sandbox Docker containers. Use when user asks about claude-sandbox, sandbox configuration, .claude-sandbox.yaml, Dockerfile.claude-sandbox, ralph loops, container isolation, or host access flags (--docker-socket, --aws, --git, --ssh). Also triggers on sandbox launch errors, entrypoint issues, or volume mount problems."
+description: "Guides setup, configuration, and troubleshooting of claude-sandbox Docker containers. Use when user asks about claude-sandbox, sandbox configuration, .claude-sandbox/config.yaml, .claude-sandbox/Dockerfile, ralph loops, container isolation, or host access flags (--docker-socket, --aws, --git, --ssh). Also triggers on sandbox launch errors, entrypoint issues, or volume mount problems."
 disable-model-invocation: false
 allowed-tools: "Read, Glob, Grep, Bash, Edit, Write, Agent"
 ---
@@ -19,7 +19,7 @@ Expert guidance for the claude-sandbox project — a Docker-based sandbox for ru
 
 ### Two-Layer Image System
 1. **Base image** (`claude-sandbox`): OS, build-essential, Node 22, Claude CLI, Docker CLI, Python venv, sandbox scripts
-2. **Child image** (`claude-sandbox-{project-slug}`): Project-specific tools via `Dockerfile.claude-sandbox` extending `FROM claude-sandbox`
+2. **Child image** (`claude-sandbox-{project-slug}`): Project-specific tools via `.claude-sandbox/Dockerfile` extending `FROM claude-sandbox`
 
 The launcher auto-builds both layers. Base rebuilds trigger child rebuilds.
 
@@ -44,26 +44,28 @@ USER root
 The container sees the project at its real host path. This is critical for `docker compose` volume resolution against the host daemon.
 
 ### Configuration Precedence
-CLI flag > env var > `.claude-sandbox.yaml` > defaults
+CLI flag > env var > `.claude-sandbox/config.yaml` > defaults
 
 Three config files are resolved by walking parent directories (direnv-style):
-- `.claude-sandbox.yaml` — container settings, host access, mounts
-- `.env.claude-sandbox` — environment variables injected into the container
-- `Dockerfile.claude-sandbox` — child image definition
+- `.claude-sandbox/config.yaml` — container settings, host access, mounts
+- `.claude-sandbox/env` — environment variables injected into the container
+- `.claude-sandbox/Dockerfile` — child image definition
+
+**Layout:** all sandbox files live under `.claude-sandbox/` — `config.yaml`, `env`, `Dockerfile`, `ralph/`, and `agent/`. The legacy scattered-root layout is no longer supported. See claude-sandbox `docs/MIGRATION.md`.
 
 ## Common Tasks
 
 ### Setting Up a New Project
-1. Optionally create `.claude-sandbox.yaml` (copy from `.claude-sandbox.example.yaml`)
-2. Optionally create `Dockerfile.claude-sandbox` for project-specific tools
-3. Optionally create `.env.claude-sandbox` for env vars
+1. Optionally create `.claude-sandbox/config.yaml` (copy from `.claude-sandbox/config.example.yaml`)
+2. Optionally create `.claude-sandbox/Dockerfile` for project-specific tools
+3. Optionally create `.claude-sandbox/env` for env vars
 4. Run `claude-sandbox` from the project directory
 
 ### Enabling Host Access
 Options (pick any):
 - **CLI flags**: `--docker-socket`, `--aws`, `--git`, `--ssh`
 - **Env vars**: `CLAUDE_SANDBOX_HOST_ACCESS_DOCKER_SOCKET_ENABLED=1`, etc.
-- **YAML** (`.claude-sandbox.yaml`):
+- **YAML** (`.claude-sandbox/config.yaml`):
   ```yaml
   hostAccess:
     dockerSocket:
@@ -77,12 +79,12 @@ Options (pick any):
 claude-sandbox --ralph --docker-socket --dangerous --limit 5
 ```
 - Runs Claude in fresh-context iterations (new process each time)
-- Stop gracefully: `touch .ralph/stop`
-- Debug: read `.ralph/runlogs/rawlog_*` for full NDJSON streams
-- Metrics: `.ralph/runlog.json`
+- Stop gracefully: `touch .claude-sandbox/ralph/stop`
+- Debug: read `.claude-sandbox/ralph/runlogs/rawlog_*` for full NDJSON streams
+- Metrics: `.claude-sandbox/ralph/runlog.json`
 
 ### Adding Extra Volume Mounts
-In `.claude-sandbox.yaml`:
+In `.claude-sandbox/config.yaml`:
 ```yaml
 mounts:
   - host: /home/user/shared-libs
@@ -98,7 +100,7 @@ mounts:
 1. Check Docker daemon is running: `docker info`
 2. Check base image exists: `docker images claude-sandbox`
 3. Look for build errors in launcher output
-4. Verify `Dockerfile.claude-sandbox` syntax if using child image
+4. Verify `.claude-sandbox/Dockerfile` syntax if using child image
 
 ### File permission issues
 The entrypoint remaps UID/GID and chowns all non-bind-mounted files under the home directory. If files have wrong ownership:
@@ -111,13 +113,13 @@ The entrypoint remaps UID/GID and chowns all non-bind-mounted files under the ho
 Ensure `--docker-socket` flag or `hostAccess.dockerSocket.enabled: true` is set. The container talks to the host Docker daemon — there is no daemon inside.
 
 ### Ralph loop won't stop
-1. `touch .ralph/stop` in the project directory
-2. If stuck, check `.ralph/lock` for the PID
+1. `touch .claude-sandbox/ralph/stop` in the project directory
+2. If stuck, check `.claude-sandbox/ralph/lock` for the PID
 3. The activity watchdog (`logstream/activity-watchdog.js`) exits after N minutes of silence
 
 ### Child Dockerfile not found
 The launcher walks parent directories. To skip child image detection entirely:
-- Set `baseOnly: true` in `.claude-sandbox.yaml`
+- Set `baseOnly: true` in `.claude-sandbox/config.yaml`
 - Or `CLAUDE_SANDBOX_BASE_ONLY=1`
 
 ## Key Files Reference
@@ -130,4 +132,4 @@ The launcher walks parent directories. To skip child image detection entirely:
 | `Dockerfile` | Base image definition |
 | `notification-hooks.json` | Hook fragment merged into settings.json |
 | `container-context.md` | Injected into container's CLAUDE.md |
-| `.claude-sandbox.example.yaml` | Example config template |
+| `.claude-sandbox/config.example.yaml` | Example config template |

@@ -100,10 +100,10 @@ cs_setup_layout() {
 
 claude-sandbox's per-project "foreign" files, consolidated out of the host tree.
 
-- `config.yaml` — sandbox config (was `./.claude-sandbox.yaml`)
-- `Dockerfile` — child image (was `./Dockerfile.claude-sandbox`)
-- `env` — environment variables, secret, never committed (was `./.env.claude-sandbox`)
-- `ralph/` — ralph loop runtime + logs (was `./.ralph/`)
+- `config.yaml` — sandbox config
+- `Dockerfile` — child image
+- `env` — environment variables, secret, never committed
+- `ralph/` — ralph loop runtime + logs
 - `agent/` — workflow docs + backlog
 - `temp/` — scratch (uncommittable)
 - `reports/` — durable outputs (bench, parity diffs, QA logs)
