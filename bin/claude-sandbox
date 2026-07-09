@@ -12,6 +12,8 @@
 #   claude-sandbox --ssh                     # mount ~/.ssh/ read-only
 #   claude-sandbox --ralph [ralph-args]     # launch the ralph loop runner
 #   claude-sandbox --ralph --limit 5        # run ralph for 5 iterations
+#   claude-sandbox init                     # bootstrap .claude-sandbox/ and exit
+#   claude-sandbox init-ralph               # bootstrap + seed ralph scaffolding
 #   PROJECT_DIR=/other claude-sandbox       # launch claude in /other
 #
 # The project is mounted at its REAL host path inside the container so that
@@ -21,7 +23,6 @@ set -euo  pipefail
 
 REAL_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 REPO_ROOT="$(cd "$(dirname "$REAL_PATH")/.." && pwd)"
-echo REPO_ROOT=${REPO_ROOT}
 BASE_IMAGE_NAME="claude-sandbox"
 
 # Single resolver for "foreign" file locations under .claude-sandbox/.
@@ -81,6 +82,12 @@ CLI_MODEL=""
 FORCE_REBUILD=false
 NO_UPDATE_CHECK="${CLAUDE_SANDBOX_NO_UPDATE_CHECK:-false}"
 
+# Bootstrap control (`init` / `init-ralph` subcommands). CLI_TRACK_IN_HOST is
+# empty unless --track-in-host / --no-track-in-host is passed (skips the prompt).
+INIT_MODE=false
+INIT_RALPH=false
+CLI_TRACK_IN_HOST=""
+
 usage() {
     cat <<'EOF'
 Usage:
@@ -93,7 +100,15 @@ Usage:
   claude-sandbox --ssh                    # mount ~/.ssh/ read-only
   claude-sandbox --ralph [ralph-args]     # launch the ralph loop runner
   claude-sandbox --ralph --limit 5        # run ralph for 5 iterations
+  claude-sandbox init                     # bootstrap .claude-sandbox/ (config, env, gitignore)
+  claude-sandbox init-ralph               # bootstrap + seed ralph agent scaffolding
   PROJECT_DIR=/other claude-sandbox       # launch claude in /other
+
+Commands (bootstrap the project, then exit — launcher flags do not apply):
+  init                      Bootstrap .claude-sandbox/ in the project (config, env, gitignore, sidecar)
+  init-ralph                Like init, plus seed ralph agent/ + scripts/ scaffolding
+     --track-in-host          set trackInHost: true  (skip the interactive prompt)
+     --no-track-in-host       set trackInHost: false (skip the interactive prompt)
 
 Options:
   --help, -h                Show this help message and exit
@@ -125,6 +140,28 @@ The project is mounted at its REAL host path inside the container so that
 docker compose volumes (which the host daemon resolves) work correctly.
 EOF
 }
+
+# ---------------------------------------------------------------------------
+# Subcommands: `init` / `init-ralph` bootstrap the project and exit. They are
+# positional (must be the first argument) and take only their own options —
+# launcher and claude flags do not apply.
+# ---------------------------------------------------------------------------
+if [[ "${1:-}" == "init" || "${1:-}" == "init-ralph" ]]; then
+    [[ "$1" == "init-ralph" ]] && INIT_RALPH=true
+    INIT_MODE=true
+    _subcmd="$1"; shift
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --track-in-host)    CLI_TRACK_IN_HOST=true; shift ;;
+            --no-track-in-host) CLI_TRACK_IN_HOST=false; shift ;;
+            --help|-h)          usage; exit 0 ;;
+            *)
+                echo "Error: 'claude-sandbox $_subcmd' does not accept '$1'" >&2
+                echo "       (valid options: --track-in-host, --no-track-in-host)" >&2
+                exit 2 ;;
+        esac
+    done
+fi
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -184,6 +221,113 @@ fi
 # ---------------------------------------------------------------------------
 PROJECT_DIR="${PROJECT_DIR:-$(pwd)}"
 PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"
+
+# ---------------------------------------------------------------------------
+# Bootstrap mode (`init` / `init-ralph` subcommands): set up .claude-sandbox/ and exit.
+# Idempotent — never overwrites an existing config, env, or scaffold file.
+# ---------------------------------------------------------------------------
+do_init() {
+    local sb config env_file
+    sb="$(cs_sandbox_dir "$PROJECT_DIR")"
+    config="$sb/config.yaml"
+    env_file="$sb/env"
+    mkdir -p "$sb"
+
+    # Configs cascade (root → project, more local wins), so the seeded local
+    # config is SPARSE — fully commented — and overrides nothing until the user
+    # uncomments a key. Upstream catch-all configs keep applying as defaults.
+    # Detect whether any ancestor already defines trackInHost (search from the
+    # parent so the project's own file is excluded).
+    local upstream_track=""
+    local -a upstream_configs=()
+    mapfile -t upstream_configs < <(cs_collect_up "$(dirname "$PROJECT_DIR")" config)
+    if [ ${#upstream_configs[@]} -gt 0 ] && \
+       grep -Eqh '^[[:space:]]*trackInHost:[[:space:]]*(true|false)([[:space:]]|$)' "${upstream_configs[@]}" 2>/dev/null; then
+        upstream_track="$(cs_cascade_track_in_host "${upstream_configs[@]}")"
+    fi
+
+    # Resolve the local trackInHost line: explicit CLI flag always wins; when an
+    # ancestor defines it, inherit (write nothing locally); otherwise prompt.
+    local track="$CLI_TRACK_IN_HOST"
+    if [ -z "$track" ] && [ -z "$upstream_track" ] && [ ! -f "$config" ]; then
+        track="$(cs_prompt_track_in_host)"
+    fi
+
+    # --- config (sparse seed) ---
+    if [ -f "$config" ]; then
+        if [ -n "$CLI_TRACK_IN_HOST" ]; then
+            # Explicit flag on an existing config: keep the file consistent with
+            # the layout we're about to (re)build.
+            cs_set_track_in_host "$config" "$CLI_TRACK_IN_HOST"
+            echo "  updated  config.yaml (trackInHost: $CLI_TRACK_IN_HOST)"
+        else
+            echo "  skipped  config.yaml (exists)"
+        fi
+    else
+        cp "$REPO_ROOT/scaffold/config.yaml" "$config"
+        if [ -n "$track" ]; then
+            cs_set_track_in_host "$config" "$track"
+            echo "  created  config.yaml (sparse; trackInHost: $track)"
+        else
+            echo "  created  config.yaml (sparse; trackInHost inherited: $upstream_track)"
+        fi
+    fi
+
+    # --- env (sparse seed; env files layer, later wins) ---
+    if [ -f "$env_file" ]; then
+        echo "  skipped  env (exists)"
+    else
+        cp "$REPO_ROOT/scaffold/env" "$env_file"
+        echo "  created  env"
+    fi
+
+    # The child Dockerfile is optional — seed it as .example so it stays inactive
+    # until the user renames it to .claude-sandbox/Dockerfile.
+    if [ -e "$sb/Dockerfile" ] || [ -e "$sb/Dockerfile.example" ]; then
+        echo "  skipped  Dockerfile.example (exists)"
+    else
+        cp "$REPO_ROOT/scaffold/Dockerfile.example" "$sb/Dockerfile.example"
+        echo "  created  Dockerfile.example (rename to Dockerfile to activate)"
+    fi
+
+    # Skeleton, seeded CLAUDE.md, host .gitignore, sidecar repo. Effective
+    # trackInHost = most-local definition across the full cascade (local file
+    # included), CLI flag first. grep-based so `init` works before yq exists.
+    local effective_track
+    if [ -n "$CLI_TRACK_IN_HOST" ]; then
+        effective_track="$CLI_TRACK_IN_HOST"
+    else
+        local -a all_configs=()
+        mapfile -t all_configs < <(cs_collect_up "$PROJECT_DIR" config)
+        effective_track="$(cs_cascade_track_in_host "${all_configs[@]}")"
+    fi
+    cs_setup_layout "$PROJECT_DIR" "$effective_track"
+}
+
+if [ "$INIT_MODE" = true ]; then
+    echo "Initializing .claude-sandbox/ in $PROJECT_DIR"
+    do_init
+    if [ "$INIT_RALPH" = true ]; then
+        cs_seed_ralph_scaffold "$PROJECT_DIR" "$REPO_ROOT/scaffold-ralph"
+    fi
+
+    echo
+    echo "Done. Next steps:"
+    echo "  1. Add secrets / env vars to .claude-sandbox/env (e.g. DISCORD_WEBHOOK_URL, API keys)"
+    echo "  2. Review .claude-sandbox/config.yaml — host access, mounts, model, memoryLimit"
+    echo "  3. (optional) Rename .claude-sandbox/Dockerfile.example → Dockerfile and add project tools (FROM claude-sandbox)"
+    if [ "$INIT_RALPH" = true ]; then
+        echo "  4. Fill .claude-sandbox/agent/PRD.md and DEVELOPMENT_PRACTICES.md / TEST_PRACTICES.md"
+        echo "  5. Groom the backlog: python3 .claude-sandbox/scripts/backlog/backlog.py add"
+        echo
+        echo "Run the loop:  claude-sandbox --ralph"
+        echo "Stop it:       touch .claude-sandbox/ralph/stop"
+    else
+        echo
+        echo "Launch:  claude-sandbox"
+    fi
+    exit 0
+fi
 
 # ---------------------------------------------------------------------------
 # Detect host IDs for permission mapping
@@ -339,10 +483,35 @@ fi
 
 
 # ---------------------------------------------------------------------------
-# Parse .claude-sandbox/config.yaml (memory limit, extra mounts, etc.)
+# Parse .claude-sandbox/ config cascade (memory limit, extra mounts, etc.)
+# Every config.yaml from the filesystem root down to the project is merged:
+# scalars/maps from more-local files override, mounts append (a same
+# host+container entry overrides the upstream one). env files layer the same
+# way (later --env-file wins); the child Dockerfile is nearest-wins (whole
+# file, no merging).
 # ---------------------------------------------------------------------------
-CONFIG_FILE="$(cs_find_up "$PROJECT_DIR" config)"
+mapfile -t CONFIG_FILES < <(cs_collect_up "$PROJECT_DIR" config)
+mapfile -t ENV_FILES < <(cs_collect_up "$PROJECT_DIR" env)
 MEMORY_LIMIT="8g"
+
+# Show the cascade whenever any .claude-sandbox/ level contributes files.
+if [ ${#CONFIG_FILES[@]} -gt 0 ] || [ ${#ENV_FILES[@]} -gt 0 ]; then
+    echo "Sandbox config cascade (root → project; later overrides earlier):"
+    _dir="$PROJECT_DIR"; _levels=()
+    while [ "$_dir" != "/" ]; do
+        [ -d "$_dir/.claude-sandbox" ] && _levels+=("$_dir")
+        _dir="$(dirname "$_dir")"
+    done
+    for ((_i = ${#_levels[@]} - 1; _i >= 0; _i--)); do
+        _lvl="${_levels[$_i]}"
+        _has=()
+        [ -f "$_lvl/.claude-sandbox/config.yaml" ] && _has+=("config.yaml")
+        [ -f "$_lvl/.claude-sandbox/env" ]         && _has+=("env")
+        [ -f "$_lvl/.claude-sandbox/Dockerfile" ]  && _has+=("Dockerfile (nearest wins)")
+        [ ${#_has[@]} -gt 0 ] && echo "  $_lvl/.claude-sandbox/  →  ${_has[*]}"
+    done
+    unset _dir _levels _lvl _has _i
+fi
 
 YAML_SSH=""
 YAML_GIT=""
@@ -351,7 +520,8 @@ YAML_AWS=""
 YAML_MODEL=""
 YAML_TRACK_IN_HOST=""
 
-if [ -f "$CONFIG_FILE" ]; then
+CONFIG_FILE=""
+if [ ${#CONFIG_FILES[@]} -gt 0 ]; then
     if ! command -v yq &>/dev/null; then
         echo "Error: .claude-sandbox/config.yaml found but 'yq' is not installed." >&2
         echo "" >&2
@@ -363,6 +533,15 @@ if [ -f "$CONFIG_FILE" ]; then
         echo "More options: https://github.com/mikefarah/yq#install" >&2
         exit 1
     fi
+
+    # Merge the cascade into one effective config; all reads below use it.
+    CONFIG_FILE="$(mktemp /tmp/claude-sandbox-config.XXXXXX.yaml)"
+    # Re-arm the EXIT trap with the merged config included (traps don't stack).
+    trap "rm -f '$CLAUDE_MD_TMP' '$SETTINGS_TMP' '$MCP_TMP' '$CONFIG_FILE'" EXIT
+    cs_merge_configs "$CONFIG_FILE" "${CONFIG_FILES[@]}"
+fi
+
+if [ -n "$CONFIG_FILE" ] && [ -f "$CONFIG_FILE" ]; then
 
     # Memory limit (default: 8g)
     CONFIG_MEMORY=$(yq '.memoryLimit // ""' "$CONFIG_FILE")
@@ -397,7 +576,8 @@ if [ -f "$CONFIG_FILE" ]; then
         MOUNT_WRITABLE=$(yq ".mounts[$i].writable // false" "$CONFIG_FILE")
 
         if [ "$MOUNT_HOST" = "null" ] || [ "$MOUNT_CONTAINER" = "null" ]; then
-            echo "Error: mounts[$i] in $CONFIG_FILE requires both 'host' and 'container' fields" >&2
+            echo "Error: mounts[$i] in the merged sandbox config requires both 'host' and 'container' fields" >&2
+            echo "       (cascade: ${CONFIG_FILES[*]})" >&2
             exit 1
         fi
 
@@ -628,9 +808,14 @@ fi
 # ---------------------------------------------------------------------------
 # Claude environment file (Discord webhook, etc.)
 # ---------------------------------------------------------------------------
-ENV_FILE="$(cs_find_up "$PROJECT_DIR" env)"
-if [ -n "$ENV_FILE" ]; then
-    ENV_ARGS=(--env-file "$ENV_FILE")
+# ENV_FILES collected with the config cascade above (root-first). Docker applies
+# --env-file flags in order, so later (more local) files override earlier ones.
+if [ ${#ENV_FILES[@]} -gt 0 ]; then
+    ENV_ARGS=()
+    for _ef in "${ENV_FILES[@]}"; do
+        ENV_ARGS+=(--env-file "$_ef")
+    done
+    unset _ef
 else
     ENV_ARGS=()
     echo "WARNING: env file not found (.claude-sandbox/env) in $PROJECT_DIR or any parent" >&2
@@ -638,8 +823,8 @@ else
     echo "This file provides environment variables needed by Claude Code" >&2
     echo "(e.g. DISCORD_WEBHOOK_URL for MCP server notifications)." >&2
     echo "" >&2
-    echo "To create it, copy the example and fill in your values:" >&2
-    echo "  cp .env.claude-sandbox.example .claude-sandbox/env" >&2
+    echo "To create it, bootstrap the project and fill in your values:" >&2
+    echo "  claude-sandbox init   # creates .claude-sandbox/env (and config)" >&2
 fi
 
 # ---------------------------------------------------------------------------

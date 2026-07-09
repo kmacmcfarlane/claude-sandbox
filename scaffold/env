@@ -1,0 +1,15 @@
+# Environment variables for the Claude Code sandbox container.
+#
+# The claude-sandbox launcher passes every .claude-sandbox/env found from the
+# filesystem root down to the project as stacked `docker run --env-file` flags:
+# LATER (more local) files override earlier ones for duplicate keys. This
+# seeded file is fully commented so it overrides nothing upstream — uncomment
+# and set a variable only to define or override it for this project.
+#
+# This file is gitignored — do not commit it.
+
+# Discord webhook for MCP notification server
+# DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/YOUR_ID/YOUR_TOKEN
+
+# Discord webhook for Claude Code notification hooks (permission prompts, idle)
+# CLAUDE_NOTIFICATION_WEBHOOK_URL=https://discord.com/api/webhooks/YOUR_ID/YOUR_TOKEN

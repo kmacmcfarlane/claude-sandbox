@@ -49,6 +49,12 @@ claude-sandbox --ralph --docker-socket --dangerous --limit 5
 
 # Point at a specific project:
 PROJECT_DIR=/home/you/projects/foo claude-sandbox
+
+# Bootstrap .claude-sandbox/ in a repo (config, env, gitignore):
+claude-sandbox init
+
+# Bootstrap + seed the ralph agent scaffolding (agent/ + scripts/):
+claude-sandbox init-ralph
 ```
 
 The base Docker image is built automatically on first run. If a `.claude-sandbox/Dockerfile` exists in the project, a child image is built on top of it.
@@ -57,7 +63,7 @@ The base Docker image is built automatically on first run. If a `.claude-sandbox
 
 ### `claude-sandbox` flags
 
-These flags are consumed by the launcher and control the container environment. They must come **before** any passthrough arguments.
+These flags are consumed by the launcher and control the container environment. They must come **before** any passthrough arguments. (To bootstrap a project, use the `init` / `init-ralph` **subcommands** instead — see [Bootstrapping a project](#bootstrapping-a-project-init--init-ralph).)
 
 | Flag | Alias | Description |
 |---|---|---|
@@ -84,6 +90,60 @@ claude-sandbox --docker-socket --resume
 # Pass --interactive and --watchdog-timeout to ralph:
 claude-sandbox --ralph --docker-socket --dangerous --interactive --watchdog-timeout 30
 ```
+
+## Bootstrapping a project (`init` / `init-ralph`)
+
+`init` sets up the `.claude-sandbox/` directory in the current project and exits (it does **not** launch a container):
+
+- Creates `.claude-sandbox/config.yaml` (from the example) and `.claude-sandbox/env`.
+- Prompts for **`trackInHost`** (default `false`) — unless `--track-in-host` / `--no-track-in-host` is passed, or there is no tty. See [`trackInHost`](#claude-sandboxconfigyaml) for what it controls.
+- Runs the standard layout setup: `temp/`+`reports/` skeleton, seeded `.claude-sandbox/CLAUDE.md`, host `.gitignore` entries, and (when `trackInHost: false`) the internal sidecar git repo.
+
+`init-ralph` does everything `init` does, then seeds the **ralph agent scaffolding** into the project:
+
+- `.claude-sandbox/agent/` — generic baseline `PROMPT*.md`, `AGENT_FLOW.md`, `LSP_TOOLS.md`, `BUG_REPORTING.md`, `ideas/`, and stub `PRD.md` / `DEVELOPMENT_PRACTICES.md` / `TEST_PRACTICES.md` / `backlog.yaml`.
+- `.claude-sandbox/scripts/` — the `backlog` (backlog.yaml CRUD) and `worktree` (git-worktree + merge helper) tools that the agents use.
+
+Both commands are **idempotent** — they never overwrite an existing `config.yaml`, `env`, agent doc, or script. Re-running fills only what's missing and reports what it skipped. This means a project template can lay down its own project-specific `AGENT_FLOW.md` / `DEVELOPMENT_PRACTICES.md` / etc. first, and a subsequent `init-ralph` will keep those and add only the pieces they don't provide.
+
+```bash
+# Own project — track the sandbox dir in this repo:
+claude-sandbox init-ralph --track-in-host
+
+# Someone else's repo — keep the sandbox out of their history (sidecar):
+claude-sandbox init-ralph --no-track-in-host
+```
+
+After `init-ralph`, fill in `agent/PRD.md` + the practice docs, groom the backlog with `python3 .claude-sandbox/scripts/backlog/backlog.py add`, then run `claude-sandbox --ralph`.
+
+### Config cascade (monorepo / workspace defaults)
+
+At launch, **every** `.claude-sandbox/config.yaml` from the filesystem root down to the
+project is merged into one effective config, and every `.claude-sandbox/env` is stacked
+(as ordered `docker run --env-file` flags). The launcher prints the cascade so it's clear
+which files apply:
+
+```
+Sandbox config cascade (root → project; later overrides earlier):
+  /home/rt/work/src/git.example.com/.claude-sandbox/  →  config.yaml env
+  /home/rt/work/src/git.example.com/myproject/.claude-sandbox/  →  config.yaml env
+```
+
+Merge rules:
+
+- **Scalars and maps** (`model`, `memoryLimit`, `hostAccess.*`, `trackInHost`, …): the
+  more-local value wins.
+- **`mounts`**: entries append down the cascade; an entry with the **same `host` +
+  `container`** as an upstream one overrides it (e.g. flip `writable: true` locally).
+- **`env` files**: layered in cascade order — a variable set in a more-local `env`
+  overrides the upstream value; upstream-only variables still apply.
+- **`Dockerfile`**: NOT merged — the nearest one up the tree wins wholesale.
+
+`init` seeds a **sparse, fully-commented** `config.yaml` and `env`, so a freshly-inited
+sub-project overrides nothing: the workspace catch-all keeps acting as the default.
+Uncomment a key locally only to set or override it for that project. The one exception is
+`trackInHost`: `init` writes it explicitly (flag or prompt) *unless* an upstream config
+already defines it — then it's inherited and the local line stays commented.
 
 ## Ralph mode
 
@@ -191,8 +251,11 @@ top-level `.claude-sandbox/` directory:
 | env        | `.claude-sandbox/env`         |
 | ralph      | `.claude-sandbox/ralph/`      |
 | agent      | `.claude-sandbox/agent/`      |
+| scripts    | `.claude-sandbox/scripts/`    |
 | scratch    | `.claude-sandbox/temp/`       |
 | reports    | `.claude-sandbox/reports/`    |
+
+The `agent/` and `scripts/` trees are seeded by [`init-ralph`](#bootstrapping-a-project-init--init-ralph) — `agent/` holds the workflow/prompt docs and `scripts/` holds the `backlog` and `worktree` tools.
 
 This is the only supported layout. Older repos that scattered these files across
 the project root must be migrated — see [docs/MIGRATION.md](docs/MIGRATION.md).
@@ -229,13 +292,7 @@ DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/YOUR_ID/YOUR_TOKEN
 CLAUDE_NOTIFICATION_WEBHOOK_URL=https://discord.com/api/webhooks/YOUR_ID/YOUR_TOKEN
 ```
 
-Copy the example to get started:
-
-```bash
-cp .env.claude-sandbox.example .claude-sandbox/env
-```
-
-This file is gitignored — do not commit it.
+Run `claude-sandbox init` to create `.claude-sandbox/env` (from the scaffold), then fill in your values. This file is gitignored — do not commit it.
 
 ### Discord MCP server
 
@@ -245,7 +302,7 @@ The base image includes a Discord notification MCP server at `/opt/claude-sandbo
 
 ### `.claude-sandbox/config.yaml`
 
-Container configuration. See `.claude-sandbox.example.yaml` for a starter template.
+Container configuration. `claude-sandbox init` seeds it from `scaffold/config.yaml` (the starter template in this repo).
 
 **Dependency:** Parsing requires [`yq`](https://github.com/mikefarah/yq) on the host. Install with `brew install yq`, `sudo snap install yq`, or `go install github.com/mikefarah/yq/v4@latest`.
 
@@ -356,11 +413,11 @@ The final `USER` must be `root` so the entrypoint has privileges.
 
 The child image is built automatically and tagged `claude-sandbox-{project-slug}`. It rebuilds when the child Dockerfile changes or the base image is updated.
 
-See `Dockerfile.claude-sandbox.example` in this repo for a commented template.
+See `scaffold/Dockerfile.example` in this repo for a commented template (`claude-sandbox init` seeds it into the project as `.claude-sandbox/Dockerfile.example`).
 
 ### Parent directory search
 
-The config, Dockerfile, and env files (under `.claude-sandbox/`) are all resolved by walking parent directories from the project root (like direnv). This lets you share config across multiple projects in a monorepo or workspace — place a `.claude-sandbox/` at the workspace root and every sub-project inherits it.
+The config, Dockerfile, and env files (under `.claude-sandbox/`) are all resolved by walking parent directories from the project root (like direnv). `config.yaml` and `env` **cascade** — every file found from the root down to the project is merged/layered, more-local values winning (see [Config cascade](#config-cascade-monorepo--workspace-defaults)). The child `Dockerfile` is **nearest-wins** — the closest one up the tree is used wholesale.
 
 If no `.claude-sandbox/Dockerfile` is found anywhere up to `/`, the launcher warns and uses the base image directly. Set `baseOnly: true` in `.claude-sandbox/config.yaml` (or `CLAUDE_SANDBOX_BASE_ONLY=1`) to suppress the warning and skip the search.
 
@@ -480,6 +537,14 @@ ralph-auto-resume:
 bin/
   claude-sandbox   Launcher: builds image, assembles mounts, runs the container
   ralph            Loop runner: fresh-context iterations with stop-file control
+  lib/paths.sh     Foreign-path resolver + layout/bootstrap lifecycle (init helpers)
+scaffold/          Base bootstrap seed for init (copied into a project's .claude-sandbox/)
+  config.yaml      Starter config
+  env              Starter env file
+  Dockerfile.example  Commented child Dockerfile template (optional; rename to activate)
+scaffold-ralph/    Additional seed for init-ralph (agent workflow + tooling)
+  agent/           Generic baseline workflow + prompt docs, ideas/, stubs
+  scripts/         backlog (backlog.yaml CRUD) and worktree (git-worktree + merge) tools
 logstream/
   raw-json-logger.js  Transparent NDJSON passthrough that writes every line to a timestamped file
   run-logger.js       Transparent NDJSON passthrough that captures per-iteration metrics
@@ -489,7 +554,6 @@ logstream/
 mcp/
   discord-notify/       Discord notification MCP server — bundled + built into the base image
 Dockerfile                          Base image: Debian + build-essential, Docker CLI/compose, Node.js 22, Claude Code CLI
-Dockerfile.claude-sandbox.example   Example child Dockerfile for project-specific tools
 entrypoint.sh                       Remaps container user UID/GID to match the host; grants Docker socket access
 notification-hooks.json             Hook fragment merged into container's settings.json
 mcp-servers.json                    MCP server fragment merged into container's .mcp.json

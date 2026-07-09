@@ -1,0 +1,11 @@
+schema_version: 2
+project: __PROJECT_NAME__
+defaults:
+  priority_order: "higher_is_more_important"
+  status_field: "status"
+  blocked_field: "blocked"
+  blocked_reason_field: "blocked_reason"
+  review_feedback_field: "review_feedback"
+  requires_field: "requires"
+
+stories: []

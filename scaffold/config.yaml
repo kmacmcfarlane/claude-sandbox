@@ -1,7 +1,14 @@
 # config.yaml — configuration for the sandbox container
 #
-# Place this file at .claude-sandbox/config.yaml (next to .claude-sandbox/env).
-# Requires 'yq' to be installed on the host.
+# Lives at .claude-sandbox/config.yaml. Requires 'yq' on the host.
+#
+# CASCADE: every .claude-sandbox/config.yaml from the filesystem root down to
+# the project is merged at launch (the launcher prints the cascade). More-local
+# values override upstream ones; `mounts` entries append, except an entry with
+# the same host+container as an upstream one, which overrides it (e.g. to flip
+# `writable`). This file is therefore SPARSE — everything is commented out.
+# Uncomment a key only to set or override it for this project; upstream
+# catch-all configs keep applying as defaults.
 
 # Model override. Forwarded to claude as --model.
 # Accepts an alias (e.g. 'opus', 'sonnet') or a full model ID (e.g. 'claude-opus-4-8').
@@ -16,41 +23,37 @@
 # Host access — control which host resources are mounted into the container.
 # Each can also be enabled via CLI flags (--ssh, --git, --docker-socket, --aws)
 # or environment variables (CLAUDE_SANDBOX_HOST_ACCESS_*_ENABLED=1).
-# Precedence: CLI flag > env var > YAML.
-hostAccess:
-  # Mount ~/.ssh/ read-only (SSH keys for git remotes)
-  ssh:
-    enabled: true
-  # Mount ~/.gitconfig read-only (git identity)
-  git:
-    enabled: true
-  # Mount /var/run/docker.sock (host Docker daemon access)
-  dockerSocket:
-    enabled: false
-  # Mount ~/.aws/ read-only (AWS CLI/SDK credentials)
-  aws:
-    enabled: false
+# Precedence: CLI flag > env var > YAML. Default: all disabled.
+# hostAccess:
+#   # Mount ~/.ssh/ read-only (SSH keys for git remotes)
+#   ssh:
+#     enabled: true
+#   # Mount ~/.gitconfig read-only (git identity)
+#   git:
+#     enabled: true
+#   # Mount /var/run/docker.sock (host Docker daemon access)
+#   dockerSocket:
+#     enabled: false
+#   # Mount ~/.aws/ read-only (AWS CLI/SDK credentials)
+#   aws:
+#     enabled: false
 
-# Extra volume mounts.
+# Extra volume mounts. Appended to any upstream mounts; re-declare an upstream
+# host+container pair here to override it (e.g. make it writable).
 # Each mount entry has:
 #   host:      absolute path on the host (required)
 #   container: absolute path inside the container (required)
 #   writable:  boolean, default false (mounts :ro unless true)
+# mounts:
+#   - host: /home/user/shared-libs
+#     container: /home/user/shared-libs
+#   - host: /data/datasets
+#     container: /mnt/data
+#     writable: true
 
-mounts: []
-  # - host: /home/user/shared-libs
-  #   container: /home/user/shared-libs
-  #
-  # - host: /data/datasets
-  #   container: /mnt/data
-  #   writable: true
-
-# Child Dockerfile for project-specific tools.
-# The launcher looks for .claude-sandbox/Dockerfile by default.
-# If not found, it walks parent directories (direnv-style) so monorepos or
-# workspaces can share a single child Dockerfile higher up in the tree.
+# Child Dockerfile for project-specific tools. NOT merged — the nearest
+# .claude-sandbox/Dockerfile up the tree wins wholesale.
 # Env vars CLAUDE_SANDBOX_DOCKERFILE_DIR / CLAUDE_SANDBOX_DOCKERFILE take precedence.
-#
 # dockerfileDir: /path/to/dir   # directory containing the override Dockerfile
 # dockerfile: Dockerfile        # filename of the override Dockerfile
 
@@ -72,4 +75,6 @@ mounts: []
 #   true: your own project. The directory is tracked by the host repo (no
 #     sidecar); .claude-sandbox/env, .claude-sandbox/temp/, and the ephemeral
 #     .claude-sandbox/ralph/ runtime are gitignored, everything else committed.
+# `claude-sandbox init` writes this explicitly unless an upstream config
+# already defines it (then it's inherited).
 # trackInHost: false
