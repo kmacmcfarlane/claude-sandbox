@@ -427,7 +427,8 @@ fi
 CLAUDE_MD_TMP=$(mktemp)
 SETTINGS_TMP=$(mktemp)
 MCP_TMP=$(mktemp)
-trap "rm -f '$CLAUDE_MD_TMP' '$SETTINGS_TMP' '$MCP_TMP'" EXIT
+GITCONFIG_TMP=$(mktemp)
+trap "rm -f '$CLAUDE_MD_TMP' '$SETTINGS_TMP' '$MCP_TMP' '$GITCONFIG_TMP'" EXIT
 cat "$CLAUDE_CONFIG_HOST/CLAUDE.md" 2>/dev/null >> "$CLAUDE_MD_TMP" || true
 printf '\n' >> "$CLAUDE_MD_TMP"
 cat "$REPO_ROOT/container-context.md" >> "$CLAUDE_MD_TMP"
@@ -626,15 +627,17 @@ AWS_MOUNT=$(resolve_flag "$CLI_AWS" "${CLAUDE_SANDBOX_HOST_ACCESS_AWS_ENABLED:-}
 if [ "$DOCKER_SOCKET" = true ]; then
     VOLUMES+=(-v /var/run/docker.sock:/var/run/docker.sock)
 fi
+# Track AWS directories already bind-mounted, to dedupe (credentials + config
+# usually share a parent dir, and it may also be ~/.aws).
+declare -A AWS_MOUNTED_DIRS=()
 if [ "$AWS_MOUNT" = true ] && [ -d "$HOME/.aws" ]; then
     VOLUMES+=(-v "$HOME/.aws:$HOME/.aws:ro")
+    AWS_MOUNTED_DIRS["$HOME/.aws"]=1
 fi
 
 # Forward host AWS_* env vars when AWS access is enabled (e.g. direnv-set
 # profile/credentials paths). Allowlist only — keeps the trust boundary
 # explicit and avoids leaking arbitrary host env into the container.
-# Path-valued vars (AWS_SHARED_CREDENTIALS_FILE, AWS_CONFIG_FILE) get a
-# same-path read-only bind mount so they resolve inside the container.
 AWS_ENV=()
 if [ "$AWS_MOUNT" = true ]; then
     for v in AWS_PROFILE AWS_DEFAULT_PROFILE AWS_REGION AWS_DEFAULT_REGION \
@@ -643,17 +646,45 @@ if [ "$AWS_MOUNT" = true ]; then
              AWS_ROLE_ARN AWS_WEB_IDENTITY_TOKEN_FILE AWS_ENDPOINT_URL; do
         [ -n "${!v:-}" ] && AWS_ENV+=(-e "$v=${!v}")
     done
+    # Path-valued vars point at individual files. Bind-mount each file's PARENT
+    # DIRECTORY read-only (same path) rather than the file itself: a single-file
+    # bind mount pins the inode, so a host tool that refreshes creds via
+    # atomic-rename (write temp + rename over the original — as `aws configure`,
+    # `aws sso login`, direnv, etc. do) hits EBUSY or leaves the container
+    # seeing stale creds. Mounting the dir lets host updates propagate live.
     for v in AWS_SHARED_CREDENTIALS_FILE AWS_CONFIG_FILE AWS_WEB_IDENTITY_TOKEN_FILE; do
         path="${!v:-}"
         if [ -n "$path" ] && [ -f "$path" ]; then
-            VOLUMES+=(-v "$path:$path:ro")
+            dir=$(dirname "$path")
+            # Guard against a credentials file sitting directly in a broad dir
+            # (e.g. ~/creds → $HOME, or any home root): mounting the whole thing
+            # read-only would expose far more than intended. Refuse and tell the
+            # user to move it into a dedicated subdir.
+            parent=$(dirname "$dir")
+            if [ "$dir" = "$HOME" ] || [ "$dir" = / ] || [ "$dir" = /root ] \
+               || [ "$parent" = /home ] || [ "$parent" = /Users ]; then
+                echo "WARNING: $v=$path is directly under '$dir'; refusing to bind-mount that whole directory. Move it into a dedicated subdir (e.g. ~/.aws/) or mount it explicitly via config.yaml mounts:." >&2
+                continue
+            fi
+            if [ -z "${AWS_MOUNTED_DIRS[$dir]:-}" ]; then
+                VOLUMES+=(-v "$dir:$dir:ro")
+                AWS_MOUNTED_DIRS["$dir"]=1
+            fi
         elif [ -n "$path" ]; then
             echo "WARNING: $v=$path but file not found on host; skipping mount" >&2
         fi
     done
 fi
 if [ "$GIT_MOUNT" = true ] && [ -f "$HOME/.gitconfig" ]; then
-    VOLUMES+=(-v "$HOME/.gitconfig:$HOME/.gitconfig:ro")
+    # Mount a temp COPY rather than the host file directly: git writes config
+    # via lock+rename, and renaming over an active single-file mountpoint fails
+    # with EBUSY. The dir-mount trick used for AWS creds doesn't apply here —
+    # ~/.gitconfig's parent is $HOME, too broad to mount. Copying means the host
+    # file is never a mountpoint, so host-side `git config`/editor saves keep
+    # working while the sandbox runs. Trade-off: host edits are picked up on the
+    # next launch, not live (fine for gitconfig).
+    cp "$HOME/.gitconfig" "$GITCONFIG_TMP"
+    VOLUMES+=(-v "$GITCONFIG_TMP:$HOME/.gitconfig:ro")
 fi
 if [ "$SSH_MOUNT" = true ] && [ -d "$HOME/.ssh" ]; then
     VOLUMES+=(-v "$HOME/.ssh:$HOME/.ssh:ro")
