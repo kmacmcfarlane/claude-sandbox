@@ -1,3 +1,15 @@
+# Build the claude-sandbox Go binary (launcher + in-container ralph runner).
+FROM golang:1.25-bookworm AS builder
+WORKDIR /src
+COPY go.mod go.sum assets.go ./
+COPY vendor/ vendor/
+COPY cmd/ cmd/
+COPY internal/ internal/
+COPY scaffold/ scaffold/
+COPY scaffold-ralph/ scaffold-ralph/
+COPY container-context.md notification-hooks.json mcp-servers.json PROMPT_RALPH.md ./
+RUN CGO_ENABLED=0 go build -mod=vendor -o /out/claude-sandbox ./cmd/claude-sandbox
+
 FROM debian:bookworm-slim
 
 # Install base utilities
@@ -62,7 +74,9 @@ RUN /home/claude/.local/bin/claude --version 2>/dev/null | head -1 > /opt/claude
 COPY entrypoint.sh /opt/claude-sandbox/bin/entrypoint.sh
 RUN chmod +x /opt/claude-sandbox/bin/entrypoint.sh
 
-COPY bin/ /opt/claude-sandbox/bin/
+# The Go binary serves as both the launcher and (via argv0) the ralph runner.
+COPY --from=builder /out/claude-sandbox /opt/claude-sandbox/bin/claude-sandbox
+RUN ln -s /opt/claude-sandbox/bin/claude-sandbox /opt/claude-sandbox/bin/ralph
 COPY logstream/ /opt/claude-sandbox/logstream/
 COPY PROMPT_RALPH.md /opt/claude-sandbox/PROMPT_RALPH.md
 RUN chmod +x /opt/claude-sandbox/bin/*

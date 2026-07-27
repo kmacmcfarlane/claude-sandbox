@@ -17,3 +17,6 @@ __pycache__/
 .claude-sandbox/ralph/
 !.claude-sandbox/config.yaml
 !.claude-sandbox/Dockerfile
+
+# Go build cache for the shim-built binary
+/bin/dist/
