@@ -294,6 +294,10 @@ CLAUDE_NOTIFICATION_WEBHOOK_URL=https://discord.com/api/webhooks/YOUR_ID/YOUR_TO
 
 Run `claude-sandbox init` to create `.claude-sandbox/env` (from the scaffold), then fill in your values. This file is gitignored — do not commit it.
 
+**Do not quote values.** `KEY=value`, one per line; blank lines and `#` comments are the only special syntax. Unlike Docker Compose's `env_file`, direnv, or shell `source`, `docker run --env-file` performs **no quote stripping and no variable expansion** — every character after `=` is part of the value. So `JIRA_API_TOKEN="ATATT…"` arrives with the quotes attached: the variable is present, non-empty, and two characters too long, and the only symptom is an auth failure from the consuming service (often a misleading 403/404 rather than a 401). The launcher warns at startup for any value wrapped in matching quotes, and for values carrying a CRLF carriage return; it does not rewrite them, so literal quotes remain possible if you actually want them.
+
+Env file changes take effect on the next container start.
+
 ### Discord MCP server
 
 The base image includes a Discord notification MCP server at `/opt/claude-sandbox/mcp/discord-notify/dist/index.mjs`. It provides the `send_discord_notification` tool, which Claude (and ralph prompts) use to post status updates to Discord.

@@ -841,9 +841,44 @@ fi
 # ---------------------------------------------------------------------------
 # ENV_FILES collected with the config cascade above (root-first). Docker applies
 # --env-file flags in order, so later (more local) files override earlier ones.
+# docker --env-file performs NO quote stripping and no variable expansion:
+# every character after '=' is part of the value. Most other env-file loaders
+# (compose env_file, direnv, python-dotenv, shell `source`) do strip matching
+# quotes, so quoting a secret is a habit that works everywhere else and fails
+# silently here — presence checks pass, the length looks plausible, and the
+# service answers with a misleading 403/404. Warn instead of rewriting, so
+# Docker's semantics stay intact for anyone relying on literal quotes.
+cs_lint_env_file() {
+    local file="$1" line key value first last lineno=0
+    while IFS= read -r line || [ -n "$line" ]; do
+        lineno=$((lineno + 1))
+        case "$line" in
+            ''|'#'*) continue ;;
+            *=*) ;;
+            *) continue ;;
+        esac
+        key="${line%%=*}"
+        value="${line#*=}"
+        if [ "${value%$'\r'}" != "$value" ]; then
+            echo "WARNING: $file:$lineno: value for $key ends with a carriage return (CRLF line endings)." >&2
+            echo "         docker --env-file keeps it as part of the value. Convert the file to LF." >&2
+            value="${value%$'\r'}"
+        fi
+        [ ${#value} -ge 2 ] || continue
+        first="${value:0:1}"
+        last="${value: -1}"
+        if [ "$first" = "$last" ] && { [ "$first" = '"' ] || [ "$first" = "'" ]; }; then
+            echo "WARNING: $file:$lineno: value for $key is wrapped in $first quotes." >&2
+            echo "         docker --env-file does not strip quotes, so the quotes become part of" >&2
+            echo "         the value (a secret will fail auth while still looking set). Remove them." >&2
+        fi
+    done < "$file"
+}
+
 if [ ${#ENV_FILES[@]} -gt 0 ]; then
     ENV_ARGS=()
     for _ef in "${ENV_FILES[@]}"; do
+        cs_lint_env_file "$_ef"
         ENV_ARGS+=(--env-file "$_ef")
     done
     unset _ef
