@@ -363,6 +363,9 @@ func runLaunch(env *Env, args []string) error {
 		fmt.Fprintf(env.Err, "(e.g. DISCORD_WEBHOOK_URL for MCP server notifications).\n\n")
 		fmt.Fprintf(env.Err, "To create it, bootstrap the project and fill in your values:\n")
 		fmt.Fprintf(env.Err, "  claude-sandbox init   # creates .claude-sandbox/env (and config)\n")
+	} else {
+		// Warn-only lint of every cascade level (CS-CASC-020).
+		cascade.LintEnvFiles(env.Err, envFiles)
 	}
 
 	noUpdate := f.NoUpdateCheck || envTrue(env.Getenv("CLAUDE_SANDBOX_NO_UPDATE_CHECK")) || cfg.DisableUpdateCheck

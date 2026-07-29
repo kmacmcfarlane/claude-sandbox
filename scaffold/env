@@ -6,6 +6,12 @@
 # seeded file is fully commented so it overrides nothing upstream — uncomment
 # and set a variable only to define or override it for this project.
 #
+# Syntax: KEY=value, one per line. Blank lines and #-comments are the only
+# special syntax. Do NOT quote values — `docker --env-file` does no quote
+# stripping and no variable expansion, so QUOTES BECOME PART OF THE VALUE
+# (a quoted API token stays set and non-empty but fails auth). The launcher
+# warns at startup if it spots a quoted value.
+#
 # This file is gitignored — do not commit it.
 
 # Discord webhook for MCP notification server
