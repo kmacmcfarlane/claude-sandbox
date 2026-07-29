@@ -1,14 +1,17 @@
 # Build the claude-sandbox Go binary (launcher + in-container ralph runner).
 FROM golang:1.25-bookworm AS builder
 WORKDIR /src
-COPY go.mod go.sum assets.go ./
-COPY vendor/ vendor/
+# Dependencies first, in their own layer: this only re-downloads when go.mod or
+# go.sum changes, not on every source edit.
+COPY go.mod go.sum ./
+RUN go mod download
+COPY assets.go ./
 COPY cmd/ cmd/
 COPY internal/ internal/
 COPY scaffold/ scaffold/
 COPY scaffold-ralph/ scaffold-ralph/
 COPY container-context.md notification-hooks.json mcp-servers.json PROMPT_RALPH.md ./
-RUN CGO_ENABLED=0 go build -mod=vendor -o /out/claude-sandbox ./cmd/claude-sandbox
+RUN CGO_ENABLED=0 go build -o /out/claude-sandbox ./cmd/claude-sandbox
 
 FROM debian:bookworm-slim
 

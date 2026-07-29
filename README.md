@@ -71,7 +71,7 @@ These flags are consumed by the launcher and control the container environment. 
 
 | Flag | Alias | Description |
 |---|---|---|
-| `--version` | | Print claude-sandbox version (host scripts + baked image) and exit |
+| `--version` | | Print claude-sandbox version (host checkout + baked image) and exit |
 | `--host-access-docker-socket-enabled` | `--docker-socket` | Mount the host Docker socket |
 | `--host-access-aws-enabled` | `--aws` | Mount `~/.aws/` read-only |
 | `--host-access-git-enabled` | `--git` | Mount `~/.gitconfig` read-only |
@@ -487,7 +487,7 @@ The entrypoint remaps the `claude` user inside the container to match your host 
 
 ### Image rebuilding
 
-The base and child images rebuild automatically when their respective Dockerfiles are newer than the cached image. The base **also** rebuilds when any baked source — `bin/`, `logstream/`, `entrypoint.sh`, `PROMPT_RALPH.md`, or `mcp/` — is newer than the image, so editing a launcher/ralph script is picked up on the next launch without `--rebuild`. A base rebuild triggers a child rebuild.
+The base and child images rebuild automatically when their respective Dockerfiles are newer than the cached image. The base **also** rebuilds when any baked source — `cmd/`, `internal/`, `go.mod`/`go.sum`, `assets.go`, `logstream/`, `entrypoint.sh`, `PROMPT_RALPH.md`, or `mcp/` — is newer than the image, so editing the launcher is picked up on the next launch without `--rebuild`. A base rebuild triggers a child rebuild.
 
 ### Versioning
 
@@ -495,11 +495,11 @@ The launcher stamps each build with `git describe --tags --always --dirty`, bake
 
 ```bash
 claude-sandbox --version
-# claude-sandbox v0.3.1-4-gab12cd  (host scripts: /path/to/repo)
+# claude-sandbox v0.3.1-4-gab12cd  (host: /path/to/repo)
 #   image:        v0.3.1-4-gab12cd  (built 2026-06-24)
 ```
 
-It prints the version of the **host scripts** (your checkout) and the **baked image** (what actually runs in the container), warning if they differ.
+It prints the version of the **host checkout** and the **baked image** (what actually runs in the container), warning if they differ. Before the image is built for the first time it reports `image: (not built yet)`.
 
 **Claude Code version check:** On each launch, the launcher compares the Claude Code version baked into the image against the latest version on npm. If a newer version is available, it prompts:
 
@@ -539,6 +539,24 @@ ralph-auto:
 ralph-auto-resume:
 	claude-sandbox --docker-socket --git --ssh --ralph --dangerous --resume
 ```
+
+## Development
+
+The CLI is a Go binary; `bin/claude-sandbox` is a shim that rebuilds it when sources change, so normal use needs no build step. To work on it directly:
+
+```bash
+go build ./...                      # compile
+go test ./...                       # Ginkgo suites (no Docker, git, or network needed)
+./scripts/check-spec-coverage.sh    # every spec scenario must be referenced by a test
+```
+
+**Behavior is specified before it is implemented.** `spec/*.feature` holds Gherkin scenarios with stable IDs (`CS-INIT-014`, `CS-LNCH-007`, …); each Ginkgo `It` description starts with the ID it implements, and the coverage script fails if a scenario has no test. The order for any behavior change is: **spec → test → implementation**. Tags mark `@new` behavior and `@changed` divergence from earlier behavior, with the rationale in a comment.
+
+Tests stay hermetic through two seams: every external command (`docker`, `git`, `claude`, `node`) goes through `execx.Runner`, and every interactive prompt through `prompt.Prompter`. Tests inject `execx.Fake` and `prompt.Scripted`, so the suite runs anywhere in about a second. Scenarios that genuinely need a real subprocess or tty are marked for the manual smoke checklist instead.
+
+Two parts remain deliberately non-Go: `entrypoint.sh` (needs root and `gosu` before the binary runs) and `logstream/*.js` (the ralph NDJSON pipeline stages, tested by `node --test`).
+
+Dependencies are ordinary Go modules — nothing is vendored. The shim's `docker run golang` fallback persists both the build cache and the module cache under `bin/dist/` (gitignored), so a throwaway build container downloads each dependency only once; the Docker builder stage runs `go mod download` in its own layer, which is re-used until `go.mod`/`go.sum` change.
 
 ## Directory structure
 

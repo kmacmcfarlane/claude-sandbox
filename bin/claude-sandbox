@@ -17,7 +17,7 @@ BIN="$BIN_DIR/claude-sandbox"
 GO_IMAGE="golang:1.25-bookworm"
 
 # Sources whose changes require a rebuild of the binary.
-SOURCES=(cmd internal assets.go go.mod go.sum vendor scaffold scaffold-ralph
+SOURCES=(cmd internal assets.go go.mod go.sum scaffold scaffold-ralph
          container-context.md notification-hooks.json mcp-servers.json PROMPT_RALPH.md)
 
 needs_build=false
@@ -38,14 +38,17 @@ if [ "$needs_build" = true ]; then
     mkdir -p "$BIN_DIR"
     if command -v go >/dev/null 2>&1; then
         echo "Building claude-sandbox binary (host go)..." >&2
-        (cd "$REPO_ROOT" && CGO_ENABLED=0 go build -mod=vendor -o "$BIN" ./cmd/claude-sandbox)
+        (cd "$REPO_ROOT" && CGO_ENABLED=0 go build -o "$BIN" ./cmd/claude-sandbox)
     else
         echo "Building claude-sandbox binary (docker $GO_IMAGE)..." >&2
-        mkdir -p "$BIN_DIR/gocache"
+        # Persist the build AND module caches under bin/dist/ (gitignored), so a
+        # throwaway build container downloads each dependency only once.
+        mkdir -p "$BIN_DIR/gocache" "$BIN_DIR/gomodcache"
         docker run --rm \
             -u "$(id -u):$(id -g)" \
-            -e HOME=/tmp -e CGO_ENABLED=0 -e GOFLAGS=-mod=vendor \
+            -e HOME=/tmp -e CGO_ENABLED=0 \
             -e GOCACHE=/src/bin/dist/gocache \
+            -e GOMODCACHE=/src/bin/dist/gomodcache \
             -v "$REPO_ROOT:/src" -w /src \
             "$GO_IMAGE" go build -o bin/dist/claude-sandbox ./cmd/claude-sandbox
     fi

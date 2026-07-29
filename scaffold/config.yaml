@@ -1,6 +1,7 @@
 # config.yaml — configuration for the sandbox container
 #
-# Lives at .claude-sandbox/config.yaml. Requires 'yq' on the host.
+# Lives at .claude-sandbox/config.yaml. No host tooling required — the
+# launcher parses and merges this file natively.
 #
 # CASCADE: every .claude-sandbox/config.yaml from the filesystem root down to
 # the project is merged at launch (the launcher prints the cascade). More-local
