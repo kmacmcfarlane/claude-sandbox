@@ -11,7 +11,11 @@ Add `bin/` to your PATH. For example, if you cloned this repo to `~/src/claude-s
 export PATH="$HOME/src/claude-sandbox/bin:$PATH"
 ```
 
-The scripts resolve their own repo root through symlinks, so PATH is all you need.
+The launcher is a Go binary behind a thin bash shim. On first run (and whenever
+sources change) the shim builds it automatically — with the host Go toolchain if
+one is installed, otherwise via a throwaway `docker run golang` container — so
+the host needs only bash and Docker. The shim resolves its repo root through
+symlinks, so PATH is all you need.
 
 ## Quick start
 
@@ -75,6 +79,7 @@ These flags are consumed by the launcher and control the container environment. 
 | `--model MODEL` | | Model to use (alias like `opus` or full ID like `claude-opus-4-8`) |
 | `--dangerous` | | Pass `--dangerously-skip-permissions` to claude/ralph |
 | `--rebuild` | | Force rebuild of base and child images (uses `--no-cache`) |
+| `--update` | | Auto-accept the Claude Code update rebuild prompt |
 | `--no-update-check` | | Skip Claude Code version check at launch |
 | `--ralph` | | Launch the ralph loop runner instead of interactive claude |
 | `--limit N` | | Stop ralph after N iterations (only valid with `--ralph`) |
@@ -95,9 +100,11 @@ claude-sandbox --ralph --docker-socket --dangerous --interactive --watchdog-time
 
 `init` sets up the `.claude-sandbox/` directory in the current project and exits (it does **not** launch a container):
 
-- Creates `.claude-sandbox/config.yaml` (from the example) and `.claude-sandbox/env`.
-- Prompts for **`trackInHost`** (default `false`) — unless `--track-in-host` / `--no-track-in-host` is passed, or there is no tty. See [`trackInHost`](#claude-sandboxconfigyaml) for what it controls.
-- Runs the standard layout setup: `temp/`+`reports/` skeleton, seeded `.claude-sandbox/CLAUDE.md`, host `.gitignore` entries, and (when `trackInHost: false`) the internal sidecar git repo.
+- Creates `.claude-sandbox/config.yaml` (from the example) and `.claude-sandbox/env`, and prints the config cascade when parent directories contribute files.
+- Prompts for **`trackInHost`** (default `false`) — unless `--track-in-host` / `--no-track-in-host` is passed, or there is no tty. When a parent `.claude-sandbox/config.yaml` already sets it, the prompt shows the inherited value: press Enter to inherit (nothing written locally — the commented hint records the inherited value and its source), or answer `y`/`n` to write a local override. See [`trackInHost`](#claude-sandboxconfigyaml) for what it controls.
+- Seeds `Dockerfile.example` — when a parent `.claude-sandbox/Dockerfile` exists, offers to copy it as the starting point (default yes; `--copy-parent-dockerfile` / `--no-copy-parent-dockerfile` skip the prompt).
+- Runs the standard layout setup: `temp/`+`reports/` skeleton, seeded `.claude-sandbox/CLAUDE.md`, host `.gitignore` entries (prompted; `--gitignore` / `--no-gitignore` skip the prompt), and (when `trackInHost: false`) the internal sidecar git repo.
+- `--yes` accepts every prompt's default, for scripted bootstraps.
 
 `init-ralph` does everything `init` does, then seeds the **ralph agent scaffolding** into the project:
 
@@ -306,9 +313,7 @@ The base image includes a Discord notification MCP server at `/opt/claude-sandbo
 
 ### `.claude-sandbox/config.yaml`
 
-Container configuration. `claude-sandbox init` seeds it from `scaffold/config.yaml` (the starter template in this repo).
-
-**Dependency:** Parsing requires [`yq`](https://github.com/mikefarah/yq) on the host. Install with `brew install yq`, `sudo snap install yq`, or `go install github.com/mikefarah/yq/v4@latest`.
+Container configuration. `claude-sandbox init` seeds it from `scaffold/config.yaml` (the starter template in this repo). Parsing and cascade merging are built into the launcher — no external tools (like `yq`) required.
 
 #### Model
 
@@ -539,9 +544,21 @@ ralph-auto-resume:
 
 ```
 bin/
-  claude-sandbox   Launcher: builds image, assembles mounts, runs the container
-  ralph            Loop runner: fresh-context iterations with stop-file control
-  lib/paths.sh     Foreign-path resolver + layout/bootstrap lifecycle (init helpers)
+  claude-sandbox   Thin shim: builds the Go binary when stale, then execs it
+  dist/            Built binary + build cache (gitignored)
+cmd/claude-sandbox/  Go CLI entry (launcher; doubles as the in-container ralph runner via argv0)
+internal/
+  paths/           Foreign-path resolver (.claude-sandbox/ mapping, cascade walks)
+  cascade/         config.yaml deep-merge + env stacking + trackInHost resolution
+  initcmd/         init / init-ralph bootstrap
+  layout/          Layout lifecycle: skeleton, gitignore, sidecar repo
+  scaffold/        Embedded scaffold seeding
+  imagebuild/      Base/child image staleness + builds + update check
+  launch/          Mount assembly, shadow injections, docker run argv
+  ralphloop/       Ralph loop: iterations, lock, quota handling, pipeline
+  execx/, prompt/  Command-runner and prompt seams (injected in tests)
+spec/              Gherkin behavioral spec — scenario IDs referenced by the Ginkgo tests
+scripts/check-spec-coverage.sh  CI check: every scenario ID appears in a test
 scaffold/          Base bootstrap seed for init (copied into a project's .claude-sandbox/)
   config.yaml      Starter config
   env              Starter env file
