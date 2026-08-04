@@ -25,7 +25,7 @@ Docker-based sandbox for running Claude Code with filesystem isolation and opt-i
 
 ```
 bin/claude-sandbox   # Thin bash shim — builds the Go binary when stale (host go or docker run golang), execs it
-cmd/claude-sandbox/  # CLI entry (cobra) — launch (default), init, init-ralph, ralph (also selected by argv0)
+cmd/claude-sandbox/  # CLI entry (cobra) — launch (default), init, init-ralph, ralph (also selected by argv0), completion
 internal/paths/      # Foreign-path resolver — single source of .claude-sandbox/ path mapping
 internal/cascade/    # config.yaml deep-merge, env stacking, trackInHost cascade, cascade report
 internal/initcmd/    # init / init-ralph bootstrap (trackInHost matrix, prompt flags)

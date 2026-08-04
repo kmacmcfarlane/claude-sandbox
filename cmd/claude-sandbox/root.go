@@ -55,6 +55,11 @@ func isSubcommand(a string) bool {
 	switch a {
 	case "init", "init-ralph", "ralph", "help", "completion":
 		return true
+	// CS-COMP-002/003: the hidden commands the generated completion scripts
+	// call on every keystroke. Without these they fall through to runLaunch,
+	// and a TAB press tries to build an image and start a container.
+	case cobra.ShellCompRequestCmd, cobra.ShellCompNoDescRequestCmd:
+		return true
 	}
 	return false
 }
@@ -113,8 +118,13 @@ func newRootCmd(env *Env) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runLaunch(env, args)
 		},
+		// DisableFlagParsing leaves cobra unaware of every launcher flag, so
+		// root completes its own command line (CS-COMP-004..013).
+		ValidArgsFunction: completeLaunch,
 	}
-	root.AddCommand(newInitCmd(env, false), newInitCmd(env, true), newRalphCmd(env))
+	ralphCmd := newRalphCmd(env)
+	registerRalphCompletions(ralphCmd)
+	root.AddCommand(newInitCmd(env, false), newInitCmd(env, true), ralphCmd)
 	// CS-INIT-002: a rejected flag names itself and lists the command's valid
 	// options (inherited by init/init-ralph/ralph).
 	root.SetFlagErrorFunc(func(c *cobra.Command, err error) error {
@@ -148,6 +158,8 @@ const launchUsage = `Usage:
 Commands (bootstrap the project, then exit — launcher flags do not apply):
   init                      Bootstrap .claude-sandbox/ in the project (config, env, gitignore, sidecar)
   init-ralph                Like init, plus seed ralph agent/ + scripts/ scaffolding
+  completion SHELL          Print a shell completion script (bash, zsh, fish, powershell)
+                            e.g. source <(claude-sandbox completion zsh)
      --track-in-host / --no-track-in-host              set trackInHost (skip the prompt)
      --gitignore / --no-gitignore                      answer the .gitignore prompt
      --copy-parent-dockerfile / --no-copy-parent-dockerfile

@@ -17,6 +17,8 @@ one is installed, otherwise via a throwaway `docker run golang` container — so
 the host needs only bash and Docker. The shim resolves its repo root through
 symlinks, so PATH is all you need.
 
+Optionally, enable tab completion for your shell — see [Shell completion](#shell-completion).
+
 ## Quick start
 
 ```bash
@@ -445,6 +447,35 @@ If no `.claude-sandbox/Dockerfile` is found anywhere up to `/`, the launcher war
 | `CLAUDE_SANDBOX_DOCKERFILE` | `Dockerfile` | Filename of the child Dockerfile |
 | `CLAUDE_SANDBOX_BASE_ONLY` | (unset) | Set to `1` or `true` to skip child Dockerfile and use base image only |
 | `CLAUDE_SANDBOX_NO_UPDATE_CHECK` | (unset) | Set to `1` or `true` to skip Claude Code version check at launch |
+
+## Shell completion
+
+`claude-sandbox completion <shell>` prints a completion script for `bash`, `zsh`, `fish`, or `powershell`. It covers the launcher flags (with descriptions), the `init` / `init-ralph` / `ralph` subcommands and their flags, `--model` aliases, and the known `claude` passthrough flags. Once an argument crosses the passthrough boundary — a claude flag, a `--`, or a positional — the launcher stops suggesting its own flags, since everything past that point belongs to `claude`.
+
+```bash
+# bash (needs bash-completion v2; see caveats below)
+claude-sandbox completion bash > /etc/bash_completion.d/claude-sandbox
+# ...or per-session: source <(claude-sandbox completion bash)
+
+# zsh — anywhere on your $fpath, and the file must be named _claude-sandbox
+claude-sandbox completion zsh > "${fpath[1]}/_claude-sandbox"
+
+# fish
+claude-sandbox completion fish > ~/.config/fish/completions/claude-sandbox.fish
+
+# powershell
+claude-sandbox completion powershell | Out-String | Invoke-Expression
+```
+
+**Other shells.** nushell, elvish, xonsh, tcsh, oil and ion are not generated directly, but [carapace-bridge](https://github.com/carapace-sh/carapace-bridge) speaks their dialects and bridges any cobra binary through the same underlying protocol, so `carapace --bridge cobra claude-sandbox` works for all of them.
+
+**Caveats.**
+
+- **bash** requires [bash-completion](https://github.com/scop/bash-completion) v2 (bash ≥ 4.2) — the generated script calls `_get_comp_words_by_ref`. macOS ships bash 3.2, so `brew install bash-completion@2` first.
+- **zsh** needs `compinit` enabled (`autoload -U compinit; compinit` in `~/.zshrc`), and the file must be named `_claude-sandbox`.
+- **fish** silently ignores file-extension and directory filters, so a few flag values fall back to plain path completion.
+- Completion cannot suggest `claude`'s own flags past the passthrough boundary — `claude` is a separate binary that only exists inside the container.
+- Tab presses are served from the already-built binary and never trigger a rebuild. Right after you change launcher sources, completions can be one build stale until the next real run.
 
 ## How it works
 

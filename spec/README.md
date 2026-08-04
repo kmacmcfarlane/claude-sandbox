@@ -33,3 +33,4 @@ references the scenario it implements by ID.
 | `image-build.feature` | base/child image staleness, update check, version stamp |
 | `ralph-loop.feature` | ralph iteration lifecycle, lock, stop, logs |
 | `ralph-quota.feature` | outcome classification, quota/rate-limit handling |
+| `completion.feature` | shell completion scripts, `__complete` routing, flag/value completion |

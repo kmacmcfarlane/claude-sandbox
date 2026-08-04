@@ -16,6 +16,19 @@ BIN_DIR="$REPO_ROOT/bin/dist"
 BIN="$BIN_DIR/claude-sandbox"
 GO_IMAGE="golang:1.25-bookworm"
 
+# Shell completion (spec/completion.feature CS-COMP-022/023): the generated
+# scripts call these hidden commands on every TAB. A keystroke must never block
+# on a compile or a docker image pull, so serve them from whatever binary is
+# already built — slightly stale completions beat a hung prompt — and exit
+# quietly if nothing has been built yet.
+case "${1-}" in
+    __complete | __completeNoDesc)
+        [ -x "$BIN" ] || exit 1
+        export CLAUDE_SANDBOX_REPO_ROOT="$REPO_ROOT"
+        exec "$BIN" "$@"
+        ;;
+esac
+
 # Sources whose changes require a rebuild of the binary.
 SOURCES=(cmd internal assets.go go.mod go.sum scaffold scaffold-ralph
          container-context.md notification-hooks.json mcp-servers.json PROMPT_RALPH.md)
