@@ -136,7 +136,8 @@ Per-repo state (all UNCOMMITTED, awaiting review):
       (No version field exists in plugin.json/marketplace.json — nothing to bump;
       refresh the installed marketplace after commit.)
 - [ ] Land order: claude-sandbox → claude-templates → claude-plugins.
-- [ ] Deferred: is the standalone `claude-skills` repo redundant with `claude-plugins`?
+- [x] Resolved: the standalone `claude-skills` repo is redundant — `claude-plugins` is the
+      source of truth for skills. `claude-skills` is deprecated; do not sync to it.
 
 ### FOLLOW-UP for claude-sandbox itself (found during migration) — RESOLVED in Wave 2
 Repos with a bare `config.yaml` gitignore rule (e.g. checkpoint-sampler, image-dataset-tool —

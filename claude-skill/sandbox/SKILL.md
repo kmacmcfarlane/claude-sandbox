@@ -11,7 +11,7 @@ Expert guidance for the claude-sandbox project — a Docker-based sandbox for ru
 
 ## Important
 
-- claude-sandbox lives at: `https://github.com/kmacmcfarlane/kmac-claude-kit` ecosystem
+- claude-sandbox lives at `https://github.com/kmacmcfarlane/claude-sandbox`, part of the [claude-kit](https://github.com/kmacmcfarlane/claude-kit) ecosystem
 - The project CLAUDE.md is the authoritative source for architecture details — read it first
 - Always check the current state of the sources and config files before giving advice
 - **The CLI is Go, and behavior is spec-driven.** `spec/*.feature` (Gherkin, stable scenario IDs like `CS-INIT-014`) is the contract; every Ginkgo test references the scenario it implements. When changing behavior: **update the spec first**, then the tests, then the code. `scripts/check-spec-coverage.sh` fails if a scenario has no referencing test.
