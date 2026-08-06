@@ -7,7 +7,7 @@ Feature: .claude-sandbox/ layout lifecycle (CS-LAY)
 
   Scenario: CS-LAY-001 Skeleton directories are created
     When SetupLayout runs
-    Then .claude-sandbox/temp/ and .claude-sandbox/reports/ exist
+    Then .claude-sandbox/temp/, .claude-sandbox/reports/ and .claude-sandbox/investigations/ exist
 
   Scenario: CS-LAY-002 CLAUDE.md is seeded once and never overwritten
     When SetupLayout runs on a fresh layout

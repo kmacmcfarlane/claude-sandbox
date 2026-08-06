@@ -76,6 +76,7 @@ var _ = Describe("layout lifecycle", func() {
 		Expect(setup(false, ptr(true))).To(Succeed())
 		Expect(exists(filepath.Join(sb, "temp"))).To(BeTrue())
 		Expect(exists(filepath.Join(sb, "reports"))).To(BeTrue())
+		Expect(exists(filepath.Join(sb, "investigations"))).To(BeTrue())
 	})
 
 	It("CS-LAY-002: CLAUDE.md is seeded once and never overwritten", func() {
