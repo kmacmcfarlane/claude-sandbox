@@ -1178,5 +1178,157 @@ class TestRepoRoot(unittest.TestCase):
             shutil.rmtree(tmpdir2, ignore_errors=True)
 
 
+class TestSetListCLI(unittest.TestCase):
+    """Integration tests for the set-list command."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.backlog_path = os.path.join(self.tmpdir, "backlog.yaml")
+        self.done_path = os.path.join(self.tmpdir, "done.yaml")
+        yaml = YAML()
+        yaml.indent(mapping=2, sequence=4, offset=2)
+        self.yaml = yaml
+        self._write(self.backlog_path, self._base([
+            self._story("S-001"),
+            self._story("S-002"),
+        ]))
+        self._write(self.done_path, self._base([self._story("S-900")]))
+
+    def tearDown(self):
+        import shutil
+
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _write(self, path, data):
+        with open(path, "w") as f:
+            self.yaml.dump(data, f)
+
+    def _read(self, path):
+        with open(path) as f:
+            return self.yaml.load(f)
+
+    def _base(self, stories):
+        return {
+            "schema_version": 2,
+            "project": "test",
+            "defaults": {"priority_order": "desc"},
+            "stories": stories,
+        }
+
+    def _story(self, sid):
+        return {
+            "id": sid,
+            "title": f"Story {sid}",
+            "priority": 50,
+            "status": "todo",
+            "requires": [],
+            "acceptance": ["FE: original"],
+            "testing": ["command: echo ok"],
+        }
+
+    def _run(self, stdin, *extra_args):
+        cmd = [
+            sys.executable,
+            SCRIPT,
+            "--backlog", self.backlog_path,
+            "--done", self.done_path,
+            "--repo-root", self.tmpdir,
+        ] + list(extra_args)
+        return subprocess.run(cmd, input=stdin, capture_output=True, text=True)
+
+    def _story_by_id(self, sid):
+        data = self._read(self.backlog_path)
+        return next(s for s in data["stories"] if s["id"] == sid)
+
+    def test_replaces_acceptance(self):
+        result = self._run(
+            "- 'BE: first'\n- 'FE: second'\n", "set-list", "S-001", "acceptance"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            list(self._story_by_id("S-001")["acceptance"]),
+            ["BE: first", "FE: second"],
+        )
+
+    def test_replaces_testing(self):
+        result = self._run("- 'edge case: empty input'\n", "set-list", "S-001", "testing")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            list(self._story_by_id("S-001")["testing"]), ["edge case: empty input"]
+        )
+
+    def test_does_not_touch_other_stories(self):
+        self._run("- 'BE: changed'\n", "set-list", "S-001", "acceptance")
+        self.assertEqual(
+            list(self._story_by_id("S-002")["acceptance"]), ["FE: original"]
+        )
+
+    def test_requires_accepts_known_id_from_backlog(self):
+        result = self._run("- S-002\n", "set-list", "S-001", "requires")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(list(self._story_by_id("S-001")["requires"]), ["S-002"])
+
+    def test_requires_accepts_known_id_from_done_file(self):
+        result = self._run("- S-900\n", "set-list", "S-001", "requires")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_requires_may_be_emptied(self):
+        self._run("- S-002\n", "set-list", "S-001", "requires")
+        result = self._run("[]\n", "set-list", "S-001", "requires")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(list(self._story_by_id("S-001")["requires"]), [])
+
+    def test_requires_rejects_unknown_id(self):
+        result = self._run("- S-404\n", "set-list", "S-001", "requires")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("S-404", result.stderr)
+        self.assertEqual(list(self._story_by_id("S-001")["requires"]), [])
+
+    def test_requires_rejects_self_reference(self):
+        result = self._run("- S-001\n", "set-list", "S-001", "requires")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("itself", result.stderr)
+
+    def test_rejects_empty_acceptance(self):
+        result = self._run("[]\n", "set-list", "S-001", "acceptance")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("non-empty", result.stderr)
+        self.assertEqual(
+            list(self._story_by_id("S-001")["acceptance"]), ["FE: original"]
+        )
+
+    def test_rejects_non_list_input(self):
+        result = self._run("just a string\n", "set-list", "S-001", "acceptance")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("must be a YAML list", result.stderr)
+
+    def test_rejects_non_string_entries(self):
+        result = self._run("- 42\n", "set-list", "S-001", "acceptance")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("non-empty strings", result.stderr)
+
+    def test_rejects_disallowed_field(self):
+        result = self._run("- x\n", "set-list", "S-001", "title")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Cannot set-list", result.stderr)
+
+    def test_unknown_story_returns_2(self):
+        result = self._run("- 'BE: x'\n", "set-list", "S-404", "acceptance")
+        self.assertEqual(result.returncode, 2)
+
+    def test_rejects_malformed_yaml(self):
+        result = self._run("- [unclosed\n", "set-list", "S-001", "acceptance")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Failed to parse", result.stderr)
+
+    def test_preserves_other_fields(self):
+        self._run("- 'BE: changed'\n", "set-list", "S-001", "acceptance")
+        story = self._story_by_id("S-001")
+        self.assertEqual(story["title"], "Story S-001")
+        self.assertEqual(story["priority"], 50)
+        self.assertEqual(story["status"], "todo")
+        self.assertEqual(list(story["testing"]), ["command: echo ok"])
+
+
 if __name__ == "__main__":
     unittest.main()

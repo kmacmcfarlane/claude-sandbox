@@ -56,6 +56,9 @@ SCALAR_SET_FIELDS = frozenset(
 TEXT_SET_FIELDS = frozenset(
     {"review_feedback", "notes", "blocked_reason"}
 )
+LIST_SET_FIELDS = frozenset(
+    {"acceptance", "testing", "requires"}
+)
 CLEARABLE_FIELDS = frozenset(
     {"review_feedback", "blocked_reason", "complexity", "notes", "claimed_by"}
 )
@@ -906,6 +909,91 @@ def cmd_set_text(args) -> int:
     return 0
 
 
+def cmd_set_list(args) -> int:
+    """Replace a list field (acceptance, testing, requires) from stdin YAML.
+
+    Scalars go through `set` and prose through `set-text`; without this, the two fields
+    carrying a story's actual contract could never be revised after `add`.
+    """
+    backlog_path, done_path = args.backlog, args.done
+    bl_data, bl_yaml = load_yaml(backlog_path)
+    done_data, _ = load_yaml(done_path)
+    stories = bl_data.get("stories") or []
+
+    result = find_story(stories, args.id)
+    if not result:
+        print(f"ERROR: Story '{args.id}' not found", file=sys.stderr)
+        return 2
+
+    _, story = result
+
+    if args.field not in LIST_SET_FIELDS:
+        print(
+            f"ERROR: Cannot set-list '{args.field}'. "
+            f"Allowed: {', '.join(sorted(LIST_SET_FIELDS))}",
+            file=sys.stderr,
+        )
+        return 1
+
+    input_yaml = _make_yaml()
+    try:
+        value = input_yaml.load(sys.stdin)
+    except Exception as e:
+        print(f"ERROR: Failed to parse stdin YAML: {e}", file=sys.stderr)
+        return 1
+
+    if value is None:
+        value = []
+    if not isinstance(value, list):
+        print("ERROR: stdin must be a YAML list", file=sys.stderr)
+        return 1
+
+    if args.field in ("acceptance", "testing"):
+        if not value:
+            print(
+                f"ERROR: '{args.field}' must be a non-empty list",
+                file=sys.stderr,
+            )
+            return 1
+        for item in value:
+            if not isinstance(item, str) or not item.strip():
+                print(
+                    f"ERROR: '{args.field}' entries must be non-empty strings",
+                    file=sys.stderr,
+                )
+                return 1
+    elif args.field == "requires":
+        known = all_ids(bl_data, done_data)
+        for item in value:
+            if not isinstance(item, str):
+                print("ERROR: 'requires' entries must be story IDs", file=sys.stderr)
+                return 1
+            if item == args.id:
+                print(f"ERROR: '{args.id}' cannot require itself", file=sys.stderr)
+                return 1
+            if item not in known:
+                print(
+                    f"ERROR: unknown story ID in requires: '{item}'",
+                    file=sys.stderr,
+                )
+                return 1
+
+    # Validate the whole story with the replacement applied before writing anything.
+    candidate = dict(story)
+    candidate[args.field] = value
+    errors, _ = validate_story(candidate)
+    if errors:
+        for e in errors:
+            print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+
+    story[args.field] = value
+
+    save_yaml_atomic(backlog_path, bl_data, bl_yaml)
+    print(f"{args.id}: {args.field} updated ({len(value)} entries)")
+    return 0
+
+
 def cmd_clear(args) -> int:
     backlog_path = args.backlog
     bl_data, bl_yaml = load_yaml(backlog_path)
@@ -1222,6 +1310,13 @@ def build_parser() -> argparse.ArgumentParser:
         "field", help=f"Field name ({', '.join(sorted(TEXT_SET_FIELDS))})"
     )
 
+    # set-list
+    p = sub.add_parser("set-list", help="Replace a list field from stdin YAML")
+    p.add_argument("id", help="Story ID")
+    p.add_argument(
+        "field", help=f"Field name ({', '.join(sorted(LIST_SET_FIELDS))})"
+    )
+
     # clear
     p = sub.add_parser("clear", help="Remove an optional field")
     p.add_argument("id", help="Story ID")
@@ -1267,6 +1362,7 @@ _MUTATING_COMMANDS = frozenset({
     "add",
     "set",
     "set-text",
+    "set-list",
     "clear",
     "archive",
 })
@@ -1293,6 +1389,7 @@ def main() -> int:
         "add": cmd_add,
         "set": cmd_set,
         "set-text": cmd_set_text,
+        "set-list": cmd_set_list,
         "clear": cmd_clear,
         "archive": cmd_archive,
         "status": cmd_status,
