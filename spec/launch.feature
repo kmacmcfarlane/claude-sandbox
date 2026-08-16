@@ -169,18 +169,46 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
   Scenario: CS-LNCH-026 Interactive command shape
     When "claude-sandbox --dangerous --model opus --resume" launches
     Then the container command is: claude --dangerously-skip-permissions --model opus --resume
-    And the container name is "claude-sandbox-<slug>"
+    And the container name is "claude-sandbox-<project-slug>-<instance>"
 
   Scenario: CS-LNCH-027 Ralph command shape
     When "claude-sandbox --ralph --limit 5 --dangerous" launches
     Then the container command is: /opt/claude-sandbox/bin/ralph --limit 5 --dangerously-skip-permissions
     And remaining passthrough args follow
-    And the container name is "claude-sandbox-<slug>-ralph"
+    And the container name is "claude-sandbox-<project-slug>-ralph"
+    # Ralph carries no instance noun: it is single-instance by construction
+    # (see CS-RLP PID lock), so there is never more than one to disambiguate.
 
-  Scenario: CS-LNCH-028 Project slug normalization
+  Scenario: CS-LNCH-028 Project slug derivation
+    # The slug identifies the PROJECT. Character normalization: lowercased,
+    # characters outside [a-z0-9._-] replaced with '-'.
     Given a project directory named "My_Cool.Project!"
-    Then the slug is lowercased with disallowed characters replaced: "my_cool.project-"
-    # Allowed: [a-z0-9._-]
+    Then the normalized basename is "my_cool.project-"
+    And the project slug is "<parent-slug>-<base-slug>-<h6>"
+    And <h6> is the first 6 hex characters of sha256 of the absolute project directory
+    And the parent segment is omitted when the project sits at the filesystem root
+    And the parent segment is normalized by the same rules as the basename
+
+  Scenario: CS-LNCH-031 Same-basename projects get distinct container names
+    # The motivating case: ~22 directories named "infrastructure" live under one
+    # workspace. Before this, all of them produced "claude-sandbox-infrastructure"
+    # and only one could run at a time.
+    Given projects at "/w/marketing/infrastructure" and "/w/auth/infrastructure"
+    Then their project slugs differ in both the parent segment and <h6>
+    And both containers can run concurrently
+
+  Scenario: CS-LNCH-032 Container labels record session identity
+    Then docker run receives labels:
+      | label                         | value                                  |
+      | claude-sandbox.project        | the absolute project directory          |
+      | claude-sandbox.mode           | "claude" or "ralph"                     |
+      | claude-sandbox.instance       | the instance noun (absent for ralph)    |
+      | claude-sandbox.version        | the launcher version                    |
+      | claude-sandbox.model          | the resolved model, empty when unset    |
+      | claude-sandbox.confighash     | the effective-config hash (CS-SESS-020) |
+      | claude-sandbox.inputs         | per-file digests (CS-SESS-021)          |
+    # Discovery filters on these labels rather than parsing container names,
+    # which are lossy (normalized and hashed). See CS-SESS-001.
 
   Scenario: CS-LNCH-029 Container runtime environment
     Then docker run receives: -it --rm --init,

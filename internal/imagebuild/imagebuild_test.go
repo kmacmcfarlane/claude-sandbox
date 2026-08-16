@@ -235,9 +235,6 @@ var _ = Describe("image build lifecycle", func() {
 			if in.ProjectDir == "" {
 				in.ProjectDir = proj
 			}
-			if in.Slug == "" {
-				in.Slug = imagebuild.Slug(in.ProjectDir)
-			}
 			return imagebuild.ResolveChild(in, out)
 		}
 
@@ -305,16 +302,116 @@ var _ = Describe("image build lifecycle", func() {
 			Expect(errw.String()).To(ContainSubstring("baseOnly"))
 		})
 
-		It("CS-IMG-015: the child image name derives from the project slug", func() {
+		It("CS-IMG-015: the child image name derives from the resolved Dockerfile, not the project", func() {
 			odd := filepath.Join(filepath.Dir(proj), "My_Cool.Project!")
 			Expect(os.MkdirAll(odd, 0o755)).To(Succeed())
-			spec := resolve(imagebuild.ChildInputs{ProjectDir: odd, Slug: imagebuild.Slug(odd)})
-			Expect(spec.ImageName).To(Equal("claude-sandbox-my_cool.project-"))
+			df := filepath.Join(odd, ".claude-sandbox", "Dockerfile")
+			touchAt(df, old)
+			spec := resolve(imagebuild.ChildInputs{ProjectDir: odd})
+			Expect(spec.Use).To(BeTrue())
+			Expect(spec.ImageName).To(Equal("claude-sandbox-" + imagebuild.ImageSlug(df, odd)))
+			// The context directory name makes the tag legible in `docker images`.
+			Expect(spec.ImageName).To(HavePrefix("claude-sandbox-df-my_cool.project-"))
+		})
+
+		It("CS-IMG-015: no child image name is produced when no child is in use", func() {
+			// EnsureChild returns the base image on this path and must never
+			// read ImageName; leaving it empty keeps that honest.
+			spec := resolve(imagebuild.ChildInputs{})
+			Expect(spec.Use).To(BeFalse())
+			Expect(spec.ImageName).To(BeEmpty())
+			img, err := imagebuild.EnsureChild(o, spec, false, false)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(img).To(Equal("claude-sandbox"))
 		})
 
 		It("CS-IMG-015: Slug lowercases and replaces characters outside [a-z0-9._-]", func() {
 			Expect(imagebuild.Slug("/x/My_Cool.Project!")).To(Equal("my_cool.project-"))
 			Expect(imagebuild.Slug("/x/plain-name_1.0")).To(Equal("plain-name_1.0"))
+		})
+
+		It("CS-IMG-018: projects sharing a parent Dockerfile and context share one image tag", func() {
+			// The motivating case: many same-named projects under one workspace
+			// all resolve the workspace Dockerfile. Previously each built its own
+			// identically-contented image under a colliding tag.
+			ws := filepath.Dir(proj)
+			df := filepath.Join(ws, ".claude-sandbox", "Dockerfile")
+			touchAt(df, old)
+			other := filepath.Join(ws, "other")
+			Expect(os.MkdirAll(other, 0o755)).To(Succeed())
+
+			a := resolve(imagebuild.ChildInputs{ProjectDir: proj})
+			b := resolve(imagebuild.ChildInputs{ProjectDir: other})
+			Expect(a.Use).To(BeTrue())
+			Expect(b.Use).To(BeTrue())
+			Expect(a.Dockerfile).To(Equal(b.Dockerfile))
+			Expect(a.Context).To(Equal(b.Context))
+			Expect(a.ImageName).To(Equal(b.ImageName))
+		})
+
+		It("CS-IMG-019: the same Dockerfile with different contexts yields different tags", func() {
+			// The default branch builds with the PROJECT ROOT as context; the
+			// dockerfileDir override builds with the override dir. Point both at
+			// the very same file: same Dockerfile, different image, so the tag
+			// must not merge them.
+			sandboxDir := filepath.Join(proj, ".claude-sandbox")
+			df := filepath.Join(sandboxDir, "Dockerfile")
+			touchAt(df, old)
+
+			viaDefault := resolve(imagebuild.ChildInputs{ProjectDir: proj})
+			viaOverride := resolve(imagebuild.ChildInputs{ProjectDir: proj, DockerfileDir: sandboxDir})
+
+			Expect(viaDefault.Dockerfile).To(Equal(viaOverride.Dockerfile))
+			Expect(viaDefault.Context).To(Equal(proj))
+			Expect(viaOverride.Context).To(Equal(sandboxDir))
+			Expect(viaDefault.ImageName).NotTo(Equal(viaOverride.ImageName))
+		})
+
+		It("CS-IMG-015: ImageSlug is deterministic and keyed on the (dockerfile, context) pair", func() {
+			Expect(imagebuild.ImageSlug("/a/Dockerfile", "/a")).To(Equal(imagebuild.ImageSlug("/a/Dockerfile", "/a")))
+			Expect(imagebuild.ImageSlug("/a/Dockerfile", "/a")).NotTo(Equal(imagebuild.ImageSlug("/a/Dockerfile", "/b")))
+			Expect(imagebuild.ImageSlug("/a/Dockerfile", "/a")).NotTo(Equal(imagebuild.ImageSlug("/b/Dockerfile", "/a")))
+		})
+	})
+
+	Describe("project slug (CS-LNCH-028, CS-LNCH-031)", func() {
+		It("CS-LNCH-028: qualifies the basename with the parent and a path digest", func() {
+			s := imagebuild.ProjectSlug("/home/u/work/marketing/infrastructure")
+			Expect(s).To(HavePrefix("marketing-infrastructure-"))
+			Expect(s).To(MatchRegexp(`^marketing-infrastructure-[0-9a-f]{6}$`))
+		})
+
+		It("CS-LNCH-028: normalizes the parent segment by the same rules as the basename", func() {
+			s := imagebuild.ProjectSlug("/x/My Group!/Sub_Project")
+			Expect(s).To(MatchRegexp(`^my-group--sub_project-[0-9a-f]{6}$`))
+		})
+
+		It("CS-LNCH-028: omits the parent segment at the filesystem root", func() {
+			Expect(imagebuild.ProjectSlug("/proj")).To(MatchRegexp(`^proj-[0-9a-f]{6}$`))
+		})
+
+		It("CS-LNCH-028: is deterministic for the same absolute path", func() {
+			Expect(imagebuild.ProjectSlug("/a/b/c")).To(Equal(imagebuild.ProjectSlug("/a/b/c")))
+			Expect(imagebuild.ProjectSlug("/a/b/c")).To(Equal(imagebuild.ProjectSlug("/a/b/c/")))
+		})
+
+		It("CS-LNCH-031: same-basename projects under different parents get distinct slugs", func() {
+			a := imagebuild.ProjectSlug("/w/marketing/infrastructure")
+			b := imagebuild.ProjectSlug("/w/auth/infrastructure")
+			Expect(a).NotTo(Equal(b))
+			// Distinct in the readable segment AND in the digest, so the names
+			// stay legible without relying on the hash alone.
+			Expect(a).To(HavePrefix("marketing-"))
+			Expect(b).To(HavePrefix("auth-"))
+			Expect(a[len(a)-6:]).NotTo(Equal(b[len(b)-6:]))
+		})
+
+		It("CS-LNCH-031: same basename AND same parent name in different trees stay distinct", func() {
+			// Parent qualification alone is not sufficient; the digest is what
+			// makes this correct.
+			a := imagebuild.ProjectSlug("/one/shared/infrastructure")
+			b := imagebuild.ProjectSlug("/two/shared/infrastructure")
+			Expect(a).NotTo(Equal(b))
 		})
 	})
 

@@ -18,8 +18,18 @@
 
 # Container memory limit. Uses Docker memory notation (e.g. 512m, 8g, 16g).
 # Swap is disabled — the container is OOM-killed if it exceeds this limit.
+# The limit is PER CONTAINER, so several sessions in their own containers
+# multiply it; sessions joined into one container share its limit.
 # Default: 8g
 # memoryLimit: 8g
+
+# Key sequence that detaches from an attached session (claude-sandbox --attach)
+# without stopping it. Docker --detach-keys syntax: a single a-z, ctrl-<char>,
+# or a comma-separated sequence.
+# Docker's own default (ctrl-p,ctrl-q) is NOT used here because the Claude Code
+# TUI binds ctrl+p. Safe alternatives, unbound by the TUI: ctrl-q, ctrl-^, ctrl-@.
+# Default: ctrl-q,ctrl-q
+# detachKeys: ctrl-q,ctrl-q
 
 # Host access — control which host resources are mounted into the container.
 # Each can also be enabled via CLI flags (--ssh, --git, --docker-socket, --aws)

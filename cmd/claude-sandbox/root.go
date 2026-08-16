@@ -53,7 +53,7 @@ func Main(args []string) int {
 // path so "claude-sandbox --rebuild init" errors instead of routing to init.
 func isSubcommand(a string) bool {
 	switch a {
-	case "init", "init-ralph", "ralph", "help", "completion":
+	case "init", "init-ralph", "ralph", "help", "completion", "sessions":
 		return true
 	// CS-COMP-002/003: the hidden commands the generated completion scripts
 	// call on every keystroke. Without these they fall through to runLaunch,
@@ -120,11 +120,11 @@ func newRootCmd(env *Env) *cobra.Command {
 		},
 		// DisableFlagParsing leaves cobra unaware of every launcher flag, so
 		// root completes its own command line (CS-COMP-004..013).
-		ValidArgsFunction: completeLaunch,
+		ValidArgsFunction: completeLaunch(env),
 	}
 	ralphCmd := newRalphCmd(env)
 	registerRalphCompletions(ralphCmd)
-	root.AddCommand(newInitCmd(env, false), newInitCmd(env, true), ralphCmd)
+	root.AddCommand(newInitCmd(env, false), newInitCmd(env, true), ralphCmd, newSessionsCmd(env))
 	// CS-INIT-002: a rejected flag names itself and lists the command's valid
 	// options (inherited by init/init-ralph/ralph).
 	root.SetFlagErrorFunc(func(c *cobra.Command, err error) error {
@@ -151,6 +151,8 @@ const launchUsage = `Usage:
   claude-sandbox --ssh                    # mount ~/.ssh/ read-only
   claude-sandbox --ralph [ralph-args]     # launch the ralph loop runner
   claude-sandbox --ralph --limit 5        # run ralph for 5 iterations
+  claude-sandbox sessions                 # list running sandbox sessions
+  claude-sandbox --attach                 # reattach after losing a terminal
   claude-sandbox init                     # bootstrap .claude-sandbox/ (config, env, gitignore)
   claude-sandbox init-ralph               # bootstrap + seed ralph agent scaffolding
   PROJECT_DIR=/other claude-sandbox       # launch claude in /other
@@ -158,6 +160,7 @@ const launchUsage = `Usage:
 Commands (bootstrap the project, then exit — launcher flags do not apply):
   init                      Bootstrap .claude-sandbox/ in the project (config, env, gitignore, sidecar)
   init-ralph                Like init, plus seed ralph agent/ + scripts/ scaffolding
+  sessions [--all] [--json] List running sandbox sessions (this project by default)
   completion SHELL          Print a shell completion script (bash, zsh, fish, powershell)
                             e.g. source <(claude-sandbox completion zsh)
      --track-in-host / --no-track-in-host              set trackInHost (skip the prompt)
@@ -180,6 +183,13 @@ Options:
   --aws                     Mount ~/.aws/ read-only into the container
   --git                     Mount ~/.gitconfig read-only into the container
   --ssh                     Mount ~/.ssh/ read-only into the container
+
+Multiple sessions (when a session is already running for this project):
+  --new                     Launch a new container without prompting
+  --attach[=INSTANCE]       Reattach to a running session (recovers a lost terminal)
+  --join[=INSTANCE]         Start another session inside a running container
+  --no-session-check        Skip the multi-session prompt and just launch
+  --allow-config-drift      Attach or join even if the config has changed since it started
 
 Environment variables:
   PROJECT_DIR                             Override the project directory (default: $PWD)
@@ -206,6 +216,16 @@ type launchFlags struct {
 	NoUpdateCheck               bool
 	SSH, Git, DockerSocket, AWS *bool
 	Passthrough                 []string
+
+	// Multi-session bypasses (CS-SESS-028). Each removes a decision, which is
+	// what makes them usable with no terminal attached.
+	NewSession       bool
+	Attach           bool
+	AttachTarget     string
+	Join             bool
+	JoinTarget       string
+	NoSessionCheck   bool
+	AllowConfigDrift bool
 }
 
 var knownPassthrough = map[string]bool{
@@ -271,24 +291,71 @@ func scanLaunchArgs(args []string) (*launchFlags, error) {
 		case "--host-access-aws-enabled", "--aws":
 			f.AWS = boolTrue()
 			i++
+		case "--new":
+			f.NewSession = true
+			i++
+		case "--no-session-check":
+			f.NoSessionCheck = true
+			i++
+		case "--allow-config-drift":
+			f.AllowConfigDrift = true
+			i++
+		case "--attach":
+			// Bare --attach is valid: with one candidate it is unambiguous, with
+			// several it prompts (or fails without a terminal) — CS-SESS-029.
+			f.Attach = true
+			i++
+		case "--join":
+			f.Join = true
+			i++
 		case "--":
 			f.Passthrough = args[i+1:]
 			return f, nil
 		default:
-			if strings.HasPrefix(a, "--") {
-				if knownPassthrough[a] {
-					f.Passthrough = args[i:]
-					return f, nil
-				}
-				return nil, exitErr(2, "Error: unknown flag '%s'", a)
+			// --attach=NOUN / --join=NOUN. Handled here rather than as cases so
+			// the bare forms above keep working.
+			if v, ok := flagValue(a, "--attach"); ok {
+				f.Attach, f.AttachTarget = true, v
+				i++
+				continue
 			}
-			if a == "init" || a == "init-ralph" {
-				return nil, exitErr(2, "Error: '%s' must be the first argument (claude-sandbox %s [options])", a, a)
+			if v, ok := flagValue(a, "--join"); ok {
+				f.Join, f.JoinTarget = true, v
+				i++
+				continue
 			}
+			return scanTail(f, args, i)
+		}
+	}
+	return f, nil
+}
+
+// flagValue splits "--flag=value", returning false unless the value is present
+// and non-empty.
+func flagValue(arg, name string) (string, bool) {
+	if !strings.HasPrefix(arg, name+"=") {
+		return "", false
+	}
+	v := strings.TrimPrefix(arg, name+"=")
+	return v, v != ""
+}
+
+// scanTail handles the end of the launcher grammar: a known claude flag or a
+// positional argument ends parsing and everything from there passes through; an
+// unknown flag is an error.
+func scanTail(f *launchFlags, args []string, i int) (*launchFlags, error) {
+	a := args[i]
+	if strings.HasPrefix(a, "--") {
+		if knownPassthrough[a] {
 			f.Passthrough = args[i:]
 			return f, nil
 		}
+		return nil, exitErr(2, "Error: unknown flag '%s'", a)
 	}
+	if a == "init" || a == "init-ralph" {
+		return nil, exitErr(2, "Error: '%s' must be the first argument (claude-sandbox %s [options])", a, a)
+	}
+	f.Passthrough = args[i:]
 	return f, nil
 }
 
@@ -380,6 +447,26 @@ func runLaunch(env *Env, args []string) error {
 		cascade.LintEnvFiles(env.Err, envFiles)
 	}
 
+	// Multi-session decision (CS-SESS-014..019). Deliberately before any image
+	// work: building an image the user is about to bypass by attaching is waste.
+	decision, err := decideSessions(env, projectDir, f)
+	if err != nil {
+		return err
+	}
+	switch decision.Action {
+	case actionQuit:
+		return nil
+	case actionAttach, actionJoin:
+		done, aerr := joinExistingSession(env, projectDir, f, cfg, envFiles, decision)
+		if aerr != nil {
+			return aerr
+		}
+		if done {
+			return nil
+		}
+		// The drift prompt chose a new container instead: fall through and launch.
+	}
+
 	noUpdate := f.NoUpdateCheck || envTrue(env.Getenv("CLAUDE_SANDBOX_NO_UPDATE_CHECK")) || cfg.DisableUpdateCheck
 
 	// Images (CS-IMG).
@@ -427,8 +514,8 @@ func runLaunch(env *Env, args []string) error {
 		dfName = cfg.Dockerfile
 	}
 	spec := imagebuild.ResolveChild(imagebuild.ChildInputs{
-		ProjectDir: projectDir, Slug: imagebuild.Slug(projectDir),
-		BaseOnly: baseOnly, DockerfileDir: dfDir, Dockerfile: dfName,
+		ProjectDir: projectDir,
+		BaseOnly:   baseOnly, DockerfileDir: dfDir, Dockerfile: dfName,
 	}, env.Out)
 	image, err := imagebuild.EnsureChild(imgOpts, spec, baseRebuilt, baseOnly)
 	if err != nil {
@@ -445,7 +532,10 @@ func runLaunch(env *Env, args []string) error {
 		CLIModel: f.Model, Passthrough: f.Passthrough,
 		CLISSH: f.SSH, CLIGit: f.Git, CLIDockerSocket: f.DockerSocket, CLIAWS: f.AWS,
 		Cfg: cfg, EnvFiles: envFiles, ImageName: image,
-		Out: env.Out, Err: env.Err,
+		ImageID:  imagebuild.ImageID(env.Runner, image),
+		Instance: newInstance(env, projectDir, f),
+		Version:  version,
+		Out:      env.Out, Err: env.Err,
 	}
 	plan, err := launch.Build(in)
 	if err != nil {

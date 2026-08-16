@@ -15,10 +15,14 @@ package main
 // get cobra's built-in flag completion for free.
 
 import (
+	"context"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/kmacmcfarlane/claude-sandbox/internal/sessions"
 )
 
 // modelAliases are the short names accepted by --model. A full model ID is
@@ -33,6 +37,77 @@ const (
 	valueModel
 	valueOpaque // takes a value that cannot be usefully completed
 )
+
+// instanceFlags take an optional instance noun in the "--flag=noun" form.
+var instanceFlags = []string{"--attach", "--join"}
+
+// completeInstanceValue completes "--attach=<noun>" / "--join=<noun>" from the
+// live sessions of the current project (CS-COMP-024).
+//
+// This is the only completion path that talks to docker. A label-filtered
+// docker ps measures around 10ms, but CS-COMP-022's guarantee that a TAB press
+// never blocks must not depend on that, so the query is bounded and falls back
+// to offering nothing.
+func completeInstanceValue(env *Env, toComplete string) ([]cobra.Completion, cobra.ShellCompDirective, bool) {
+	for _, fl := range instanceFlags {
+		prefix := fl + "="
+		if !strings.HasPrefix(toComplete, prefix) {
+			continue
+		}
+		partial := strings.TrimPrefix(toComplete, prefix)
+		var names []string
+		for _, n := range liveInstances(env) {
+			if strings.HasPrefix(n, partial) {
+				names = append(names, prefix+n)
+			}
+		}
+		slices.Sort(names)
+		return toCompletions(names), cobra.ShellCompDirectiveNoFileComp, true
+	}
+	return nil, 0, false
+}
+
+// liveInstances returns the instance nouns of this project's live sessions, or
+// nothing at all if that cannot be determined quickly.
+func liveInstances(env *Env) []string {
+	if env == nil || env.Runner == nil {
+		return nil
+	}
+	projectDir, err := resolveProjectDir(env.Getenv)
+	if err != nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), completionDockerTimeout)
+	defer cancel()
+
+	type result struct{ names []string }
+	ch := make(chan result, 1)
+	go func() {
+		found, derr := sessions.Discover(env.Runner, projectDir)
+		if derr != nil {
+			ch <- result{}
+			return
+		}
+		ch <- result{sessions.Instances(sessions.Interactive(found))}
+	}()
+	select {
+	case r := <-ch:
+		return r.names
+	case <-ctx.Done():
+		return nil
+	}
+}
+
+// completionDockerTimeout bounds the only docker call on a completion path.
+const completionDockerTimeout = 300 * time.Millisecond
+
+func toCompletions(names []string) []cobra.Completion {
+	out := make([]cobra.Completion, 0, len(names))
+	for _, n := range names {
+		out = append(out, cobra.Completion(n))
+	}
+	return out
+}
 
 // launchFlagSpec describes one launcher flag for completion purposes.
 //
@@ -67,6 +142,14 @@ var launchFlagSpecs = []launchFlagSpec{
 	{Name: "--host-access-git-enabled"},
 	{Name: "--ssh", Desc: "Mount ~/.ssh/ read-only into the container"},
 	{Name: "--host-access-ssh-enabled"},
+	{Name: "--new", Desc: "Launch a new container without prompting"},
+	// --attach/--join take an OPTIONAL instance noun, and only in the "=" form:
+	// "--attach otter" would be ambiguous with a passthrough positional. So they
+	// are valueNone here, and instanceFlags drives completion of the "=" form.
+	{Name: "--attach", Desc: "Reattach to a running session (recovers a lost terminal)"},
+	{Name: "--join", Desc: "Start another session inside a running container"},
+	{Name: "--no-session-check", Desc: "Skip the multi-session prompt and just launch"},
+	{Name: "--allow-config-drift", Desc: "Attach or join even if the config has changed since it started"},
 }
 
 func lookupLaunchFlag(name string) (launchFlagSpec, bool) {
@@ -83,7 +166,18 @@ func lookupLaunchFlag(name string) (launchFlagSpec, bool) {
 // args is the command line *before* the word being completed. Because root
 // disables flag parsing, cobra hands it over unstripped, which is exactly what
 // the launcher grammar needs.
-func completeLaunch(_ *cobra.Command, args []string, toComplete string) ([]cobra.Completion, cobra.ShellCompDirective) {
+func completeLaunch(env *Env) func(*cobra.Command, []string, string) ([]cobra.Completion, cobra.ShellCompDirective) {
+	return func(cmd *cobra.Command, args []string, toComplete string) ([]cobra.Completion, cobra.ShellCompDirective) {
+		return completeLaunchWith(env, args, toComplete)
+	}
+}
+
+func completeLaunchWith(env *Env, args []string, toComplete string) ([]cobra.Completion, cobra.ShellCompDirective) {
+	// "--attach=<noun>" / "--join=<noun>" — the only docker-backed completion.
+	if comps, directive, ok := completeInstanceValue(env, toComplete); ok {
+		return comps, directive
+	}
+
 	// A value position: the previous word is a flag that takes one.
 	if len(args) > 0 {
 		if s, ok := lookupLaunchFlag(args[len(args)-1]); ok {

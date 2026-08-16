@@ -56,6 +56,12 @@ claude-sandbox --ralph --docker-socket --dangerous --limit 5
 # Point at a specific project:
 PROJECT_DIR=/home/you/projects/foo claude-sandbox
 
+# See what is already running:
+claude-sandbox sessions
+
+# Reattach after your terminal died:
+claude-sandbox --attach
+
 # Bootstrap .claude-sandbox/ in a repo (config, env, gitignore):
 claude-sandbox init
 
@@ -85,6 +91,13 @@ These flags are consumed by the launcher and control the container environment. 
 | `--no-update-check` | | Skip Claude Code version check at launch |
 | `--ralph` | | Launch the ralph loop runner instead of interactive claude |
 | `--limit N` | | Stop ralph after N iterations (only valid with `--ralph`) |
+| `--new` | | Launch a new container without prompting, even if sessions are running |
+| `--attach[=INSTANCE]` | | Reattach to a running session instead of launching |
+| `--join[=INSTANCE]` | | Start another session inside a running container |
+| `--no-session-check` | | Skip the multi-session prompt and just launch |
+| `--allow-config-drift` | | Attach or join even if the config changed since that session started |
+
+See [Multiple sessions](#multiple-sessions) for what these do and when to reach for each.
 
 ### Passthrough arguments
 
@@ -97,6 +110,97 @@ claude-sandbox --docker-socket --resume
 # Pass --interactive and --watchdog-timeout to ralph:
 claude-sandbox --ralph --docker-socket --dangerous --interactive --watchdog-timeout 30
 ```
+
+## Multiple sessions
+
+More than one sandbox session can run in the same project. Container names are unique per project directory, so two checkouts that merely share a directory name (say a dozen directories all called `infrastructure`) no longer collide.
+
+### Listing what is running
+
+```bash
+# Sessions for this project:
+claude-sandbox sessions
+
+# Every project on this machine:
+claude-sandbox sessions --all
+
+# Machine-readable:
+claude-sandbox sessions --json
+```
+
+```
+INSTANCE  NAME                                            MODE    UP      SESSIONS
+otter     claude-sandbox-kmacmcfarlane-myproj-1de77a-otter  claude  2h14m   1
+heron     claude-sandbox-kmacmcfarlane-myproj-1de77a-heron  claude  11m     2
+```
+
+Each session gets a short **instance noun** (`otter`, `heron`) so it can be named by hand. `SESSIONS` counts the claude processes inside a container, so joined sessions are visible too.
+
+### Launching when a session already exists
+
+Launching in a project that already has a session offers four choices:
+
+```
+Found 1 running session(s) for this project:
+  otter      up 2h14m      1 session(s)
+
+  [n] new session in a new container   (isolated; attachable if your terminal drops)
+  [j] new session in an existing container   (dies with that container's primary; not attachable later)
+  [a] attach to an existing session   (shares the terminal if someone is already using it)
+  [q] quit
+```
+
+**Which to pick:**
+
+| | New container (`n`) | Join a container (`j`) | Attach (`a`) |
+|---|---|---|---|
+| Survives losing your terminal | yes — reattach with `--attach` | **no**, gone for good | n/a (this *is* the recovery path) |
+| Dies when another session exits | no | **yes** — the container is `--rm` | n/a |
+| Cost | a second container, its own memory limit | almost nothing | nothing |
+
+If your terminal died and you want your session back, that is **`[a]` attach**. Use `[j]` only for a genuinely disposable second session, and remember it cannot be recovered.
+
+Attaching prints the detach sequence, which defaults to **`ctrl-q` twice**. Docker's own default (`ctrl-p ctrl-q`) is not used because the Claude Code TUI binds `ctrl+p`. Override it with `detachKeys` in `config.yaml`. Detaching leaves the session running; it does not stop it.
+
+Docker cannot report whether another client is attached, so attaching to a session someone else is actively using silently shares the terminal — output is duplicated and keystrokes interleave.
+
+### Non-interactive use
+
+When a decision is required and no terminal is attached, the command prints what it found and **exits 3** rather than guessing. Choose explicitly instead:
+
+```bash
+claude-sandbox --new             # always a new container
+claude-sandbox --attach=otter    # a specific session
+claude-sandbox --join=heron      # another session inside a specific container
+claude-sandbox --no-session-check  # skip the prompt and launch
+```
+
+`--no-session-check` skips the *decision*, not the instance-noun lookup — a new container still has to be named, and naming it without knowing which nouns are taken would reintroduce the collisions this exists to prevent.
+
+Bare `--attach` / `--join` work when there is exactly one candidate. Exit code 3 means specifically "a choice is needed and nobody can make it"; 2 remains a general error.
+
+`--ralph` never prompts — it reports running sessions and proceeds, leaving concurrency to the ralph PID lock.
+
+### Config drift
+
+Attaching to or joining a container does **not** rebuild the image, reassemble mounts, or regenerate the injected `CLAUDE.md` / `settings.json` / `.mcp.json` — you are entering a container that was configured when it started. So each container records a hash of its effective configuration, and attaching to one whose configuration no longer matches what is on disk asks first:
+
+```
+Session 'otter' was started with different configuration:
+  changed  /w/.claude-sandbox/config.yaml
+  added    /w/sub/.claude-sandbox/env
+
+Attaching will NOT apply these changes to the running container.
+  [c] continue anyway
+  [n] new container with the current config
+  [q] quit
+```
+
+The hash covers the merged config cascade, env file contents, the resolved Dockerfile and the image ID actually in use, the generated shadow files, the mount set, host-access flags, host identity, and the memory limit. It deliberately ignores `--model`, passthrough arguments and `--limit`, which are per-session choices rather than environment — so starting a second session never looks like drift. Because it hashes the *merged* result, an upstream edit that a more-local file fully overrides is correctly not drift.
+
+`--model` is reported separately: attaching cannot change a running session's model, so a mismatch warns. Joining passes the model through to the new process, where it does apply.
+
+Skip the check with `--allow-config-drift`.
 
 ## Bootstrapping a project (`init` / `init-ralph`)
 
@@ -349,6 +453,18 @@ The container is capped at **8 GB** of RAM by default (swap disabled). If the co
 memoryLimit: 16g
 ```
 
+The limit is **per container**, so running several sessions in their own containers multiplies it. Sessions joined into one container share that container's limit.
+
+#### Detach keys
+
+The key sequence that detaches from an attached session without stopping it. Defaults to `ctrl-q,ctrl-q`:
+
+```yaml
+detachKeys: ctrl-^
+```
+
+Accepts Docker's `--detach-keys` syntax: a single `a-z`, `ctrl-<char>`, or a comma-separated sequence. Docker's own default of `ctrl-p,ctrl-q` is deliberately *not* used, because the Claude Code TUI binds `ctrl+p`. If you change this, avoid keys the TUI uses — `ctrl+o/x/b/e/s/k/g/t/v/r/d/n/a/u/p/z/l/j`, and `ctrl+]`, `ctrl+\`, `ctrl+_` — which leaves `ctrl-q`, `ctrl-^` and `ctrl-@` as the safe choices.
+
 #### Extra mounts
 
 Add extra volume mounts to the container for shared libraries, data directories, or other paths.
@@ -422,7 +538,9 @@ USER root
 
 The final `USER` must be `root` so the entrypoint has privileges.
 
-The child image is built automatically and tagged `claude-sandbox-{project-slug}`. It rebuilds when the child Dockerfile changes or the base image is updated.
+The child image is built automatically and tagged after the Dockerfile it was built from, not the project that triggered the build: `claude-sandbox-df-{context-dir}-{hash}`, where the hash covers the Dockerfile path **and** its build context. It rebuilds when the child Dockerfile changes or the base image is updated.
+
+Tagging this way means every project resolving the same shared Dockerfile — a whole workspace inheriting one `.claude-sandbox/Dockerfile` from a parent directory — shares a single image and builds it once, instead of each project building an identical copy. The build context is part of the identity because the default branch builds with the project root as context while `dockerfileDir` builds with the override directory; the same Dockerfile in different contexts is genuinely a different image.
 
 See `scaffold/Dockerfile.example` in this repo for a commented template (`claude-sandbox init` seeds it into the project as `.claude-sandbox/Dockerfile.example`).
 

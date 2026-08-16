@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/imagebuild"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/prompt"
 )
 
@@ -110,14 +112,18 @@ var _ = Describe("launcher CLI (end-to-end argv)", func() {
 
 	It("CS-LNCH-026: interactive command shape and container name", func() {
 		Expect(f.run("--dangerous", "--model", "opus", "--resume")).To(Equal(0))
-		Expect(f.execLine()).To(HaveSuffix(
-			"--name claude-sandbox-proj claude-sandbox claude --dangerously-skip-permissions --model opus --resume"))
+		// The instance noun is chosen at random, so match its shape rather than
+		// a fixed value; the project slug is derived from the fixture's temp dir.
+		Expect(f.execLine()).To(MatchRegexp(
+			`--name claude-sandbox-` + regexp.QuoteMeta(imagebuild.ProjectSlug(f.proj)) +
+				`-[a-z]+ claude-sandbox claude --dangerously-skip-permissions --model opus --resume$`))
 	})
 
 	It("CS-LNCH-027: ralph command shape, passthrough tail, and -ralph container name", func() {
 		Expect(f.run("--ralph", "--limit", "5", "--dangerous", "--verbose")).To(Equal(0))
 		Expect(f.execLine()).To(HaveSuffix(
-			"--name claude-sandbox-proj-ralph claude-sandbox /opt/claude-sandbox/bin/ralph --limit 5 --dangerously-skip-permissions --verbose"))
+			"--name claude-sandbox-" + imagebuild.ProjectSlug(f.proj) +
+				"-ralph claude-sandbox /opt/claude-sandbox/bin/ralph --limit 5 --dangerously-skip-permissions --verbose"))
 	})
 
 	It("CS-LNCH-029: container runtime environment", func() {
@@ -233,9 +239,12 @@ var _ = Describe("launcher CLI (end-to-end argv)", func() {
 		writeFile(filepath.Join(f.proj, ".claude-sandbox", "config.yaml"), "dockerfileDir: "+dirA+"\n")
 		f.envmap["CLAUDE_SANDBOX_BASE_ONLY"] = ""
 		f.envmap["CLAUDE_SANDBOX_DOCKERFILE_DIR"] = dirB
-		f.fake.On("image inspect claude-sandbox-proj", "", execx.Fail(1)) // force the child build
+		// The tag now derives from the (Dockerfile, context) pair, so name it the
+		// same way the launcher does rather than from the project.
+		tag := "claude-sandbox-" + imagebuild.ImageSlug(filepath.Join(dirB, "Dockerfile"), dirB)
+		f.fake.On("image inspect "+tag, "", execx.Fail(1)) // force the child build
 		Expect(f.run()).To(Equal(0))
 		Expect(f.fake.CommandLines()).To(ContainElement(
-			"docker build -t claude-sandbox-proj -f " + filepath.Join(dirB, "Dockerfile") + " " + dirB))
+			"docker build -t " + tag + " -f " + filepath.Join(dirB, "Dockerfile") + " " + dirB))
 	})
 })

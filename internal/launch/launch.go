@@ -38,6 +38,17 @@ type Inputs struct {
 	CLIModel        string
 	Passthrough     []string
 
+	// Instance is the noun identifying this session among the project's
+	// containers (CS-LNCH-026). Empty for ralph, which is single-instance.
+	Instance string
+
+	// Version stamps the claude-sandbox.version label.
+	Version string
+
+	// ImageID is the resolved image's docker ID. It feeds the config hash so an
+	// out-of-band rebuild registers as drift (CS-SESS-023).
+	ImageID string
+
 	// CLI host-access overrides (nil = not passed).
 	CLISSH, CLIGit, CLIDockerSocket, CLIAWS *bool
 
@@ -47,6 +58,11 @@ type Inputs struct {
 	ImageName string
 	Out       io.Writer
 	Err       io.Writer
+
+	// shadowDigests accumulates a content digest per generated shadow file, so
+	// the config hash tracks what was actually mounted rather than the temp
+	// paths those files happen to live at (which differ every launch).
+	shadowDigests []InputDigest
 }
 
 // Plan is the assembled invocation.
@@ -58,6 +74,13 @@ type Plan struct {
 	EnvFiles      []string // --env-file paths
 	MemoryLimit   string
 	Command       []string // command + args inside the container
+	Labels        []string // --label KEY=VAL specs
+
+	// ConfigHash identifies the effective configuration this container was
+	// launched with; ConfigInputs records the contributing files so drift can
+	// be explained rather than merely reported (CS-SESS-020, CS-SESS-021).
+	ConfigHash   string
+	ConfigInputs []InputDigest
 }
 
 func (in *Inputs) getenv(k string) string {
@@ -166,7 +189,7 @@ func Build(in Inputs) (*Plan, error) {
 	}
 
 	// CS-LNCH-026..028: container command and name.
-	slug := imagebuild.Slug(in.ProjectDir)
+	slug := imagebuild.ProjectSlug(in.ProjectDir)
 	if in.RalphMode {
 		p.ContainerName = "claude-sandbox-" + slug + "-ralph"
 		p.Command = []string{"/opt/claude-sandbox/bin/ralph"}
@@ -177,7 +200,8 @@ func Build(in Inputs) (*Plan, error) {
 			p.Command = append(p.Command, "--dangerously-skip-permissions")
 		}
 	} else {
-		p.ContainerName = "claude-sandbox-" + slug
+		// The instance noun distinguishes concurrent sessions in one project.
+		p.ContainerName = "claude-sandbox-" + slug + "-" + in.Instance
 		p.Command = []string{"claude"}
 		if in.SkipPermissions {
 			p.Command = append(p.Command, "--dangerously-skip-permissions")
@@ -202,6 +226,31 @@ func Build(in Inputs) (*Plan, error) {
 		p.EnvFlags = append(p.EnvFlags, "CLAUDE_CONFIG_DIR="+d)
 	}
 
+	// CS-SESS-020/021: hash the effective configuration, then record it and the
+	// contributing files on the container so a later attach can tell whether it
+	// is joining a container built from the config now on disk.
+	p.ConfigHash, p.ConfigInputs = in.configFingerprint(p, hostAccess{
+		SSH: ssh, Git: git, DockerSocket: dockerSocket, AWS: aws,
+	})
+
+	// CS-LNCH-032: identity labels. Discovery filters on these rather than
+	// parsing container names, which are lossy.
+	mode := "claude"
+	if in.RalphMode {
+		mode = "ralph"
+	}
+	p.Labels = append(p.Labels,
+		"claude-sandbox.project="+in.ProjectDir,
+		"claude-sandbox.mode="+mode,
+		"claude-sandbox.version="+in.Version,
+		"claude-sandbox.model="+model,
+		"claude-sandbox.confighash="+p.ConfigHash,
+		"claude-sandbox.inputs="+encodeInputs(p.ConfigInputs),
+	)
+	if in.Instance != "" {
+		p.Labels = append(p.Labels, "claude-sandbox.instance="+in.Instance)
+	}
+
 	return p, nil
 }
 
@@ -218,6 +267,9 @@ func (p *Plan) DockerArgs(workdir string) []string {
 	args = append(args, "--memory", p.MemoryLimit, "--memory-swap", p.MemoryLimit)
 	for _, e := range p.EnvFlags {
 		args = append(args, "-e", e)
+	}
+	for _, l := range p.Labels {
+		args = append(args, "--label", l)
 	}
 	args = append(args, "--name", p.ContainerName, p.Image)
 	args = append(args, p.Command...)
@@ -240,6 +292,12 @@ func (in *Inputs) tempFile(name string, content []byte) (string, error) {
 		dir = d
 	}
 	p := filepath.Join(dir, name)
+	// Every shadow file is written through here, so this is the one place that
+	// needs to record what was mounted. The digest is of the CONTENT: the temp
+	// path itself is fresh on every launch and must never reach the hash.
+	in.shadowDigests = append(in.shadowDigests, InputDigest{
+		Path: name, Digest: shortDigest(content), Kind: KindShadow,
+	})
 	return p, os.WriteFile(p, content, 0o644)
 }
 

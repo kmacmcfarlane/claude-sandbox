@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"syscall"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -21,8 +22,20 @@ import (
 
 	assets "github.com/kmacmcfarlane/claude-sandbox"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/cascade"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/imagebuild"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/launch"
 )
+
+// argPairs collects the values following each occurrence of flag in argv.
+func argPairs(args []string, flag string) []string {
+	var out []string
+	for i, a := range args {
+		if a == flag && i+1 < len(args) {
+			out = append(out, args[i+1])
+		}
+	}
+	return out
+}
 
 // touch creates the file (and parents) with the given content.
 func touch(p, content string) {
@@ -447,9 +460,10 @@ var _ = Describe("launch.Build", func() {
 		in.SkipPermissions = true
 		in.CLIModel = "opus"
 		in.Passthrough = []string{"--resume"}
+		in.Instance = "otter"
 		p := build()
 		Expect(p.Command).To(Equal([]string{"claude", "--dangerously-skip-permissions", "--model", "opus", "--resume"}))
-		Expect(p.ContainerName).To(Equal("claude-sandbox-proj"))
+		Expect(p.ContainerName).To(Equal("claude-sandbox-" + imagebuild.ProjectSlug(proj) + "-otter"))
 	})
 
 	It("CS-LNCH-027: ralph command shape, passthrough tail, and -ralph container name", func() {
@@ -459,15 +473,64 @@ var _ = Describe("launch.Build", func() {
 		in.Passthrough = []string{"--verbose"}
 		p := build()
 		Expect(p.Command).To(Equal([]string{"/opt/claude-sandbox/bin/ralph", "--limit", "5", "--dangerously-skip-permissions", "--verbose"}))
-		Expect(p.ContainerName).To(Equal("claude-sandbox-proj-ralph"))
+		Expect(p.ContainerName).To(Equal("claude-sandbox-" + imagebuild.ProjectSlug(proj) + "-ralph"))
 	})
 
-	It("CS-LNCH-028: project slug is lowercased with disallowed characters replaced", func() {
+	It("CS-LNCH-028: the container name carries the parent segment and a path digest", func() {
 		odd := filepath.Join(filepath.Dir(proj), "My_Cool.Project!")
 		mkdir(odd)
 		in.ProjectDir = odd
+		in.Instance = "otter"
 		p := build()
-		Expect(p.ContainerName).To(Equal("claude-sandbox-my_cool.project-"))
+		Expect(p.ContainerName).To(MatchRegexp(
+			`^claude-sandbox-` + regexp.QuoteMeta(imagebuild.Slug(filepath.Dir(odd))) + `-my_cool\.project--[0-9a-f]{6}-otter$`))
+	})
+
+	It("CS-LNCH-031: same-basename projects in different parents get different container names", func() {
+		base := filepath.Dir(proj)
+		a := filepath.Join(base, "marketing", "infrastructure")
+		b := filepath.Join(base, "auth", "infrastructure")
+		mkdir(a)
+		mkdir(b)
+		in.Instance = "otter"
+
+		in.ProjectDir = a
+		nameA := build().ContainerName
+		in.ProjectDir = b
+		nameB := build().ContainerName
+
+		Expect(nameA).NotTo(Equal(nameB))
+		Expect(nameA).To(ContainSubstring("marketing-infrastructure-"))
+		Expect(nameB).To(ContainSubstring("auth-infrastructure-"))
+	})
+
+	It("CS-LNCH-032: docker run carries the identity labels", func() {
+		in.Instance = "otter"
+		in.Version = "v1.2.3"
+		in.CLIModel = "opus"
+		p := build()
+		Expect(p.Labels).To(ContainElements(
+			"claude-sandbox.project="+proj,
+			"claude-sandbox.mode=claude",
+			"claude-sandbox.instance=otter",
+			"claude-sandbox.version=v1.2.3",
+			"claude-sandbox.model=opus",
+		))
+		Expect(p.Labels).To(ContainElement("claude-sandbox.confighash=" + p.ConfigHash))
+
+		args := p.DockerArgs(proj)
+		for _, l := range p.Labels {
+			Expect(argPairs(args, "--label")).To(ContainElement(l))
+		}
+	})
+
+	It("CS-SESS-035: a ralph container carries mode=ralph and no instance label", func() {
+		in.RalphMode = true
+		p := build()
+		Expect(p.Labels).To(ContainElement("claude-sandbox.mode=ralph"))
+		for _, l := range p.Labels {
+			Expect(l).NotTo(HavePrefix("claude-sandbox.instance="))
+		}
 	})
 
 	It("CS-LNCH-029: container runtime environment flags", func() {

@@ -137,3 +137,13 @@ Feature: Shell completion (CS-COMP)
     Given bin/dist/claude-sandbox does not exist
     When the shim is invoked with "__complete"
     Then it exits non-zero without output and without building
+
+  # ---- sessions ----
+
+  Scenario: CS-COMP-024 sessions and its instance nouns complete
+    Then "sessions" is offered as a subcommand
+    And --attach and --join complete the instance nouns of live sessions
+    And the docker query is bounded by a short timeout, falling back to no
+      suggestions rather than blocking a TAB press
+    # Measured ~10ms for a label-filtered docker ps, but the timeout keeps the
+    # guarantee in CS-COMP-022 unconditional.

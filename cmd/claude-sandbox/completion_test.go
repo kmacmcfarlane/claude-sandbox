@@ -22,6 +22,8 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/spf13/cobra"
+
+	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
 )
 
 // completionResult is the parsed __complete protocol: one completion per line
@@ -244,6 +246,53 @@ var _ = Describe("shell completion", func() {
 		for _, name := range visibleLaunchFlags() {
 			Expect(launchUsage).To(ContainSubstring(name), "flag %q is completed but undocumented", name)
 		}
+	})
+
+	Describe("CS-COMP-024: sessions and instance nouns", func() {
+		It("offers the sessions subcommand", func() {
+			Expect(f.complete("").has("sessions")).To(BeTrue())
+		})
+
+		It("completes --attach= and --join= from the live sessions", func() {
+			f.fake.On("docker ps", strings.Join([]string{
+				strings.Join([]string{"cs-a", "Up 1h", f.proj, "claude", "otter", "v1", "", "", ""}, "\x1f"),
+				strings.Join([]string{"cs-b", "Up 2h", f.proj, "claude", "heron", "v1", "", "", ""}, "\x1f"),
+			}, "\n")+"\n", nil)
+			f.fake.On("docker top", "PID  COMMAND\n1  claude\n", nil)
+
+			r := f.complete("--attach=")
+			Expect(r.names).To(ConsistOf("--attach=otter", "--attach=heron"))
+			Expect(r.directive).To(Equal(cobra.ShellCompDirectiveNoFileComp))
+
+			f.out.Reset()
+			j := f.complete("--join=")
+			Expect(j.names).To(ConsistOf("--join=otter", "--join=heron"))
+		})
+
+		It("narrows to the typed prefix", func() {
+			f.fake.On("docker ps", strings.Join([]string{
+				strings.Join([]string{"cs-a", "Up 1h", f.proj, "claude", "otter", "v1", "", "", ""}, "\x1f"),
+				strings.Join([]string{"cs-b", "Up 2h", f.proj, "claude", "heron", "v1", "", "", ""}, "\x1f"),
+			}, "\n")+"\n", nil)
+			f.fake.On("docker top", "PID  COMMAND\n1  claude\n", nil)
+			Expect(f.complete("--attach=o").names).To(ConsistOf("--attach=otter"))
+		})
+
+		It("offers nothing rather than failing when docker is unavailable", func() {
+			// A TAB press must never surface an error or block, whatever docker does.
+			f.fake.On("docker ps", "", execx.Fail(1))
+			r := f.complete("--attach=")
+			Expect(r.names).To(BeEmpty())
+			Expect(r.directive).To(Equal(cobra.ShellCompDirectiveNoFileComp))
+		})
+
+		It("excludes ralph containers, which cannot be attached to or joined", func() {
+			f.fake.On("docker ps", strings.Join([]string{
+				"cs-r", "Up 1h", f.proj, "ralph", "", "v1", "", "", "",
+			}, "\x1f")+"\n", nil)
+			f.fake.On("docker top", "PID  COMMAND\n1  ralph\n", nil)
+			Expect(f.complete("--attach=").names).To(BeEmpty())
+		})
 	})
 })
 

@@ -79,8 +79,29 @@ Feature: Image build lifecycle (CS-IMG)
 
   # ---- child image staleness ----
 
-  Scenario: CS-IMG-015 Child image name derives from the project slug
-    Then the child image is tagged "claude-sandbox-<slug>"
+  Scenario: CS-IMG-015 Child image name derives from the Dockerfile it was built from
+    # NOT from the project: the tag must describe the image's content, so that
+    # projects sharing a Dockerfile share the image instead of racing on a tag.
+    Then the child image is tagged "claude-sandbox-df-<context-dir-slug>-<h6>"
+    And <h6> is the first 6 hex characters of sha256 of "<dockerfile path>\0<context path>"
+    And the tag is computed after the Dockerfile is resolved, not before
+    And no child image name is required when no child Dockerfile is in use
+
+  Scenario: CS-IMG-018 Projects sharing a Dockerfile and context share one image
+    # The motivating case: ~22 same-named projects under one workspace all resolve
+    # to the workspace's .claude-sandbox/Dockerfile with the workspace as context.
+    # Previously each built its own identically-contented image under a colliding tag.
+    Given two project directories with no local Dockerfile
+    And both resolve the same parent .claude-sandbox/Dockerfile by walking up
+    Then both resolve the same build context (the parent of that .claude-sandbox dir)
+    And both produce the same child image tag, so the image is built once
+
+  Scenario: CS-IMG-019 Same Dockerfile with different contexts yields different tags
+    # The default branch uses the PROJECT ROOT as context, and the
+    # dockerfileDir/dockerfile override branch uses the override directory.
+    # Same Dockerfile, different context, different image — the tag must not merge them.
+    Given the same Dockerfile is used for two launches with different build contexts
+    Then the two child image tags differ
 
   Scenario Outline: CS-IMG-016 Child rebuild triggers
     Given a child Dockerfile is in use

@@ -95,6 +95,10 @@ type Config struct {
 	Dockerfile         string     `yaml:"dockerfile"`
 	HostAccess         HostAccess `yaml:"hostAccess"`
 	Mounts             []Mount    `yaml:"mounts"`
+
+	// DetachKeys overrides the key sequence that detaches from an attached
+	// session. Empty means the built-in default; see defaultDetachKeys.
+	DetachKeys string `yaml:"detachKeys"`
 }
 
 // Load parses and deep-merges the config files (root-first order, as returned
