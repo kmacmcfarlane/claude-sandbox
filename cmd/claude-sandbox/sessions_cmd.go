@@ -26,15 +26,6 @@ import (
 // (CS-SESS-019).
 const exitDecisionRequired = 3
 
-// defaultDetachKeys is the sequence that detaches from an attached session
-// without stopping it.
-//
-// Docker's own default is ctrl-p,ctrl-q, which is wrong here: the Claude Code
-// TUI binds ctrl+p. ctrl-q is not bound by the TUI, and requiring it twice
-// makes an accidental detach effectively impossible. `docker run -it` puts the
-// terminal in raw mode, so XON/XOFF flow control does not eat it.
-const defaultDetachKeys = "ctrl-q,ctrl-q"
-
 // promptTimeout bounds every session prompt so a forgotten terminal does not
 // wedge a launch indefinitely.
 const promptTimeout = 2 * time.Minute
@@ -319,7 +310,7 @@ func joinExistingSession(env *Env, projectDir string, f *launchFlags, cfg *casca
 		return true, attachTo(env, d.Target, cfg.DetachKeys)
 	}
 	_, _, hostUser, _ := hostIdentity(env.Getenv)
-	return true, joinInto(env, d.Target, projectDir, hostUser, model, f)
+	return true, joinInto(env, d.Target, projectDir, hostUser, model, cfg.DetachKeys, f)
 }
 
 // wouldBeFingerprint computes the config hash a launch would produce right now,
@@ -386,10 +377,8 @@ func newInstance(env *Env, projectDir string, f *launchFlags) string {
 }
 
 // attachTo hands the process over to `docker attach` (CS-SESS-031).
-func attachTo(env *Env, s sessions.Session, detachKeys string) error {
-	if detachKeys == "" {
-		detachKeys = defaultDetachKeys
-	}
+func attachTo(env *Env, s sessions.Session, configuredKeys string) error {
+	detachKeys := launch.ResolveDetachKeys(configuredKeys)
 	fmt.Fprintf(env.Out, "Attaching to %s. Press %s to detach without stopping it.\n", s.Instance, detachKeys)
 	// Docker cannot report whether another client is already attached, so this
 	// cannot be prevented — only mentioned.
@@ -401,15 +390,21 @@ func attachTo(env *Env, s sessions.Session, detachKeys string) error {
 }
 
 // joinInto starts another claude inside a running container (CS-SESS-032).
-func joinInto(env *Env, s sessions.Session, projectDir, hostUser, model string, f *launchFlags) error {
+func joinInto(env *Env, s sessions.Session, projectDir, hostUser, model, configuredKeys string, f *launchFlags) error {
+	detachKeys := launch.ResolveDetachKeys(configuredKeys)
 	fmt.Fprintf(env.Out, "Starting a new session inside %s.\n", s.Instance)
 	fmt.Fprintln(env.Out, "Note: this session ends if that container's primary session exits, and it cannot be reattached.")
+	// Detaching from an exec'd session orphans it beyond recovery, so this is
+	// the path where docker's ctrl-p,ctrl-q default does the most damage: the
+	// TUI binds ctrl+p, so a stray ctrl+p then ctrl+q would silently lose the
+	// session. Never leave these keys to docker's default.
+	fmt.Fprintf(env.Out, "Press %s to detach — but note that a detached joined session cannot be recovered.\n", detachKeys)
 
 	// -u is required: exec skips the entrypoint's gosu step, and the image ends
 	// USER root. -w is redundant (docker run's -w is inherited via
 	// Config.WorkingDir) but passed so the working directory never depends on
 	// how the container happened to be started.
-	args := []string{"exec", "-it", "-u", hostUser, "-w", projectDir, s.Name, "claude"}
+	args := []string{"exec", "-it", "--detach-keys=" + detachKeys, "-u", hostUser, "-w", projectDir, s.Name, "claude"}
 	if f.Dangerous {
 		args = append(args, "--dangerously-skip-permissions")
 	}

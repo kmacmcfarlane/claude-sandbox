@@ -65,6 +65,24 @@ type Inputs struct {
 	shadowDigests []InputDigest
 }
 
+// DefaultDetachKeys is the sequence that detaches a session without stopping
+// it. It must be applied to EVERY interactive docker invocation — `run`,
+// `attach` and `exec` alike — because docker's own default otherwise takes
+// over, and docker's default is `ctrl-p,ctrl-q` while the Claude Code TUI binds
+// ctrl+p. Requiring ctrl-q twice makes an accidental detach implausible;
+// `-it` puts the terminal in raw mode, so XON/XOFF flow control does not eat it.
+const DefaultDetachKeys = "ctrl-q,ctrl-q"
+
+// ResolveDetachKeys applies the configured override, falling back to the
+// default. Every caller must route through here so the three docker paths
+// cannot disagree about which keys detach.
+func ResolveDetachKeys(configured string) string {
+	if s := strings.TrimSpace(configured); s != "" {
+		return s
+	}
+	return DefaultDetachKeys
+}
+
 // Plan is the assembled invocation.
 type Plan struct {
 	Image         string
@@ -75,6 +93,7 @@ type Plan struct {
 	MemoryLimit   string
 	Command       []string // command + args inside the container
 	Labels        []string // --label KEY=VAL specs
+	DetachKeys    string   // --detach-keys sequence
 
 	// ConfigHash identifies the effective configuration this container was
 	// launched with; ConfigInputs records the contributing files so drift can
@@ -179,6 +198,9 @@ func Build(in Inputs) (*Plan, error) {
 		p.MemoryLimit = "8g"
 	}
 
+	// CS-LNCH-033: detach keys for the primary session.
+	p.DetachKeys = ResolveDetachKeys(in.Cfg.DetachKeys)
+
 	// Env files (root-first; later wins).
 	p.EnvFiles = in.EnvFiles
 
@@ -257,6 +279,11 @@ func Build(in Inputs) (*Plan, error) {
 // DockerArgs renders the plan as the docker run argv.
 func (p *Plan) DockerArgs(workdir string) []string {
 	args := []string{"run", "-it", "--rm", "--init"}
+	// The primary session needs this as much as attach does: without it the
+	// container runs with docker's ctrl-p,ctrl-q, which the TUI collides with.
+	if p.DetachKeys != "" {
+		args = append(args, "--detach-keys="+p.DetachKeys)
+	}
 	for _, v := range p.Volumes {
 		args = append(args, "-v", v)
 	}

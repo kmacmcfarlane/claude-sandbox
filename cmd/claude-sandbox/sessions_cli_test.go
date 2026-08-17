@@ -5,6 +5,7 @@ package main
 // scripted execx.Fake and prompt.Scripted.
 
 import (
+	"path/filepath"
 	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -161,9 +162,46 @@ var _ = Describe("sessions (CS-SESS)", func() {
 			tty("j")
 			Expect(f.run()).To(Equal(0))
 			line := f.execLine()
-			Expect(line).To(ContainSubstring("docker exec -it -u "))
+			Expect(line).To(ContainSubstring("docker exec -it --detach-keys=ctrl-q,ctrl-q -u "))
 			Expect(line).To(ContainSubstring(" -w " + f.proj + " cs-a claude"))
 			Expect(f.out.String()).To(ContainSubstring("cannot be reattached"))
+		})
+
+		It("CS-SESS-036: all three docker paths carry the same detach keys", func() {
+			// Docker applies its own ctrl-p,ctrl-q to any invocation that omits
+			// the flag, so a path missing it is silently wrong rather than
+			// obviously broken.
+			byPath := map[string]string{}
+
+			running()
+			Expect(f.run()).To(Equal(0))
+			byPath["run"] = f.execLine()
+
+			for _, choice := range []string{"a", "j"} {
+				g := newCLIFixture()
+				g.fake.On("docker ps", psRow("cs-a", "Up 1 hour", g.proj, "otter")+"\n", nil)
+				g.fake.On("docker top", "PID  COMMAND\n1  claude\n", nil)
+				g.env.Prompter = &prompt.Scripted{IsTTY: true, Answers: []string{choice}}
+				Expect(g.run()).To(Equal(0))
+				byPath[choice] = g.fake.Execed.Name + " " + strings.Join(g.fake.Execed.Args, " ")
+			}
+
+			for path, line := range byPath {
+				Expect(line).To(ContainSubstring("--detach-keys=ctrl-q,ctrl-q"),
+					"the %s path omits detach keys, so docker's ctrl-p,ctrl-q applies", path)
+			}
+			Expect(byPath["run"]).To(ContainSubstring("docker run"))
+			Expect(byPath["a"]).To(ContainSubstring("docker attach"))
+			Expect(byPath["j"]).To(ContainSubstring("docker exec"))
+		})
+
+		It("CS-SESS-036: detachKeys overrides every path together", func() {
+			writeFile(filepath.Join(f.proj, ".claude-sandbox", "config.yaml"), "detachKeys: ctrl-^\n")
+			running(psRow("cs-a", "Up 1 hour", f.proj, "otter"))
+			tty("a")
+			Expect(f.run()).To(Equal(0))
+			Expect(f.execLine()).To(ContainSubstring("--detach-keys=ctrl-^"))
+			Expect(f.out.String()).To(ContainSubstring("ctrl-^"))
 		})
 
 		It("CS-SESS-018: tier 2 selects an instance when several are running", func() {

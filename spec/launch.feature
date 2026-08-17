@@ -215,6 +215,13 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       -e HOST_UID/HOST_GID/HOST_USER/HOST_HOME of the calling user,
       -e HOME=$HOME, -e DOCKER_GID, -e ANTHROPIC_API_KEY (empty when unset)
 
+  Scenario: CS-LNCH-033 The primary session gets the configured detach keys
+    # Omitting the flag does not mean "no detach keys" — it means docker's own
+    # ctrl-p,ctrl-q, which the Claude Code TUI collides with. See CS-SESS-036.
+    Then docker run receives --detach-keys with the resolved sequence
+    And the sequence defaults to "ctrl-q,ctrl-q"
+    And the detachKeys config key overrides it
+
   Scenario: CS-LNCH-030 --version reports host and baked-image versions
     When "claude-sandbox --version" is run
     Then it prints the host version (git describe) and the image's baked revision label

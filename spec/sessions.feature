@@ -260,13 +260,29 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
     # ctrl-q is unbound by the TUI, and doubling it makes an accidental detach
     # effectively impossible. Detaching leaves the container running.
 
+  Scenario: CS-SESS-036 Every interactive docker path carries the detach keys
+    # Docker applies its OWN default to any invocation that omits the flag, so
+    # setting it on only one path silently leaves the others on ctrl-p,ctrl-q.
+    # All three resolve through one helper so they cannot disagree.
+    Then --detach-keys is passed to each of:
+      | path         | session                                  |
+      | docker run   | the primary session of a new container    |
+      | docker attach| a reattached session                      |
+      | docker exec  | a joined session                          |
+    And all three use the same resolved sequence
+    And the detachKeys config key overrides all three together
+
   Scenario: CS-SESS-032 Join execs claude as the host user
     When join is chosen
-    Then "docker exec -it -u <host user> -w <project dir> <container> claude ..."
-      replaces the current process
+    Then "docker exec -it --detach-keys=<seq> -u <host user> -w <project dir>
+      <container> claude ..." replaces the current process
+    And the output warns that a detached joined session cannot be recovered
     # -u is required: exec skips the entrypoint's gosu step and the image ends
     # USER root. -w is redundant (docker run's -w is inherited via Config.WorkingDir)
     # but passed explicitly so the working directory never depends on that.
+    # The detach keys matter most here: detaching an exec'd session orphans it
+    # beyond recovery, so leaving docker's ctrl-p,ctrl-q default in place would
+    # let a stray ctrl+p (which the TUI binds) begin losing the session.
 
   Scenario: CS-SESS-033 Attach and join skip the launch pipeline
     When attach or join is chosen

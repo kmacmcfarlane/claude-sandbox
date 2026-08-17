@@ -160,7 +160,19 @@ Found 1 running session(s) for this project:
 
 If your terminal died and you want your session back, that is **`[a]` attach**. Use `[j]` only for a genuinely disposable second session, and remember it cannot be recovered.
 
-Attaching prints the detach sequence, which defaults to **`ctrl-q` twice**. Docker's own default (`ctrl-p ctrl-q`) is not used because the Claude Code TUI binds `ctrl+p`. Override it with `detachKeys` in `config.yaml`. Detaching leaves the session running; it does not stop it.
+### Detaching
+
+Pressing **`ctrl-q` twice** detaches: the docker client exits, the container and the `claude` process keep running with the conversation intact, and `claude-sandbox --attach` picks it back up. The sequence applies to every session — one you launched, one you attached to, and one you joined.
+
+| Keys | Effect |
+|---|---|
+| `ctrl-q` `ctrl-q` | Detach. Container keeps running; session recoverable (unless it was a *joined* session — see above). |
+| `ctrl-c` | Forwarded to claude as an interrupt. Container unaffected. |
+| `ctrl-d` / `/exit` | claude exits → container exits → `--rm` removes it. Session gone. |
+
+A single `ctrl-q` is not swallowed: docker buffers the partial sequence and forwards both bytes to the container if the next key doesn't complete it, so a stray press is delivered one keystroke late rather than lost. That's what makes doubling safe.
+
+Docker's own default (`ctrl-p ctrl-q`) is deliberately not used, because the Claude Code TUI binds `ctrl+p`. Override with `detachKeys` in `config.yaml`; the override applies to all three session types together.
 
 Docker cannot report whether another client is attached, so attaching to a session someone else is actively using silently shares the terminal — output is duplicated and keystrokes interleave.
 

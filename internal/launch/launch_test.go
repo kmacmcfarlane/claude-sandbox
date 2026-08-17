@@ -524,6 +524,32 @@ var _ = Describe("launch.Build", func() {
 		}
 	})
 
+	It("CS-LNCH-033: docker run carries the detach keys for the primary session", func() {
+		// Regression: these were originally passed only to `docker attach`, so a
+		// normally-launched session silently ran with docker's ctrl-p,ctrl-q —
+		// which the Claude Code TUI binds — and ctrl-q,ctrl-q did nothing.
+		p := build()
+		Expect(p.DetachKeys).To(Equal("ctrl-q,ctrl-q"))
+		Expect(p.DockerArgs(proj)).To(ContainElement("--detach-keys=ctrl-q,ctrl-q"))
+	})
+
+	It("CS-LNCH-033: the detachKeys config key overrides the default", func() {
+		in.Cfg = &cascade.Config{DetachKeys: "ctrl-^"}
+		p := build()
+		Expect(p.DetachKeys).To(Equal("ctrl-^"))
+		Expect(p.DockerArgs(proj)).To(ContainElement("--detach-keys=ctrl-^"))
+	})
+
+	It("CS-LNCH-033: a whitespace-only override falls back to the default", func() {
+		in.Cfg = &cascade.Config{DetachKeys: "   "}
+		Expect(build().DetachKeys).To(Equal(launch.DefaultDetachKeys))
+	})
+
+	It("CS-LNCH-029: the detach keys do not disturb the leading run flags", func() {
+		args := build().DockerArgs(proj)
+		Expect(args[0:4]).To(Equal([]string{"run", "-it", "--rm", "--init"}))
+	})
+
 	It("CS-SESS-035: a ralph container carries mode=ralph and no instance label", func() {
 		in.RalphMode = true
 		p := build()
