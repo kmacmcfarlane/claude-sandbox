@@ -23,9 +23,11 @@
 # Default: 8g
 # memoryLimit: 8g
 
-# Key sequence that detaches from an attached session (claude-sandbox --attach)
-# without stopping it. Docker --detach-keys syntax: a single a-z, ctrl-<char>,
-# or a comma-separated sequence.
+# Key sequence that detaches a session without stopping it. Applies to every
+# interactive session alike — one you launched, one you reattached to
+# (claude-sandbox --attach), and one you joined (--join).
+# Docker --detach-keys syntax: a single a-z, ctrl-<char>, or a comma-separated
+# sequence.
 # Docker's own default (ctrl-p,ctrl-q) is NOT used here because the Claude Code
 # TUI binds ctrl+p. Safe alternatives, unbound by the TUI: ctrl-q, ctrl-^, ctrl-@.
 # Default: ctrl-q,ctrl-q

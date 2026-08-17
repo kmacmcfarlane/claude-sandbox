@@ -172,6 +172,8 @@ Pressing **`ctrl-q` twice** detaches: the docker client exits, the container and
 
 A single `ctrl-q` is not swallowed: docker buffers the partial sequence and forwards both bytes to the container if the next key doesn't complete it, so a stray press is delivered one keystroke late rather than lost. That's what makes doubling safe.
 
+Detach and reattach are repeatable — a reattached session can be detached again with the same keys, so this is normal operation rather than a one-shot escape.
+
 Docker's own default (`ctrl-p ctrl-q`) is deliberately not used, because the Claude Code TUI binds `ctrl+p`. Override with `detachKeys` in `config.yaml`; the override applies to all three session types together.
 
 Docker cannot report whether another client is attached, so attaching to a session someone else is actively using silently shares the terminal — output is duplicated and keystrokes interleave.
@@ -469,7 +471,7 @@ The limit is **per container**, so running several sessions in their own contain
 
 #### Detach keys
 
-The key sequence that detaches from an attached session without stopping it. Defaults to `ctrl-q,ctrl-q`:
+The key sequence that detaches a session without stopping it — applied to every interactive session alike, whether launched, attached to, or joined. Defaults to `ctrl-q,ctrl-q`:
 
 ```yaml
 detachKeys: ctrl-^

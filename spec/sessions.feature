@@ -272,6 +272,20 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
     And all three use the same resolved sequence
     And the detachKeys config key overrides all three together
 
+  @manual
+  Scenario: CS-SESS-037 The detach/reattach round trip survives repetition
+    # Automated tests can only assert the argv; whether the sequence actually
+    # reaches the docker client past the TUI, the terminal's raw mode and any
+    # multiplexer is real-tty behavior. Verified by hand.
+    Given an interactive session in a new container
+    When ctrl-q is pressed twice
+    Then the client detaches and the container keeps running
+    When the session is reattached with --attach
+    Then the conversation is intact
+    And pressing ctrl-q twice again detaches once more
+    # Repeatability is the point: a reattach that could not itself be detached
+    # would make recovery a one-shot escape rather than normal operation.
+
   Scenario: CS-SESS-032 Join execs claude as the host user
     When join is chosen
     Then "docker exec -it --detach-keys=<seq> -u <host user> -w <project dir>

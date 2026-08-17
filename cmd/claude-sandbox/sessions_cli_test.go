@@ -3,6 +3,13 @@ package main
 // Spec: spec/sessions.feature (CS-SESS) — the `sessions` subcommand and the
 // launch-time multi-session decision, end to end through MainWithEnv with a
 // scripted execx.Fake and prompt.Scripted.
+//
+// CS-SESS-037 is @manual: these tests assert the argv handed to docker, but
+// whether a detach sequence actually reaches the docker client past the Claude
+// Code TUI, the terminal's raw mode and any multiplexer is real-tty behavior.
+// The detach/reattach/detach-again round trip was verified by hand; CS-SESS-036
+// covers the part that can be automated, namely that every interactive docker
+// path is given the keys in the first place.
 
 import (
 	"path/filepath"
