@@ -1,5 +1,26 @@
 # TODO
 
+## Stray writes to the literal `~/.claude` when `CLAUDE_CONFIG_DIR` is set
+
+Observed in a kappa-dev container whose config dir is relocated via
+`CLAUDE_CONFIG_DIR`: the CLI still created `~/.claude/backups/` and
+`~/.claude/downloads/` at session start. With the config dir relocated,
+`~/.claude` is not a mount — it is container layer — so whatever lands in those
+directories is silently lost at session exit. Either the CLI hardcodes those
+paths past `CLAUDE_CONFIG_DIR` (upstream bug worth filing) or something else
+writes there; identify which, then decide whether the launcher should mount or
+redirect them.
+
+## Prune old scratchpad session directories
+
+With `CLAUDE_CODE_TMPDIR` rooted in the config-dir mount (CS-LNCH-034), scratch
+state survives the container — which also means it accumulates: the CLI never
+garbage-collects `<config>/tmp/claude-<uid>/<project>/<session-id>/` dirs
+(verified against 2.1.245). Dozens of sessions leave dozens of dead dirs.
+Consider launcher-side pruning of session dirs older than N days whose session
+id no longer has a transcript, or at least document `rm -rf <config>/tmp` as
+always-safe while no session is running.
+
 ## Offer microVM isolation via Docker Sandboxes (`sbx`)
 
 Docker ships **Docker Sandboxes** (`sbx`) — agent sandboxes backed by microVMs on

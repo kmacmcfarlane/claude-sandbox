@@ -248,6 +248,28 @@ func Build(in Inputs) (*Plan, error) {
 		p.EnvFlags = append(p.EnvFlags, "CLAUDE_CONFIG_DIR="+d)
 	}
 
+	// CS-LNCH-034: durable scratchpad root. Claude Code roots its per-session
+	// scratchpad (and background-task output) at $CLAUDE_CODE_TMPDIR, falling
+	// back to /tmp — which is the container's writable layer, destroyed at
+	// session exit because the container runs with --rm. Point the root inside
+	// the config-dir mount (CS-LNCH-008) so scratch state survives the
+	// container and `claude --resume` finds it again; the CLI partitions
+	// beneath the root by uid, project and session id, so one root is shared
+	// safely. Precedence: host env > env file (docker -e would silently beat
+	// --env-file, so stand down) > derived default.
+	switch {
+	case in.getenv("CLAUDE_CODE_TMPDIR") != "":
+		v := in.getenv("CLAUDE_CODE_TMPDIR")
+		p.EnvFlags = append(p.EnvFlags, "CLAUDE_CODE_TMPDIR="+v)
+		if !underAnyMount(p.Volumes, v) {
+			fmt.Fprintf(in.Out, "Warning: CLAUDE_CODE_TMPDIR=%s is not under any container mount; scratchpad files will be lost when the session exits.\n", v)
+		}
+	case envFilesDefine(in.EnvFiles, "CLAUDE_CODE_TMPDIR"):
+		// The env file supplies it; adding -e would override the file.
+	case dirExists(configDir):
+		p.EnvFlags = append(p.EnvFlags, "CLAUDE_CODE_TMPDIR="+filepath.Join(configDir, "tmp"))
+	}
+
 	// CS-SESS-020/021: hash the effective configuration, then record it and the
 	// contributing files on the container so a later attach can tell whether it
 	// is joining a container built from the config now on disk.
@@ -536,6 +558,45 @@ func socketGID(path string) string {
 func dirExists(p string) bool {
 	fi, err := os.Stat(p)
 	return err == nil && fi.IsDir()
+}
+
+// underAnyMount reports whether path lies inside (or at) the container side of
+// any -v spec. Used to warn when a user-supplied CLAUDE_CODE_TMPDIR points at
+// the container's writable layer, where files silently die with the container.
+func underAnyMount(volumes []string, path string) bool {
+	path = filepath.Clean(path)
+	for _, v := range volumes {
+		parts := strings.Split(v, ":")
+		if len(parts) < 2 {
+			continue
+		}
+		dst := filepath.Clean(parts[1])
+		if path == dst || strings.HasPrefix(path, dst+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// envFilesDefine reports whether any env file assigns the key. Parsed with
+// docker --env-file semantics (KEY=VALUE per line, # comments), matching the
+// envlint reader: no quote stripping, no expansion.
+func envFilesDefine(files []string, key string) bool {
+	for _, f := range files {
+		raw, err := os.ReadFile(f)
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(string(raw), "\n") {
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			if k, _, ok := strings.Cut(line, "="); ok && k == key {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func fileExists(p string) bool {

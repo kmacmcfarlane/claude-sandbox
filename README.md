@@ -111,6 +111,13 @@ claude-sandbox --docker-socket --resume
 claude-sandbox --ralph --docker-socket --dangerous --interactive --watchdog-timeout 30
 ```
 
+Resumed sessions keep their scratchpad: the launcher roots Claude Code's
+session scratchpad inside the mounted config directory (`CLAUDE_CODE_TMPDIR`),
+so working files survive the container and `--resume` picks them back up.
+Set `CLAUDE_CODE_TMPDIR` yourself (host env or `.claude-sandbox/env`) to
+override the location — keep it under a mounted path or it dies with the
+container.
+
 ## Multiple sessions
 
 More than one sandbox session can run in the same project. Container names are unique per project directory, so two checkouts that merely share a directory name (say a dozen directories all called `infrastructure`) no longer collide.

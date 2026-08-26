@@ -585,6 +585,60 @@ var _ = Describe("launch.Build", func() {
 		Expect(p.EnvFlags).To(ContainElement("ANTHROPIC_API_KEY=sk-test"))
 	})
 
+	// ---- durable scratchpad root ----
+
+	It("CS-LNCH-034: derives CLAUDE_CODE_TMPDIR under the default config dir", func() {
+		cfgDir := filepath.Join(home, ".claude")
+		mkdir(cfgDir)
+		p := build()
+		Expect(p.EnvFlags).To(ContainElement("CLAUDE_CODE_TMPDIR=" + filepath.Join(cfgDir, "tmp")))
+	})
+
+	It("CS-LNCH-034: derives CLAUDE_CODE_TMPDIR under CLAUDE_CONFIG_DIR when set", func() {
+		alt := filepath.Join(home, "alt-cfg")
+		mkdir(alt)
+		env["CLAUDE_CONFIG_DIR"] = alt
+		p := build()
+		Expect(p.EnvFlags).To(ContainElement("CLAUDE_CODE_TMPDIR=" + filepath.Join(alt, "tmp")))
+	})
+
+	It("CS-LNCH-034: sets no CLAUDE_CODE_TMPDIR when the config dir does not exist", func() {
+		p := build()
+		for _, e := range p.EnvFlags {
+			Expect(e).NotTo(HavePrefix("CLAUDE_CODE_TMPDIR="))
+		}
+	})
+
+	It("CS-LNCH-034: forwards a host-env CLAUDE_CODE_TMPDIR verbatim instead of deriving", func() {
+		cfgDir := filepath.Join(home, ".claude")
+		mkdir(cfgDir)
+		env["CLAUDE_CODE_TMPDIR"] = proj + "/scratch"
+		p := build()
+		Expect(p.EnvFlags).To(ContainElement("CLAUDE_CODE_TMPDIR=" + proj + "/scratch"))
+		Expect(p.EnvFlags).NotTo(ContainElement("CLAUDE_CODE_TMPDIR=" + filepath.Join(cfgDir, "tmp")))
+		// Inside the project mount: no warning.
+		Expect(out.String()).NotTo(ContainSubstring("CLAUDE_CODE_TMPDIR"))
+	})
+
+	It("CS-LNCH-034: warns when a host-env CLAUDE_CODE_TMPDIR is outside every mount", func() {
+		env["CLAUDE_CODE_TMPDIR"] = "/var/tmp/elsewhere"
+		p := build()
+		Expect(p.EnvFlags).To(ContainElement("CLAUDE_CODE_TMPDIR=/var/tmp/elsewhere"))
+		Expect(out.String()).To(ContainSubstring("not under any container mount"))
+	})
+
+	It("CS-LNCH-034: stands down when an env file defines CLAUDE_CODE_TMPDIR (-e would override --env-file)", func() {
+		cfgDir := filepath.Join(home, ".claude")
+		mkdir(cfgDir)
+		ef := filepath.Join(home, "envfile")
+		touch(ef, "# comment\nCLAUDE_CODE_TMPDIR=/somewhere\n")
+		in.EnvFiles = []string{ef}
+		p := build()
+		for _, e := range p.EnvFlags {
+			Expect(e).NotTo(HavePrefix("CLAUDE_CODE_TMPDIR="))
+		}
+	})
+
 	It("renders env files as stacked --env-file flags in cascade order", func() {
 		in.EnvFiles = []string{"/root/env", "/proj/env"}
 		args := build().DockerArgs(proj)

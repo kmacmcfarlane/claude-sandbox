@@ -222,6 +222,20 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     And the sequence defaults to "ctrl-q,ctrl-q"
     And the detachKeys config key overrides it
 
+  Scenario: CS-LNCH-034 Durable scratchpad root
+    # Claude Code roots its per-session scratchpad at $CLAUDE_CODE_TMPDIR,
+    # falling back to /tmp — the container's writable layer, destroyed at exit
+    # by --rm. Rooting it inside the config-dir mount (CS-LNCH-008) makes
+    # scratch state survive the container, so `claude --resume` finds it. The
+    # CLI partitions beneath the root by uid, project slug and session id.
+    Then docker run receives -e CLAUDE_CODE_TMPDIR=<config dir>/tmp when the config dir exists
+    And no flag is set when the config dir does not exist
+    And a host-env CLAUDE_CODE_TMPDIR is forwarded verbatim instead,
+      with a warning when its path is outside every container mount
+    And no flag is set when an env file in the cascade defines the key
+      # docker -e always beats --env-file, so setting the flag would silently
+      # override the consumer's env-file value.
+
   Scenario: CS-LNCH-030 --version reports host and baked-image versions
     When "claude-sandbox --version" is run
     Then it prints the host version (git describe) and the image's baked revision label

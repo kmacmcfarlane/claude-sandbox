@@ -35,5 +35,24 @@ one-time setup (idempotent). Use `setup-lsp-plugins --check` to verify status.
 - The project is mounted at its real host path so `docker compose` volume resolution works against the host daemon.
 - Files you create are owned by the host user (UID/GID remapping handled by the entrypoint).
 - `/home/claude` is symlinked to the host user's home directory (e.g. `/home/rt`). Both paths work. Build-time files from the Dockerfile are relocated here automatically.
+- **The scratchpad is durable.** The launcher points `CLAUDE_CODE_TMPDIR` inside
+  the host-mounted Claude config directory, so the session scratchpad named in
+  your system prompt survives the container and is found again by
+  `claude --resume`. Use it freely for working state. `/tmp` itself remains
+  container-local and is destroyed when the session exits.
+- **Only bind-mounted paths persist to the host.** The container's filesystem is
+  discarded at session exit (`docker run --rm`); only the project tree, the
+  Claude config dir, and the configured extra mounts survive. `mkdir` anywhere
+  else (e.g. under `$HOME` outside a mount) succeeds but the files die with the
+  container. When the config dir is relocated via `CLAUDE_CONFIG_DIR`,
+  `~/.claude` itself is NOT mounted — do not write there. Check with
+  `mount | grep <path>` when unsure.
+- **Docker bind mounts resolve on the host.** The Docker CLI talks to the host
+  daemon, so `-v /path:/dest` resolves `/path` on the host, not in this
+  container. Mounting a container-only path such as `/tmp/foo` does not fail:
+  Docker creates an empty directory there on the host and mounts it, so reads
+  silently return nothing. Put anything Docker must read under a mounted path
+  (the scratchpad qualifies). `docker compose` files using `${HOME}` are
+  subject to the same rule.
 - **Discord MCP server** — baked in at `/opt/claude-sandbox/mcp/discord-notify/dist/index.mjs`. Provides the `send_discord_notification` tool when `DISCORD_WEBHOOK_URL` is set in the env file (`.claude-sandbox/env`). Configured via `~/.mcp.json` — no per-project setup needed.
 - You do NOT have sudo or root access.
