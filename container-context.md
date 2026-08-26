@@ -35,11 +35,19 @@ one-time setup (idempotent). Use `setup-lsp-plugins --check` to verify status.
 - The project is mounted at its real host path so `docker compose` volume resolution works against the host daemon.
 - Files you create are owned by the host user (UID/GID remapping handled by the entrypoint).
 - `/home/claude` is symlinked to the host user's home directory (e.g. `/home/rt`). Both paths work. Build-time files from the Dockerfile are relocated here automatically.
-- **The scratchpad is durable.** The launcher points `CLAUDE_CODE_TMPDIR` inside
-  the host-mounted Claude config directory, so the session scratchpad named in
-  your system prompt survives the container and is found again by
-  `claude --resume`. Use it freely for working state. `/tmp` itself remains
-  container-local and is destroyed when the session exits.
+- **The scratchpad survives the container.** The launcher points
+  `CLAUDE_CODE_TMPDIR` inside the host-mounted Claude config directory, so the
+  session scratchpad named in your system prompt persists through session exit
+  and is found again by `claude --resume`. It is still session-scoped exactly
+  as your system prompt says — a new session gets a fresh scratchpad and will
+  not find an old one's — so working state for THIS session belongs there,
+  while deliberate artifacts a later session must find by name belong under a
+  project path. The scratchpad sits outside every git repo (though inside the
+  host filesystem), and because it is host-visible, scratchpad files CAN be
+  bind-mounted into docker containers. `/tmp` itself remains container-local,
+  invisible to the host Docker daemon, and is destroyed when the session
+  exits — if asked to put something Docker must read under `/tmp`, flag that
+  conflict rather than complying literally.
 - **Only bind-mounted paths persist to the host.** The container's filesystem is
   discarded at session exit (`docker run --rm`); only the project tree, the
   Claude config dir, and the configured extra mounts survive. `mkdir` anywhere
