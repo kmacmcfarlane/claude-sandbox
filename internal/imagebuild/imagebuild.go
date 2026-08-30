@@ -242,9 +242,13 @@ func CapImageName(under string) string {
 // makes the layer independent of the parent's content; no --chown because the
 // CLI image installs as uid 1000 and --link preserves it (a named --chown for
 // a user absent from the parent would silently yield root).
+//
+// Deliberately no "# syntax=docker/dockerfile:1" line: that directive makes
+// BuildKit resolve the frontend image from Docker Hub on every build, so an
+// unreachable registry fails the build before line 2. The daemon's built-in
+// frontend already supports --link and cache mounts.
 func capDockerfile(under string) string {
-	return "# syntax=docker/dockerfile:1\n" +
-		"FROM " + under + "\n" +
+	return "FROM " + under + "\n" +
 		"COPY --link --from=" + CLIImageName + " /home/claude/.local /home/claude/.local\n" +
 		"COPY --link --from=" + CLIImageName + " " + CLIVersionFile + " " + CLIVersionFile + "\n"
 }

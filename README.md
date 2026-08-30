@@ -528,7 +528,6 @@ baseOnly: true
 Place a `Dockerfile` under `.claude-sandbox/` to install project-specific tools on top of the base image. It must start with `FROM claude-sandbox`. The build context stays the project root, so `COPY` instructions reference the project.
 
 ```dockerfile
-# syntax=docker/dockerfile:1
 FROM claude-sandbox
 
 # Go toolchain — copied from the official image, no download layer
@@ -688,7 +687,7 @@ The point of the split is what a **Claude Code update costs**: previously the CL
 
 Because the CLI arrives with the cap, `docker run claude-sandbox …` by hand gives you a container without `claude`; run `<image>:run` instead. Attach and join compare the cap's image ID, so a CLI update still registers as config drift for a running container.
 
-**BuildKit is required.** `COPY --link`, `RUN --mount=type=cache` and stdin builds all need it. The launcher checks `docker buildx version` before building and exits 2 naming the `docker-buildx-plugin` package when it is missing (a modern CLI without the plugin silently falls back to the legacy builder, which would otherwise surface as a confusing build error). The base image installs the plugin too, so `docker build` inside a session gets BuildKit.
+**BuildKit is required.** `COPY --link`, `RUN --mount=type=cache` and stdin builds all need it. The launcher checks `docker buildx version` before building and exits 2 naming the `docker-buildx-plugin` package when it is missing (a modern CLI without the plugin silently falls back to the legacy builder, which would otherwise surface as a confusing build error). The base image installs the plugin too, so `docker build` inside a session gets BuildKit. None of the Dockerfiles carry a `# syntax=docker/dockerfile:1` directive, and yours should not either: it makes BuildKit resolve that frontend image from Docker Hub on every build, so a registry hiccup fails the build at line 1, while the daemon's built-in frontend already supports everything used here (`COPY --link`, `--chmod`, `RUN --mount=type=cache`).
 
 ### BuildKit cache
 

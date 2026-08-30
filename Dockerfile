@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1
 # Base image: sandbox infrastructure WITHOUT the Claude Code CLI.
 #
 # The CLI lives in its own image (Dockerfile.cli) and is copied onto this

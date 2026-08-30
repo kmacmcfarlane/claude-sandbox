@@ -268,8 +268,11 @@ var _ = Describe("image build lifecycle", func() {
 			for id := range allowed {
 				Expect(seen).To(HaveKey(id), id+" is declared nowhere")
 			}
-			Expect(repoFile("Dockerfile")).To(HavePrefix("# syntax=docker/dockerfile:1"))
-			Expect(repoFile("Dockerfile.cli")).To(HavePrefix("# syntax=docker/dockerfile:1"))
+			// No external frontend: "# syntax=" would make every build resolve
+			// docker/dockerfile:1 from Docker Hub (CS-IMG-030).
+			Expect(repoFile("Dockerfile")).NotTo(ContainSubstring("# syntax="))
+			Expect(repoFile("Dockerfile.cli")).NotTo(ContainSubstring("# syntax="))
+			Expect(repoFile(filepath.Join("scaffold", "Dockerfile.example"))).NotTo(ContainSubstring("# syntax="))
 		})
 	})
 
@@ -288,11 +291,16 @@ var _ = Describe("image build lifecycle", func() {
 			Expect(img).To(Equal("claude-sandbox-proj:run"))
 			Expect(buildLines(fake)).To(ConsistOf("docker build -t claude-sandbox-proj:run -"))
 			Expect(stdinOf(fake)).To(Equal(
-				"# syntax=docker/dockerfile:1\n" +
-					"FROM claude-sandbox-proj\n" +
+				"FROM claude-sandbox-proj\n" +
 					"COPY --link --from=claude-sandbox-cli /home/claude/.local /home/claude/.local\n" +
 					"COPY --link --from=claude-sandbox-cli /opt/claude-sandbox/claude-version /opt/claude-sandbox/claude-version\n"))
 			Expect(stdinOf(fake)).NotTo(ContainSubstring("--chown"))
+		})
+
+		It("CS-IMG-030: the generated cap Dockerfile carries no # syntax= directive", func() {
+			_, _, err := imagebuild.EnsureCap(o, "claude-sandbox-proj")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(stdinOf(fake)).NotTo(ContainSubstring("# syntax="))
 		})
 
 		It("CS-IMG-024: CapImageName is the single resolver for the run image", func() {

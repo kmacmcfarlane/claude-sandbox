@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1
 # Claude Code CLI image (claude-sandbox-cli).
 #
 # Its only job is to install the CLI. The launcher builds it pinned to the

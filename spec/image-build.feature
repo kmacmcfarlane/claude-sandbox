@@ -168,7 +168,6 @@ Feature: Image build lifecycle (CS-IMG)
     Given the project resolved image <under> (claude-sandbox, or the child image)
     Then "docker build -t <under>:run -" runs with this Dockerfile on stdin:
       """
-      # syntax=docker/dockerfile:1
       FROM <under>
       COPY --link --from=claude-sandbox-cli /home/claude/.local /home/claude/.local
       COPY --link --from=claude-sandbox-cli /opt/claude-sandbox/claude-version /opt/claude-sandbox/claude-version
@@ -219,3 +218,13 @@ Feature: Image build lifecycle (CS-IMG)
     And the ids are apt, apt-lists, pip, npm, go-mod, go-build
     # Fixed ids (not the default target-path keys) so the base, the CLI image
     # and every child Dockerfile share one cache per package manager.
+
+  Scenario: CS-IMG-030 No Dockerfile pins an external frontend
+    Then neither Dockerfile, Dockerfile.cli, the scaffold example nor the generated cap
+      Dockerfile contains a "# syntax=" directive
+    # "# syntax=docker/dockerfile:1" makes BuildKit resolve that image from
+    # Docker Hub on EVERY build (":1" is a moving tag), so an unreachable
+    # registry fails the build at line 1 — as it did the first time a host
+    # without registry access rebuilt the base. The daemon's built-in frontend
+    # already supports COPY --link, --chmod and RUN --mount=type=cache, which is
+    # everything these Dockerfiles use.
