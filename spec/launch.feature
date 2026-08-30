@@ -11,7 +11,8 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       --model MODEL, --dangerous (alias --dangerously-skip-permissions),
       --rebuild, --no-update-check,
       --ssh (alias --host-access-ssh-enabled), --git (alias --host-access-git-enabled),
-      --docker-socket (alias --host-access-docker-socket-enabled), --aws (alias --host-access-aws-enabled)
+      --docker-socket (alias --host-access-docker-socket-enabled), --aws (alias --host-access-aws-enabled),
+      --package-caches (alias --host-access-package-caches-enabled)
 
   Scenario: CS-LNCH-002 Unknown flags are rejected; known claude flags pass through
     When "claude-sandbox --frobnicate" is run
@@ -100,6 +101,7 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       | hostAccess.git         | true  | CLAUDE_SANDBOX_HOST_ACCESS_GIT_ENABLED            |      | --git           | absent | true   |
       | hostAccess.dockerSocket| false | CLAUDE_SANDBOX_HOST_ACCESS_DOCKER_SOCKET_ENABLED  |      | --docker-socket | set    | true   |
       | hostAccess.aws         | false | CLAUDE_SANDBOX_HOST_ACCESS_AWS_ENABLED            |      | --aws           | absent | false  |
+      | hostAccess.packageCaches | false | CLAUDE_SANDBOX_HOST_ACCESS_PACKAGE_CACHES_ENABLED |    | --package-caches | set   | true   |
     # Env var truthy forms: "1", "true", "yes".
 
   Scenario: CS-LNCH-015 Docker socket mount and group detection
@@ -136,6 +138,38 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     Then no mount is added and a WARNING tells the user to relocate the file
     Given the file does not exist
     Then no mount is added and a WARNING notes the missing file
+
+  # ---- host access: package caches ----
+  # Downloads a session makes (go modules, the go build cache, npm, pip) die
+  # with the container. This lever keeps them on the host — in a tree that
+  # belongs to the sandbox alone. Never the host's own ~/go, ~/.npm or
+  # ~/.cache/pip: Go verifies module zips on download but trusts extracted
+  # directories, so a poisoned entry written by a session would be trusted by
+  # the host's own toolchain. Confined to ~/.cache/claude-sandbox, the blast
+  # radius is other sandbox sessions, which already share a trust level.
+
+  Scenario: CS-LNCH-035 Package caches mounted writable at the same path with env overrides
+    Given package-cache access is enabled
+    Then for each of go-mod, go-build, npm, pip:
+      "-v ~/.cache/claude-sandbox/<name>:~/.cache/claude-sandbox/<name>" is added without :ro
+    And docker run receives -e GOMODCACHE=~/.cache/claude-sandbox/go-mod,
+      -e GOCACHE=~/.cache/claude-sandbox/go-build,
+      -e npm_config_cache=~/.cache/claude-sandbox/npm,
+      -e PIP_CACHE_DIR=~/.cache/claude-sandbox/pip
+    And the config fingerprint records packageCaches=true
+    # The env overrides are what redirect the toolchains; the same-path mount
+    # keeps host and container paths interchangeable like every other mount.
+
+  Scenario: CS-LNCH-036 Package cache directories are created on the host before docker run
+    Given package-cache access is enabled and ~/.cache/claude-sandbox/<name> does not exist
+    Then the launcher creates it (as the invoking user) before assembling the mount
+    # Docker creates a missing bind source as root, and the entrypoint deliberately
+    # never chowns a mount point — so a dir the launcher did not create would be
+    # unwritable for the session.
+
+  Scenario: CS-LNCH-037 Package caches never target the host's own caches
+    Then the mounted tree is fixed under ~/.cache/claude-sandbox and is not configurable
+    And nothing under ~/go, ~/.npm or ~/.cache/pip is mounted by this lever
 
   # ---- config-driven container settings ----
 
@@ -236,8 +270,10 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       # docker -e always beats --env-file, so setting the flag would silently
       # override the consumer's env-file value.
 
-  Scenario: CS-LNCH-030 --version reports host and baked-image versions
+  Scenario: CS-LNCH-030 --version reports host, base-image and CLI-image versions
     When "claude-sandbox --version" is run
-    Then it prints the host version (git describe) and the image's baked revision label
+    Then it prints the host version (git describe) and the base image's baked revision label
     And notes a mismatch would auto-rebuild on next launch
-    And prints "(not built yet)" when the image does not exist
+    And prints "(not built yet)" when the base image does not exist
+    And prints the Claude Code version pinned in the CLI image (claude-sandbox-cli),
+      or "(not built yet)" when that image does not exist

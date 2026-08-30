@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"strings"
 	"syscall"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -233,6 +234,9 @@ var _ = Describe("launch.Build", func() {
 			case "aws":
 				d := filepath.Join(home, ".aws")
 				probe = d + ":" + d + ":ro"
+			case "packageCaches":
+				d := filepath.Join(home, ".cache", "claude-sandbox", "go-mod")
+				probe = d + ":" + d
 			}
 			for _, v := range p.Volumes {
 				if v == probe {
@@ -267,6 +271,9 @@ var _ = Describe("launch.Build", func() {
 				case "aws":
 					cfg.HostAccess.AWS = entry
 					in.CLIAWS = cli
+				case "packageCaches":
+					cfg.HostAccess.PackageCaches = entry
+					in.CLIPackageCaches = cli
 				}
 				in.Cfg = cfg
 				Expect(hasAccess(build(), key)).To(Equal(want))
@@ -279,6 +286,12 @@ var _ = Describe("launch.Build", func() {
 				"dockerSocket", "CLAUDE_SANDBOX_HOST_ACCESS_DOCKER_SOCKET_ENABLED", "", boolp(false), boolp(true), true),
 			Entry("CS-LNCH-014: aws: yaml false, env unset, cli absent -> false",
 				"aws", "CLAUDE_SANDBOX_HOST_ACCESS_AWS_ENABLED", "", boolp(false), nil, false),
+			Entry("CS-LNCH-014: packageCaches: yaml false, env unset, cli set -> true",
+				"packageCaches", "CLAUDE_SANDBOX_HOST_ACCESS_PACKAGE_CACHES_ENABLED", "", boolp(false), boolp(true), true),
+			Entry("CS-LNCH-014: packageCaches: yaml true, env unset, cli absent -> true",
+				"packageCaches", "CLAUDE_SANDBOX_HOST_ACCESS_PACKAGE_CACHES_ENABLED", "", boolp(true), nil, true),
+			Entry("CS-LNCH-014: packageCaches: nothing set -> false (opt-in)",
+				"packageCaches", "CLAUDE_SANDBOX_HOST_ACCESS_PACKAGE_CACHES_ENABLED", "", nil, nil, false),
 			// Env var truthy forms: "1", "true", "yes".
 			Entry("CS-LNCH-014: ssh: env 'true' is truthy",
 				"ssh", "CLAUDE_SANDBOX_HOST_ACCESS_SSH_ENABLED", "true", nil, nil, true),
@@ -360,6 +373,73 @@ var _ = Describe("launch.Build", func() {
 		for _, e := range p.EnvFlags {
 			Expect(e).NotTo(HavePrefix("AWS_SESSION_TOKEN="))
 		}
+	})
+
+	// ---- package caches ----
+
+	Describe("package caches (CS-LNCH-035..037)", func() {
+		var root string
+		BeforeEach(func() {
+			t := true
+			in.CLIPackageCaches = &t
+			root = filepath.Join(home, ".cache", "claude-sandbox")
+		})
+
+		It("CS-LNCH-035: mounts the four cache dirs writable at the same path and points the toolchains at them", func() {
+			p := build()
+			for _, name := range []string{"go-mod", "go-build", "npm", "pip"} {
+				d := filepath.Join(root, name)
+				Expect(p.Volumes).To(ContainElement(d+":"+d), name+" must be writable (no :ro)")
+			}
+			Expect(p.EnvFlags).To(ContainElements(
+				"GOMODCACHE="+filepath.Join(root, "go-mod"),
+				"GOCACHE="+filepath.Join(root, "go-build"),
+				"npm_config_cache="+filepath.Join(root, "npm"),
+				"PIP_CACHE_DIR="+filepath.Join(root, "pip"),
+			))
+		})
+
+		It("CS-LNCH-035: the fingerprint records the lever", func() {
+			with := build().ConfigHash
+			in.CLIPackageCaches = nil
+			Expect(build().ConfigHash).NotTo(Equal(with))
+		})
+
+		It("CS-LNCH-036: creates the host directories before docker run", func() {
+			Expect(filepath.Join(root, "go-mod")).NotTo(BeADirectory())
+			build()
+			for _, name := range []string{"go-mod", "go-build", "npm", "pip"} {
+				Expect(filepath.Join(root, name)).To(BeADirectory())
+			}
+		})
+
+		It("CS-LNCH-037: mounts nothing from the host's own caches", func() {
+			mkdir(filepath.Join(home, "go", "pkg", "mod"))
+			mkdir(filepath.Join(home, ".npm"))
+			mkdir(filepath.Join(home, ".cache", "pip"))
+			p := build()
+			for _, v := range p.Volumes {
+				host := strings.SplitN(v, ":", 2)[0]
+				if strings.HasPrefix(host, root) {
+					continue
+				}
+				Expect(host).NotTo(HavePrefix(filepath.Join(home, "go")))
+				Expect(host).NotTo(HavePrefix(filepath.Join(home, ".npm")))
+				Expect(host).NotTo(HavePrefix(filepath.Join(home, ".cache", "pip")))
+			}
+			Expect(launch.PackageCacheRoot).To(Equal(".cache/claude-sandbox"))
+		})
+
+		It("CS-LNCH-037: adds nothing when the lever is off", func() {
+			in.CLIPackageCaches = nil
+			p := build()
+			for _, v := range p.Volumes {
+				Expect(v).NotTo(ContainSubstring(".cache/claude-sandbox"))
+			}
+			for _, e := range p.EnvFlags {
+				Expect(e).NotTo(HavePrefix("GOMODCACHE="))
+			}
+		})
 	})
 
 	It("CS-LNCH-019: mounts the parent DIRECTORY of AWS path vars read-only, deduplicated", func() {

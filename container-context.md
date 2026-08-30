@@ -5,12 +5,12 @@ You are running inside a **claude-sandbox** Docker container (Debian bookworm-sl
 ## Installed Software (Base Image)
 
 - **Git** — full CLI
-- **Docker CLI + Compose plugin** — talks to the host Docker daemon (no daemon inside the container)
+- **Docker CLI + Compose + Buildx plugins** — talks to the host Docker daemon (no daemon inside the container); `docker build` uses BuildKit
 - **Node.js 22** (LTS)
 - **Python 3** — virtual environment at `/opt/claude-sandbox/venv` (activated by default)
   - Pre-installed: `ruamel.yaml`
   - Install packages with `pip install <package>` (no `--break-system-packages` needed)
-- **Claude Code CLI** — installed globally via npm
+- **Claude Code CLI** — native install under `~/.local/bin/claude`, copied in from the `claude-sandbox-cli` image at launch (it is not part of the base image)
 - **Build tools** — `build-essential` (gcc, g++, make, libc-dev) for compiling C/C++ extensions
 - **Utilities:** curl, jq, less, gnupg, openssh-client
 

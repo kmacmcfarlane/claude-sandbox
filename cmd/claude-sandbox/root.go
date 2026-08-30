@@ -149,6 +149,7 @@ const launchUsage = `Usage:
   claude-sandbox --aws                    # mount ~/.aws/ read-only
   claude-sandbox --git                    # mount ~/.gitconfig read-only
   claude-sandbox --ssh                    # mount ~/.ssh/ read-only
+  claude-sandbox --package-caches         # keep go/npm/pip downloads on the host
   claude-sandbox --ralph [ralph-args]     # launch the ralph loop runner
   claude-sandbox --ralph --limit 5        # run ralph for 5 iterations
   claude-sandbox sessions                 # list running sandbox sessions
@@ -171,18 +172,20 @@ Commands (bootstrap the project, then exit — launcher flags do not apply):
 
 Options:
   --help, -h                Show this help message and exit
-  --version                 Show claude-sandbox version (host + baked image) and exit
+  --version                 Show claude-sandbox version (host, base image, Claude Code image) and exit
   --ralph                   Launch the ralph loop runner instead of interactive claude
   --limit N                 Run ralph for N iterations (only valid with --ralph)
   --model MODEL             Model to use (alias like 'opus' or a full model ID)
   --dangerous               Skip permission prompts (--dangerously-skip-permissions)
-  --rebuild                 Force rebuild of base and child images
-  --update                  Auto-accept the Claude Code update rebuild prompt
+  --rebuild                 Force rebuild of the base, Claude Code, child and run images
+  --update                  Auto-accept the Claude Code update prompt (rebuilds only the CLI image)
   --no-update-check         Skip Claude Code version check
   --docker-socket           Mount the host Docker socket into the container
   --aws                     Mount ~/.aws/ read-only into the container
   --git                     Mount ~/.gitconfig read-only into the container
   --ssh                     Mount ~/.ssh/ read-only into the container
+  --package-caches          Mount ~/.cache/claude-sandbox/{go-mod,go-build,npm,pip} writable
+                            and point GOMODCACHE/GOCACHE/npm_config_cache/PIP_CACHE_DIR at them
 
 Multiple sessions (when a session is already running for this project):
   --new                     Launch a new container without prompting
@@ -197,7 +200,7 @@ Environment variables:
   CLAUDE_SANDBOX_BASE_ONLY=1              Skip child Dockerfile detection
   CLAUDE_SANDBOX_DOCKERFILE_DIR           Override child Dockerfile directory
   CLAUDE_SANDBOX_DOCKERFILE               Override child Dockerfile name
-  CLAUDE_SANDBOX_HOST_ACCESS_*_ENABLED    Enable ssh/git/docker-socket/aws mounts
+  CLAUDE_SANDBOX_HOST_ACCESS_*_ENABLED    Enable ssh/git/docker-socket/aws/package-caches mounts
   CLAUDE_SANDBOX_NO_UPDATE_CHECK          Skip Claude Code version check
 
 The project is mounted at its REAL host path inside the container so that
@@ -215,6 +218,7 @@ type launchFlags struct {
 	Update                      bool
 	NoUpdateCheck               bool
 	SSH, Git, DockerSocket, AWS *bool
+	PackageCaches               *bool
 	Passthrough                 []string
 
 	// Multi-session bypasses (CS-SESS-028). Each removes a decision, which is
@@ -290,6 +294,9 @@ func scanLaunchArgs(args []string) (*launchFlags, error) {
 			i++
 		case "--host-access-aws-enabled", "--aws":
 			f.AWS = boolTrue()
+			i++
+		case "--host-access-package-caches-enabled", "--package-caches":
+			f.PackageCaches = boolTrue()
 			i++
 		case "--new":
 			f.NewSession = true
@@ -469,18 +476,26 @@ func runLaunch(env *Env, args []string) error {
 
 	noUpdate := f.NoUpdateCheck || envTrue(env.Getenv("CLAUDE_SANDBOX_NO_UPDATE_CHECK")) || cfg.DisableUpdateCheck
 
-	// Images (CS-IMG).
+	// Images (CS-IMG). Order: base, CLI image, update check (CLI only), child,
+	// cap. A Claude Code update never touches the base or the child.
 	imgOpts := imagebuild.Options{
 		Runner: env.Runner, Prompter: env.Prompter, Out: env.Out, Err: env.Err,
 		RepoRoot: rr, Version: version,
 		ForceRebuild: f.Rebuild, NoUpdateCheck: noUpdate, AutoUpdate: f.Update,
 	}
+	if err := imagebuild.EnsureBuildKit(imgOpts); err != nil {
+		return exitErr(2, "%s", err.Error())
+	}
 	baseRebuilt, err := imagebuild.EnsureBase(imgOpts)
 	if err != nil {
 		return err
 	}
-	if imagebuild.UpdateCheck(imgOpts, baseRebuilt) {
-		baseRebuilt = true
+	cliBuilt, err := imagebuild.EnsureCLI(imgOpts)
+	if err != nil {
+		return err
+	}
+	if imagebuild.UpdateCheck(imgOpts, cliBuilt) {
+		cliBuilt = true
 	}
 
 	// Layout adoption (CS-LAY-015/016).
@@ -517,9 +532,18 @@ func runLaunch(env *Env, args []string) error {
 		ProjectDir: projectDir,
 		BaseOnly:   baseOnly, DockerfileDir: dfDir, Dockerfile: dfName,
 	}, env.Out)
-	image, err := imagebuild.EnsureChild(imgOpts, spec, baseRebuilt, baseOnly)
+	parent, childBuilt, err := imagebuild.EnsureChild(imgOpts, spec, baseRebuilt, baseOnly)
 	if err != nil {
 		return err
+	}
+
+	// Run image: the cap over the base or child (CS-IMG-024..026).
+	image, capBuilt, err := imagebuild.EnsureCap(imgOpts, parent)
+	if err != nil {
+		return err
+	}
+	if baseRebuilt || cliBuilt || childBuilt || capBuilt {
+		imagebuild.WarnCacheBudget(imgOpts)
 	}
 
 	// Launch plan (CS-LNCH).
@@ -531,7 +555,8 @@ func runLaunch(env *Env, args []string) error {
 		RalphMode: f.Ralph, Limit: f.Limit, SkipPermissions: f.Dangerous,
 		CLIModel: f.Model, Passthrough: f.Passthrough,
 		CLISSH: f.SSH, CLIGit: f.Git, CLIDockerSocket: f.DockerSocket, CLIAWS: f.AWS,
-		Cfg: cfg, EnvFiles: envFiles, ImageName: image,
+		CLIPackageCaches: f.PackageCaches,
+		Cfg:              cfg, EnvFiles: envFiles, ImageName: image,
 		ImageID:  imagebuild.ImageID(env.Runner, image),
 		Instance: newInstance(env, projectDir, f),
 		Version:  version,

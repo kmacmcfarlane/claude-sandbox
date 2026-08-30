@@ -1,8 +1,12 @@
 Feature: Image build lifecycle (CS-IMG)
-  Two-layer image model: the base image (claude-sandbox) provides sandbox
-  infrastructure; an optional child Dockerfile adds project tools. Both
-  auto-rebuild on staleness. Tests assert on the docker build/inspect calls
-  issued through the injected runner.
+  Layered image model: the base image (claude-sandbox) provides sandbox
+  infrastructure WITHOUT the Claude Code CLI; an optional child Dockerfile adds
+  project tools on top of it; the CLI lives in its own small image
+  (claude-sandbox-cli); and the image a container actually runs is a generated
+  one-layer "cap" (<base-or-child>:run) that copies the CLI onto the base or
+  child. A Claude Code update therefore rebuilds the CLI image and the caps,
+  never the base or the children. All images auto-rebuild on staleness. Tests
+  assert on the docker build/inspect calls issued through the injected runner.
   Go home: internal/imagebuild.
 
   # ---- base image ----
@@ -11,7 +15,11 @@ Feature: Image build lifecycle (CS-IMG)
     Given "docker image inspect claude-sandbox" fails
     Then "docker build -t claude-sandbox --build-arg CLAUDE_SANDBOX_VERSION=<version> <repo-root>" runs
 
-  Scenario: CS-IMG-002 --rebuild forces a base rebuild with --no-cache
+  Scenario: CS-IMG-002 --rebuild forces a full rebuild with --no-cache
+    Given "claude-sandbox --rebuild"
+    Then the base is rebuilt with --no-cache
+    And the CLI image is rebuilt with --no-cache
+    And the child (when in use) and the cap are rebuilt
 
   Scenario: CS-IMG-003 Base rebuilds when the Dockerfile is newer than the image
     Given the image exists with creation time T
@@ -29,26 +37,56 @@ Feature: Image build lifecycle (CS-IMG)
     Then the build arg CLAUDE_SANDBOX_VERSION carries "git describe --tags --always --dirty"
       of the repo checkout, or "unknown" outside a git repo
 
+  # ---- Claude Code CLI image ----
+  # The CLI is deliberately NOT baked into the base: installing it mid-Dockerfile
+  # meant every update invalidated the base from that layer down and, because
+  # every child's FROM ID changed, rebuilt every child image cold (~3 min per
+  # child for a 13 s install). Dockerfile.cli builds a tiny image whose only job
+  # is the install; the base and children never see the CLI until the cap.
+
+  Scenario: CS-IMG-020 Base image does not bake the Claude Code CLI
+    Then the repo Dockerfile contains no "install.sh" step and no claude-version file
+    And Dockerfile.cli is the only place the CLI is installed
+
+  Scenario: CS-IMG-021 CLI image builds when missing, pinned to the resolved version
+    Given "docker image inspect claude-sandbox-cli" fails
+    And the npm registry reports version <v>
+    Then "docker build -t claude-sandbox-cli --build-arg CLAUDE_CODE_VERSION=<v> -f <repo-root>/Dockerfile.cli <repo-root>" runs
+    # The build arg is the installer's positional pin (install.sh accepts
+    # stable|latest|X.Y.Z), so the layer busts exactly when the version moves.
+
+  Scenario: CS-IMG-022 CLI image rebuilds when Dockerfile.cli is newer than the image
+    Given the CLI image exists with creation time T
+    And Dockerfile.cli has mtime after T
+    Then the CLI image is rebuilt
+
+  Scenario: CS-IMG-023 Version resolution falls back to "latest" when npm is unreachable
+    Given "npm view @anthropic-ai/claude-code version" fails or prints nothing
+    Then the CLI image is built with CLAUDE_CODE_VERSION=latest
+    And no update prompt is shown
+
   # ---- Claude Code update check ----
 
-  Scenario: CS-IMG-006 Update check runs only when the base was not just built
-    Given the base image is fresh (not rebuilt this launch)
-    Then the baked claude version is read from the image and compared to the npm registry version
+  Scenario: CS-IMG-006 Update check runs only when the CLI image was not just built
+    Given the CLI image is fresh (not built this launch)
+    Then the pinned version is read from the CLI image's claude-sandbox.claude-version label
+    And it is compared to the npm registry version
+    # A label inspect, not a "docker run": no container is spawned to read a file.
 
   Scenario: CS-IMG-007 Update check is skippable
     Given --no-update-check, or CLAUDE_SANDBOX_NO_UPDATE_CHECK=1/true, or config disableUpdateCheck: true
     Then no version comparison happens
 
   Scenario: CS-IMG-008 Update prompt defaults to no with a short timeout
-    Given the baked and latest versions differ and a terminal is attached
-    Then a rebuild prompt is shown; Enter/timeout declines; "y" rebuilds base with --no-cache
-    And a base rebuild here also triggers the child rebuild
+    Given the pinned and latest versions differ and a terminal is attached
+    Then a rebuild prompt is shown; Enter/timeout declines
+    And "y" rebuilds ONLY the CLI image, pinned to the latest version
+    And neither the base nor the child is rebuilt; the cap refreshes on its own staleness
 
-  @new
   Scenario: CS-IMG-009 --update auto-accepts the update rebuild
-    Given the baked and latest versions differ
+    Given the pinned and latest versions differ
     When "claude-sandbox --update" is run
-    Then the base is rebuilt without prompting
+    Then the CLI image is rebuilt without prompting
     # Pairs with --no-update-check per the uniform prompt-flag scheme.
 
   # ---- child Dockerfile resolution ----
@@ -117,4 +155,67 @@ Feature: Image build lifecycle (CS-IMG)
 
   Scenario: CS-IMG-017 Fresh child is not rebuilt
     Given the child image exists, the base is unchanged, and no source is newer
-    Then no child build runs and the child image is used
+    Then no child build runs and the child image is used as the cap's parent
+
+  # ---- run image (cap) ----
+  # The container runs neither the base nor the child directly: it runs a
+  # generated one-layer image that copies the CLI from claude-sandbox-cli onto
+  # whichever of the two the project resolved. COPY --link makes the layer
+  # independent of the parent's content, and the Dockerfile is fed on stdin so
+  # no build context is sent.
+
+  Scenario: CS-IMG-024 Run image is a cap over the base or child
+    Given the project resolved image <under> (claude-sandbox, or the child image)
+    Then "docker build -t <under>:run -" runs with this Dockerfile on stdin:
+      """
+      # syntax=docker/dockerfile:1
+      FROM <under>
+      COPY --link --from=claude-sandbox-cli /home/claude/.local /home/claude/.local
+      COPY --link --from=claude-sandbox-cli /opt/claude-sandbox/claude-version /opt/claude-sandbox/claude-version
+      """
+    And the container runs "<under>:run"
+    And the config fingerprint hashes the cap's image ID
+    # No --chown: the CLI image installs as uid 1000 and COPY --link preserves
+    # it; a named --chown for a user absent from the parent silently yields root.
+
+  Scenario Outline: CS-IMG-025 Cap rebuild triggers
+    Then the cap rebuilds when <condition>
+    Examples:
+      | condition                                        |
+      | the cap image does not exist                     |
+      | the parent image is newer than the cap           |
+      | the CLI image is newer than the cap              |
+      | --rebuild was given                              |
+
+  Scenario: CS-IMG-026 Fresh cap is not rebuilt
+    Given the cap exists and is newer than both its parent and the CLI image
+    Then no cap build runs and the cap is used
+
+  # ---- BuildKit ----
+
+  Scenario: CS-IMG-027 BuildKit is a prerequisite
+    Given "docker buildx version" fails
+    Then the launcher exits 2 naming the docker-buildx-plugin package
+    And no image build is attempted
+    # COPY --link, RUN --mount=type=cache and stdin builds all need BuildKit;
+    # without the buildx plugin a modern CLI silently falls back to the legacy
+    # builder, so the failure would otherwise be a confusing build error.
+    And every "docker build" the launcher issues runs with DOCKER_BUILDKIT=1
+
+  Scenario: CS-IMG-028 Build-cache budget warning after a build ran this launch
+    Given at least one image was built this launch
+    And "docker system df --format {{json .}}" reports the Build Cache size
+    And "docker buildx inspect" reports the GC policy's Max Used Space
+    Then a warning prints when the cache size is at least 80% of the all-records budget
+    Or when the budget of the rule filtering type==exec.cachemount is below 20GiB
+    And the warning names "docker builder prune -af" and the README section on raising the budget
+    And nothing prints when no build ran, or when either command cannot be parsed
+    # The daily image churn fills the ephemeral-records budget, after which
+    # BuildKit evicts cache mounts between builds and every apt/pip/npm/go
+    # step downloads again.
+
+  Scenario: CS-IMG-029 Base and CLI Dockerfiles declare the shared cache-mount ids
+    Then Dockerfile and Dockerfile.cli use "--mount=type=cache,id=claude-sandbox-<name>" mounts
+    And the ids are apt, apt-lists, pip, npm, go-mod, go-build
+    # Fixed ids (not the default target-path keys) so the base, the CLI image
+    # and every child Dockerfile share one cache per package manager.

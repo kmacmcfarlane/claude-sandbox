@@ -45,7 +45,7 @@ type InputDigest struct {
 }
 
 type hostAccess struct {
-	SSH, Git, DockerSocket, AWS bool
+	SSH, Git, DockerSocket, AWS, PackageCaches bool
 }
 
 func shortDigest(b []byte) string {
@@ -93,7 +93,7 @@ func (in *Inputs) configFingerprint(p *Plan, ha hostAccess) (string, []InputDige
 	for _, v := range normalizedMounts(p.Volumes) {
 		fmt.Fprintf(&env, "mount=%s\n", v)
 	}
-	fmt.Fprintf(&env, "ssh=%t git=%t docker=%t aws=%t\n", ha.SSH, ha.Git, ha.DockerSocket, ha.AWS)
+	fmt.Fprintf(&env, "ssh=%t git=%t docker=%t aws=%t packageCaches=%t\n", ha.SSH, ha.Git, ha.DockerSocket, ha.AWS, ha.PackageCaches)
 	fmt.Fprintf(&env, "uid=%d gid=%d user=%s home=%s\n", in.HostUID, in.HostGID, in.HostUser, in.Home)
 	fmt.Fprintf(&env, "memory=%s\n", p.MemoryLimit)
 

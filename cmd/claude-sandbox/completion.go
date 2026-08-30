@@ -125,14 +125,14 @@ func (s launchFlagSpec) alias() bool { return s.Desc == "" }
 var launchFlagSpecs = []launchFlagSpec{
 	{Name: "--help", Desc: "Show this help message and exit"},
 	{Name: "-h"},
-	{Name: "--version", Desc: "Show claude-sandbox version (host + baked image) and exit"},
+	{Name: "--version", Desc: "Show claude-sandbox version (host, base image, Claude Code image) and exit"},
 	{Name: "--ralph", Desc: "Launch the ralph loop runner instead of interactive claude"},
 	{Name: "--limit", Desc: "Run ralph for N iterations (only valid with --ralph)", Value: valueOpaque},
 	{Name: "--model", Desc: "Model to use (alias like 'opus' or a full model ID)", Value: valueModel},
 	{Name: "--dangerous", Desc: "Skip permission prompts (--dangerously-skip-permissions)"},
 	{Name: "--dangerously-skip-permissions"},
-	{Name: "--rebuild", Desc: "Force rebuild of base and child images"},
-	{Name: "--update", Desc: "Auto-accept the Claude Code update rebuild prompt"},
+	{Name: "--rebuild", Desc: "Force rebuild of the base, Claude Code, child and run images"},
+	{Name: "--update", Desc: "Auto-accept the Claude Code update prompt (rebuilds only the CLI image)"},
 	{Name: "--no-update-check", Desc: "Skip Claude Code version check"},
 	{Name: "--docker-socket", Desc: "Mount the host Docker socket into the container"},
 	{Name: "--host-access-docker-socket-enabled"},
@@ -142,6 +142,8 @@ var launchFlagSpecs = []launchFlagSpec{
 	{Name: "--host-access-git-enabled"},
 	{Name: "--ssh", Desc: "Mount ~/.ssh/ read-only into the container"},
 	{Name: "--host-access-ssh-enabled"},
+	{Name: "--package-caches", Desc: "Keep go/npm/pip downloads in ~/.cache/claude-sandbox on the host"},
+	{Name: "--host-access-package-caches-enabled"},
 	{Name: "--new", Desc: "Launch a new container without prompting"},
 	// --attach/--join take an OPTIONAL instance noun, and only in the "=" form:
 	// "--attach otter" would be ambiguous with a passthrough positional. So they

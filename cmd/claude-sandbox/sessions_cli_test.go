@@ -315,6 +315,15 @@ var _ = Describe("sessions (CS-SESS)", func() {
 			Expect(f.errw.String()).NotTo(ContainSubstring("different configuration"))
 		})
 
+		It("CS-SESS-038: the would-be fingerprint resolves the cap image's ID, not its parent's", func() {
+			running(psRowFull("cs-a", "Up 1 hour", f.proj, "otter", "", "stalehash1234", "[]"))
+			f.env.Prompter = &prompt.Scripted{IsTTY: true, Answers: []string{"c"}}
+			Expect(f.run("--attach=otter")).To(Equal(0))
+			lines := f.fake.CommandLines()
+			Expect(lines).To(ContainElement("docker image inspect -f {{.Id}} claude-sandbox:run"))
+			Expect(lines).NotTo(ContainElement("docker image inspect -f {{.Id}} claude-sandbox"))
+		})
+
 		It("CS-SESS-025: a differing hash prompts, and [c] continues", func() {
 			running(psRowFull("cs-a", "Up 1 hour", f.proj, "otter", "", "stalehash1234",
 				`[{"p":"/w/env","d":"aaaaaaaa","k":"env"}]`))

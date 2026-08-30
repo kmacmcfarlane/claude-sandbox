@@ -79,15 +79,16 @@ These flags are consumed by the launcher and control the container environment. 
 
 | Flag | Alias | Description |
 |---|---|---|
-| `--version` | | Print claude-sandbox version (host checkout + baked image) and exit |
+| `--version` | | Print claude-sandbox version (host checkout, base image, Claude Code image) and exit |
 | `--host-access-docker-socket-enabled` | `--docker-socket` | Mount the host Docker socket |
 | `--host-access-aws-enabled` | `--aws` | Mount `~/.aws/` read-only |
 | `--host-access-git-enabled` | `--git` | Mount `~/.gitconfig` read-only |
 | `--host-access-ssh-enabled` | `--ssh` | Mount `~/.ssh/` read-only |
+| `--host-access-package-caches-enabled` | `--package-caches` | Keep go/npm/pip downloads made inside sessions in `~/.cache/claude-sandbox/` on the host |
 | `--model MODEL` | | Model to use (alias like `opus` or full ID like `claude-opus-4-8`) |
 | `--dangerous` | | Pass `--dangerously-skip-permissions` to claude/ralph |
-| `--rebuild` | | Force rebuild of base and child images (uses `--no-cache`) |
-| `--update` | | Auto-accept the Claude Code update rebuild prompt |
+| `--rebuild` | | Force rebuild of every image — base, Claude Code, child, run (uses `--no-cache`) |
+| `--update` | | Auto-accept the Claude Code update prompt (rebuilds only the CLI image) |
 | `--no-update-check` | | Skip Claude Code version check at launch |
 | `--ralph` | | Launch the ralph loop runner instead of interactive claude |
 | `--limit N` | | Stop ralph after N iterations (only valid with `--ralph`) |
@@ -464,6 +465,8 @@ hostAccess:
     enabled: true
   aws:
     enabled: true
+  packageCaches:
+    enabled: true
 ```
 
 #### Memory limit
@@ -525,21 +528,32 @@ baseOnly: true
 Place a `Dockerfile` under `.claude-sandbox/` to install project-specific tools on top of the base image. It must start with `FROM claude-sandbox`. The build context stays the project root, so `COPY` instructions reference the project.
 
 ```dockerfile
+# syntax=docker/dockerfile:1
 FROM claude-sandbox
 
-# Go toolchain
-RUN curl -fsSL https://go.dev/dl/go1.25.6.linux-amd64.tar.gz | tar -C /usr/local -xz
+# Go toolchain — copied from the official image, no download layer
+COPY --link --from=golang:1.25.6-bookworm /usr/local/go /usr/local/go
 ENV PATH="/usr/local/go/bin:$PATH"
 
-# TypeScript language server
-RUN npm install -g typescript-language-server typescript @vtsls/language-server
+# TypeScript language server — npm downloads served from the shared cache
+RUN --mount=type=cache,id=claude-sandbox-npm,target=/root/.npm \
+    npm install -g typescript-language-server@4.4.0 typescript@5.9.3 @vtsls/language-server@0.2.10
 
-# Go language server (install as claude user for ~/go/bin)
+# Go language server (install as claude user for ~/go/bin; the cache mounts
+# need uid/gid or the step fails with "permission denied", and the tree must
+# exist first because BuildKit creates a missing mount parent as root)
 USER claude
-RUN go install golang.org/x/tools/gopls@latest
+RUN mkdir -p /home/claude/go/pkg/mod /home/claude/go/bin /home/claude/.cache/go-build
+RUN --mount=type=cache,id=claude-sandbox-go-mod-claude,target=/home/claude/go/pkg/mod,uid=1000,gid=1000 \
+    --mount=type=cache,id=claude-sandbox-go-build-claude,target=/home/claude/.cache/go-build,uid=1000,gid=1000 \
+    go install golang.org/x/tools/gopls@v0.23.0
 USER root
 ENV PATH="/home/claude/go/bin:$PATH"
 ```
+
+**The Claude Code CLI is not present at build time.** The base image does not contain it; the launcher copies it onto your child image at launch (see [Image layering](#image-layering)). A `RUN` step that invokes `claude` fails — plugin registration and the like belong at runtime.
+
+**Share the download caches.** The base image declares BuildKit cache mounts with fixed ids — `claude-sandbox-apt`, `-apt-lists`, `-pip`, `-npm`, `-go-mod`, `-go-build`. Reuse the same ids in your child and every image on the machine is served from one cache per package manager instead of downloading again. Under `USER claude` the mount must carry `uid=1000,gid=1000` and target a path under `/home/claude`, and the parent directories must be created as `claude` in an earlier step (BuildKit creates a missing parent as root, and `go` then cannot write `~/go/pkg/sumdb` beside the mounted `~/go/pkg/mod`), as in the example. Pin versions: `@latest` re-resolves on every rebuild and turns a cache hit into a download plus a compile.
 
 **Home directory convention:** Always use `/home/claude` in child Dockerfiles — never hardcode a host-specific path like `/home/yourname`. At runtime, the entrypoint:
 
@@ -559,7 +573,7 @@ USER root
 
 The final `USER` must be `root` so the entrypoint has privileges.
 
-The child image is built automatically and tagged after the Dockerfile it was built from, not the project that triggered the build: `claude-sandbox-df-{context-dir}-{hash}`, where the hash covers the Dockerfile path **and** its build context. It rebuilds when the child Dockerfile changes or the base image is updated.
+The child image is built automatically and tagged after the Dockerfile it was built from, not the project that triggered the build: `claude-sandbox-df-{context-dir}-{hash}`, where the hash covers the Dockerfile path **and** its build context. It rebuilds when the child Dockerfile changes or the base image is updated — and **not** when Claude Code is updated, because the CLI is not part of its ancestry.
 
 Tagging this way means every project resolving the same shared Dockerfile — a whole workspace inheriting one `.claude-sandbox/Dockerfile` from a parent directory — shares a single image and builds it once, instead of each project building an identical copy. The build context is part of the identity because the default branch builds with the project root as context while `dockerfileDir` builds with the override directory; the same Dockerfile in different contexts is genuinely a different image.
 
@@ -582,6 +596,7 @@ If no `.claude-sandbox/Dockerfile` is found anywhere up to `/`, the launcher war
 | `CLAUDE_SANDBOX_HOST_ACCESS_GIT_ENABLED` | (unset) | Mount `~/.gitconfig` read-only (equivalent to `--git`) |
 | `CLAUDE_SANDBOX_HOST_ACCESS_DOCKER_SOCKET_ENABLED` | (unset) | Mount host Docker socket (equivalent to `--docker-socket`) |
 | `CLAUDE_SANDBOX_HOST_ACCESS_AWS_ENABLED` | (unset) | Mount `~/.aws/` read-only (equivalent to `--aws`) |
+| `CLAUDE_SANDBOX_HOST_ACCESS_PACKAGE_CACHES_ENABLED` | (unset) | Keep session package downloads in `~/.cache/claude-sandbox/` (equivalent to `--package-caches`) |
 | `CLAUDE_SANDBOX_DOCKERFILE_DIR` | `$PROJECT_DIR` | Directory containing the child Dockerfile |
 | `CLAUDE_SANDBOX_DOCKERFILE` | `Dockerfile` | Filename of the child Dockerfile |
 | `CLAUDE_SANDBOX_BASE_ONLY` | (unset) | Set to `1` or `true` to skip child Dockerfile and use base image only |
@@ -629,6 +644,7 @@ The container only has access to:
 - `~/.ssh/` — SSH keys for git remotes (read-only, opt-in via `--ssh`)
 - `~/.aws/` — AWS credentials and config (read-only, opt-in via `--aws`)
 - `/var/run/docker.sock` — host Docker daemon (opt-in via `--docker-socket`)
+- `~/.cache/claude-sandbox/{go-mod,go-build,npm,pip}` — package caches for sessions (writable, opt-in via `--package-caches`)
 - Any extra mounts defined in `.claude-sandbox/config.yaml`
 
 When `CLAUDE_CONFIG_DIR` relocates the config directory (e.g. via direnv), `.claude.json` and `.mcp.json` are mounted from the parent of that directory — mirroring the standard `$HOME/.claude/` + `$HOME/.claude.json` + `$HOME/.mcp.json` layout.
@@ -641,7 +657,7 @@ The project is mounted at its **real host path** inside the container (e.g., `-v
 
 ### Host access mounts
 
-SSH, git, Docker socket, and AWS mounts are all opt-in. Enable them via CLI flags (`--ssh`, `--git`, `--docker-socket`, `--aws`), environment variables (`CLAUDE_SANDBOX_HOST_ACCESS_*_ENABLED`), or the `hostAccess` section in `.claude-sandbox/config.yaml`. Without explicitly enabling them, these resources are not available inside the sandbox.
+SSH, git, Docker socket, AWS and package-cache mounts are all opt-in. Enable them via CLI flags (`--ssh`, `--git`, `--docker-socket`, `--aws`, `--package-caches`), environment variables (`CLAUDE_SANDBOX_HOST_ACCESS_*_ENABLED`), or the `hostAccess` section in `.claude-sandbox/config.yaml`. Without explicitly enabling them, these resources are not available inside the sandbox.
 
 **Docker socket** — when enabled, the entrypoint adds the container user to the socket's group automatically, so Claude can run `docker compose`, `make up`, etc. Note: Docker socket access is effectively root-equivalent on the host. This setup trusts Claude not to abuse it (e.g., launching a container that mounts `/` read-write). The goal is to prevent *accidental* damage to the host, not to defend against a deliberately adversarial agent.
 
@@ -651,36 +667,78 @@ SSH, git, Docker socket, and AWS mounts are all opt-in. Enable them via CLI flag
 
 **SSH** — mounts `~/.ssh/` read-only so Claude can access git remotes over SSH.
 
+**Package caches** — downloads a session makes (Go modules, the Go build cache, npm, pip) otherwise die with the container. When enabled, the launcher creates `~/.cache/claude-sandbox/{go-mod,go-build,npm,pip}` on the host (as you, before `docker run`, so the entrypoint's mount-point rule leaves them writable), mounts each **writable** at the same path, and sets `GOMODCACHE`, `GOCACHE`, `npm_config_cache` and `PIP_CACHE_DIR` to point at them. The tree is sandbox-only on purpose: it is never your own `~/go`, `~/.npm` or `~/.cache/pip`. Go verifies module zips on download but trusts extracted directories, so a shared cache would let a session plant a module your host toolchain then trusts; confined to its own tree, the blast radius is other sandbox sessions, which already share a trust level. The caches are content-addressed and lock-safe, so concurrent sessions are fine. Nothing evicts them — delete the directory to reset.
+
 ### UID/GID mapping
 
 The entrypoint remaps the `claude` user inside the container to match your host UID/GID, so files created or modified by Claude have correct ownership — no root-owned files left behind. It also recursively chowns all non-bind-mounted files under the home directory, so files created as root during `docker build` (in child Dockerfiles) are owned by the runtime user.
 
-### Image rebuilding
+### Image layering
 
-The base and child images rebuild automatically when their respective Dockerfiles are newer than the cached image. The base **also** rebuilds when any baked source — `cmd/`, `internal/`, `go.mod`/`go.sum`, `assets.go`, `logstream/`, `entrypoint.sh`, `PROMPT_RALPH.md`, or `mcp/` — is newer than the image, so editing the launcher is picked up on the next launch without `--rebuild`. A base rebuild triggers a child rebuild.
+Four images take part in a launch, and the container runs the last of them:
+
+| Image | Built from | Rebuilds when |
+|---|---|---|
+| `claude-sandbox` | `Dockerfile` — OS, toolchains, Docker CLI, Python venv, sandbox binary. **No Claude Code.** | `Dockerfile` or a baked source (`cmd/`, `internal/`, `go.mod`/`go.sum`, `assets.go`, `logstream/`, `entrypoint.sh`, `PROMPT_RALPH.md`, `mcp/`) is newer than the image |
+| `claude-sandbox-cli` | `Dockerfile.cli` — installs Claude Code, pinned to a version | `Dockerfile.cli` is newer, or you accept a Claude Code update |
+| `claude-sandbox-df-…` | your child `.claude-sandbox/Dockerfile`, `FROM claude-sandbox` | the child Dockerfile is newer, or the base was rebuilt |
+| `<base-or-child>:run` | a generated one-layer "cap": `FROM <base-or-child>` + `COPY --link` of the CLI from `claude-sandbox-cli` | either parent is newer than the cap |
+
+The point of the split is what a **Claude Code update costs**: previously the CLI was installed mid-way through the base Dockerfile, so every update invalidated the base from that layer down and — because every child's `FROM` ID changed — rebuilt every child image cold (minutes per project for a 13-second install). Now an update rebuilds the small CLI image once and a one-layer cap per project on its next launch; the base and children are untouched. The cap is built from a Dockerfile fed on stdin (no build context) and takes about a second when cached.
+
+Because the CLI arrives with the cap, `docker run claude-sandbox …` by hand gives you a container without `claude`; run `<image>:run` instead. Attach and join compare the cap's image ID, so a CLI update still registers as config drift for a running container.
+
+**BuildKit is required.** `COPY --link`, `RUN --mount=type=cache` and stdin builds all need it. The launcher checks `docker buildx version` before building and exits 2 naming the `docker-buildx-plugin` package when it is missing (a modern CLI without the plugin silently falls back to the legacy builder, which would otherwise surface as a confusing build error). The base image installs the plugin too, so `docker build` inside a session gets BuildKit.
+
+### BuildKit cache
+
+Every package-manager step in the base and CLI Dockerfiles keeps its downloads in a BuildKit cache mount with a fixed id (`claude-sandbox-apt`, `-apt-lists`, `-pip`, `-npm`, `-go-mod`, `-go-build`). Child Dockerfiles that reuse those ids share the same cache, so a package downloads once per daemon rather than once per image — see [`.claude-sandbox/Dockerfile`](#claude-sandboxdockerfile).
+
+Cache mounts live in the daemon's build cache, which BuildKit garbage-collects under a budget. With the default `docker` builder the budget is `defaultKeepStorage`; the rule that governs *ephemeral* records — local build contexts, git checkouts and **cache mounts** — keeps only 13.8 % of it. Daily image churn fills that quickly, after which BuildKit evicts cache mounts between builds and every apt/pip/npm/go step downloads again. The launcher checks after any build it runs and warns when the cache is at 80 % of its budget or the ephemeral budget is under 20 GiB:
+
+```
+WARNING: BuildKit build cache: 625 GB of a 719 GB budget (cache-mount budget 12 GB).
+```
+
+Two host-side fixes, both yours to apply:
+
+```bash
+# 1. Prune the build cache once (images and containers are untouched; the next
+#    builds run cold).
+docker builder prune -af
+```
+
+```jsonc
+// 2. /etc/docker/daemon.json — raise the budget, then `sudo systemctl restart docker`.
+//    The ephemeral/cache-mount rule becomes ~41 GB, the global limit 300 GB.
+{ "builder": { "gc": { "enabled": true, "defaultKeepStorage": "300GB" } } }
+```
+
+Size the budget to your disk; the Docker docs on [build garbage collection](https://docs.docker.com/build/cache/garbage-collection/) describe the full policy syntax if you want per-rule control. Images from before the `df-` tagging scheme (`claude-sandbox-<project>`) are dead weight too: `docker images --format '{{.Repository}}' | grep -E '^claude-sandbox-' | grep -vE '^claude-sandbox-(df-|cli$)' | xargs -r docker rmi`.
 
 ### Versioning
 
-The launcher stamps each build with `git describe --tags --always --dirty`, baked into the image as `$CLAUDE_SANDBOX_VERSION`, `/opt/claude-sandbox/version`, and the `org.opencontainers.image.revision` label. Check it with:
+The launcher stamps each build with `git describe --tags --always --dirty`, baked into the base image as `$CLAUDE_SANDBOX_VERSION`, `/opt/claude-sandbox/version`, and the `org.opencontainers.image.revision` label. Check it with:
 
 ```bash
 claude-sandbox --version
 # claude-sandbox v0.3.1-4-gab12cd  (host: /path/to/repo)
 #   image:        v0.3.1-4-gab12cd  (built 2026-06-24)
+#   claude:       2.1.247  (image claude-sandbox-cli, built 2026-08-27)
 ```
 
-It prints the version of the **host checkout** and the **baked image** (what actually runs in the container), warning if they differ. Before the image is built for the first time it reports `image: (not built yet)`.
+It prints the version of the **host checkout**, the **base image** (warning if they differ) and the Claude Code version pinned in the **CLI image**. Before an image is built for the first time its line reads `(not built yet)`.
 
-**Claude Code version check:** On each launch, the launcher compares the Claude Code version baked into the image against the latest version on npm. If a newer version is available, it prompts:
+**Claude Code version check:** On each launch, the launcher reads the version pinned in `claude-sandbox-cli` (an image label — no container is started) and compares it with the latest on npm. If a newer version is available, it prompts:
 
 ```
-Claude Code update available: 1.0.30 → 1.0.35
-Rebuild base image to update? [y/N]
+Claude Code update available: 2.1.246 → 2.1.247
+Rebuild Claude Code image to update? [y/N]
 ```
 
-Accepting triggers a `--no-cache` rebuild of the base image (and consequently the child image). Skip the check with `--no-update-check` or `CLAUDE_SANDBOX_NO_UPDATE_CHECK=1`.
+Accepting rebuilds **only** the CLI image, pinned to the new version (`install.sh` takes the version as its argument, so the install layer busts exactly when the version moves). The base and child images are not touched; each project's run cap refreshes on its next launch. Skip the check with `--no-update-check` or `CLAUDE_SANDBOX_NO_UPDATE_CHECK=1`; accept it without a prompt with `--update`. If npm is unreachable when the CLI image has to be built, it is built with `latest` and a warning.
 
-**Force rebuild:** Use `--rebuild` to force a full base + child rebuild without the version check prompt:
+**Force rebuild:** Use `--rebuild` to rebuild everything — base, CLI image, child and cap — with `--no-cache`:
 
 ```bash
 claude-sandbox --rebuild
@@ -741,7 +799,7 @@ internal/
   initcmd/         init / init-ralph bootstrap
   layout/          Layout lifecycle: skeleton, gitignore, sidecar repo
   scaffold/        Embedded scaffold seeding
-  imagebuild/      Base/child image staleness + builds + update check
+  imagebuild/      Base/CLI/child/cap image staleness + builds, update check, cache-budget warning
   launch/          Mount assembly, shadow injections, docker run argv
   ralphloop/       Ralph loop: iterations, lock, quota handling, pipeline
   execx/, prompt/  Command-runner and prompt seams (injected in tests)
@@ -762,7 +820,8 @@ logstream/
   activity-watchdog.js  Inactivity watchdog — exits with code 124 after N minutes of silence
 mcp/
   discord-notify/       Discord notification MCP server — bundled + built into the base image
-Dockerfile                          Base image: Debian + build-essential, Docker CLI/compose, Node.js 22, Claude Code CLI
+Dockerfile                          Base image: Debian + build-essential, Docker CLI/compose/buildx, Node.js 22 (no Claude Code)
+Dockerfile.cli                      Claude Code CLI image, pinned to a version; copied onto the base/child by the run cap
 entrypoint.sh                       Remaps container user UID/GID to match the host; grants Docker socket access
 notification-hooks.json             Hook fragment merged into container's settings.json
 mcp-servers.json                    MCP server fragment merged into container's .mcp.json

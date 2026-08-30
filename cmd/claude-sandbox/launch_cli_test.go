@@ -95,7 +95,35 @@ var _ = Describe("launcher CLI (end-to-end argv)", func() {
 
 	It("CS-LNCH-002: appends a known claude flag and subsequent args to the container command", func() {
 		Expect(f.run("--resume")).To(Equal(0))
-		Expect(f.execLine()).To(HaveSuffix(" claude-sandbox claude --resume"))
+		Expect(f.execLine()).To(HaveSuffix(" claude-sandbox:run claude --resume"))
+	})
+
+	It("CS-IMG-024: the container runs the cap over the base, not the base itself", func() {
+		Expect(f.run()).To(Equal(0))
+		Expect(f.fake.Execed.Args).To(ContainElement("claude-sandbox:run"))
+		Expect(f.fake.Execed.Args).NotTo(ContainElement("claude-sandbox"))
+		Expect(f.fake.CommandLines()).To(ContainElement("docker build -t claude-sandbox:run -"))
+	})
+
+	It("CS-IMG-027: exits 2 naming docker-buildx-plugin when BuildKit is unavailable", func() {
+		f.fake.On("docker buildx version", "", execx.Fail(1))
+		Expect(f.run()).To(Equal(2))
+		Expect(f.errw.String()).To(ContainSubstring("docker-buildx-plugin"))
+		Expect(f.fake.Execed).To(BeNil())
+		Expect(strings.Join(f.fake.CommandLines(), "\n")).NotTo(ContainSubstring("docker build "))
+	})
+
+	It("CS-IMG-028: the cache-budget check runs only when a build happened this launch", func() {
+		// Everything fresh: no build, so no docker system df.
+		f.fake.On("{{.Created}}", time.Now().Format(time.RFC3339Nano)+"\n", nil)
+		Expect(f.run()).To(Equal(0))
+		Expect(strings.Join(f.fake.CommandLines(), "\n")).NotTo(ContainSubstring("docker system df"))
+
+		// The cap is missing on a second launch: a build happens and the check runs.
+		g := newCLIFixture()
+		g.fake.On("image inspect claude-sandbox:run", "", execx.Fail(1))
+		Expect(g.run()).To(Equal(0))
+		Expect(g.fake.CommandLines()).To(ContainElement("docker system df --format {{json .}}"))
 	})
 
 	It("CS-LNCH-004: --limit without --ralph exits 2 with an explanation", func() {
@@ -116,14 +144,14 @@ var _ = Describe("launcher CLI (end-to-end argv)", func() {
 		// a fixed value; the project slug is derived from the fixture's temp dir.
 		Expect(f.execLine()).To(MatchRegexp(
 			`--name claude-sandbox-` + regexp.QuoteMeta(imagebuild.ProjectSlug(f.proj)) +
-				`-[a-z]+ claude-sandbox claude --dangerously-skip-permissions --model opus --resume$`))
+				`-[a-z]+ claude-sandbox:run claude --dangerously-skip-permissions --model opus --resume$`))
 	})
 
 	It("CS-LNCH-027: ralph command shape, passthrough tail, and -ralph container name", func() {
 		Expect(f.run("--ralph", "--limit", "5", "--dangerous", "--verbose")).To(Equal(0))
 		Expect(f.execLine()).To(HaveSuffix(
 			"--name claude-sandbox-" + imagebuild.ProjectSlug(f.proj) +
-				"-ralph claude-sandbox /opt/claude-sandbox/bin/ralph --limit 5 --dangerously-skip-permissions --verbose"))
+				"-ralph claude-sandbox:run /opt/claude-sandbox/bin/ralph --limit 5 --dangerously-skip-permissions --verbose"))
 	})
 
 	It("CS-LNCH-029: container runtime environment", func() {
@@ -182,16 +210,25 @@ var _ = Describe("launcher CLI (end-to-end argv)", func() {
 		Expect(f.fake.Execed).To(BeNil())
 	})
 
-	It("CS-LNCH-030: --version prints \"(not built yet)\" when the image does not exist", func() {
+	It("CS-LNCH-030: --version prints \"(not built yet)\" when the images do not exist", func() {
 		f.fake.On("describe --tags --always --dirty", "v2.0.0\n", nil)
 		f.fake.On("docker image inspect claude-sandbox", "", execx.Fail(1))
 		Expect(f.run("--version")).To(Equal(0))
 		Expect(f.out.String()).To(ContainSubstring("(not built yet)"))
 	})
 
+	It("CS-LNCH-030: --version prints the Claude Code version pinned in the CLI image", func() {
+		f.fake.On("describe --tags --always --dirty", "v2.0.0\n", nil)
+		f.fake.On("image.revision", "v2.0.0\n", nil)
+		f.fake.On("claude-sandbox.claude-version", "2.1.247\n", nil)
+		f.fake.On("{{.Created}}", time.Now().Format(time.RFC3339Nano)+"\n", nil)
+		Expect(f.run("--version")).To(Equal(0))
+		Expect(f.out.String()).To(ContainSubstring("claude:       2.1.247"))
+	})
+
 	Describe("update-check skips (CS-IMG-007 resolution in runLaunch)", func() {
 		stubVersions := func() {
-			f.fake.On("/opt/claude-sandbox/claude-version", "1.2.3\n", nil)
+			f.fake.On("claude-sandbox.claude-version", "1.2.3\n", nil)
 			f.fake.On("npm view @anthropic-ai/claude-code version", "1.2.3\n", nil)
 		}
 

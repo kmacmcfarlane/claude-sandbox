@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # Dockerfile — project-specific tools for claude-sandbox
 #
 # Place as .claude-sandbox/Dockerfile in your project (or configure the
@@ -16,25 +17,70 @@
 #   - Use /home/claude (not a hardcoded host path like /home/yourname) so the
 #     image is portable across host users.
 #   - End with "USER root" so the entrypoint has the privileges it needs.
+#
+# THE CLAUDE CLI IS NOT HERE AT BUILD TIME:
+#   The base image does not contain Claude Code; the launcher copies it onto
+#   this image at launch (a one-layer "cap" tagged <this-image>:run). A RUN
+#   step that invokes `claude` will fail. Anything needing the CLI (plugin
+#   registration, `setup-lsp-plugins`) belongs at runtime.
+#
+# CACHE MOUNTS — share the base image's download caches:
+#   The base declares BuildKit cache mounts with fixed ids. Reuse the same ids
+#   here and your apt/pip/npm/go downloads are served from the same cache
+#   instead of fetched again for every image on the machine:
+#     --mount=type=cache,id=claude-sandbox-apt,target=/var/cache/apt,sharing=locked
+#     --mount=type=cache,id=claude-sandbox-apt-lists,target=/var/lib/apt,sharing=locked
+#     --mount=type=cache,id=claude-sandbox-pip,target=/root/.cache/pip
+#     --mount=type=cache,id=claude-sandbox-npm,target=/root/.npm
+#     --mount=type=cache,id=claude-sandbox-go-mod,target=/go/pkg/mod
+#     --mount=type=cache,id=claude-sandbox-go-build,target=/root/.cache/go-build
+#   Under "USER claude" the mount must be owned by that user or the step fails
+#   with "permission denied": add uid=1000,gid=1000 and target it under
+#   /home/claude (see the gopls example below). BuildKit creates a missing
+#   PARENT of the mount target as root, so `mkdir -p` the tree as claude in a
+#   step before the mount — otherwise `go` cannot create ~/go/pkg/sumdb next
+#   to the mounted ~/go/pkg/mod. The base image already keeps apt's downloads
+#   (docker-clean is disabled), so no extra apt config is needed.
+#
+# PIN VERSIONS. `@latest` re-resolves on every rebuild and turns a cache hit
+# into a download plus a compile; a pinned version rebuilds only when you
+# change it.
 
 FROM claude-sandbox
 
-# --- Go toolchain -----------------------------------------------------------
-# RUN curl -fsSL https://go.dev/dl/go1.25.6.linux-amd64.tar.gz | tar -C /usr/local -xz
+# --- Go toolchain: copy it from the official image (no curl/tar layer) -------
+# COPY --link --from=golang:1.25.6-bookworm /usr/local/go /usr/local/go
 # ENV PATH="/usr/local/go/bin:$PATH"
 
-# --- Go language server (gopls) — install as claude user for ~/go/bin --------
+# --- Go tools (gopls etc.) — install as claude user for ~/go/bin ------------
 # USER claude
-# RUN go install golang.org/x/tools/gopls@latest
+# RUN mkdir -p /home/claude/go/pkg/mod /home/claude/go/bin /home/claude/.cache/go-build
+# RUN --mount=type=cache,id=claude-sandbox-go-mod-claude,target=/home/claude/go/pkg/mod,uid=1000,gid=1000 \
+#     --mount=type=cache,id=claude-sandbox-go-build-claude,target=/home/claude/.cache/go-build,uid=1000,gid=1000 \
+#     go install golang.org/x/tools/gopls@v0.23.0
 # USER root
 # ENV PATH="/home/claude/go/bin:$PATH"
 
+# --- apt packages ------------------------------------------------------------
+# RUN --mount=type=cache,id=claude-sandbox-apt,target=/var/cache/apt,sharing=locked \
+#     --mount=type=cache,id=claude-sandbox-apt-lists,target=/var/lib/apt,sharing=locked \
+#     apt-get update && apt-get install -y --no-install-recommends direnv
+
 # --- TypeScript / JavaScript language servers --------------------------------
-# RUN npm install -g typescript-language-server typescript && \
-#     npm install -g @vtsls/language-server
+# RUN --mount=type=cache,id=claude-sandbox-npm,target=/root/.npm \
+#     npm install -g typescript-language-server@4.4.0 typescript@5.9.3 @vtsls/language-server@0.2.10
 
 # --- Python packages (venv is already active from base image) ----------------
-# RUN pip install --no-cache-dir numpy pandas
+# RUN --mount=type=cache,id=claude-sandbox-pip,target=/root/.cache/pip \
+#     pip install numpy==2.3.3 pandas==2.3.3
+
+# --- Static binaries: fetch in a throwaway stage, COPY --link the result ------
+# FROM debian:bookworm-slim AS tools
+# RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl unzip
+# RUN curl -fsSL https://releases.hashicorp.com/terraform/1.15.7/terraform_1.15.7_linux_amd64.zip -o /tmp/tf.zip \
+#     && unzip -d /out /tmp/tf.zip
+# FROM claude-sandbox
+# COPY --link --chmod=755 --from=tools /out/terraform /usr/local/bin/terraform
 
 # --- Files under /home/claude (use USER claude so they're owned correctly) ---
 # USER claude

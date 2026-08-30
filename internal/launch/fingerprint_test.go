@@ -177,6 +177,15 @@ var _ = Describe("config fingerprint", func() {
 			Expect(hashOf(i)).NotTo(Equal(bare))
 		})
 
+		It("the CLI image being rebuilt (a new cap ID) changes it (CS-SESS-038)", func() {
+			// The launch hashes the cap's ID, so a CLI update — which leaves the
+			// base and child IDs untouched — still registers as drift.
+			i := fresh()
+			i.ImageName = "claude-sandbox-df-proj-abc123:run"
+			i.ImageID = "sha256:cap-after-cli-update"
+			Expect(hashOf(i)).NotTo(Equal(bare))
+		})
+
 		It("a different host identity changes it", func() {
 			i := fresh()
 			i.HostUID = 1001

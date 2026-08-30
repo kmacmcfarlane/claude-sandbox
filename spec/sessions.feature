@@ -191,6 +191,16 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
       | a shadow file's merged contents change                  |
       | a mount is added or its read-only flag changes          |
       | a host-access flag is added                             |
+      | the Claude Code CLI image is rebuilt (the cap changes)  |
+
+  Scenario: CS-SESS-038 The fingerprint hashes the run image, not its parent
+    # The container runs the generated cap (<base-or-child>:run, CS-IMG-024),
+    # so attach/join must resolve the cap's ID: a CLI update rebuilds the cap
+    # while the base and child IDs stay the same, and hashing a parent would
+    # hide that drift.
+    Given a running session
+    When the would-be fingerprint is recomputed for attach or join
+    Then the image input is the cap image "<resolved image>:run" and its docker ID
 
   Scenario: CS-SESS-024 A shadowed upstream edit is not drift
     Given an upstream config.yaml key is edited

@@ -332,10 +332,13 @@ func wouldBeFingerprint(env *Env, projectDir string, f *launchFlags, cfg *cascad
 		BaseOnly:   baseOnly, DockerfileDir: dfDir, Dockerfile: dfName,
 	}, io.Discard)
 
-	image := spec.ImageName
+	parent := spec.ImageName
 	if !spec.Use {
-		image = imagebuild.BaseImageName
+		parent = imagebuild.BaseImageName
 	}
+	// The container runs the cap, not its parent (CS-SESS-038): a CLI update
+	// changes the cap's ID while the parent's stays put.
+	image := imagebuild.CapImageName(parent)
 	id := imagebuild.ImageID(env.Runner, image)
 
 	uid, gid, uname, home := hostIdentity(env.Getenv)
@@ -346,7 +349,8 @@ func wouldBeFingerprint(env *Env, projectDir string, f *launchFlags, cfg *cascad
 		RalphMode: f.Ralph, Limit: f.Limit, SkipPermissions: f.Dangerous,
 		CLIModel: f.Model, Passthrough: f.Passthrough,
 		CLISSH: f.SSH, CLIGit: f.Git, CLIDockerSocket: f.DockerSocket, CLIAWS: f.AWS,
-		Cfg: cfg, EnvFiles: envFiles,
+		CLIPackageCaches: f.PackageCaches,
+		Cfg:              cfg, EnvFiles: envFiles,
 		ImageName: image, ImageID: id,
 		Out: io.Discard, Err: io.Discard,
 	})

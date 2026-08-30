@@ -51,6 +51,7 @@ type Inputs struct {
 
 	// CLI host-access overrides (nil = not passed).
 	CLISSH, CLIGit, CLIDockerSocket, CLIAWS *bool
+	CLIPackageCaches                        *bool
 
 	Cfg      *cascade.Config
 	EnvFiles []string
@@ -158,6 +159,7 @@ func Build(in Inputs) (*Plan, error) {
 	git := resolveFlag(in.CLIGit, in.getenv("CLAUDE_SANDBOX_HOST_ACCESS_GIT_ENABLED"), in.Cfg.HostAccess.Git.Enabled)
 	dockerSocket := resolveFlag(in.CLIDockerSocket, in.getenv("CLAUDE_SANDBOX_HOST_ACCESS_DOCKER_SOCKET_ENABLED"), in.Cfg.HostAccess.DockerSocket.Enabled)
 	aws := resolveFlag(in.CLIAWS, in.getenv("CLAUDE_SANDBOX_HOST_ACCESS_AWS_ENABLED"), in.Cfg.HostAccess.AWS.Enabled)
+	packageCaches := resolveFlag(in.CLIPackageCaches, in.getenv("CLAUDE_SANDBOX_HOST_ACCESS_PACKAGE_CACHES_ENABLED"), in.Cfg.HostAccess.PackageCaches.Enabled)
 
 	dockerGID := ""
 	if dockerSocket {
@@ -166,6 +168,11 @@ func Build(in Inputs) (*Plan, error) {
 	}
 	if aws {
 		in.assembleAWS(p)
+	}
+	if packageCaches {
+		if err := in.assemblePackageCaches(p); err != nil {
+			return nil, err
+		}
 	}
 	if git {
 		if err := in.shadowGitconfig(p); err != nil {
@@ -274,7 +281,7 @@ func Build(in Inputs) (*Plan, error) {
 	// contributing files on the container so a later attach can tell whether it
 	// is joining a container built from the config now on disk.
 	p.ConfigHash, p.ConfigInputs = in.configFingerprint(p, hostAccess{
-		SSH: ssh, Git: git, DockerSocket: dockerSocket, AWS: aws,
+		SSH: ssh, Git: git, DockerSocket: dockerSocket, AWS: aws, PackageCaches: packageCaches,
 	})
 
 	// CS-LNCH-032: identity labels. Discovery filters on these rather than
@@ -479,6 +486,39 @@ func (in *Inputs) assembleAWS(p *Plan) {
 			mounted[dir] = true
 		}
 	}
+}
+
+// PackageCacheRoot is the sandbox-only tree under $HOME that the package-cache
+// lever mounts (CS-LNCH-037). Fixed on purpose: pointing this at the host's
+// own ~/go, ~/.npm or ~/.cache/pip would let a session plant a module the
+// host's toolchain then trusts (Go verifies zips on download, not extracted
+// dirs). Confined here, the blast radius is other sandbox sessions.
+const PackageCacheRoot = ".cache/claude-sandbox"
+
+// packageCaches maps each cache dir name to the env var that redirects its
+// toolchain (CS-LNCH-035).
+var packageCaches = []struct{ dir, env string }{
+	{"go-mod", "GOMODCACHE"},
+	{"go-build", "GOCACHE"},
+	{"npm", "npm_config_cache"},
+	{"pip", "PIP_CACHE_DIR"},
+}
+
+// assemblePackageCaches mounts the cache dirs writable at the same path and
+// points the toolchains at them. The dirs are created here, before docker
+// run, as the invoking user (CS-LNCH-036): docker creates a missing bind
+// source as root, and the entrypoint deliberately never chowns a mount point.
+func (in *Inputs) assemblePackageCaches(p *Plan) error {
+	root := filepath.Join(in.Home, PackageCacheRoot)
+	for _, c := range packageCaches {
+		dir := filepath.Join(root, c.dir)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("package caches: creating %s: %w", dir, err)
+		}
+		p.Volumes = append(p.Volumes, fmt.Sprintf("%s:%s", dir, dir))
+		p.EnvFlags = append(p.EnvFlags, c.env+"="+dir)
+	}
+	return nil
 }
 
 // resolveFlag implements the CLI > env var > YAML precedence.

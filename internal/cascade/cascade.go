@@ -82,6 +82,9 @@ type HostAccess struct {
 	Git          HostAccessEntry `yaml:"git"`
 	DockerSocket HostAccessEntry `yaml:"dockerSocket"`
 	AWS          HostAccessEntry `yaml:"aws"`
+	// PackageCaches keeps go/npm/pip downloads on the host under
+	// ~/.cache/claude-sandbox (CS-LNCH-035..037).
+	PackageCaches HostAccessEntry `yaml:"packageCaches"`
 }
 
 // Config is the effective merged configuration.

@@ -1,0 +1,32 @@
+# syntax=docker/dockerfile:1
+# Claude Code CLI image (claude-sandbox-cli).
+#
+# Its only job is to install the CLI. The launcher builds it pinned to the
+# version the update check resolved (CLAUDE_CODE_VERSION), so the install
+# layer busts exactly when the version moves — and nothing else does. At
+# launch a generated one-layer "cap" copies /home/claude/.local from here onto
+# the base or child image the project runs (spec/image-build.feature,
+# CS-IMG-020..024). The base and children never rebuild for a CLI update.
+#
+# The install runs as the "claude" user (uid 1000) so the copied tree is owned
+# by the user the entrypoint remaps at runtime.
+FROM debian:bookworm-slim
+
+RUN --mount=type=cache,id=claude-sandbox-apt,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,id=claude-sandbox-apt-lists,target=/var/lib/apt,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean \
+    && apt-get update && apt-get install -y --no-install-recommends ca-certificates curl
+
+RUN useradd -m -s /bin/bash claude
+
+# install.sh accepts stable | latest | X.Y.Z as its positional argument.
+ARG CLAUDE_CODE_VERSION=latest
+USER claude
+RUN curl -fsSL https://claude.ai/install.sh | bash -s -- "$CLAUDE_CODE_VERSION"
+USER root
+
+# Recorded twice: the file rides along into the cap for in-container use; the
+# label lets the launcher read the pin with an inspect instead of a container.
+RUN mkdir -p /opt/claude-sandbox \
+    && /home/claude/.local/bin/claude --version 2>/dev/null | head -1 > /opt/claude-sandbox/claude-version
+LABEL claude-sandbox.claude-version=$CLAUDE_CODE_VERSION

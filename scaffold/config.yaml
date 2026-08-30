@@ -34,8 +34,8 @@
 # detachKeys: ctrl-q,ctrl-q
 
 # Host access — control which host resources are mounted into the container.
-# Each can also be enabled via CLI flags (--ssh, --git, --docker-socket, --aws)
-# or environment variables (CLAUDE_SANDBOX_HOST_ACCESS_*_ENABLED=1).
+# Each can also be enabled via CLI flags (--ssh, --git, --docker-socket, --aws,
+# --package-caches) or environment variables (CLAUDE_SANDBOX_HOST_ACCESS_*_ENABLED=1).
 # Precedence: CLI flag > env var > YAML. Default: all disabled.
 # hostAccess:
 #   # Mount ~/.ssh/ read-only (SSH keys for git remotes)
@@ -49,6 +49,15 @@
 #     enabled: false
 #   # Mount ~/.aws/ read-only (AWS CLI/SDK credentials)
 #   aws:
+#     enabled: false
+#   # Keep package downloads made INSIDE sessions (go modules, the go build
+#   # cache, npm, pip) on the host so they survive the container. Mounts
+#   # ~/.cache/claude-sandbox/{go-mod,go-build,npm,pip} writable at the same
+#   # path and sets GOMODCACHE / GOCACHE / npm_config_cache / PIP_CACHE_DIR.
+#   # The tree is sandbox-only on purpose — never your own ~/go, ~/.npm or
+#   # ~/.cache/pip — so a session can never plant a module your host toolchain
+#   # would trust. It grows without bound; delete the directory to reset it.
+#   packageCaches:
 #     enabled: false
 
 # Extra volume mounts. Appended to any upstream mounts; re-declare an upstream
