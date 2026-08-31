@@ -178,6 +178,7 @@ Options:
   --model MODEL             Model to use (alias like 'opus' or a full model ID)
   --dangerous               Skip permission prompts (--dangerously-skip-permissions)
   --rebuild                 Force rebuild of the base, Claude Code, child and run images
+                            (--no-cache: also starts the shared package caches empty)
   --update                  Auto-accept the Claude Code update prompt (rebuilds only the CLI image)
   --no-update-check         Skip Claude Code version check
   --docker-socket           Mount the host Docker socket into the container

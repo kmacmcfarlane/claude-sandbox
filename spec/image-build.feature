@@ -20,6 +20,11 @@ Feature: Image build lifecycle (CS-IMG)
     Then the base is rebuilt with --no-cache
     And the CLI image is rebuilt with --no-cache
     And the child (when in use) and the cap are rebuilt
+    # --no-cache also starts every cache mount empty (BuildKit gives the build a
+    # fresh mount rather than the shared one), so --rebuild discards the shared
+    # apt/pip/npm/go caches and the next builds re-download. That is intended:
+    # --rebuild means from scratch, and a flag reached for when a layer is
+    # suspect must not quietly reuse cached downloads.
 
   Scenario: CS-IMG-003 Base rebuilds when the Dockerfile is newer than the image
     Given the image exists with creation time T

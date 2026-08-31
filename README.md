@@ -693,14 +693,20 @@ Because the CLI arrives with the cap, `docker run claude-sandbox …` by hand gi
 
 Every package-manager step in the base and CLI Dockerfiles keeps its downloads in a BuildKit cache mount with a fixed id (`claude-sandbox-apt`, `-apt-lists`, `-pip`, `-npm`, `-go-mod`, `-go-build`). Child Dockerfiles that reuse those ids share the same cache, so a package downloads once per daemon rather than once per image — see [`.claude-sandbox/Dockerfile`](#claude-sandboxdockerfile).
 
-Cache mounts live in the daemon's build cache, which BuildKit garbage-collects against an ordered list of policy rules. **Two of those limits matter here, and they are independent** — check yours with `docker buildx inspect`:
+**`--no-cache` starts every cache mount empty.** This is the single biggest thing to know about them, and it is BuildKit behaviour, not a GC effect: a build run with `--no-cache` gets a brand-new cache mount rather than the shared one, so nothing carries over and nothing it downloads is kept for the next build. Verified on Docker 29.3 / BuildKit 0.28 — three ordinary builds sharing one mount id accumulated state across all three, while the same builds under `--no-cache` each started from scratch (reported independently as [moby#41715](https://github.com/moby/moby/issues/41715)).
+
+The practical consequence: **`claude-sandbox --rebuild` discards the shared package caches**, because it passes `--no-cache` to the base and CLI builds. That is deliberate — `--rebuild` means *from scratch*, and a flag you reach for when you suspect a bad layer should not quietly reuse cached downloads — but it does mean the builds right after a `--rebuild` re-download apt/pip/npm/go. Ordinary staleness-triggered rebuilds keep their caches; reach for `--rebuild` when you want the cold path, not as a habit.
+
+Cache mounts otherwise live in the daemon's build cache, which BuildKit garbage-collects against an ordered list of policy rules. **Two of those limits matter here, and they are independent** — check yours with `docker buildx inspect`:
 
 | Limit | What it covers | Symptom when it bites |
 |---|---|---|
 | The `All: true` rule's `Max Used Space` | the whole build cache | the daemon evicts aggressively once usage approaches it — cache mounts included |
-| The rule filtering `type==exec.cachemount` | *ephemeral* records only: local build contexts, git checkouts and **cache mounts** | cache mounts above the cap are dropped between builds, so apt/pip/npm/go steps re-download — **regardless of how empty the total cache is** |
+| The rule filtering `type==exec.cachemount` | *ephemeral* records only: local build contexts, git checkouts and **cache mounts** | cache mounts above the cap are dropped, so apt/pip/npm/go steps re-download — **regardless of how empty the total cache is** |
 
-That second cap is the one that usually hurts, and pruning cannot fix it: it is a configured limit, not a usage figure. On the `docker` builder it resolves to 13.8 % of the keep-storage value (Docker Desktop's out-of-box 20GB → a 2.76 GB cache-mount cap; a host on auto-derived defaults is typically far more generous).
+Pruning cannot fix the second one: it is a configured limit, not a usage figure. On the `docker` builder it resolves to 13.8 % of the keep-storage value (Docker Desktop's out-of-box 20GB → a 2.76 GB cache-mount cap; a host on auto-derived defaults is typically far more generous, and needs no attention).
+
+Before blaming either limit, check whether the builds that "lost" their cache used `--no-cache` — that explains far more cases than GC does.
 
 The launcher checks after any build it runs and reports the two conditions separately — a `WARNING` when total usage is at 80 % of the global budget, and a `NOTE` when the cache-mount cap is below what this project's caches need:
 
@@ -739,7 +745,7 @@ docker builder prune -af
 
 `daemon.json` is strict JSON — no comments, no trailing commas — so the block above is copy-pasteable as it stands. The rules are evaluated in order: the **first** one is what decides whether cache mounts survive a build (its filter is the `exec.cachemount` rule), and the last, with `"all": true`, is the global ceiling.
 
-Confirm it took effect with `docker buildx inspect` — if the numbers do not change, the daemon did not restart or the file did not parse (`sudo dockerd --validate --config-file /etc/docker/daemon.json` checks it without restarting). Size the values to your disk; the Docker docs on [build garbage collection](https://docs.docker.com/build/cache/garbage-collection/) carry the full syntax and the `daemon.json` vs `buildkitd.toml` filter-operator difference (`type=` vs `type==`).
+`builder.gc` is **not** among the options a `SIGHUP` reload picks up, so a full `systemctl restart docker` is required — a reload leaves the old policy in place. Confirm it took effect with `docker buildx inspect`; if the numbers do not change, the daemon did not restart or the file did not parse (`sudo dockerd --validate --config-file /etc/docker/daemon.json` checks it without restarting). Note that the `filter` line has known sharp edges in `daemon.json` ([buildkit#5581](https://github.com/moby/buildkit/issues/5581), [moby#46864](https://github.com/moby/moby/issues/46864)); if the policy applies but the filtered rule does not, that is the first thing to suspect. Size the values to your disk; the Docker docs on [build garbage collection](https://docs.docker.com/build/cache/garbage-collection/) carry the full syntax and the `daemon.json` vs `buildkitd.toml` filter-operator difference (`type=` vs `type==`).
 
 Images from before the `df-` tagging scheme (`claude-sandbox-<project>`) are dead weight too: `docker images --format '{{.Repository}}' | grep -E '^claude-sandbox-' | grep -vE '^claude-sandbox-(df-|cli$)' | xargs -r docker rmi`.
 
