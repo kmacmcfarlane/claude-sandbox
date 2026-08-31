@@ -144,6 +144,7 @@ func newRootCmd(env *Env) *cobra.Command {
 const launchUsage = `Usage:
   claude-sandbox                          # launch claude interactively in $PWD
   claude-sandbox --resume                 # pass args through to claude
+  claude-sandbox --continue               # resume the most recent session for this dir
   claude-sandbox --dangerous              # skip permission prompts
   claude-sandbox --docker-socket          # mount the host Docker socket
   claude-sandbox --aws                    # mount ~/.aws/ read-only

@@ -112,6 +112,27 @@ claude-sandbox --docker-socket --resume
 claude-sandbox --ralph --docker-socket --dangerous --interactive --watchdog-timeout 30
 ```
 
+#### Resuming a session
+
+Both of claude's own resumption flags pass straight through, and between them they cover
+what you'd want a "resume the last one" flag for — which is why the launcher deliberately
+adds none of its own:
+
+```bash
+claude-sandbox --continue     # resume the most recent session for this directory, no picker
+claude-sandbox --resume       # choose from the interactive picker
+claude-sandbox --resume <id>  # resume a specific session by id or name
+```
+
+`--continue` (`-c`) is the direct one: it loads the newest conversation for the current
+directory and never prompts, failing cleanly if there isn't one. It deliberately skips
+background, `--print` and Agent-SDK sessions.
+
+One caveat on a project you run several sessions in at once: `--continue` resolves to the
+same newest transcript in every container, so two sessions started that way share one
+conversation file. Add claude's `--fork-session` to branch a resumed conversation into a new
+session id instead.
+
 Resumed sessions keep their scratchpad: the launcher roots Claude Code's
 session scratchpad inside the mounted config directory (`CLAUDE_CODE_TMPDIR`),
 so working files survive the container and `--resume` picks them back up.

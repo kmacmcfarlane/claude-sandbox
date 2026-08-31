@@ -23,6 +23,13 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     # --allowedTools --disallowTools --permission-prompt-tool --mcp-config
     # --permission-mode --append-system-prompt --system-prompt --max-turns
     # --print --input-format --model --fallback-model
+    #
+    # --continue is the supported "resume the newest session for this directory"
+    # path, and the launcher deliberately adds no flag of its own for it: a
+    # wrapper flag would rename an upstream one that already passes through, and
+    # the only way to implement one independently is to read the session
+    # transcripts, a format upstream documents as internal and version-unstable.
+    # See .claude-sandbox/investigations/resume-last-flag/.
 
   Scenario: CS-LNCH-003 "--" ends launcher parsing
     When "claude-sandbox -- --whatever" is run
