@@ -717,16 +717,17 @@ docker builder prune -af
 
 **Fix for the second** — an explicit GC policy in `/etc/docker/daemon.json`, then `sudo systemctl restart docker`. Set the rules directly rather than relying on `defaultKeepStorage`, which is the Docker-Desktop-era key and is ignored on engines that derive their thresholds from disk size:
 
-```jsonc
+```json
 {
   "builder": {
     "gc": {
       "enabled": true,
       "policy": [
-        // Ephemeral records — local contexts, git checkouts, CACHE MOUNTS.
-        // This is the rule that decides whether cache mounts survive a build.
-        { "reservedSpace": "40GB", "keepDuration": ["48h"],
-          "filter": ["type=source.local,type=exec.cachemount,type=source.git.checkout"] },
+        {
+          "reservedSpace": "40GB",
+          "keepDuration": ["48h"],
+          "filter": ["type=source.local,type=exec.cachemount,type=source.git.checkout"]
+        },
         { "reservedSpace": "100GB", "keepDuration": ["1440h"] },
         { "reservedSpace": "100GB" },
         { "reservedSpace": "200GB", "all": true }
@@ -736,7 +737,9 @@ docker builder prune -af
 }
 ```
 
-Confirm it took effect with `docker buildx inspect` — if the numbers do not change, the daemon did not restart or the file did not parse. Size the values to your disk; the Docker docs on [build garbage collection](https://docs.docker.com/build/cache/garbage-collection/) carry the full syntax and the `daemon.json` vs `buildkitd.toml` filter-operator difference (`type=` vs `type==`).
+`daemon.json` is strict JSON — no comments, no trailing commas — so the block above is copy-pasteable as it stands. The rules are evaluated in order: the **first** one is what decides whether cache mounts survive a build (its filter is the `exec.cachemount` rule), and the last, with `"all": true`, is the global ceiling.
+
+Confirm it took effect with `docker buildx inspect` — if the numbers do not change, the daemon did not restart or the file did not parse (`sudo dockerd --validate --config-file /etc/docker/daemon.json` checks it without restarting). Size the values to your disk; the Docker docs on [build garbage collection](https://docs.docker.com/build/cache/garbage-collection/) carry the full syntax and the `daemon.json` vs `buildkitd.toml` filter-operator difference (`type=` vs `type==`).
 
 Images from before the `df-` tagging scheme (`claude-sandbox-<project>`) are dead weight too: `docker images --format '{{.Repository}}' | grep -E '^claude-sandbox-' | grep -vE '^claude-sandbox-(df-|cli$)' | xargs -r docker rmi`.
 

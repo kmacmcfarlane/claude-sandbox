@@ -218,6 +218,9 @@ Feature: Image build lifecycle (CS-IMG)
     And each condition prints on its own, so a host under the global budget with a small
       cache-mount cap is not told its total usage is a problem
     And nothing prints when no build ran, or when either command cannot be parsed
+    And the daemon.json recipe the NOTE points at is valid, copy-pasteable JSON
+      # daemon.json is strict JSON: a jsonc block with // comments renders fine
+      # in the README and then fails to parse in the file it is written for.
 
   Scenario: CS-IMG-029 Base and CLI Dockerfiles declare the shared cache-mount ids
     Then Dockerfile and Dockerfile.cli use "--mount=type=cache,id=claude-sandbox-<name>" mounts

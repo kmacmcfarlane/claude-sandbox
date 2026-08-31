@@ -7,6 +7,7 @@ package imagebuild_test
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
@@ -419,6 +420,20 @@ var _ = Describe("image build lifecycle", func() {
 			fake.On("docker buildx inspect", "", execx.Fail(1))
 			imagebuild.WarnCacheBudget(o)
 			Expect(errw.String()).To(BeEmpty())
+		})
+
+		It("CS-IMG-028: the daemon.json recipe the NOTE points at is valid, copy-pasteable JSON", func() {
+			// daemon.json is strict JSON. A ```jsonc block with // comments
+			// reads fine on GitHub and then fails to parse when pasted into the
+			// file it is written for, which is how this shipped the first time.
+			readme := repoFile("README.md")
+			blocks := regexp.MustCompile("(?s)```json\n(.*?)```").FindAllStringSubmatch(readme, -1)
+			Expect(blocks).NotTo(BeEmpty(), "the BuildKit cache section must carry a daemon.json example")
+			for _, b := range blocks {
+				var v any
+				Expect(json.Unmarshal([]byte(b[1]), &v)).To(Succeed(), "README json block is not valid JSON:\n"+b[1])
+			}
+			Expect(readme).NotTo(ContainSubstring("```jsonc"), "jsonc permits comments that daemon.json rejects")
 		})
 
 		It("CS-IMG-003: rebuilds when the Dockerfile is newer than the image", func() {
