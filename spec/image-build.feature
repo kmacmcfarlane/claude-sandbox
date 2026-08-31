@@ -202,16 +202,22 @@ Feature: Image build lifecycle (CS-IMG)
     And every "docker build" the launcher issues runs with DOCKER_BUILDKIT=1
 
   Scenario: CS-IMG-028 Build-cache budget warning after a build ran this launch
+    # Two INDEPENDENT conditions with different fixes, so they are reported
+    # separately. Reporting them as one message printed a healthy total
+    # alongside the ephemeral figure and recommended a prune that could not
+    # address the condition that had fired.
     Given at least one image was built this launch
     And "docker system df --format {{json .}}" reports the Build Cache size
-    And "docker buildx inspect" reports the GC policy's Max Used Space
-    Then a warning prints when the cache size is at least 80% of the all-records budget
-    Or when the budget of the rule filtering type==exec.cachemount is below 20GiB
-    And the warning names "docker builder prune -af" and the README section on raising the budget
+    And "docker buildx inspect" reports the GC policy rules
+    Then a WARNING prints when the cache size is at least 80% of the all-records budget,
+      naming "docker builder prune -af" and the README section
+    And a NOTE prints when the budget of the rule filtering type==exec.cachemount is
+      below the floor that this project's cache mounts need, stating that pruning does
+      NOT help because the cap is a setting rather than a usage figure,
+      and pointing at a builder.gc policy in daemon.json
+    And each condition prints on its own, so a host under the global budget with a small
+      cache-mount cap is not told its total usage is a problem
     And nothing prints when no build ran, or when either command cannot be parsed
-    # The daily image churn fills the ephemeral-records budget, after which
-    # BuildKit evicts cache mounts between builds and every apt/pip/npm/go
-    # step downloads again.
 
   Scenario: CS-IMG-029 Base and CLI Dockerfiles declare the shared cache-mount ids
     Then Dockerfile and Dockerfile.cli use "--mount=type=cache,id=claude-sandbox-<name>" mounts

@@ -693,27 +693,52 @@ Because the CLI arrives with the cap, `docker run claude-sandbox …` by hand gi
 
 Every package-manager step in the base and CLI Dockerfiles keeps its downloads in a BuildKit cache mount with a fixed id (`claude-sandbox-apt`, `-apt-lists`, `-pip`, `-npm`, `-go-mod`, `-go-build`). Child Dockerfiles that reuse those ids share the same cache, so a package downloads once per daemon rather than once per image — see [`.claude-sandbox/Dockerfile`](#claude-sandboxdockerfile).
 
-Cache mounts live in the daemon's build cache, which BuildKit garbage-collects under a budget. With the default `docker` builder the budget is `defaultKeepStorage`; the rule that governs *ephemeral* records — local build contexts, git checkouts and **cache mounts** — keeps only 13.8 % of it. Daily image churn fills that quickly, after which BuildKit evicts cache mounts between builds and every apt/pip/npm/go step downloads again. The launcher checks after any build it runs and warns when the cache is at 80 % of its budget or the ephemeral budget is under 20 GiB:
+Cache mounts live in the daemon's build cache, which BuildKit garbage-collects against an ordered list of policy rules. **Two of those limits matter here, and they are independent** — check yours with `docker buildx inspect`:
+
+| Limit | What it covers | Symptom when it bites |
+|---|---|---|
+| The `All: true` rule's `Max Used Space` | the whole build cache | the daemon evicts aggressively once usage approaches it — cache mounts included |
+| The rule filtering `type==exec.cachemount` | *ephemeral* records only: local build contexts, git checkouts and **cache mounts** | cache mounts above the cap are dropped between builds, so apt/pip/npm/go steps re-download — **regardless of how empty the total cache is** |
+
+That second cap is the one that usually hurts, and pruning cannot fix it: it is a configured limit, not a usage figure. On the `docker` builder it resolves to 13.8 % of the keep-storage value (Docker Desktop's out-of-box 20GB → a 2.76 GB cache-mount cap; a host on auto-derived defaults is typically far more generous).
+
+The launcher checks after any build it runs and reports the two conditions separately — a `WARNING` when total usage is at 80 % of the global budget, and a `NOTE` when the cache-mount cap is below what this project's caches need:
 
 ```
-WARNING: BuildKit build cache: 625 GB of a 719 GB budget (cache-mount budget 12 GB).
+WARNING: BuildKit build cache is 625 GB of its 719 GB budget.
+NOTE: this daemon caps cache mounts at 3 GB (build cache in use: 10 GB of 719 GB).
 ```
 
-Two host-side fixes, both yours to apply:
+**Fix for the first** — prune (images and containers are untouched; the next builds run cold):
 
 ```bash
-# 1. Prune the build cache once (images and containers are untouched; the next
-#    builds run cold).
 docker builder prune -af
 ```
 
+**Fix for the second** — an explicit GC policy in `/etc/docker/daemon.json`, then `sudo systemctl restart docker`. Set the rules directly rather than relying on `defaultKeepStorage`, which is the Docker-Desktop-era key and is ignored on engines that derive their thresholds from disk size:
+
 ```jsonc
-// 2. /etc/docker/daemon.json — raise the budget, then `sudo systemctl restart docker`.
-//    The ephemeral/cache-mount rule becomes ~41 GB, the global limit 300 GB.
-{ "builder": { "gc": { "enabled": true, "defaultKeepStorage": "300GB" } } }
+{
+  "builder": {
+    "gc": {
+      "enabled": true,
+      "policy": [
+        // Ephemeral records — local contexts, git checkouts, CACHE MOUNTS.
+        // This is the rule that decides whether cache mounts survive a build.
+        { "reservedSpace": "40GB", "keepDuration": ["48h"],
+          "filter": ["type=source.local,type=exec.cachemount,type=source.git.checkout"] },
+        { "reservedSpace": "100GB", "keepDuration": ["1440h"] },
+        { "reservedSpace": "100GB" },
+        { "reservedSpace": "200GB", "all": true }
+      ]
+    }
+  }
+}
 ```
 
-Size the budget to your disk; the Docker docs on [build garbage collection](https://docs.docker.com/build/cache/garbage-collection/) describe the full policy syntax if you want per-rule control. Images from before the `df-` tagging scheme (`claude-sandbox-<project>`) are dead weight too: `docker images --format '{{.Repository}}' | grep -E '^claude-sandbox-' | grep -vE '^claude-sandbox-(df-|cli$)' | xargs -r docker rmi`.
+Confirm it took effect with `docker buildx inspect` — if the numbers do not change, the daemon did not restart or the file did not parse. Size the values to your disk; the Docker docs on [build garbage collection](https://docs.docker.com/build/cache/garbage-collection/) carry the full syntax and the `daemon.json` vs `buildkitd.toml` filter-operator difference (`type=` vs `type==`).
+
+Images from before the `df-` tagging scheme (`claude-sandbox-<project>`) are dead weight too: `docker images --format '{{.Repository}}' | grep -E '^claude-sandbox-' | grep -vE '^claude-sandbox-(df-|cli$)' | xargs -r docker rmi`.
 
 ### Versioning
 

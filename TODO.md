@@ -91,3 +91,24 @@ Two independent fixes, and they solve different halves:
 
 Doing 1 without 2 leaves the two caches merged and correct only for as long as
 the versions happen to match.
+
+## `--resume-last`: launch straight into the most recent session
+
+`claude-sandbox --resume-last` should resolve the newest resumable Claude Code
+session for the project and hand `--resume <id>` to the CLI, so returning to a
+project does not mean picking from the `claude --resume` list by hand.
+
+Open points to settle before building it:
+
+- Where the session list comes from. `claude --resume` reads its own state under
+  the config dir; the launcher would need the same ordering ("top session")
+  without duplicating the CLI's storage format. Check whether the CLI exposes a
+  machine-readable listing before parsing anything.
+- Which project it keys on. The container sees the project at its real host
+  path (same-path mounting), so the session id should be resolvable from
+  `$PROJECT_DIR` — worth confirming the CLI partitions sessions the same way.
+- Interaction with the multi-session decision (CS-SESS-014..019). `--resume-last`
+  is about which *conversation* to resume, `--attach`/`--join` about which
+  *container* to enter; the flags are orthogonal and the help text has to make
+  that clear.
+- Whether it belongs as a launcher flag or as passthrough sugar.

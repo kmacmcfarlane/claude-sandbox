@@ -465,14 +465,30 @@ type CacheBudget struct {
 }
 
 const (
-	cacheWarnRatio     = 0.8
-	ephemeralFloorGiB  = 20
-	ephemeralFloorSize = int64(ephemeralFloorGiB) << 30
+	cacheWarnRatio = 0.8
+
+	// ephemeralFloorSize is the point below which the ephemeral budget cannot
+	// hold this project's cache mounts. The rule covering them also covers
+	// local build contexts and git checkouts, and a Go toolchain's module +
+	// build caches alone run to a couple of GB before apt/npm/pip. Docker
+	// Desktop's out-of-box 20GB keep-storage resolves to a 2.76 GB ephemeral
+	// budget, which is genuinely too small; a host on auto-derived defaults
+	// typically lands well above this and needs no warning.
+	ephemeralFloorSize = int64(4) << 30
 )
 
-// WarnCacheBudget prints a warning when the daemon's build cache is close to
-// its GC budget, or when the budget for ephemeral records (which is where
-// RUN --mount=type=cache lives) is too small to hold a day of sandbox builds.
+// WarnCacheBudget reports the two build-cache conditions that hurt this
+// project, which are independent of each other and have different fixes:
+//
+//   - total usage near the global budget → pruning helps;
+//   - a small budget on the rule covering ephemeral records (where
+//     RUN --mount=type=cache lives) → pruning does nothing, because that cap
+//     is a configuration value rather than a usage figure.
+//
+// Reporting them as one message was wrong: it printed the healthy total
+// alongside the ephemeral figure and recommended a prune that could not
+// address the condition that had actually fired.
+//
 // Called only when a build ran this launch: the check costs two docker calls,
 // and the common no-build launch should not pay them. Silent when either
 // command cannot be parsed.
@@ -481,16 +497,20 @@ func WarnCacheBudget(o Options) {
 	if !ok {
 		return
 	}
-	over := b.AllBudget > 0 && float64(b.Size) >= cacheWarnRatio*float64(b.AllBudget)
-	tiny := b.Ephemeral > 0 && b.Ephemeral < ephemeralFloorSize
-	if !over && !tiny {
-		return
+	if b.AllBudget > 0 && float64(b.Size) >= cacheWarnRatio*float64(b.AllBudget) {
+		fmt.Fprintf(o.Err, "\nWARNING: BuildKit build cache is %s of its %s budget.\n",
+			humanSize(b.Size), humanSize(b.AllBudget))
+		fmt.Fprintf(o.Err, "  At this level the daemon evicts cache aggressively, including cache mounts.\n")
+		fmt.Fprintf(o.Err, "  Prune:  docker builder prune -af\n")
+		fmt.Fprintf(o.Err, "  Or raise the budget: see README.md, \"BuildKit cache\".\n\n")
 	}
-	fmt.Fprintf(o.Err, "\nWARNING: BuildKit build cache: %s of a %s budget (cache-mount budget %s).\n",
-		humanSize(b.Size), humanSize(b.AllBudget), humanSize(b.Ephemeral))
-	fmt.Fprintf(o.Err, "  Cache mounts are being evicted between builds, so every apt/pip/npm/go step downloads again.\n")
-	fmt.Fprintf(o.Err, "  Prune:            docker builder prune -af\n")
-	fmt.Fprintf(o.Err, "  Raise the budget: see README.md, \"BuildKit cache\" (builder.gc.defaultKeepStorage in daemon.json).\n\n")
+	if b.Ephemeral > 0 && b.Ephemeral < ephemeralFloorSize {
+		fmt.Fprintf(o.Err, "\nNOTE: this daemon caps cache mounts at %s (build cache in use: %s of %s).\n",
+			humanSize(b.Ephemeral), humanSize(b.Size), humanSize(b.AllBudget))
+		fmt.Fprintf(o.Err, "  Cache mounts above that are evicted between builds, so apt/pip/npm/go steps re-download.\n")
+		fmt.Fprintf(o.Err, "  Pruning does not help — the cap is a setting, not usage.\n")
+		fmt.Fprintf(o.Err, "  Raise it with a builder.gc policy in daemon.json: see README.md, \"BuildKit cache\".\n\n")
+	}
 }
 
 func readCacheBudget(o Options) (CacheBudget, bool) {

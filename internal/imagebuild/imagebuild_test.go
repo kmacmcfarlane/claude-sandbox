@@ -356,27 +356,55 @@ var _ = Describe("image build lifecycle", func() {
 				"GC Policy rule#3:\n All:            true\n Reserved Space: 83.82GiB\n Max Used Space: " + all + "\n Min Free Space: 167.6GiB\n"
 		}
 
+		// dfSize swaps the Build Cache row's size.
+		dfSize := func(size string) string { return strings.Replace(dfOut, "625.1GB", size, 1) }
+
 		It("CS-IMG-028: warns with the prune command when the cache is at least 80% of the budget", func() {
 			fake.On("docker system df --format {{json .}}", dfOut, nil)
 			fake.On("docker buildx inspect", inspect("41GiB", "669.6GiB"), nil)
 			imagebuild.WarnCacheBudget(o)
-			Expect(errw.String()).To(ContainSubstring("625 GB of a 719 GB budget"))
+			Expect(errw.String()).To(ContainSubstring("625 GB of its 719 GB budget"))
 			Expect(errw.String()).To(ContainSubstring("docker builder prune -af"))
 			Expect(errw.String()).To(ContainSubstring("BuildKit cache"))
+			// The ephemeral budget is healthy here, so nothing claims otherwise.
+			Expect(errw.String()).NotTo(ContainSubstring("caps cache mounts"))
 		})
 
-		It("CS-IMG-028: warns when the cache-mount (ephemeral) budget is below 20GiB", func() {
-			fake.On("docker system df --format {{json .}}", strings.Replace(dfOut, "625.1GB", "10GB", 1), nil)
+		It("CS-IMG-028: reports a small cache-mount cap as its own note, and does not recommend pruning for it", func() {
+			// Docker Desktop's out-of-box 20GB keep-storage resolves to this.
+			fake.On("docker system df --format {{json .}}", dfSize("10GB"), nil)
+			fake.On("docker buildx inspect", inspect("2.764GB", "669.6GiB"), nil)
+			imagebuild.WarnCacheBudget(o)
+			Expect(errw.String()).To(ContainSubstring("caps cache mounts at 3 GB"))
+			Expect(errw.String()).To(ContainSubstring("Pruning does not help"))
+			Expect(errw.String()).To(ContainSubstring("builder.gc policy"))
+			Expect(errw.String()).NotTo(ContainSubstring("docker builder prune -af"))
+			// The total is healthy: it is context, not the complaint.
+			Expect(errw.String()).NotTo(ContainSubstring("of its 719 GB budget"))
+		})
+
+		It("CS-IMG-028: stays silent when usage is well under budget and the cache-mount cap is adequate", func() {
+			// The reported false alarm: 147 GB of 719 GB with an 11.58 GiB
+			// cache-mount cap is a healthy host and must produce no output.
+			fake.On("docker system df --format {{json .}}", dfSize("147GB"), nil)
 			fake.On("docker buildx inspect", inspect("11.58GiB", "669.6GiB"), nil)
 			imagebuild.WarnCacheBudget(o)
-			Expect(errw.String()).To(ContainSubstring("cache-mount budget 12 GB"))
+			Expect(errw.String()).To(BeEmpty())
 		})
 
 		It("CS-IMG-028: stays silent when the cache is comfortably under budget", func() {
-			fake.On("docker system df --format {{json .}}", strings.Replace(dfOut, "625.1GB", "10GB", 1), nil)
+			fake.On("docker system df --format {{json .}}", dfSize("10GB"), nil)
 			fake.On("docker buildx inspect", inspect("41GiB", "300GB"), nil)
 			imagebuild.WarnCacheBudget(o)
 			Expect(errw.String()).To(BeEmpty())
+		})
+
+		It("CS-IMG-028: reports both conditions separately when both hold", func() {
+			fake.On("docker system df --format {{json .}}", dfOut, nil)
+			fake.On("docker buildx inspect", inspect("2.764GB", "669.6GiB"), nil)
+			imagebuild.WarnCacheBudget(o)
+			Expect(errw.String()).To(ContainSubstring("625 GB of its 719 GB budget"))
+			Expect(errw.String()).To(ContainSubstring("caps cache mounts at 3 GB"))
 		})
 
 		It("CS-IMG-028: stays silent when docker system df cannot be parsed", func() {
