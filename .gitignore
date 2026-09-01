@@ -10,15 +10,10 @@ node_modules/
 __pycache__/
 *.pyc
 
-# Consolidated layout: track config + work items, ignore state.
-# (The old whole-dir /.claude-sandbox/ rule made the ! lines dead — git never
-# descends into an ignored directory, so nothing under it was ever tracked.)
-.claude-sandbox/env
-.claude-sandbox/temp/
-.claude-sandbox/ralph/
-.claude-sandbox/investigations/
-.claude-sandbox/reports/
-.claude-sandbox/**/*.dec.*
+# Consolidated layout (foreign-safe default): .claude-sandbox/ is a SIDECAR
+# git repo — work items, investigations, config all live in its own history,
+# so the whole dir stays ignored here.
+/.claude-sandbox/
 
 # Go build cache for the shim-built binary
 /bin/dist/
