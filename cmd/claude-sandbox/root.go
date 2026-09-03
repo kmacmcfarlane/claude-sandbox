@@ -155,6 +155,7 @@ const launchUsage = `Usage:
   claude-sandbox --ralph --limit 5        # run ralph for 5 iterations
   claude-sandbox sessions                 # list running sandbox sessions
   claude-sandbox --attach                 # reattach after losing a terminal
+  claude-sandbox --branch                 # fork a conversation into a new container
   claude-sandbox init                     # bootstrap .claude-sandbox/ (config, env, gitignore)
   claude-sandbox init-ralph               # bootstrap + seed ralph agent scaffolding
   PROJECT_DIR=/other claude-sandbox       # launch claude in /other
@@ -191,6 +192,10 @@ Options:
 
 Multiple sessions (when a session is already running for this project):
   --new                     Launch a new container without prompting
+  --branch                  Fork a conversation into a new container and work on it
+                            in parallel (claude's --resume picker chooses which;
+                            works with or without running sessions). Add claude's
+                            --name "my-name" to set the fork's display name
   --attach[=INSTANCE]       Reattach to a running session (recovers a lost terminal)
   --join[=INSTANCE]         Start another session inside a running container
   --no-session-check        Skip the multi-session prompt and just launch
@@ -226,6 +231,7 @@ type launchFlags struct {
 	// Multi-session bypasses (CS-SESS-028). Each removes a decision, which is
 	// what makes them usable with no terminal attached.
 	NewSession       bool
+	Branch           bool
 	Attach           bool
 	AttachTarget     string
 	Join             bool
@@ -240,6 +246,9 @@ var knownPassthrough = map[string]bool{
 	"--mcp-config": true, "--permission-mode": true, "--append-system-prompt": true,
 	"--system-prompt": true, "--max-turns": true, "--print": true, "--input-format": true,
 	"--model": true, "--fallback-model": true,
+	// -n, the short form of --name, needs no entry: single-dash args are
+	// positionals to the launcher grammar and already pass through (CS-LNCH-002).
+	"--name": true,
 }
 
 // scanLaunchArgs implements the launcher grammar (CS-LNCH-001..005): known
@@ -302,6 +311,9 @@ func scanLaunchArgs(args []string) (*launchFlags, error) {
 			i++
 		case "--new":
 			f.NewSession = true
+			i++
+		case "--branch":
+			f.Branch = true
 			i++
 		case "--no-session-check":
 			f.NoSessionCheck = true
@@ -405,6 +417,30 @@ func resolveProjectDir(getenv func(string) string) (string, error) {
 
 func envTrue(v string) bool { return v == "1" || v == "true" || v == "yes" }
 
+// validateBranch rejects flag combinations that contradict --branch
+// (CS-SESS-042). Branch always means a NEW container forking a conversation,
+// so entering an existing session (attach/join), ralph mode (which owns its
+// own --resume semantics), or a second resume flag for claude are all errors.
+func validateBranch(f *launchFlags) error {
+	if !f.Branch {
+		return nil
+	}
+	switch {
+	case f.Ralph:
+		return exitErr(2, "Error: --branch is not valid with --ralph (ralph has its own --resume)")
+	case f.Attach:
+		return exitErr(2, "Error: --branch conflicts with --attach: branch forks a conversation into a new container")
+	case f.Join:
+		return exitErr(2, "Error: --branch conflicts with --join: branch forks a conversation into a new container")
+	}
+	if len(f.Passthrough) > 0 {
+		if p := f.Passthrough[0]; p == "--resume" || p == "--continue" {
+			return exitErr(2, "Error: --branch already implies a resume (--resume --fork-session); drop %s or use it without --branch", p)
+		}
+	}
+	return nil
+}
+
 func runLaunch(env *Env, args []string) error {
 	f, err := scanLaunchArgs(args)
 	if err != nil {
@@ -422,6 +458,9 @@ func runLaunch(env *Env, args []string) error {
 	}
 	if f.Limit != "" && !f.Ralph {
 		return exitErr(2, "Error: --limit is only valid with --ralph")
+	}
+	if err := validateBranch(f); err != nil {
+		return err
 	}
 	projectDir, err := resolveProjectDir(env.Getenv)
 	if err != nil {
@@ -474,6 +513,15 @@ func runLaunch(env *Env, args []string) error {
 			return nil
 		}
 		// The drift prompt chose a new container instead: fall through and launch.
+	}
+
+	// A branch is an ordinary new container whose claude invocation forks an
+	// existing conversation (CS-SESS-039/040). The flags go ahead of the user's
+	// passthrough; the fingerprint is unaffected because passthrough args are
+	// per-session choices excluded from the config hash (CS-SESS-020).
+	passthrough := f.Passthrough
+	if len(decision.BranchArgs) > 0 {
+		passthrough = append(append([]string{}, decision.BranchArgs...), passthrough...)
 	}
 
 	noUpdate := f.NoUpdateCheck || envTrue(env.Getenv("CLAUDE_SANDBOX_NO_UPDATE_CHECK")) || cfg.DisableUpdateCheck
@@ -555,7 +603,7 @@ func runLaunch(env *Env, args []string) error {
 		HostUID: uid, HostGID: gid, HostUser: uname,
 		Getenv:    env.Getenv,
 		RalphMode: f.Ralph, Limit: f.Limit, SkipPermissions: f.Dangerous,
-		CLIModel: f.Model, Passthrough: f.Passthrough,
+		CLIModel: f.Model, Passthrough: passthrough,
 		CLISSH: f.SSH, CLIGit: f.Git, CLIDockerSocket: f.DockerSocket, CLIAWS: f.AWS,
 		CLIPackageCaches: f.PackageCaches,
 		Cfg:              cfg, EnvFiles: envFiles, ImageName: image,

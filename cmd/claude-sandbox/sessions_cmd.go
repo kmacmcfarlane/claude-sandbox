@@ -146,14 +146,36 @@ const (
 type sessionDecision struct {
 	Action sessionAction
 	Target sessions.Session
+	// BranchArgs are claude flags the launcher prepends to the passthrough so
+	// the new container forks an existing conversation (CS-SESS-039/040).
+	BranchArgs []string
 }
+
+// Branching composes upstream claude flags — the launcher never reads the
+// session transcripts, whose format is internal and version-unstable
+// (CS-LNCH-002). All sessions of a project share the host-mounted transcript
+// store, so the fork works from any container.
+var (
+	// branchNewestArgs forks the newest conversation for this directory —
+	// which is the running session's, since it is actively appending to its
+	// transcript (CS-SESS-039).
+	branchNewestArgs = []string{"--continue", "--fork-session"}
+	// branchPickerArgs shows claude's own resume picker inside the new
+	// container, so choosing which conversation to fork gets id search, titles
+	// and relative times for free (CS-SESS-040).
+	branchPickerArgs = []string{"--resume", "--fork-session"}
+)
 
 // decideSessions discovers running sessions for the project and resolves what
 // to do about them. It runs before any image build, since building an image the
 // user is about to bypass by attaching is wasted work (CS-SESS-015).
 func decideSessions(env *Env, projectDir string, f *launchFlags) (sessionDecision, error) {
 	if f.NoSessionCheck {
-		return sessionDecision{Action: actionNew}, nil
+		d := sessionDecision{Action: actionNew}
+		if f.Branch {
+			d.BranchArgs = branchPickerArgs
+		}
+		return d, nil
 	}
 	found, err := sessions.Discover(env.Runner, projectDir)
 	if err != nil {
@@ -187,6 +209,11 @@ func decideSessions(env *Env, projectDir string, f *launchFlags) (sessionDecisio
 		}
 		return sessionDecision{Action: act, Target: s}, nil
 	}
+	// --branch removes the decision like --new does — the conversation to fork
+	// is chosen by claude's own picker inside the new container (CS-SESS-040/041).
+	if f.Branch {
+		return sessionDecision{Action: actionNew, BranchArgs: branchPickerArgs}, nil
+	}
 	if f.NewSession || len(candidates) == 0 {
 		return sessionDecision{Action: actionNew}, nil
 	}
@@ -197,17 +224,22 @@ func decideSessions(env *Env, projectDir string, f *launchFlags) (sessionDecisio
 	if !env.Prompter.Interactive() {
 		return sessionDecision{}, exitErr(exitDecisionRequired,
 			"Error: %d session(s) already running for this project and no terminal is attached.\n"+
-				"Choose explicitly: --new, --attach[=INSTANCE], --join[=INSTANCE], or --no-session-check.",
+				"Choose explicitly: --new, --branch, --attach[=INSTANCE], --join[=INSTANCE], or --no-session-check.",
 			len(candidates))
 	}
 
 	fmt.Fprintln(env.Err, "  [n] new session in a new container   (isolated; attachable if your terminal drops)")
+	fmt.Fprintln(env.Err, "  [b] branch the newest conversation into a new container   (fork it; both continue independently)")
 	fmt.Fprintln(env.Err, "  [j] new session in an existing container   (dies with that container's primary; not attachable later)")
 	fmt.Fprintln(env.Err, "  [a] attach to an existing session   (shares the terminal if someone is already using it)")
 	fmt.Fprintln(env.Err, "  [q] quit")
-	switch strings.ToLower(strings.TrimSpace(env.Prompter.Ask("", "Choice [n/j/a/q]:", promptTimeout))) {
+	switch strings.ToLower(strings.TrimSpace(env.Prompter.Ask("", "Choice [n/b/j/a/q]:", promptTimeout))) {
 	case "n", "new":
 		return sessionDecision{Action: actionNew}, nil
+	case "b", "branch":
+		// The newest conversation for this directory is the running session's;
+		// to branch a different one, use --branch for claude's picker instead.
+		return sessionDecision{Action: actionNew, BranchArgs: branchNewestArgs}, nil
 	case "j", "join":
 		s, serr := selectInstance(env, candidates, "join")
 		return sessionDecision{Action: actionJoin, Target: s}, serr

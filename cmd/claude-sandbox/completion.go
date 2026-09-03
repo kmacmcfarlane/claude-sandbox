@@ -145,6 +145,7 @@ var launchFlagSpecs = []launchFlagSpec{
 	{Name: "--package-caches", Desc: "Keep go/npm/pip downloads in ~/.cache/claude-sandbox on the host"},
 	{Name: "--host-access-package-caches-enabled"},
 	{Name: "--new", Desc: "Launch a new container without prompting"},
+	{Name: "--branch", Desc: "Fork a conversation into a new container (claude's --resume picker chooses which; add --name to name the fork)"},
 	// --attach/--join take an OPTIONAL instance noun, and only in the "=" form:
 	// "--attach otter" would be ambiguous with a passthrough positional. So they
 	// are valueNone here, and instanceFlags drives completion of the "=" form.

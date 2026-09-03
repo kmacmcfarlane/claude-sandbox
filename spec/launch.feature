@@ -22,7 +22,9 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     # Pass-through allowlist: --resume --continue --verbose --output-format
     # --allowedTools --disallowTools --permission-prompt-tool --mcp-config
     # --permission-mode --append-system-prompt --system-prompt --max-turns
-    # --print --input-format --model --fallback-model
+    # --print --input-format --model --fallback-model --name
+    # (-n, the short form of --name, needs no allowlisting: single-dash args
+    # are positionals to the launcher grammar and already pass through)
     #
     # --continue is the supported "resume the newest session for this directory"
     # path, and the launcher deliberately adds no flag of its own for it: a
@@ -30,6 +32,9 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     # the only way to implement one independently is to read the session
     # transcripts, a format upstream documents as internal and version-unstable.
     # See .claude-sandbox/investigations/resume-last-flag/.
+    # --branch (CS-SESS-039..043) is not that wrapper: it COMPOSES the upstream
+    # --resume/--continue with --fork-session and the multi-session decision,
+    # renaming nothing and still never reading transcripts.
 
   Scenario: CS-LNCH-003 "--" ends launcher parsing
     When "claude-sandbox -- --whatever" is run

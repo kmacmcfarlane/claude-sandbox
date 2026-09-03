@@ -104,13 +104,14 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
     Given a session is already running for this project
     Then sessions are discovered before any base or child image build runs
 
-  Scenario: CS-SESS-016 Tier-1 prompt offers new/join/attach/quit
+  Scenario: CS-SESS-016 Tier-1 prompt offers new/branch/join/attach/quit
     Given 2 sessions are running for this project
     And a terminal is attached
     Then the running sessions are printed with instance, uptime, and session count
     And the choices offered are:
       | key | action                                     |
       | n   | new session in a new container             |
+      | b   | new container forking the newest conversation |
       | j   | new session in an existing container       |
       | a   | attach to an existing session              |
       | q   | quit                                       |
@@ -127,6 +128,71 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
     Given 2 or more sessions are running
     When join or attach is chosen
     Then a second prompt selects the instance by noun
+
+  # ---- branching a conversation ----
+  # A "branch" is an ordinary NEW container whose claude invocation forks an
+  # existing conversation (claude's own --fork-session). Every session of a
+  # project shares the host-mounted transcript store, so the fork mechanism is
+  # entirely upstream's: the launcher composes upstream flags and never reads
+  # the transcript files, whose format is documented as internal and
+  # version-unstable (see CS-LNCH-002). This is why --branch is not the
+  # wrapper flag CS-LNCH-002 declines to add: it composes --resume/--continue
+  # with --fork-session and the session decision, renaming nothing.
+
+  Scenario: CS-SESS-039 Tier-1 [b] branches the newest conversation
+    Given a session is running for this project
+    And a terminal is attached
+    When branch is chosen at the tier-1 prompt
+    Then a new container launches through the normal pipeline
+    And its claude command carries "--continue --fork-session" before any
+      passthrough arguments
+    # --continue resolves to the newest conversation for this directory, which
+    # is the running session's (it is actively appending to its transcript);
+    # --fork-session gives the copy a new session id so both continue
+    # independently. The running container is not touched.
+    And the running sessions and container are unaffected
+
+  Scenario: CS-SESS-040 --branch launches a new container with claude's session picker
+    # "Which conversation?" is claude's own --resume menu, shown inside the new
+    # container. Reusing it keeps the launcher out of the transcript format and
+    # gives id search, titles, and relative times for free.
+    When "claude-sandbox --branch" is run
+    Then no session prompt is shown, whether or not sessions are running
+    And a new container launches through the normal pipeline
+    And its claude command carries "--resume --fork-session" before any
+      passthrough arguments
+    And running sessions are not required — a past conversation can be branched
+
+  Scenario: CS-SESS-041 --branch is a bypass flag but the picker still needs a terminal
+    Given a session is running for this project
+    And no terminal is attached
+    When "claude-sandbox --branch" is run
+    Then the command does not exit 3 — the session decision is removed
+    # The claude picker inside the container is interactive, but that failure
+    # mode belongs to claude/docker -it, exactly as with any other launch.
+
+  Scenario Outline: CS-SESS-042 --branch rejects contradictory flags
+    When "claude-sandbox --branch <flag>" is run
+    Then it exits 2 naming the conflict
+    Examples:
+      | flag       | why                                                    |
+      | --ralph    | ralph owns its own --resume semantics (first iteration) |
+      | --attach   | attach enters an existing session; branch forks one    |
+      | --join     | join enters an existing container; branch forks one    |
+      | --resume   | --branch already implies a resume; passing both would   |
+      | --continue | hand claude the flag twice                              |
+
+  Scenario: CS-SESS-043 Naming the fork composes with claude's own --name
+    # There is deliberately NO --branch=NAME form: on --attach=/--join= the "="
+    # value picks a target, and a value that instead named the result would
+    # make the same syntax mean two things. Callers use the flag claude itself
+    # uses — upstream's -n/--name sets the session display name (resume picker,
+    # terminal title), and it is allowlisted passthrough (CS-LNCH-002).
+    When "claude-sandbox --branch --name sidequest" is run
+    Then the claude command carries "--resume --fork-session --name sidequest"
+    And "claude-sandbox --name sidequest" alone names any new session at launch
+    And "claude-sandbox --branch=sidequest" is rejected as an unknown flag
+    And the tier-1 [b] choice takes no name — /rename covers that path
 
   Scenario: CS-SESS-019 A terminal is required to decide, never defaulted
     # The pre-existing hard failure on a name collision was useful signal. It is
@@ -242,6 +308,7 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
     Examples:
       | flag                  | effect                                          |
       | --new                 | always launches a new container                 |
+      | --branch              | new container forking a chosen conversation     |
       | --attach=<noun>       | attaches to that instance                       |
       | --join=<noun>         | joins that container                            |
       | --no-session-check    | skips the decision and launches                 |

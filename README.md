@@ -62,6 +62,9 @@ claude-sandbox sessions
 # Reattach after your terminal died:
 claude-sandbox --attach
 
+# Fork a conversation into a new container, to chase a side idea in parallel:
+claude-sandbox --branch
+
 # Bootstrap .claude-sandbox/ in a repo (config, env, gitignore):
 claude-sandbox init
 
@@ -93,6 +96,7 @@ These flags are consumed by the launcher and control the container environment. 
 | `--ralph` | | Launch the ralph loop runner instead of interactive claude |
 | `--limit N` | | Stop ralph after N iterations (only valid with `--ralph`) |
 | `--new` | | Launch a new container without prompting, even if sessions are running |
+| `--branch` | | Fork a conversation into a new container (claude's `--resume` picker chooses which); add claude's `--name "my-name"` to name the fork |
 | `--attach[=INSTANCE]` | | Reattach to a running session instead of launching |
 | `--join[=INSTANCE]` | | Start another session inside a running container |
 | `--no-session-check` | | Skip the multi-session prompt and just launch |
@@ -131,7 +135,8 @@ background, `--print` and Agent-SDK sessions.
 One caveat on a project you run several sessions in at once: `--continue` resolves to the
 same newest transcript in every container, so two sessions started that way share one
 conversation file. Add claude's `--fork-session` to branch a resumed conversation into a new
-session id instead.
+session id instead — or use `claude-sandbox --branch`, which composes exactly that (see
+[Branching a conversation](#branching-a-conversation)).
 
 Resumed sessions keep their scratchpad: the launcher roots Claude Code's
 session scratchpad inside the mounted config directory (`CLAUDE_CODE_TMPDIR`),
@@ -167,13 +172,14 @@ Each session gets a short **instance noun** (`otter`, `heron`) so it can be name
 
 ### Launching when a session already exists
 
-Launching in a project that already has a session offers four choices:
+Launching in a project that already has a session offers five choices:
 
 ```
 Found 1 running session(s) for this project:
   otter      up 2h14m      1 session(s)
 
   [n] new session in a new container   (isolated; attachable if your terminal drops)
+  [b] branch the newest conversation into a new container   (fork it; both continue independently)
   [j] new session in an existing container   (dies with that container's primary; not attachable later)
   [a] attach to an existing session   (shares the terminal if someone is already using it)
   [q] quit
@@ -181,13 +187,29 @@ Found 1 running session(s) for this project:
 
 **Which to pick:**
 
-| | New container (`n`) | Join a container (`j`) | Attach (`a`) |
-|---|---|---|---|
-| Survives losing your terminal | yes — reattach with `--attach` | **no**, gone for good | n/a (this *is* the recovery path) |
-| Dies when another session exits | no | **yes** — the container is `--rm` | n/a |
-| Cost | a second container, its own memory limit | almost nothing | nothing |
+| | New container (`n`) | Branch (`b`) | Join a container (`j`) | Attach (`a`) |
+|---|---|---|---|---|
+| Conversation | fresh | a **fork** of the newest one | fresh | the running one |
+| Survives losing your terminal | yes — reattach with `--attach` | yes — reattach with `--attach` | **no**, gone for good | n/a (this *is* the recovery path) |
+| Dies when another session exits | no | no | **yes** — the container is `--rm` | n/a |
+| Cost | a second container, its own memory limit | a second container, its own memory limit | almost nothing | nothing |
 
-If your terminal died and you want your session back, that is **`[a]` attach**. Use `[j]` only for a genuinely disposable second session, and remember it cannot be recovered.
+If your terminal died and you want your session back, that is **`[a]` attach**. Use **`[b]` branch** to explore a side idea with the running session's full context — the fork gets its own session id, so both conversations continue independently. Use `[j]` only for a genuinely disposable second session, and remember it cannot be recovered.
+
+### Branching a conversation
+
+A branch is an ordinary new container whose claude invocation forks an existing conversation, so a side idea can run in parallel with the session it grew out of. Every session of a project shares the host-mounted transcript store, which is what makes the fork work from any container.
+
+```bash
+claude-sandbox --branch                             # pick any past or running conversation to fork
+claude-sandbox --branch --name "something sidequest"  # same, and name the fork up front
+```
+
+`--branch` launches a new container running `claude --resume --fork-session`: claude's own session picker chooses the conversation, and `--fork-session` gives the copy a new session id. It works whether or not anything is currently running, so an old conversation can be branched too. The `[b]` prompt choice is the shorthand for the common case — it forks the **newest** conversation for the directory (via `--continue --fork-session`), which is the running session's, since that session is actively appending to its transcript. To branch a specific older one, use `--branch` and pick from the menu.
+
+To name the fork up front instead of `/rename`-ing afterwards, add claude's own `--name` (short form `-n`) — it passes through like any claude flag and sets the display name shown in the resume picker and terminal title. It composes with `--branch` or stands alone to name any new session at launch: `claude-sandbox --name "big refactor"`. (There is deliberately no `--branch=NAME` form: on `--attach=`/`--join=` the `=` value picks a *target*, and a value that instead named the result would make the same syntax mean two things.)
+
+The launcher composes claude's own `--resume`/`--continue`/`--fork-session` and never reads the transcript files (their format is internal to Claude Code and version-unstable). Because branch always means a *new* container, `--branch` rejects `--attach`, `--join`, `--ralph`, and a passthrough `--resume`/`--continue`.
 
 ### Detaching
 
@@ -213,6 +235,8 @@ When a decision is required and no terminal is attached, the command prints what
 
 ```bash
 claude-sandbox --new             # always a new container
+claude-sandbox --branch          # new container forking a conversation (claude's picker chooses)
+claude-sandbox --branch --name sidequest  # same, naming the fork
 claude-sandbox --attach=otter    # a specific session
 claude-sandbox --join=heron      # another session inside a specific container
 claude-sandbox --no-session-check  # skip the prompt and launch

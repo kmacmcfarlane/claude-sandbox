@@ -447,6 +447,88 @@ var _ = Describe("sessions (CS-SESS)", func() {
 			Expect(f.execLine()).To(ContainSubstring("docker run"))
 		})
 	})
+
+	Describe("branching a conversation (CS-SESS-039..042)", func() {
+		It("CS-SESS-016, CS-SESS-039: [b] launches a new container forking the newest conversation", func() {
+			running(psRow("cs-a", "Up 1 hour", f.proj, "otter"))
+			tty("b")
+			Expect(f.run()).To(Equal(0))
+			line := f.execLine()
+			Expect(line).To(ContainSubstring("docker run"))
+			Expect(line).To(HaveSuffix(" claude --continue --fork-session"))
+			// A fresh container with its own instance noun; the running one is untouched.
+			Expect(line).NotTo(ContainSubstring("-otter claude-sandbox"))
+		})
+
+		It("CS-SESS-039: [b] puts the fork flags before the user's passthrough", func() {
+			running(psRow("cs-a", "Up 1 hour", f.proj, "otter"))
+			tty("b")
+			Expect(f.run("--verbose")).To(Equal(0))
+			Expect(f.execLine()).To(HaveSuffix(" claude --continue --fork-session --verbose"))
+		})
+
+		It("CS-SESS-040, CS-SESS-041: --branch bypasses the session prompt and uses claude's picker", func() {
+			running(psRow("cs-a", "Up 1 hour", f.proj, "otter"))
+			// No terminal: reaching docker run proves the decision was removed
+			// rather than exiting 3 (CS-SESS-028/041).
+			f.env.Prompter = &prompt.Scripted{IsTTY: false}
+			Expect(f.run("--branch")).To(Equal(0))
+			line := f.execLine()
+			Expect(line).To(ContainSubstring("docker run"))
+			Expect(line).To(HaveSuffix(" claude --resume --fork-session"))
+			Expect(f.errw.String()).NotTo(ContainSubstring("Choice ["))
+		})
+
+		It("CS-SESS-040: --branch needs no running session — a past conversation can be branched", func() {
+			running()
+			Expect(f.run("--branch")).To(Equal(0))
+			Expect(f.execLine()).To(HaveSuffix(" claude --resume --fork-session"))
+		})
+
+		It("CS-SESS-040: --branch keeps the fork flags ahead of passthrough args", func() {
+			running()
+			Expect(f.run("--branch", "--verbose")).To(Equal(0))
+			Expect(f.execLine()).To(HaveSuffix(" claude --resume --fork-session --verbose"))
+		})
+
+		It("CS-SESS-040: --branch with --no-session-check still forks", func() {
+			running()
+			Expect(f.run("--branch", "--no-session-check")).To(Equal(0))
+			Expect(f.execLine()).To(HaveSuffix(" claude --resume --fork-session"))
+		})
+
+		DescribeTable("CS-SESS-042: contradictory flags are rejected",
+			func(flag string) {
+				Expect(f.run("--branch", flag)).To(Equal(2))
+				Expect(f.errw.String()).To(ContainSubstring("--branch"))
+				Expect(f.fake.Execed).To(BeNil())
+			},
+			Entry("--ralph", "--ralph"),
+			Entry("--attach", "--attach"),
+			Entry("--join", "--join"),
+			Entry("--resume", "--resume"),
+			Entry("--continue", "--continue"),
+		)
+
+		It("CS-SESS-043: --branch composes with claude's own --name to name the fork", func() {
+			running()
+			Expect(f.run("--branch", "--name", "sidequest")).To(Equal(0))
+			Expect(f.execLine()).To(HaveSuffix(" claude --resume --fork-session --name sidequest"))
+		})
+
+		It("CS-SESS-043, CS-LNCH-002: --name alone passes through to name any new session", func() {
+			running()
+			Expect(f.run("--name", "something sidequest")).To(Equal(0))
+			Expect(f.fake.Execed.Args).To(ContainElement("something sidequest"), "the name stays one argument")
+			Expect(f.execLine()).To(HaveSuffix(" claude --name something sidequest"))
+		})
+
+		It("CS-SESS-043: there is no --branch=NAME form — the '=' value would name the result while --attach=/--join= pick a target", func() {
+			Expect(f.run("--branch=sidequest")).To(Equal(2))
+			Expect(f.errw.String()).To(ContainSubstring("unknown flag"))
+			Expect(f.fake.Execed).To(BeNil())
+		})
+	})
 })
 
 // currentHash returns the config hash the fixture's launch would produce, so a
