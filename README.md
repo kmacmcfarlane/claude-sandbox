@@ -761,7 +761,7 @@ Four images take part in a launch, and the container runs the last of them:
 
 | Image | Built from | Rebuilds when |
 |---|---|---|
-| `claude-sandbox` | `Dockerfile` — OS, toolchains, Docker CLI, Python venv, sandbox binary. **No Claude Code.** | `Dockerfile` or a baked source (`cmd/`, `internal/`, `go.mod`/`go.sum`, `assets.go`, `logstream/`, `entrypoint.sh`, `PROMPT_RALPH.md`, `mcp/`) is newer than the image |
+| `claude-sandbox` | `Dockerfile` — OS, toolchains, Docker CLI, Python venv, sandbox binary. **No Claude Code.** | `Dockerfile` or a baked source (`cmd/`, `internal/`, `go.mod`/`go.sum`, `assets.go`, `logstream/`, `entrypoint.sh`, `PROMPT_RALPH.md`, `mcp/`; `_test.go` files excluded) is newer than the image |
 | `claude-sandbox-cli` | `Dockerfile.cli` — installs Claude Code, pinned to a version | `Dockerfile.cli` is newer, or you accept a Claude Code update |
 | `claude-sandbox-df-…` | your child `.claude-sandbox/Dockerfile`, `FROM claude-sandbox` | the child Dockerfile is newer, or the base was rebuilt |
 | `<base-or-child>:run` | a generated one-layer "cap": `FROM <base-or-child>` + `COPY --link` of the CLI from `claude-sandbox-cli` | either parent is newer than the cap |

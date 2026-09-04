@@ -461,6 +461,15 @@ var _ = Describe("image build lifecycle", func() {
 			Expect(rebuilt).To(BeTrue())
 			Expect(out.String()).To(ContainSubstring("Baked sources changed"))
 		})
+
+		It("CS-IMG-031: does not rebuild when only a Go test file is newer", func() {
+			images["claude-sandbox"] = &imgState{created: imgT}
+			touchAt(filepath.Join(repo, "internal", "foo", "foo_test.go"), time.Now())
+			rebuilt, err := imagebuild.EnsureBase(o)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rebuilt).To(BeFalse())
+			Expect(buildLines(fake)).To(BeEmpty())
+		})
 	})
 
 	Describe("Version", func() {

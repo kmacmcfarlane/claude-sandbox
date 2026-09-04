@@ -760,6 +760,11 @@ func anyNewer(root string, rels []string, t time.Time) bool {
 			if err != nil || newer || d.IsDir() {
 				return nil
 			}
+			// Tests are not compiled into the binary, so a test-only edit
+			// cannot change the image (CS-IMG-031).
+			if strings.HasSuffix(d.Name(), "_test.go") {
+				return nil
+			}
 			if info, ierr := d.Info(); ierr == nil && info.ModTime().After(t) {
 				newer = true
 			}

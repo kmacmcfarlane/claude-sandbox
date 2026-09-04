@@ -38,6 +38,13 @@ Feature: Image build lifecycle (CS-IMG)
     # go.mod/go.sum), logstream/, entrypoint.sh, PROMPT_RALPH.md, mcp/.
     # (bash version: bin/, logstream/, entrypoint.sh, PROMPT_RALPH.md, mcp/)
 
+  Scenario: CS-IMG-031 Go test files are not baked sources
+    Given the only file under the baked source set with mtime after the image creation time ends in _test.go
+    Then the base is not rebuilt
+    # Tests are not compiled into the binary, so a test-only edit cannot change
+    # the image — and a base rebuild is expensive, because it invalidates every
+    # child image built FROM it.
+
   Scenario: CS-IMG-005 Version stamp
     Then the build arg CLAUDE_SANDBOX_VERSION carries "git describe --tags --always --dirty"
       of the repo checkout, or "unknown" outside a git repo
