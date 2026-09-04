@@ -92,6 +92,9 @@ type Config struct {
 	Model              string     `yaml:"model"`
 	MemoryLimit        string     `yaml:"memoryLimit"`
 	DisableUpdateCheck bool       `yaml:"disableUpdateCheck"`
+	// Dangerous passes --dangerously-skip-permissions to claude/ralph, like
+	// the --dangerous flag or CLAUDE_SANDBOX_DANGEROUS=1 (CS-LNCH-038).
+	Dangerous bool `yaml:"dangerous"`
 	TrackInHost        *bool      `yaml:"trackInHost"`
 	BaseOnly           bool       `yaml:"baseOnly"`
 	DockerfileDir      string     `yaml:"dockerfileDir"`

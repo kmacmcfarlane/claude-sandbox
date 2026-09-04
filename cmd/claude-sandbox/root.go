@@ -205,6 +205,8 @@ Environment variables:
   PROJECT_DIR                             Override the project directory (default: $PWD)
   CLAUDE_CONFIG_DIR                       Override the Claude config directory
   CLAUDE_SANDBOX_BASE_ONLY=1              Skip child Dockerfile detection
+  CLAUDE_SANDBOX_DANGEROUS=1              Skip permission prompts (same as --dangerous;
+                                          also config key 'dangerous: true')
   CLAUDE_SANDBOX_DOCKERFILE_DIR           Override child Dockerfile directory
   CLAUDE_SANDBOX_DOCKERFILE               Override child Dockerfile name
   CLAUDE_SANDBOX_HOST_ACCESS_*_ENABLED    Enable ssh/git/docker-socket/aws/package-caches mounts
@@ -526,6 +528,11 @@ func runLaunch(env *Env, args []string) error {
 
 	noUpdate := f.NoUpdateCheck || envTrue(env.Getenv("CLAUDE_SANDBOX_NO_UPDATE_CHECK")) || cfg.DisableUpdateCheck
 
+	// CS-LNCH-038: dangerous mode is durable via env var or config, not just
+	// the flag. A more-local "dangerous: false" overrides an upstream true
+	// through the ordinary cascade merge before this OR is evaluated.
+	dangerous := f.Dangerous || envTrue(env.Getenv("CLAUDE_SANDBOX_DANGEROUS")) || cfg.Dangerous
+
 	// Images (CS-IMG). Order: base, CLI image, update check (CLI only), child,
 	// cap. A Claude Code update never touches the base or the child.
 	imgOpts := imagebuild.Options{
@@ -602,7 +609,7 @@ func runLaunch(env *Env, args []string) error {
 		ProjectDir: projectDir, Home: home,
 		HostUID: uid, HostGID: gid, HostUser: uname,
 		Getenv:    env.Getenv,
-		RalphMode: f.Ralph, Limit: f.Limit, SkipPermissions: f.Dangerous,
+		RalphMode: f.Ralph, Limit: f.Limit, SkipPermissions: dangerous,
 		CLIModel: f.Model, Passthrough: passthrough,
 		CLISSH: f.SSH, CLIGit: f.Git, CLIDockerSocket: f.DockerSocket, CLIAWS: f.AWS,
 		CLIPackageCaches: f.PackageCaches,

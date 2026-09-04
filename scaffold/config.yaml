@@ -84,6 +84,12 @@
 # Env var CLAUDE_SANDBOX_BASE_ONLY=1 overrides.
 # baseOnly: false
 
+# Skip Claude Code permission prompts — passes --dangerously-skip-permissions
+# to claude (and ralph). Same effect as launching with --dangerous or setting
+# CLAUDE_SANDBOX_DANGEROUS=1. The cascade applies: set `dangerous: false` here
+# to override an upstream config that enables it.
+# dangerous: false
+
 # Disable the Claude Code version check at launch.
 # Also controllable via --no-update-check flag or CLAUDE_SANDBOX_NO_UPDATE_CHECK=1.
 # disableUpdateCheck: false

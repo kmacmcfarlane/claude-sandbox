@@ -107,6 +107,12 @@ These are **positional subcommands** (must be the first argument) and reject lau
 - **YAML** (`.claude-sandbox/config.yaml`): `model: claude-opus-4-8`
 - Forwarded to both `claude` and `ralph` as `--model`
 
+### Skipping Permission Prompts (Dangerous Mode)
+Any of the three enables it (passes `--dangerously-skip-permissions` to claude/ralph):
+- **CLI flag**: `--dangerous`
+- **Env var**: `CLAUDE_SANDBOX_DANGEROUS=1`
+- **YAML** (`.claude-sandbox/config.yaml`): `dangerous: true` — cascades, so a more-local `dangerous: false` overrides an upstream `true`
+
 ### Updating Claude Code
 On launch, the sandbox checks whether a newer Claude Code version is available on npm and prompts to rebuild (the prompt defaults to *no* and times out quickly).
 

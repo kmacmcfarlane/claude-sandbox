@@ -268,6 +268,34 @@ var _ = Describe("launcher CLI (end-to-end argv)", func() {
 		})
 	})
 
+	Describe("dangerous mode from config or environment (CS-LNCH-038)", func() {
+		It("CS-LNCH-038: config dangerous: true adds --dangerously-skip-permissions", func() {
+			writeFile(filepath.Join(f.proj, ".claude-sandbox", "config.yaml"), "dangerous: true\n")
+			Expect(f.run()).To(Equal(0))
+			Expect(f.execLine()).To(HaveSuffix(" claude-sandbox:run claude --dangerously-skip-permissions"))
+		})
+
+		It("CS-LNCH-038: CLAUDE_SANDBOX_DANGEROUS=1 adds --dangerously-skip-permissions", func() {
+			f.envmap["CLAUDE_SANDBOX_DANGEROUS"] = "1"
+			Expect(f.run()).To(Equal(0))
+			Expect(f.execLine()).To(HaveSuffix(" claude-sandbox:run claude --dangerously-skip-permissions"))
+		})
+
+		It("CS-LNCH-038: ralph mode forwards the config-enabled flag the same way", func() {
+			writeFile(filepath.Join(f.proj, ".claude-sandbox", "config.yaml"), "dangerous: true\n")
+			Expect(f.run("--ralph")).To(Equal(0))
+			Expect(f.execLine()).To(HaveSuffix(
+				" claude-sandbox:run /opt/claude-sandbox/bin/ralph --dangerously-skip-permissions"))
+		})
+
+		It("CS-LNCH-038: a more-local dangerous: false overrides an upstream true", func() {
+			writeFile(filepath.Join(filepath.Dir(f.proj), ".claude-sandbox", "config.yaml"), "dangerous: true\n")
+			writeFile(filepath.Join(f.proj, ".claude-sandbox", "config.yaml"), "dangerous: false\n")
+			Expect(f.run()).To(Equal(0))
+			Expect(f.execLine()).NotTo(ContainSubstring("--dangerously-skip-permissions"))
+		})
+	})
+
 	It("CS-IMG-012: the env var Dockerfile override wins over the config key", func() {
 		dirA := filepath.Join(f.proj, "docker-a")
 		dirB := filepath.Join(f.proj, "docker-b")

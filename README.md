@@ -89,7 +89,7 @@ These flags are consumed by the launcher and control the container environment. 
 | `--host-access-ssh-enabled` | `--ssh` | Mount `~/.ssh/` read-only |
 | `--host-access-package-caches-enabled` | `--package-caches` | Keep go/npm/pip downloads made inside sessions in `~/.cache/claude-sandbox/` on the host |
 | `--model MODEL` | | Model to use (alias like `opus` or full ID like `claude-opus-4-8`) |
-| `--dangerous` | | Pass `--dangerously-skip-permissions` to claude/ralph |
+| `--dangerous` | | Pass `--dangerously-skip-permissions` to claude/ralph (durable alternatives: `dangerous: true` in config.yaml, or `CLAUDE_SANDBOX_DANGEROUS=1`) |
 | `--rebuild` | | Force rebuild of every image — base, Claude Code, child, run (uses `--no-cache`) |
 | `--update` | | Auto-accept the Claude Code update prompt (rebuilds only the CLI image) |
 | `--no-update-check` | | Skip Claude Code version check at launch |
@@ -458,7 +458,6 @@ Set in `.claude-sandbox/config.yaml`. Controls how the directory is version-cont
 ```
 
 The `env` file is gitignored in both modes. Project-level `.claude/` (Claude Code
-agents/settings) is not moved — it stays at the project root by convention.
 
 ### `.claude-sandbox/env`
 
@@ -494,6 +493,14 @@ Override the model used by claude (and ralph). Accepts an alias or full model ID
 
 ```yaml
 model: claude-opus-4-8
+```
+
+#### Dangerous mode
+
+Skip Claude Code permission prompts on every launch — passes `--dangerously-skip-permissions` to claude (and ralph), the same as the `--dangerous` flag or `CLAUDE_SANDBOX_DANGEROUS=1`. Any of the three enables it; the cascade lets a more-local `dangerous: false` override an upstream config that turns it on.
+
+```yaml
+dangerous: true
 ```
 
 #### Host access
@@ -643,6 +650,7 @@ If no `.claude-sandbox/Dockerfile` is found anywhere up to `/`, the launcher war
 | `CLAUDE_SANDBOX_HOST_ACCESS_PACKAGE_CACHES_ENABLED` | (unset) | Keep session package downloads in `~/.cache/claude-sandbox/` (equivalent to `--package-caches`) |
 | `CLAUDE_SANDBOX_DOCKERFILE_DIR` | `$PROJECT_DIR` | Directory containing the child Dockerfile |
 | `CLAUDE_SANDBOX_DOCKERFILE` | `Dockerfile` | Filename of the child Dockerfile |
+| `CLAUDE_SANDBOX_DANGEROUS` | (unset) | Set to `1` or `true` to skip permission prompts (equivalent to `--dangerous`) |
 | `CLAUDE_SANDBOX_BASE_ONLY` | (unset) | Set to `1` or `true` to skip child Dockerfile and use base image only |
 | `CLAUDE_SANDBOX_NO_UPDATE_CHECK` | (unset) | Set to `1` or `true` to skip Claude Code version check at launch |
 

@@ -200,6 +200,22 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     Given only YAML sets model
     Then it includes "--model opus"
 
+  Scenario: CS-LNCH-038 Dangerous mode from config or environment
+    # --dangerous can be made durable: any of the CLI flag,
+    # CLAUDE_SANDBOX_DANGEROUS=1, or "dangerous: true" in the merged cascade
+    # config enables it — the same OR shape as the update-check skip
+    # (CS-IMG-007). A falsy env value falls through to YAML rather than
+    # overriding it (matching resolveFlag semantics, CS-LNCH-014); to disable
+    # an upstream "dangerous: true", a more-local config sets
+    # "dangerous: false" via the ordinary cascade merge (CS-CASC).
+    Given config sets "dangerous: true"
+    Then the container command includes --dangerously-skip-permissions
+    Given only CLAUDE_SANDBOX_DANGEROUS=1 is set
+    Then the container command includes --dangerously-skip-permissions
+    And ralph mode forwards the flag the same way
+    Given an upstream config sets "dangerous: true" and the project config sets "dangerous: false"
+    Then the container command omits --dangerously-skip-permissions
+
   Scenario: CS-LNCH-024 Cascade report printed at startup
     Given ancestor .claude-sandbox/ levels contribute config.yaml, env, or Dockerfile
     Then stdout lists each level root-first with its contributing files
