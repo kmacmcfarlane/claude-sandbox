@@ -68,6 +68,10 @@ type Loop struct {
 	StderrFile string
 	MarkerFile string
 	LockFile   string
+
+	// ReserveClass replaces the pid-class burn before each iteration's claude
+	// (CS-PID-006); nil means the real one.
+	ReserveClass func()
 }
 
 func (o *Options) withDefaults() error {

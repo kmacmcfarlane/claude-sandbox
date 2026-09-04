@@ -1,6 +1,7 @@
 package sessions_test
 
 import (
+	"strconv"
 	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -15,7 +16,7 @@ const sep = "\x1f"
 
 // row builds one docker ps --format line.
 func row(name, status, project, mode, instance, version, model, hash, inputs string) string {
-	return strings.Join([]string{name, status, project, mode, instance, version, model, hash, inputs}, sep)
+	return strings.Join([]string{name, status, project, mode, instance, version, model, hash, inputs, ""}, sep)
 }
 
 var _ = Describe("session discovery", func() {
@@ -192,5 +193,43 @@ var _ = Describe("instance nouns (CS-SESS-007..009)", func() {
 	It("ignores whitespace when comparing in-use nouns", func() {
 		got := sessions.PickNoun([]string{" " + sessions.Nouns[0] + " "}, func(int) int { return 0 })
 		Expect(got).NotTo(Equal(sessions.Nouns[0]))
+	})
+})
+
+var _ = Describe("pid classes (CS-PID-004)", func() {
+	It("CS-PID-004: reads the pidclass label as the tenth ps field", func() {
+		fake := &execx.Fake{}
+		fake.On("docker ps", strings.Join([]string{"cs-a", "Up", "/p", "claude", "otter", "v1", "", "", "", "42"}, sep)+"\n", nil)
+		fake.On("docker top", "PID COMMAND\n1 claude\n", nil)
+		all, err := sessions.DiscoverAll(fake)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(all).To(HaveLen(1))
+		Expect(all[0].PIDClass).To(Equal("42"))
+		Expect(sessions.Classes(all)).To(Equal([]string{"42"}))
+		// A container from a launcher that predates classes has none.
+		Expect(sessions.Classes([]sessions.Session{{Name: "old"}})).To(BeEmpty())
+	})
+
+	It("CS-PID-004: samples a class without replacement across the host", func() {
+		first := sessions.PickClass(nil, func(int) int { return 0 })
+		Expect(first).To(Equal(0))
+		second := sessions.PickClass([]string{"0"}, func(int) int { return 0 })
+		Expect(second).To(Equal(1))
+		inUse := make([]string, 0, 255)
+		for k := 0; k < 255; k++ {
+			inUse = append(inUse, strconv.Itoa(k))
+		}
+		Expect(sessions.PickClass(inUse, func(int) int { return 0 })).To(Equal(255))
+		Expect(sessions.PickClass(inUse, func(int) int { return 9999 })).To(Equal(255))
+	})
+
+	It("CS-PID-004: when every class is taken any class is returned rather than blocking", func() {
+		inUse := make([]string, 0, 256)
+		for k := 0; k < 256; k++ {
+			inUse = append(inUse, strconv.Itoa(k))
+		}
+		got := sessions.PickClass(inUse, func(int) int { return 7 })
+		Expect(got).To(Equal(7))
+		Expect(sessions.PickClass(nil, nil)).To(SatisfyAll(BeNumerically(">=", 0), BeNumerically("<", 256)))
 	})
 })

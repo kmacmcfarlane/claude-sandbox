@@ -7,6 +7,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"time"
 
@@ -412,6 +413,19 @@ func newInstance(env *Env, projectDir string, f *launchFlags) string {
 	return sessions.PickNoun(sessions.Instances(found), nil)
 }
 
+// newPIDClass picks the pid class for a container about to be launched
+// (CS-PID-004, CS-LNCH-039). Unlike the noun it is chosen against every
+// sandbox on the host, not just this project's: the peer registry in
+// ~/.claude is shared by all of them. Ralph gets one too.
+func newPIDClass(env *Env) string {
+	found, err := sessions.DiscoverAll(env.Runner)
+	if err != nil {
+		// Same rule as nouns: discovery failing must not block a launch.
+		return strconv.Itoa(sessions.PickClass(nil, nil))
+	}
+	return strconv.Itoa(sessions.PickClass(sessions.Classes(found), nil))
+}
+
 // attachTo hands the process over to `docker attach` (CS-SESS-031).
 func attachTo(env *Env, s sessions.Session, configuredKeys string) error {
 	detachKeys := launch.ResolveDetachKeys(configuredKeys)
@@ -440,7 +454,10 @@ func joinInto(env *Env, s sessions.Session, projectDir, hostUser, model, configu
 	// USER root. -w is redundant (docker run's -w is inherited via
 	// Config.WorkingDir) but passed so the working directory never depends on
 	// how the container happened to be started.
-	args := []string{"exec", "-it", "--detach-keys=" + detachKeys, "-u", hostUser, "-w", projectDir, s.Name, "claude"}
+	// The helper lands this claude on the container's pid class (CS-SESS-044,
+	// CS-PID-005); CLAUDE_SANDBOX_PID_CLASS is inherited from the container.
+	args := []string{"exec", "-it", "--detach-keys=" + detachKeys, "-u", hostUser, "-w", projectDir, s.Name,
+		"/opt/claude-sandbox/bin/claude-sandbox", "pidslot", "--", "claude"}
 	if f.Dangerous {
 		args = append(args, "--dangerously-skip-permissions")
 	}

@@ -393,3 +393,10 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
   Scenario: CS-SESS-035 Ralph containers carry no instance noun
     Then a ralph container is named "claude-sandbox-<project-slug>-ralph"
     And its claude-sandbox.instance label is absent
+
+  Scenario: CS-SESS-044 Join runs claude through the pid-class helper
+    When join is chosen
+    Then "docker exec ... <container> /opt/claude-sandbox/bin/claude-sandbox pidslot -- claude ..."
+      replaces the current process
+    # See spec/pidslot.feature (CS-PID-005): the joined session inherits the
+    # container's CLAUDE_SANDBOX_PID_CLASS and lands on the same residue class.

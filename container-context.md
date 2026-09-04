@@ -34,6 +34,13 @@ one-time setup (idempotent). Use `setup-lsp-plugins --check` to verify status.
 
 - The project is mounted at its real host path so `docker compose` volume resolution works against the host daemon.
 - Files you create are owned by the host user (UID/GID remapping handled by the entrypoint).
+- **Sibling sandboxes are discoverable by name.** Every sandbox container is its own
+  PID namespace, so the launcher assigns each one a PID class
+  (`CLAUDE_SANDBOX_PID_CLASS`) and the entrypoint lands `claude` on a PID no
+  other sandbox uses; Claude Code's local session registry
+  (`~/.claude/sessions/<pid>.json`) is shared through the mounted config dir, so
+  `/peers` and `SendMessage` reach sessions in other sandboxes without Remote
+  Control. Sessions Claude spawns itself (`--bg`, `/bg`) are not slotted.
 - `/home/claude` is symlinked to the host user's home directory (e.g. `/home/rt`). Both paths work. Build-time files from the Dockerfile are relocated here automatically.
 - **The scratchpad survives the container.** The launcher points
   `CLAUDE_CODE_TMPDIR` inside the host-mounted Claude config directory, so the

@@ -53,7 +53,8 @@ RUN --mount=type=cache,id=claude-sandbox-apt,target=/var/cache/apt,sharing=locke
     python3 \
     python3-dev \
     python3-pip \
-    python3-venv
+    python3-venv \
+    tini
 
 # Python virtual environment for agent tooling (backlog CRUD, etc.)
 ENV VIRTUAL_ENV=/opt/claude-sandbox/venv

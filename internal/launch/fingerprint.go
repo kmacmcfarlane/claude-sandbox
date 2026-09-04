@@ -97,8 +97,8 @@ func (in *Inputs) configFingerprint(p *Plan, ha hostAccess) (string, []InputDige
 	fmt.Fprintf(&env, "uid=%d gid=%d user=%s home=%s\n", in.HostUID, in.HostGID, in.HostUser, in.Home)
 	fmt.Fprintf(&env, "memory=%s\n", p.MemoryLimit)
 
-	// Excluded on purpose: model, passthrough args, --limit, the instance noun
-	// and the container name. Those are per-session choices, not the
+	// Excluded on purpose: model, passthrough args, --limit, the instance noun,
+	// the pid class (CS-LNCH-040) and the container name. Those are per-session choices, not the
 	// environment, and would make every new session look like drift. The model
 	// is reported separately, since attaching cannot change it (CS-SESS-027).
 	h := sha256.New()

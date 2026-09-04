@@ -95,4 +95,9 @@ if [ -n "$DOCKER_SOCKET_GID" ]; then
     usermod -aG "$DOCKER_GROUP" "$TARGET_USER" 2>/dev/null || true
 fi
 
-exec gosu "$TARGET_USER" "$@"
+# Hand off through the pid-class helper (spec/pidslot.feature, CS-PID-007): it
+# advances this namespace's pid counter to the launcher-assigned class and
+# execs tini, whose FORK lands the command on a pid no sibling sandbox shares —
+# so Claude Code's ~/.claude/sessions/<pid>.json records stop colliding.
+# (exec alone keeps this script's pid, which is why the fork matters.)
+exec gosu "$TARGET_USER" /opt/claude-sandbox/bin/claude-sandbox pidslot -- "$@"

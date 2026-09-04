@@ -45,6 +45,11 @@ type Inputs struct {
 	// Version stamps the claude-sandbox.version label.
 	Version string
 
+	// PIDClass is the container's pid class (CS-PID-004), rendered as the
+	// claude-sandbox.pidclass label and CLAUDE_SANDBOX_PID_CLASS. Empty
+	// emits neither. Like Instance it is excluded from the fingerprint.
+	PIDClass string
+
 	// ImageID is the resolved image's docker ID. It feeds the config hash so an
 	// out-of-band rebuild registers as drift (CS-SESS-023).
 	ImageID string
@@ -300,6 +305,13 @@ func Build(in Inputs) (*Plan, error) {
 	)
 	if in.Instance != "" {
 		p.Labels = append(p.Labels, "claude-sandbox.instance="+in.Instance)
+	}
+	// CS-LNCH-039: the pid class rides a label (for allocation) and an env
+	// var (for the in-container helper). EnvFlags are not fingerprinted, and
+	// the label is not either, so a fresh class is never drift (CS-LNCH-040).
+	if in.PIDClass != "" {
+		p.Labels = append(p.Labels, "claude-sandbox.pidclass="+in.PIDClass)
+		p.EnvFlags = append(p.EnvFlags, "CLAUDE_SANDBOX_PID_CLASS="+in.PIDClass)
 	}
 
 	return p, nil

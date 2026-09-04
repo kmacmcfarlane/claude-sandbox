@@ -141,6 +141,16 @@ var _ = Describe("runIterationReal", func() {
 		return l
 	}
 
+	It("CS-PID-006: the pid-class burn runs once, immediately before claude is started", func() {
+		tmp := GinkgoT().TempDir()
+		l := newLoop(tmp)
+		l.ClaudeBin = "/bin/cat"
+		calls := 0
+		l.ReserveClass = func() { calls++ }
+		Expect(l.runIterationReal(1, false)).To(Equal(0))
+		Expect(calls).To(Equal(1))
+	})
+
 	It("CS-RLP-013: interactive mode pipes the assembled prompt to the claude binary's stdin", func() {
 		// /bin/cat stands in for claude: what it prints is what arrived on
 		// stdin. Node logstream stage ordering is covered by the manual

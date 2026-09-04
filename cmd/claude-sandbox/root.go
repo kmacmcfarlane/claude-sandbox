@@ -20,6 +20,7 @@ import (
 	"github.com/kmacmcfarlane/claude-sandbox/internal/launch"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/layout"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/paths"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/pidslot"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/prompt"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/ralphloop"
 )
@@ -31,6 +32,9 @@ type Env struct {
 	Out      io.Writer
 	Err      io.Writer
 	Getenv   func(string) string
+
+	// PidslotOps overrides the pidslot helper's process seams under test.
+	PidslotOps *pidslot.Ops
 }
 
 func defaultEnv() *Env {
@@ -53,7 +57,7 @@ func Main(args []string) int {
 // path so "claude-sandbox --rebuild init" errors instead of routing to init.
 func isSubcommand(a string) bool {
 	switch a {
-	case "init", "init-ralph", "ralph", "help", "completion", "sessions":
+	case "init", "init-ralph", "ralph", "help", "completion", "sessions", "pidslot":
 		return true
 	// CS-COMP-002/003: the hidden commands the generated completion scripts
 	// call on every keystroke. Without these they fall through to runLaunch,
@@ -124,7 +128,7 @@ func newRootCmd(env *Env) *cobra.Command {
 	}
 	ralphCmd := newRalphCmd(env)
 	registerRalphCompletions(ralphCmd)
-	root.AddCommand(newInitCmd(env, false), newInitCmd(env, true), ralphCmd, newSessionsCmd(env))
+	root.AddCommand(newInitCmd(env, false), newInitCmd(env, true), ralphCmd, newSessionsCmd(env), newPidslotCmd(env))
 	// CS-INIT-002: a rejected flag names itself and lists the command's valid
 	// options (inherited by init/init-ralph/ralph).
 	root.SetFlagErrorFunc(func(c *cobra.Command, err error) error {
@@ -616,6 +620,7 @@ func runLaunch(env *Env, args []string) error {
 		Cfg:              cfg, EnvFiles: envFiles, ImageName: image,
 		ImageID:  imagebuild.ImageID(env.Runner, image),
 		Instance: newInstance(env, projectDir, f),
+		PIDClass: newPIDClass(env),
 		Version:  version,
 		Out:      env.Out, Err: env.Err,
 	}

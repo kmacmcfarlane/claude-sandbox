@@ -604,6 +604,31 @@ var _ = Describe("launch.Build", func() {
 		}
 	})
 
+	It("CS-LNCH-039: the pid class rides a label and an env var, for interactive and ralph launches", func() {
+		in.PIDClass = "17"
+		for _, ralph := range []bool{false, true} {
+			in.RalphMode = ralph
+			p := build()
+			Expect(p.Labels).To(ContainElement("claude-sandbox.pidclass=17"))
+			Expect(p.EnvFlags).To(ContainElement("CLAUDE_SANDBOX_PID_CLASS=17"))
+			args := p.DockerArgs(proj)
+			Expect(argPairs(args, "--label")).To(ContainElement("claude-sandbox.pidclass=17"))
+			Expect(argPairs(args, "-e")).To(ContainElement("CLAUDE_SANDBOX_PID_CLASS=17"))
+		}
+		in.PIDClass = ""
+		p := build()
+		Expect(p.Labels).NotTo(ContainElement(HavePrefix("claude-sandbox.pidclass=")))
+		Expect(p.EnvFlags).NotTo(ContainElement(HavePrefix("CLAUDE_SANDBOX_PID_CLASS=")))
+	})
+
+	It("CS-LNCH-040: a different pid class is never drift", func() {
+		in.PIDClass = "1"
+		a := build()
+		in.PIDClass = "200"
+		b := build()
+		Expect(a.ConfigHash).To(Equal(b.ConfigHash))
+	})
+
 	It("CS-LNCH-033: docker run carries the detach keys for the primary session", func() {
 		// Regression: these were originally passed only to `docker attach`, so a
 		// normally-launched session silently ran with docker's ctrl-p,ctrl-q —

@@ -305,3 +305,16 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     And prints "(not built yet)" when the base image does not exist
     And prints the Claude Code version pinned in the CLI image (claude-sandbox-cli),
       or "(not built yet)" when that image does not exist
+
+  Scenario: CS-LNCH-039 Every launch carries a PID class
+    # See spec/pidslot.feature (CS-PID-004). Interactive and ralph launches
+    # alike, and --no-session-check skips the session decision, not the
+    # class lookup — a container without a class would collide again.
+    Then docker run receives "--label claude-sandbox.pidclass=<k>" and "-e CLAUDE_SANDBOX_PID_CLASS=<k>"
+    And <k> is not in use by any running sandbox container on the host
+    And ralph launches receive the same pair
+
+  Scenario: CS-LNCH-040 A PID class is never drift
+    # Like the instance noun, the class is a per-session choice: two launches
+    # of one config get different classes and must hash identically.
+    Then the config-drift fingerprint (CS-SESS-020) does not change when the class changes

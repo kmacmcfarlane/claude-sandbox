@@ -269,6 +269,20 @@ The hash covers the merged config cascade, env file contents, the resolved Docke
 
 Skip the check with `--allow-config-drift`.
 
+### Messaging between sessions
+
+Claude Code's `/peers` (`ListAgents`) and `SendMessage` reach sessions in other sandboxes
+without Remote Control. The local session registry lives in the mounted config directory
+(`~/.claude/sessions/<pid>.json`, plus an inbox socket under `$CLAUDE_CODE_TMPDIR`), so every
+sandbox on the host reads the same one. Records are named after the process id, and each
+sandbox is its own PID namespace in which `claude` would always be PID 7 — so the launcher
+assigns every container a **PID class** (`--label claude-sandbox.pidclass`,
+`CLAUDE_SANDBOX_PID_CLASS`) that no other running sandbox on the host holds, and the
+entrypoint lands `claude` on a pid in that class. Joined sessions and ralph iterations get the
+same treatment. It is always on; if the helper cannot apply the class it warns and starts the
+session anyway. Sessions Claude spawns itself (`claude --bg`, `/bg`) are not slotted. Details:
+[How it works → Session registry and PID classes](#session-registry-and-pid-classes).
+
 ## Bootstrapping a project (`init` / `init-ralph`)
 
 `init` sets up the `.claude-sandbox/` directory in the current project and exits (it does **not** launch a container):
@@ -724,6 +738,22 @@ SSH, git, Docker socket, AWS and package-cache mounts are all opt-in. Enable the
 ### UID/GID mapping
 
 The entrypoint remaps the `claude` user inside the container to match your host UID/GID, so files created or modified by Claude have correct ownership — no root-owned files left behind. It also recursively chowns all non-bind-mounted files under the home directory, so files created as root during `docker build` (in child Dockerfiles) are owned by the runtime user.
+
+### Session registry and PID classes
+
+Claude Code keys its peer registry by pid (`~/.claude/sessions/<pid>.json`; the companion
+`.key` and socket names are already collision-safe). A container's `exec` chain keeps one pid
+(docker-init → `entrypoint.sh` → `claude`), so every sandbox's `claude` was PID 7 and the
+records overwrote each other: only the newest sandbox was discoverable. The fix keeps
+namespaces private. The launcher picks a class `k ∈ [0,256)` not carried by any running
+sandbox's `claude-sandbox.pidclass` label and passes it as `CLAUDE_SANDBOX_PID_CLASS`; the
+entrypoint hands the command to `claude-sandbox pidslot`, which reads
+`/proc/sys/kernel/ns_last_pid` (one `read(2)` — a sysctl file returns EOF at any offset but
+zero), forks throwaway processes until the counter is `k−1 (mod 256)`, then execs
+`tini -s -- claude`. tini's **fork** lands `claude` on a pid `≡ k`. `docker run --init` is
+kept, so docker-init stays PID 1 and reaps orphans; `tini` is installed in the base image.
+The class is a per-session choice like the instance noun and is not part of the config-drift
+fingerprint. Spec: `spec/pidslot.feature`.
 
 ### Image layering
 

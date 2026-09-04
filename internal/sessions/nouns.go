@@ -2,7 +2,10 @@ package sessions
 
 import (
 	"math/rand"
+	"strconv"
 	"strings"
+
+	"github.com/kmacmcfarlane/claude-sandbox/internal/pidslot"
 )
 
 // Instance nouns name a session so it can be referred to by hand — at the
@@ -59,6 +62,33 @@ func PickNoun(inUse []string, chooser func(n int) int) string {
 		// Every noun is in use — implausible in one project, but the name must
 		// still be unique, so fall back to a suffixed one (CS-SESS-008).
 		return suffixed(Nouns, taken, chooser)
+	}
+	return free[clamp(chooser(len(free)), len(free))]
+}
+
+// PickClass returns a pid class in [0, pidslot.Modulus) not present in inUse
+// (CS-PID-004), sampled without replacement exactly like nouns. The chooser is
+// injected for determinism under test; nil means real randomness. When every
+// class is taken — more concurrent sandboxes than classes — any class is
+// returned: a collision is then unavoidable and the launch still proceeds.
+func PickClass(inUse []string, chooser func(n int) int) int {
+	taken := make(map[int]bool, len(inUse))
+	for _, u := range inUse {
+		if k, err := strconv.Atoi(strings.TrimSpace(u)); err == nil {
+			taken[k] = true
+		}
+	}
+	free := make([]int, 0, pidslot.Modulus)
+	for k := 0; k < pidslot.Modulus; k++ {
+		if !taken[k] {
+			free = append(free, k)
+		}
+	}
+	if chooser == nil {
+		chooser = rand.Intn
+	}
+	if len(free) == 0 {
+		return clamp(chooser(pidslot.Modulus), pidslot.Modulus)
 	}
 	return free[clamp(chooser(len(free)), len(free))]
 }

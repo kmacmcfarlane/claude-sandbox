@@ -28,12 +28,12 @@ const psSep = "\x1f"
 
 // psRow builds one line of scripted `docker ps --format` output.
 func psRow(name, status, project, instance string) string {
-	return strings.Join([]string{name, status, project, "claude", instance, "v1", "", "", ""}, psSep)
+	return strings.Join([]string{name, status, project, "claude", instance, "v1", "", "", "", ""}, psSep)
 }
 
 // psRowFull additionally sets the model, config hash and inputs label.
 func psRowFull(name, status, project, instance, model, hash, inputs string) string {
-	return strings.Join([]string{name, status, project, "claude", instance, "v1", model, hash, inputs}, psSep)
+	return strings.Join([]string{name, status, project, "claude", instance, "v1", model, hash, inputs, ""}, psSep)
 }
 
 var _ = Describe("sessions (CS-SESS)", func() {
@@ -164,13 +164,13 @@ var _ = Describe("sessions (CS-SESS)", func() {
 			Expect(f.out.String()).To(ContainSubstring("ctrl-q,ctrl-q"), "the detach sequence is printed")
 		})
 
-		It("CS-SESS-016, CS-SESS-032: [j] joins the container as the host user", func() {
+		It("CS-SESS-016, CS-SESS-032, CS-SESS-044, CS-PID-005: [j] joins the container as the host user, through the pid-class helper", func() {
 			running(psRow("cs-a", "Up 1 hour", f.proj, "otter"))
 			tty("j")
 			Expect(f.run()).To(Equal(0))
 			line := f.execLine()
 			Expect(line).To(ContainSubstring("docker exec -it --detach-keys=ctrl-q,ctrl-q -u "))
-			Expect(line).To(ContainSubstring(" -w " + f.proj + " cs-a claude"))
+			Expect(line).To(ContainSubstring(" -w " + f.proj + " cs-a /opt/claude-sandbox/bin/claude-sandbox pidslot -- claude"))
 			Expect(f.out.String()).To(ContainSubstring("cannot be reattached"))
 		})
 

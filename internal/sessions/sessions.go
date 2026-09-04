@@ -27,6 +27,9 @@ const (
 	LabelModel      = "claude-sandbox.model"
 	LabelConfigHash = "claude-sandbox.confighash"
 	LabelInputs     = "claude-sandbox.inputs"
+	// LabelPIDClass records the container's pid class (CS-PID-004), read back
+	// so later launches allocate without replacement across the host.
+	LabelPIDClass = "claude-sandbox.pidclass"
 )
 
 // ModeRalph marks a ralph loop container.
@@ -43,6 +46,9 @@ type Session struct {
 	Status     string               `json:"status"`
 	ConfigHash string               `json:"configHash,omitempty"`
 	Inputs     []launch.InputDigest `json:"-"`
+	// PIDClass is the container's pid class label, "" for containers started
+	// by a launcher that predates classes.
+	PIDClass string `json:"pidClass,omitempty"`
 
 	// Count is the number of live claude processes, so joined sessions are
 	// visible and not just the container that hosts them.
@@ -64,9 +70,10 @@ var psFormat = strings.Join([]string{
 	`{{.Label "` + LabelModel + `"}}`,
 	`{{.Label "` + LabelConfigHash + `"}}`,
 	`{{.Label "` + LabelInputs + `"}}`,
+	`{{.Label "` + LabelPIDClass + `"}}`,
 }, fieldSep)
 
-const psFieldCount = 9
+const psFieldCount = 10
 
 // Discover lists sessions for one project directory (CS-SESS-001).
 func Discover(r execx.Runner, projectDir string) ([]Session, error) {
@@ -103,7 +110,7 @@ func list(r execx.Runner, filter string) ([]Session, error) {
 		s := Session{
 			Name: f[0], Status: f[1], Project: f[2], Mode: f[3],
 			Instance: f[4], Version: f[5], Model: f[6], ConfigHash: f[7],
-			Inputs: launch.DecodeInputs(f[8]),
+			Inputs: launch.DecodeInputs(f[8]), PIDClass: f[9],
 		}
 		s.Count = countSessions(r, s.Name)
 		out2 = append(out2, s)
@@ -185,6 +192,17 @@ func Instances(all []Session) []string {
 	for _, s := range all {
 		if s.Instance != "" {
 			out = append(out, s.Instance)
+		}
+	}
+	return out
+}
+
+// Classes lists the pid classes in use, for class allocation (CS-PID-004).
+func Classes(all []Session) []string {
+	out := make([]string, 0, len(all))
+	for _, s := range all {
+		if s.PIDClass != "" {
+			out = append(out, s.PIDClass)
 		}
 	}
 	return out

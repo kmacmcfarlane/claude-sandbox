@@ -255,8 +255,8 @@ var _ = Describe("shell completion", func() {
 
 		It("completes --attach= and --join= from the live sessions", func() {
 			f.fake.On("docker ps", strings.Join([]string{
-				strings.Join([]string{"cs-a", "Up 1h", f.proj, "claude", "otter", "v1", "", "", ""}, "\x1f"),
-				strings.Join([]string{"cs-b", "Up 2h", f.proj, "claude", "heron", "v1", "", "", ""}, "\x1f"),
+				strings.Join([]string{"cs-a", "Up 1h", f.proj, "claude", "otter", "v1", "", "", "", ""}, "\x1f"),
+				strings.Join([]string{"cs-b", "Up 2h", f.proj, "claude", "heron", "v1", "", "", "", ""}, "\x1f"),
 			}, "\n")+"\n", nil)
 			f.fake.On("docker top", "PID  COMMAND\n1  claude\n", nil)
 
@@ -271,8 +271,8 @@ var _ = Describe("shell completion", func() {
 
 		It("narrows to the typed prefix", func() {
 			f.fake.On("docker ps", strings.Join([]string{
-				strings.Join([]string{"cs-a", "Up 1h", f.proj, "claude", "otter", "v1", "", "", ""}, "\x1f"),
-				strings.Join([]string{"cs-b", "Up 2h", f.proj, "claude", "heron", "v1", "", "", ""}, "\x1f"),
+				strings.Join([]string{"cs-a", "Up 1h", f.proj, "claude", "otter", "v1", "", "", "", ""}, "\x1f"),
+				strings.Join([]string{"cs-b", "Up 2h", f.proj, "claude", "heron", "v1", "", "", "", ""}, "\x1f"),
 			}, "\n")+"\n", nil)
 			f.fake.On("docker top", "PID  COMMAND\n1  claude\n", nil)
 			Expect(f.complete("--attach=o").names).To(ConsistOf("--attach=otter"))

@@ -2,7 +2,9 @@ package ralphloop
 
 import (
 	"bytes"
+
 	"fmt"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/pidslot"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -39,6 +41,16 @@ func (t *pipelineTracker) signal(sig syscall.Signal) {
 }
 
 var tracker pipelineTracker
+
+// reserveClass advances the pid counter so the next fork lands on the class
+// (CS-PID-006); ReserveClass overrides it under test.
+func (l *Loop) reserveClass() {
+	if l.ReserveClass != nil {
+		l.ReserveClass()
+		return
+	}
+	pidslot.BurnFromEnv(pidslot.Real())
+}
 
 // Terminate TERMs the current iteration's process tree (interrupt path).
 func Terminate() { tracker.signal(syscall.SIGTERM) }
@@ -100,6 +112,9 @@ func (l *Loop) runIterationReal(iter int, resume bool) int {
 		c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	}
 
+	// CS-PID-006: land claude on the container's pid class. The loop is the
+	// parent, so its own fork is the landing fork.
+	l.reserveClass()
 	for i, c := range cmds {
 		if serr := c.Start(); serr != nil {
 			fmt.Fprintln(l.Err, serr)

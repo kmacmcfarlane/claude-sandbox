@@ -178,6 +178,17 @@ JIRA_API_TOKEN=ATATT…     # right
 
 The launcher lints every env file in the cascade at startup and warns for values wrapped in matching quotes and for CRLF carriage returns. It is **warn-only** — it never rewrites the file, so literal quotes stay possible when genuinely wanted. If a value looks right but fails, also check the file's line endings (`file .claude-sandbox/env`).
 
+### A sibling sandbox is missing from `/peers`
+
+Sessions in other sandboxes are discovered through the shared `~/.claude/sessions/<pid>.json`
+registry, and each container gets a PID class so those records do not collide. If a
+sandbox is missing: check the container has a class (`docker inspect -f '{{index .Config.Labels
+"claude-sandbox.pidclass"}}' <name>`) — containers started by an older launcher have none and
+stay on PID 7 until relaunched; check the session's stderr for `Warning: pid class not applied`
+(tini missing from a child image, or `/proc/sys/kernel/ns_last_pid` unreadable); and remember
+that sessions Claude spawns itself (`claude --bg`, `/bg`) are not slotted. `ls
+~/.claude/sessions/*.json` on the host shows which pids hold records.
+
 ### Container won't start
 1. Check Docker daemon is running: `docker info`
 2. Check base image exists: `docker images claude-sandbox`
