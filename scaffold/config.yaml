@@ -103,6 +103,8 @@
 #   true: your own project. The directory is tracked by the host repo (no
 #     sidecar); .claude-sandbox/env, .claude-sandbox/temp/, and the ephemeral
 #     .claude-sandbox/ralph/ runtime are gitignored, everything else committed.
+#   In both modes the launcher also gitignores .claude/worktrees/ (Claude Code's
+#     session worktrees) unless an existing .claude/ rule already covers it.
 # `claude-sandbox init` writes this explicitly unless an upstream config
 # already defines it (then it's inherited).
 # trackInHost: false

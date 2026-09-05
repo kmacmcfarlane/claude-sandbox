@@ -471,7 +471,12 @@ Set in `.claude-sandbox/config.yaml`. Controls how the directory is version-cont
 # trackInHost: true
 ```
 
-The `env` file is gitignored in both modes. Project-level `.claude/` (Claude Code
+The `env` file is gitignored in both modes. In both modes the launcher also adds
+`.claude/worktrees/` (Claude Code's harness-native worktrees, `.claude/worktrees/<name>`
+on branch `worktree-<name>`) to the host `.gitignore` — in the same prompt, never
+duplicated, and skipped when an existing rule such as `.claude/`, `.claude/*` or
+`/.claude/worktrees/` already covers it. Declining the prompt (`--no-gitignore`,
+`CS_GITIGNORE_ASSUME=n`) skips this line along with the rest.
 
 ### `.claude-sandbox/env`
 

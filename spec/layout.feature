@@ -113,3 +113,24 @@ Feature: .claude-sandbox/ layout lifecycle (CS-LAY)
     Then .claude-sandbox/ is created and SetupLayout runs
     When "claude-sandbox" launches interactively instead
     Then no .claude-sandbox/ directory is created
+
+  # ---- Claude Code worktrees ----
+
+  Scenario: CS-LAY-017 Layout gitignores .claude/worktrees/ in both trackInHost modes
+    # Claude Code's harness-native worktrees live at .claude/worktrees/<name>
+    # (branch worktree-<name>); every project the sandbox manages grows it.
+    Given the project is a git work tree
+    When SetupLayout runs with trackInHost false and the gitignore update is accepted
+    Then the host .gitignore contains the line ".claude/worktrees/"
+    When SetupLayout runs with trackInHost true and the gitignore update is accepted
+    Then the host .gitignore contains the line ".claude/worktrees/"
+    And the line is proposed in the same prompt as the .claude-sandbox/ entries
+    Given the host .gitignore already contains ".claude/worktrees/"
+    When SetupLayout runs again
+    Then the line appears exactly once (idempotent)
+    Given the host .gitignore already contains a covering rule such as ".claude/", ".claude/*" or "/.claude/worktrees/"
+    When SetupLayout runs
+    Then ".claude/worktrees/" is neither proposed nor added
+    Given the gitignore update is declined (--no-gitignore, CS_GITIGNORE_ASSUME=n, or "n")
+    When SetupLayout runs
+    Then ".claude/worktrees/" is not written either

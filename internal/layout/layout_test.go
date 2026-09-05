@@ -1,6 +1,6 @@
 package layout_test
 
-// Spec: spec/layout.feature (CS-LAY-001..014). CS-LAY-015/016 (launcher
+// Spec: spec/layout.feature (CS-LAY-001..014, 017). CS-LAY-015/016 (launcher
 // adoption) live in cmd/claude-sandbox. Git behavior is scripted through
 // execx.Fake: unmatched commands succeed, so by default the project IS a git
 // work tree and check-ignore reports the path as ignored.
@@ -163,6 +163,60 @@ var _ = Describe("layout lifecycle", func() {
 			}
 			Expect(exists(filepath.Join(sb, ".gitignore"))).To(BeFalse())
 			Expect(fake.CommandLines()).NotTo(ContainElement(ContainSubstring(" init -q")))
+		})
+	})
+
+	Describe("Claude Code worktrees", func() {
+		const wt = ".claude/worktrees/"
+
+		It("CS-LAY-017: .claude/worktrees/ is gitignored in both trackInHost modes", func() {
+			By("trackInHost false")
+			Expect(setup(false, ptr(true))).To(Succeed())
+			Expect(countLine(read(hostGI), wt)).To(Equal(1))
+			Expect(countLine(read(hostGI), "/.claude-sandbox/")).To(Equal(1))
+
+			By("trackInHost true, proposed alongside the .claude-sandbox/ entries")
+			proj2 := filepath.Join(GinkgoT().TempDir(), "p2")
+			Expect(os.MkdirAll(proj2, 0o755)).To(Succeed())
+			var err2 bytes.Buffer
+			Expect(layout.Setup(proj2, true, layout.Options{
+				Runner: fake, Prompter: sp, Out: &out, Err: &err2, Gitignore: ptr(true),
+			})).To(Succeed())
+			gi2 := read(filepath.Join(proj2, ".gitignore"))
+			Expect(countLine(gi2, wt)).To(Equal(1))
+			Expect(countLine(gi2, ".claude-sandbox/env")).To(Equal(1))
+			Expect(err2.String()).To(ContainSubstring("  " + wt + "\n"))
+			Expect(strings.Count(err2.String(), "These entries are missing")).To(Equal(1), "one proposal, not two")
+		})
+
+		It("CS-LAY-017: a second run is idempotent", func() {
+			Expect(setup(false, ptr(true))).To(Succeed())
+			errOut.Reset()
+			Expect(setup(false, ptr(true))).To(Succeed())
+			Expect(countLine(read(hostGI), wt)).To(Equal(1))
+			Expect(errOut.String()).NotTo(ContainSubstring("These entries are missing"))
+		})
+
+		It("CS-LAY-017: an existing covering rule means nothing is proposed or added", func() {
+			for _, rule := range []string{".claude/*", ".claude/", "/.claude/worktrees/", "  .claude  "} {
+				p := filepath.Join(GinkgoT().TempDir(), "p")
+				Expect(os.MkdirAll(p, 0o755)).To(Succeed())
+				gi := filepath.Join(p, ".gitignore")
+				write(gi, "/.claude-sandbox/\n"+rule+"\n")
+				var e bytes.Buffer
+				Expect(layout.Setup(p, false, layout.Options{
+					Runner: fake, Prompter: sp, Out: &out, Err: &e, Gitignore: ptr(true),
+				})).To(Succeed())
+				Expect(countLine(read(gi), wt)).To(BeZero(), rule)
+				Expect(e.String()).NotTo(ContainSubstring("These entries are missing"), rule)
+			}
+		})
+
+		It("CS-LAY-017: declining gitignore management skips the line too", func() {
+			Expect(setup(true, ptr(false))).To(Succeed())
+			Expect(errOut.String()).To(ContainSubstring("  " + wt + "\n"))
+			Expect(errOut.String()).To(ContainSubstring("Skipped .gitignore update."))
+			Expect(exists(hostGI)).To(BeFalse())
 		})
 	})
 

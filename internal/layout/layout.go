@@ -83,21 +83,23 @@ func Setup(project string, trackInHost bool, opts Options) error {
 		}
 	}
 
+	hostGI := filepath.Join(project, ".gitignore")
+
 	if trackInHost {
 		// CS-LAY-009: host-tracked — ignore only ephemeral content. The
 		// negations defensively re-include config/Dockerfile against broad
 		// host ignore rules; no-ops otherwise.
 		if hostIsGit {
-			gitignoreAdd(filepath.Join(project, ".gitignore"), opts,
+			gitignoreAdd(hostGI, opts, withWorktreesLine(hostGI,
 				".claude-sandbox/env", ".claude-sandbox/temp/", ".claude-sandbox/ralph/",
-				"!.claude-sandbox/config.yaml", "!.claude-sandbox/Dockerfile")
+				"!.claude-sandbox/config.yaml", "!.claude-sandbox/Dockerfile")...)
 		}
 		return nil
 	}
 
 	// Foreign-safe: whole dir ignored in host; sidecar repo holds history.
 	if hostIsGit {
-		gitignoreAdd(filepath.Join(project, ".gitignore"), opts, "/.claude-sandbox/")
+		gitignoreAdd(hostGI, opts, withWorktreesLine(hostGI, "/.claude-sandbox/")...)
 	}
 	// CS-LAY-004: sidecar's own .gitignore — append-only, no prompt.
 	if err := ensureLines(filepath.Join(sb, ".gitignore"), "temp/", "env", "ralph/"); err != nil {
@@ -116,6 +118,35 @@ func Setup(project string, trackInHost bool, opts Options) error {
 		fmt.Fprintf(opts.errw(), "  Add /.claude-sandbox/ to .gitignore to enable sidecar history.\n")
 	}
 	return nil
+}
+
+// worktreesLine ignores Claude Code's harness-native worktrees
+// (.claude/worktrees/<name>, branch worktree-<name>) — CS-LAY-017. Written in
+// both trackInHost modes, in the same prompt as the .claude-sandbox/ entries.
+const worktreesLine = ".claude/worktrees/"
+
+// worktreesCoveringRules are existing .gitignore lines that already ignore
+// .claude/worktrees/; when one is present the line is neither proposed nor
+// added. Matched exactly after trimming whitespace.
+var worktreesCoveringRules = []string{
+	worktreesLine, "/" + worktreesLine, ".claude/worktrees", "/.claude/worktrees",
+	".claude/", "/.claude/", ".claude", "/.claude",
+	".claude/*", "/.claude/*", ".claude/**", "/.claude/**",
+}
+
+// withWorktreesLine appends worktreesLine to lines unless the host .gitignore
+// already carries a covering rule.
+func withWorktreesLine(gi string, lines ...string) []string {
+	raw, _ := os.ReadFile(gi)
+	for _, l := range strings.Split(string(raw), "\n") {
+		l = strings.TrimSpace(l)
+		for _, rule := range worktreesCoveringRules {
+			if l == rule {
+				return lines
+			}
+		}
+	}
+	return append(lines, worktreesLine)
 }
 
 func isGitWorkTree(r execx.Runner, dir string) bool {
