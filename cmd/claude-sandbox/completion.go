@@ -144,6 +144,8 @@ var launchFlagSpecs = []launchFlagSpec{
 	{Name: "--host-access-ssh-enabled"},
 	{Name: "--package-caches", Desc: "Keep go/npm/pip downloads in ~/.cache/claude-sandbox on the host"},
 	{Name: "--host-access-package-caches-enabled"},
+	{Name: "--worktree", Desc: "Work in a Claude Code worktree, .claude/worktrees/<name> (the default; --worktree=NAME names it)"},
+	{Name: "--no-worktree", Desc: "Work in the shared checkout instead of a worktree"},
 	{Name: "--new", Desc: "Launch a new container without prompting"},
 	{Name: "--branch", Desc: "Fork a conversation into a new container (claude's --resume picker chooses which; add --name to name the fork)"},
 	// --attach/--join take an OPTIONAL instance noun, and only in the "=" form:

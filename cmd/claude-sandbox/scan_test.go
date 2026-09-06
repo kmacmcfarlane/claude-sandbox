@@ -22,6 +22,7 @@ var _ = Describe("scanLaunchArgs", func() {
 			{"--git"}, {"--host-access-git-enabled"},
 			{"--docker-socket"}, {"--host-access-docker-socket-enabled"},
 			{"--aws"}, {"--host-access-aws-enabled"},
+			{"--worktree"}, {"--worktree=feature-x"}, {"--no-worktree"},
 		}
 		for _, args := range cases {
 			f, err := scanLaunchArgs(args)
@@ -54,6 +55,34 @@ var _ = Describe("scanLaunchArgs", func() {
 		for _, p := range []*bool{f.SSH, f.Git, f.DockerSocket, f.AWS} {
 			Expect(p).NotTo(BeNil())
 			Expect(*p).To(BeTrue())
+		}
+	})
+
+	It("CS-LNCH-041, CS-LNCH-043: --worktree forms land in the scanned flag set", func() {
+		f, err := scanLaunchArgs([]string{"--worktree"})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(f.Worktree).To(HaveValue(BeTrue()))
+		Expect(f.WorktreeName).To(BeEmpty())
+
+		f, err = scanLaunchArgs([]string{"--worktree=feature-x"})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(f.Worktree).To(HaveValue(BeTrue()))
+		Expect(f.WorktreeName).To(Equal("feature-x"))
+
+		f, err = scanLaunchArgs([]string{"--no-worktree"})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(f.Worktree).To(HaveValue(BeFalse()))
+
+		f, err = scanLaunchArgs(nil)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(f.Worktree).To(BeNil(), "absent means not passed, so env and config decide")
+	})
+
+	It("CS-LNCH-043: an invalid --worktree=NAME exits 2", func() {
+		for _, bad := range []string{"--worktree=a b", "--worktree=a/b", "--worktree=.git"} {
+			_, err := scanLaunchArgs([]string{bad})
+			Expect(err).To(HaveOccurred(), bad)
+			Expect(execx.ExitCode(err)).To(Equal(2), bad)
 		}
 	})
 

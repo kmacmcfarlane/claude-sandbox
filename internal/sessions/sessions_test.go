@@ -16,7 +16,7 @@ const sep = "\x1f"
 
 // row builds one docker ps --format line.
 func row(name, status, project, mode, instance, version, model, hash, inputs string) string {
-	return strings.Join([]string{name, status, project, mode, instance, version, model, hash, inputs, ""}, sep)
+	return strings.Join([]string{name, status, project, mode, instance, version, model, hash, inputs, "", ""}, sep)
 }
 
 var _ = Describe("session discovery", func() {
@@ -196,10 +196,28 @@ var _ = Describe("instance nouns (CS-SESS-007..009)", func() {
 	})
 })
 
+var _ = Describe("worktree label (CS-LNCH-044)", func() {
+	It("CS-LNCH-044, CS-SESS-010: reads the worktree label as the eleventh ps field", func() {
+		fake := &execx.Fake{}
+		fake.On("docker ps", strings.Join([]string{"cs-a", "Up", "/p", "claude", "otter", "v1", "", "", "", "42", "otter"}, sep)+"\n"+
+			row("cs-b", "Up", "/p", "claude", "heron", "v1", "", "", "")+"\n", nil)
+		fake.On("docker top", "PID COMMAND\n1 claude\n", nil)
+		all, err := sessions.DiscoverAll(fake)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(all).To(HaveLen(2))
+		Expect(all[0].Worktree).To(Equal("otter"))
+		Expect(all[1].Worktree).To(BeEmpty(), "a shared-checkout session")
+		b, err := sessions.MarshalJSON(all)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(string(b)).To(ContainSubstring(`"worktree": "otter"`))
+		Expect(strings.Count(string(b), `"worktree"`)).To(Equal(1), "omitted when empty")
+	})
+})
+
 var _ = Describe("pid classes (CS-PID-004)", func() {
 	It("CS-PID-004: reads the pidclass label as the tenth ps field", func() {
 		fake := &execx.Fake{}
-		fake.On("docker ps", strings.Join([]string{"cs-a", "Up", "/p", "claude", "otter", "v1", "", "", "", "42"}, sep)+"\n", nil)
+		fake.On("docker ps", strings.Join([]string{"cs-a", "Up", "/p", "claude", "otter", "v1", "", "", "", "42", ""}, sep)+"\n", nil)
 		fake.On("docker top", "PID COMMAND\n1 claude\n", nil)
 		all, err := sessions.DiscoverAll(fake)
 		Expect(err).NotTo(HaveOccurred())

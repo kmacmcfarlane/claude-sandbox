@@ -12,7 +12,8 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       --rebuild, --no-update-check,
       --ssh (alias --host-access-ssh-enabled), --git (alias --host-access-git-enabled),
       --docker-socket (alias --host-access-docker-socket-enabled), --aws (alias --host-access-aws-enabled),
-      --package-caches (alias --host-access-package-caches-enabled)
+      --package-caches (alias --host-access-package-caches-enabled),
+      --worktree[=NAME] / --no-worktree (CS-LNCH-041..043)
 
   Scenario: CS-LNCH-002 Unknown flags are rejected; known claude flags pass through
     When "claude-sandbox --frobnicate" is run
@@ -35,6 +36,12 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     # --branch (CS-SESS-039..043) is not that wrapper: it COMPOSES the upstream
     # --resume/--continue with --fork-session and the multi-session decision,
     # renaming nothing and still never reading transcripts.
+    #
+    # --worktree is launcher-owned (CS-LNCH-041), never passthrough: the
+    # launcher names the worktree after the container and appends claude's
+    # flag itself. Claude's short form -w is a single-dash positional and
+    # still passes through; it hands naming to claude and bypasses the
+    # launcher's own name and label, so it is tolerated, not recommended.
 
   Scenario: CS-LNCH-003 "--" ends launcher parsing
     When "claude-sandbox -- --whatever" is run
@@ -229,17 +236,21 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
   # ---- container command & runtime env ----
 
   Scenario: CS-LNCH-026 Interactive command shape
-    When "claude-sandbox --dangerous --model opus --resume" launches
-    Then the container command is: claude --dangerously-skip-permissions --model opus --resume
+    When "claude-sandbox --dangerous --model opus --resume" launches in a git project
+    Then the container command is: claude --dangerously-skip-permissions --worktree <instance> --model opus --resume
     And the container name is "claude-sandbox-<project-slug>-<instance>"
+    # Launcher-owned flags come first, then --model, then the passthrough
+    # tail, so a passthrough claude flag can still override them.
+    And outside a git work tree the --worktree pair is omitted (CS-LNCH-046)
 
   Scenario: CS-LNCH-027 Ralph command shape
-    When "claude-sandbox --ralph --limit 5 --dangerous" launches
-    Then the container command is: /opt/claude-sandbox/bin/ralph --limit 5 --dangerously-skip-permissions
+    When "claude-sandbox --ralph --limit 5 --dangerous" launches in a git project
+    Then the container command is: /opt/claude-sandbox/bin/ralph --limit 5 --dangerously-skip-permissions --worktree ralph
     And remaining passthrough args follow
     And the container name is "claude-sandbox-<project-slug>-ralph"
     # Ralph carries no instance noun: it is single-instance by construction
     # (see CS-RLP PID lock), so there is never more than one to disambiguate.
+    # Its worktree is therefore named "ralph" (CS-LNCH-045).
 
   Scenario: CS-LNCH-028 Project slug derivation
     # The slug identifies the PROJECT. Character normalization: lowercased,
@@ -269,13 +280,15 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       | claude-sandbox.model          | the resolved model, empty when unset    |
       | claude-sandbox.confighash     | the effective-config hash (CS-SESS-020) |
       | claude-sandbox.inputs         | per-file digests (CS-SESS-021)          |
+      | claude-sandbox.worktree       | the worktree name, empty when off (CS-LNCH-044) |
     # Discovery filters on these labels rather than parsing container names,
     # which are lossy (normalized and hashed). See CS-SESS-001.
 
   Scenario: CS-LNCH-029 Container runtime environment
     Then docker run receives: -it --rm --init,
       -e HOST_UID/HOST_GID/HOST_USER/HOST_HOME of the calling user,
-      -e HOME=$HOME, -e DOCKER_GID, -e ANTHROPIC_API_KEY (empty when unset)
+      -e HOME=$HOME, -e DOCKER_GID, -e ANTHROPIC_API_KEY (empty when unset),
+      -e CLAUDE_SANDBOX_PROJECT_DIR (CS-LNCH-047)
 
   Scenario: CS-LNCH-033 The primary session gets the configured detach keys
     # Omitting the flag does not mean "no detach keys" — it means docker's own
@@ -318,3 +331,85 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     # Like the instance noun, the class is a per-session choice: two launches
     # of one config get different classes and must hash identically.
     Then the config-drift fingerprint (CS-SESS-020) does not change when the class changes
+
+  # ---- worktree mode ----
+  # Claude Code's own --worktree <name> puts a session in
+  # <repo-root>/.claude/worktrees/<name> on branch worktree-<name> (reopened
+  # when it exists; the harness blocks edits to the shared checkout from
+  # inside). The launcher turns it on by default so concurrent sessions of one
+  # project stop editing the same tree, and names the worktree after the
+  # container so one noun identifies the container, the worktree and the
+  # branch. See .claude-sandbox/investigations/launch-claude-in-worktree-mode/.
+
+  Scenario: CS-LNCH-041 Worktree mode is on by default
+    Given the project directory is inside a git work tree
+    When "claude-sandbox" launches
+    Then the container command carries "--worktree <instance>" before --model
+      and before any passthrough argument
+    And the container name, the worktree and its branch share the instance noun
+    And stdout carries one banner line naming the worktree, its path and branch
+    And "claude-sandbox --no-worktree" launches plain "claude" and the banner
+      line reads "Worktree: off (shared checkout)"
+
+  Scenario Outline: CS-LNCH-042 Worktree precedence is tri-state
+    # The default is TRUE, so the OR shape of CS-LNCH-038 cannot express
+    # "off": a falsy CLAUDE_SANDBOX_WORKTREE is an explicit off here, not a
+    # fall-through, and CLI > env > merged config > default resolves the rest.
+    Given the merged config sets worktree to "<yaml>", CLAUDE_SANDBOX_WORKTREE is "<env>", and the CLI flag is <cli>
+    Then worktree mode is <result>
+    Examples:
+      | yaml   | env   | cli           | result |
+      | unset  | unset | absent        | on     |
+      | false  | unset | absent        | off    |
+      | false  | 1     | absent        | on     |
+      | true   | 0     | absent        | off    |
+      | true   | no    | absent        | off    |
+      | unset  | maybe | absent        | on     |
+      | true   | unset | --no-worktree | off    |
+      | false  | 0     | --worktree    | on     |
+    # Env var truthy forms: "1", "true", "yes"; falsy forms: "0", "false",
+    # "no"; anything else is unset.
+    And the cascade merges the key like any scalar: a more-local "worktree: true"
+      overrides an upstream false and vice versa
+
+  Scenario: CS-LNCH-043 --worktree=NAME names the worktree
+    When "claude-sandbox --worktree=feature-x" launches
+    Then the container command carries "--worktree feature-x"
+    And an existing .claude/worktrees/feature-x is reopened (claude's own reuse path)
+    And the instance noun is still chosen independently for the container name
+    When the name is longer than 64 characters or contains a character outside [A-Za-z0-9._-]
+    Then it exits 2 before any docker command runs
+
+  Scenario: CS-LNCH-044 Worktree mode is a per-session choice, never drift
+    # Like the model (CS-SESS-027) and the pid class (CS-LNCH-040): every new
+    # container gets a different worktree name, so hashing it would make
+    # every launch look like drift. The config key is therefore excluded from
+    # the merged-config digest too.
+    Then the config-drift fingerprint (CS-SESS-020) does not change with the
+      worktree key, flag, env var or name
+    And docker run receives "--label claude-sandbox.worktree=<name>",
+      with an empty value when the mode is off
+
+  Scenario: CS-LNCH-045 Ralph launches carry a worktree named ralph
+    When "claude-sandbox --ralph" launches in a git project
+    Then the container command ends with "--worktree ralph" (before passthrough)
+    And "--worktree=NAME" renames it
+    And "--no-worktree" omits the pair
+    # One worktree per RUN, reopened by every iteration — the loop's side is
+    # CS-RLP (ralph-loop.feature).
+
+  Scenario: CS-LNCH-046 Outside a git work tree the default stands down
+    Given the project directory is not inside a git work tree
+    When "claude-sandbox" launches
+    Then the container command carries no --worktree pair
+    And stdout carries one banner line: "Worktree: off (not a git repository)"
+    And this holds however the mode was requested — claude itself would
+      refuse "--worktree requires a git repository", so standing down is the
+      only outcome that launches
+
+  Scenario: CS-LNCH-047 The container knows the project root
+    Then docker run receives -e CLAUDE_SANDBOX_PROJECT_DIR=<project dir>
+      for interactive and ralph launches, in and out of worktree mode
+    # The one fact a session inside .claude/worktrees/<name> cannot otherwise
+    # get without `git rev-parse --git-common-dir`: where .claude-sandbox/
+    # lives.

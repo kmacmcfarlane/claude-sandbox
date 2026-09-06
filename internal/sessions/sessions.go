@@ -30,6 +30,9 @@ const (
 	// LabelPIDClass records the container's pid class (CS-PID-004), read back
 	// so later launches allocate without replacement across the host.
 	LabelPIDClass = "claude-sandbox.pidclass"
+	// LabelWorktree records the worktree the session was launched into
+	// (CS-LNCH-044); empty when it runs in the shared checkout.
+	LabelWorktree = "claude-sandbox.worktree"
 )
 
 // ModeRalph marks a ralph loop container.
@@ -49,6 +52,10 @@ type Session struct {
 	// PIDClass is the container's pid class label, "" for containers started
 	// by a launcher that predates classes.
 	PIDClass string `json:"pidClass,omitempty"`
+	// Worktree is the claude-sandbox.worktree label: the name handed to
+	// claude's --worktree, "" for a shared-checkout session (or a container
+	// from a launcher that predates worktree mode).
+	Worktree string `json:"worktree,omitempty"`
 
 	// Count is the number of live claude processes, so joined sessions are
 	// visible and not just the container that hosts them.
@@ -71,9 +78,10 @@ var psFormat = strings.Join([]string{
 	`{{.Label "` + LabelConfigHash + `"}}`,
 	`{{.Label "` + LabelInputs + `"}}`,
 	`{{.Label "` + LabelPIDClass + `"}}`,
+	`{{.Label "` + LabelWorktree + `"}}`,
 }, fieldSep)
 
-const psFieldCount = 10
+const psFieldCount = 11
 
 // Discover lists sessions for one project directory (CS-SESS-001).
 func Discover(r execx.Runner, projectDir string) ([]Session, error) {
@@ -110,7 +118,7 @@ func list(r execx.Runner, filter string) ([]Session, error) {
 		s := Session{
 			Name: f[0], Status: f[1], Project: f[2], Mode: f[3],
 			Instance: f[4], Version: f[5], Model: f[6], ConfigHash: f[7],
-			Inputs: launch.DecodeInputs(f[8]), PIDClass: f[9],
+			Inputs: launch.DecodeInputs(f[8]), PIDClass: f[9], Worktree: f[10],
 		}
 		s.Count = countSessions(r, s.Name)
 		out2 = append(out2, s)

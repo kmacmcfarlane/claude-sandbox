@@ -79,7 +79,7 @@ func newSessionsCmd(env *Env) *cobra.Command {
 
 // printSessionTable renders the human-readable listing (CS-SESS-010/011).
 func printSessionTable(env *Env, found []sessions.Session, all bool, projectDir string) {
-	header := []string{"INSTANCE", "NAME", "MODE", "UP", "SESSIONS"}
+	header := []string{"INSTANCE", "WORKTREE", "NAME", "MODE", "UP", "SESSIONS"}
 	if all {
 		header = append(header, "PROJECT")
 	}
@@ -93,7 +93,11 @@ func printSessionTable(env *Env, found []sessions.Session, all bool, projectDir 
 		if all && s.Project == projectDir {
 			mark = "* "
 		}
-		row := []string{mark + instance, s.Name, s.Mode, uptime(s.Status), fmt.Sprint(s.Count)}
+		worktree := s.Worktree
+		if worktree == "" {
+			worktree = "-"
+		}
+		row := []string{mark + instance, worktree, s.Name, s.Mode, uptime(s.Status), fmt.Sprint(s.Count)}
 		if all {
 			row = append(row, s.Project)
 		}
@@ -320,7 +324,7 @@ func selectInstance(env *Env, candidates []sessions.Session, verb string) (sessi
 // Neither path runs the image staleness check, the image build, mount assembly,
 // or shadow-file injection — the container is already configured. That is
 // exactly why config drift is reported instead (CS-SESS-033).
-func joinExistingSession(env *Env, projectDir string, f *launchFlags, cfg *cascade.Config, envFiles []string, d sessionDecision) (bool, error) {
+func joinExistingSession(env *Env, projectDir string, f *launchFlags, cfg *cascade.Config, envFiles []string, d sessionDecision, wt worktreeChoice) (bool, error) {
 	model := f.Model
 	if model == "" {
 		model = cfg.Model
@@ -340,10 +344,11 @@ func joinExistingSession(env *Env, projectDir string, f *launchFlags, cfg *casca
 
 	if d.Action == actionAttach {
 		warnModelMismatch(env, d.Target, model)
+		noteWorktree(env, d.Target, wt)
 		return true, attachTo(env, d.Target, cfg.DetachKeys)
 	}
 	_, _, hostUser, _ := hostIdentity(env.Getenv)
-	return true, joinInto(env, d.Target, projectDir, hostUser, model, cfg.DetachKeys, f)
+	return true, joinInto(env, d.Target, projectDir, hostUser, model, cfg.DetachKeys, f, wt)
 }
 
 // wouldBeFingerprint computes the config hash a launch would produce right now,
@@ -399,18 +404,23 @@ func wouldBeFingerprint(env *Env, projectDir string, f *launchFlags, cfg *cascad
 // Ralph gets none: it is single-instance, so there is nothing to disambiguate.
 //
 // The noun is chosen from those NOT already in use by this project, which is
-// why a short word list suffices — see sessions.PickNoun.
-func newInstance(env *Env, projectDir string, f *launchFlags) string {
+// why a short word list suffices — see sessions.PickNoun. Because the noun
+// also names the container's worktree, nouns whose worktree directory already
+// exists under gitRoot are skipped too (CS-SESS-045): claude reopens an
+// existing worktree, and reopening one left behind by an earlier session must
+// be a deliberate --worktree=NAME, never a coin toss.
+func newInstance(env *Env, projectDir string, f *launchFlags, gitRoot string) string {
 	if f.Ralph {
 		return ""
 	}
+	taken := launch.ExistingWorktrees(gitRoot)
 	found, err := sessions.Discover(env.Runner, projectDir)
 	if err != nil {
 		// Discovery failing must not block a launch; an unfiltered pick is still
 		// overwhelmingly likely to be unique.
-		return sessions.PickNoun(nil, nil)
+		return sessions.PickNoun(taken, nil)
 	}
-	return sessions.PickNoun(sessions.Instances(found), nil)
+	return sessions.PickNoun(append(taken, sessions.Instances(found)...), nil)
 }
 
 // newPIDClass picks the pid class for a container about to be launched
@@ -440,7 +450,7 @@ func attachTo(env *Env, s sessions.Session, configuredKeys string) error {
 }
 
 // joinInto starts another claude inside a running container (CS-SESS-032).
-func joinInto(env *Env, s sessions.Session, projectDir, hostUser, model, configuredKeys string, f *launchFlags) error {
+func joinInto(env *Env, s sessions.Session, projectDir, hostUser, model, configuredKeys string, f *launchFlags, wt worktreeChoice) error {
 	detachKeys := launch.ResolveDetachKeys(configuredKeys)
 	fmt.Fprintf(env.Out, "Starting a new session inside %s.\n", s.Instance)
 	fmt.Fprintln(env.Out, "Note: this session ends if that container's primary session exits, and it cannot be reattached.")
@@ -461,11 +471,37 @@ func joinInto(env *Env, s sessions.Session, projectDir, hostUser, model, configu
 	if f.Dangerous {
 		args = append(args, "--dangerously-skip-permissions")
 	}
+	// CS-SESS-046: a joined session gets its OWN worktree — bare --worktree
+	// lets claude generate the name — never the primary's, which the harness's
+	// lock and reset logic does not expect to share. --worktree=NAME still
+	// names it explicitly.
+	if wt.Enabled {
+		args = append(args, "--worktree")
+		if wt.Name != "" {
+			args = append(args, wt.Name)
+		}
+	}
 	if model != "" {
 		args = append(args, "--model", model)
 	}
 	args = append(args, f.Passthrough...)
 	return env.Runner.Exec(execx.Cmd{Name: "docker", Args: args})
+}
+
+// noteWorktree reports where the session being attached to works, the way
+// warnModelMismatch reports the model (CS-SESS-047): a per-session choice
+// attach cannot change, so it is stated rather than treated as drift.
+func noteWorktree(env *Env, s sessions.Session, wt worktreeChoice) {
+	where := "the shared checkout"
+	if s.Worktree != "" {
+		where = fmt.Sprintf("worktree '%s' (branch worktree-%s)", s.Worktree, s.Worktree)
+	}
+	msg := fmt.Sprintf("Note: session '%s' runs in %s", s.Instance, where)
+	requestedOn := wt.Enabled || wt.StoodDown
+	if requestedOn != (s.Worktree != "") || (wt.Name != "" && wt.Name != s.Worktree) {
+		msg += "; --worktree/--no-worktree cannot change a running session"
+	}
+	fmt.Fprintln(env.Err, msg+".")
 }
 
 // confirmDrift compares the configuration a container was started with against

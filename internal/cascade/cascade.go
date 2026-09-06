@@ -89,18 +89,24 @@ type HostAccess struct {
 
 // Config is the effective merged configuration.
 type Config struct {
-	Model              string     `yaml:"model"`
-	MemoryLimit        string     `yaml:"memoryLimit"`
-	DisableUpdateCheck bool       `yaml:"disableUpdateCheck"`
+	Model              string `yaml:"model"`
+	MemoryLimit        string `yaml:"memoryLimit"`
+	DisableUpdateCheck bool   `yaml:"disableUpdateCheck"`
 	// Dangerous passes --dangerously-skip-permissions to claude/ralph, like
 	// the --dangerous flag or CLAUDE_SANDBOX_DANGEROUS=1 (CS-LNCH-038).
 	Dangerous bool `yaml:"dangerous"`
-	TrackInHost        *bool      `yaml:"trackInHost"`
-	BaseOnly           bool       `yaml:"baseOnly"`
-	DockerfileDir      string     `yaml:"dockerfileDir"`
-	Dockerfile         string     `yaml:"dockerfile"`
-	HostAccess         HostAccess `yaml:"hostAccess"`
-	Mounts             []Mount    `yaml:"mounts"`
+	// Worktree turns claude's --worktree mode on or off for every launch
+	// (CS-LNCH-041/042). A pointer, because the default is ON and an explicit
+	// false must be distinguishable from unset. Excluded from the JSON form
+	// the config-drift fingerprint hashes: it is a per-session choice, like
+	// the model (CS-LNCH-044).
+	Worktree      *bool      `yaml:"worktree" json:"-"`
+	TrackInHost   *bool      `yaml:"trackInHost"`
+	BaseOnly      bool       `yaml:"baseOnly"`
+	DockerfileDir string     `yaml:"dockerfileDir"`
+	Dockerfile    string     `yaml:"dockerfile"`
+	HostAccess    HostAccess `yaml:"hostAccess"`
+	Mounts        []Mount    `yaml:"mounts"`
 
 	// DetachKeys overrides the key sequence that detaches from an attached
 	// session. Empty means the built-in default; see defaultDetachKeys.

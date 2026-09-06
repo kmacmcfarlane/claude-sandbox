@@ -42,6 +42,12 @@ type Inputs struct {
 	// containers (CS-LNCH-026). Empty for ralph, which is single-instance.
 	Instance string
 
+	// Worktree is the name handed to claude's --worktree (CS-LNCH-041); empty
+	// means the session works in the shared checkout. Rendered as the
+	// claude-sandbox.worktree label and, like Instance, excluded from the
+	// fingerprint (CS-LNCH-044).
+	Worktree string
+
 	// Version stamps the claude-sandbox.version label.
 	Version string
 
@@ -241,6 +247,11 @@ func Build(in Inputs) (*Plan, error) {
 			p.Command = append(p.Command, "--dangerously-skip-permissions")
 		}
 	}
+	// CS-LNCH-041/045: launcher-owned flags precede --model and the
+	// passthrough tail, so a passthrough claude flag can still override them.
+	if in.Worktree != "" {
+		p.Command = append(p.Command, "--worktree", in.Worktree)
+	}
 	if model != "" {
 		p.Command = append(p.Command, "--model", model)
 	}
@@ -255,6 +266,9 @@ func Build(in Inputs) (*Plan, error) {
 		fmt.Sprintf("HOME=%s", in.Home),
 		fmt.Sprintf("DOCKER_GID=%s", dockerGID),
 		fmt.Sprintf("ANTHROPIC_API_KEY=%s", in.getenv("ANTHROPIC_API_KEY")),
+		// CS-LNCH-047: a session inside .claude/worktrees/<name> cannot
+		// otherwise tell where the project root (and .claude-sandbox/) is.
+		"CLAUDE_SANDBOX_PROJECT_DIR="+in.ProjectDir,
 	)
 	if d := in.getenv("CLAUDE_CONFIG_DIR"); d != "" {
 		p.EnvFlags = append(p.EnvFlags, "CLAUDE_CONFIG_DIR="+d)
@@ -302,6 +316,8 @@ func Build(in Inputs) (*Plan, error) {
 		"claude-sandbox.model="+model,
 		"claude-sandbox.confighash="+p.ConfigHash,
 		"claude-sandbox.inputs="+encodeInputs(p.ConfigInputs),
+		// CS-LNCH-044: empty when off, so `sessions` and attach can tell.
+		"claude-sandbox.worktree="+in.Worktree,
 	)
 	if in.Instance != "" {
 		p.Labels = append(p.Labels, "claude-sandbox.instance="+in.Instance)
@@ -531,6 +547,27 @@ func (in *Inputs) assemblePackageCaches(p *Plan) error {
 		p.EnvFlags = append(p.EnvFlags, c.env+"="+dir)
 	}
 	return nil
+}
+
+// ResolveTristate implements CLI > env var > YAML > default for a setting
+// whose default may be TRUE (CS-LNCH-042). Unlike resolveFlag, a falsy env
+// value ("0", "false", "no") is an explicit off rather than a fall-through:
+// with a true default, fall-through would leave the env var unable to disable
+// a config "true". Any other env value is treated as unset.
+func ResolveTristate(cli *bool, envVal string, yaml *bool, def bool) bool {
+	if cli != nil {
+		return *cli
+	}
+	switch strings.ToLower(strings.TrimSpace(envVal)) {
+	case "1", "true", "yes":
+		return true
+	case "0", "false", "no":
+		return false
+	}
+	if yaml != nil {
+		return *yaml
+	}
+	return def
 }
 
 // resolveFlag implements the CLI > env var > YAML precedence.

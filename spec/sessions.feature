@@ -1,8 +1,11 @@
 Feature: Sessions — discovery, multi-instance launch, attach/join, config drift
 
-  A project can have more than one sandbox session running at once. Because the
-  project is bind-mounted at its real host path, sessions in the same project
-  share the working tree; what differs is durability:
+  A project can have more than one sandbox session running at once. The
+  project is bind-mounted at its real host path, so sessions in the same
+  project share the repository — by default each one works in its own
+  worktree named after its container (CS-LNCH-041), and with --no-worktree
+  they share the checkout itself. What differs between the mechanisms is
+  durability:
 
     - a session in its OWN container is PID 1, so it can be reattached with
       `docker attach` and survives losing its terminal;
@@ -62,6 +65,16 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
     # Sampling from the unused remainder makes collisions impossible, which is
     # why the noun list does not need a numeric or hash tail for uniqueness.
 
+  Scenario: CS-SESS-045 The instance noun avoids existing worktrees
+    # The noun names the container's worktree (CS-LNCH-041), and claude
+    # REOPENS a worktree whose directory exists. A kept worktree from an
+    # earlier session must therefore not be reopened by accident; reopening
+    # is deliberate only through an explicit --worktree=NAME (CS-LNCH-043).
+    Given .claude/worktrees/otter exists in the project and no session uses "otter"
+    When an instance noun is picked for a new container
+    Then the result is not "otter"
+    And the lookup runs for --no-session-check launches too (like CS-LNCH-039)
+
   Scenario: CS-SESS-008 Exhausted noun list falls back to a suffix
     Given every noun in the list is in use
     When an instance noun is picked
@@ -75,7 +88,9 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
   Scenario: CS-SESS-010 "sessions" lists the current project by default
     When "claude-sandbox sessions" is run
     Then only sessions whose claude-sandbox.project matches the cwd's project are listed
-    And the columns are INSTANCE, NAME, MODE, UP, SESSIONS
+    And the columns are INSTANCE, WORKTREE, NAME, MODE, UP, SESSIONS
+    # WORKTREE is the claude-sandbox.worktree label, "-" when the session runs
+    # in the shared checkout (CS-LNCH-044).
 
   Scenario: CS-SESS-011 "sessions --all" widens to every project
     When "claude-sandbox sessions --all" is run
@@ -86,6 +101,7 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
   Scenario: CS-SESS-012 "sessions --json" emits machine-readable output
     When "claude-sandbox sessions --json" is run
     Then the output is a JSON array of session objects
+    And each object carries "worktree" when the session has one
 
   Scenario: CS-SESS-013 "sessions" with nothing running exits zero
     Given no sandbox containers are running for this project
@@ -144,8 +160,8 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
     And a terminal is attached
     When branch is chosen at the tier-1 prompt
     Then a new container launches through the normal pipeline
-    And its claude command carries "--continue --fork-session" before any
-      passthrough arguments
+    And its claude command carries "--worktree <new-noun> --continue --fork-session"
+      before any passthrough arguments
     # --continue resolves to the newest conversation for this directory, which
     # is the running session's (it is actively appending to its transcript);
     # --fork-session gives the copy a new session id so both continue
@@ -159,8 +175,11 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
     When "claude-sandbox --branch" is run
     Then no session prompt is shown, whether or not sessions are running
     And a new container launches through the normal pipeline
-    And its claude command carries "--resume --fork-session" before any
-      passthrough arguments
+    And its claude command carries "--worktree <new-noun> --resume --fork-session"
+      before any passthrough arguments
+    # A --fork-session starts where claude was launched; the launcher's own
+    # --worktree is what lands the fork in its own tree, so a branch never
+    # shares the original's worktree.
     And running sessions are not required — a past conversation can be branched
 
   Scenario: CS-SESS-041 --branch is a bypass flag but the picker still needs a terminal
@@ -296,6 +315,26 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
     Then a warning states the running session's model cannot be changed
     When join is chosen
     Then the requested model is passed to the joined claude process
+
+  Scenario: CS-SESS-046 Join enters its own worktree
+    # Two sessions in one worktree is a case the harness's own lock and reset
+    # logic was not designed for, so a joined session never reuses the
+    # primary's name: with no name claude generates one (adjective-verb-noun).
+    When join is chosen and worktree mode resolves on
+    Then the joined claude command carries a bare "--worktree" before --model
+    When "--worktree=NAME" was given
+    Then it carries "--worktree NAME" instead
+    When "--no-worktree" was given (or the mode resolves off)
+    Then no --worktree flag is passed and the join works in the shared checkout
+
+  Scenario: CS-SESS-047 Attach reports the session's worktree
+    # Like the model (CS-SESS-027): a per-session choice attach cannot change,
+    # so it is reported rather than treated as drift (CS-LNCH-044).
+    When attach is chosen
+    Then a note names the worktree the session runs in (or "the shared checkout")
+    And when the request differs (--worktree=NAME, --no-worktree), the note
+      states the running session cannot be changed
+    And nothing blocks and no prompt is added
 
   # ---- bypass flags ----
 

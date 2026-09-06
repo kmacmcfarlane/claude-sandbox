@@ -160,6 +160,7 @@ const launchUsage = `Usage:
   claude-sandbox sessions                 # list running sandbox sessions
   claude-sandbox --attach                 # reattach after losing a terminal
   claude-sandbox --branch                 # fork a conversation into a new container
+  claude-sandbox --no-worktree            # work in the shared checkout, not a worktree
   claude-sandbox init                     # bootstrap .claude-sandbox/ (config, env, gitignore)
   claude-sandbox init-ralph               # bootstrap + seed ralph agent scaffolding
   PROJECT_DIR=/other claude-sandbox       # launch claude in /other
@@ -194,6 +195,13 @@ Options:
   --package-caches          Mount ~/.cache/claude-sandbox/{go-mod,go-build,npm,pip} writable
                             and point GOMODCACHE/GOCACHE/npm_config_cache/PIP_CACHE_DIR at them
 
+Worktree mode (on by default; config key 'worktree: false' turns it off):
+  --worktree[=NAME]         Run claude in its own worktree, .claude/worktrees/NAME on branch
+                            worktree-NAME (default NAME: the container's instance noun;
+                            ralph: "ralph"). An existing NAME is reopened. Outside a git
+                            repository the launch proceeds without it
+  --no-worktree             Run claude in the shared checkout instead
+
 Multiple sessions (when a session is already running for this project):
   --new                     Launch a new container without prompting
   --branch                  Fork a conversation into a new container and work on it
@@ -215,6 +223,10 @@ Environment variables:
   CLAUDE_SANDBOX_DOCKERFILE               Override child Dockerfile name
   CLAUDE_SANDBOX_HOST_ACCESS_*_ENABLED    Enable ssh/git/docker-socket/aws/package-caches mounts
   CLAUDE_SANDBOX_NO_UPDATE_CHECK          Skip Claude Code version check
+  CLAUDE_SANDBOX_WORKTREE=0|1             Worktree mode off/on (flag > env > config 'worktree' > on)
+
+Inside the container, CLAUDE_SANDBOX_PROJECT_DIR names the project root (where
+.claude-sandbox/ lives) — a session in a worktree cannot otherwise tell.
 
 The project is mounted at its REAL host path inside the container so that
 docker compose volumes (which the host daemon resolves) work correctly.
@@ -233,6 +245,12 @@ type launchFlags struct {
 	SSH, Git, DockerSocket, AWS *bool
 	PackageCaches               *bool
 	Passthrough                 []string
+
+	// Worktree is the tri-state --worktree/--no-worktree choice (nil = not
+	// passed) and WorktreeName the optional "--worktree=NAME" value
+	// (CS-LNCH-041..043).
+	Worktree     *bool
+	WorktreeName string
 
 	// Multi-session bypasses (CS-SESS-028). Each removes a decision, which is
 	// what makes them usable with no terminal attached.
@@ -315,6 +333,13 @@ func scanLaunchArgs(args []string) (*launchFlags, error) {
 		case "--host-access-package-caches-enabled", "--package-caches":
 			f.PackageCaches = boolTrue()
 			i++
+		case "--worktree":
+			f.Worktree = boolTrue()
+			i++
+		case "--no-worktree":
+			off := false
+			f.Worktree = &off
+			i++
 		case "--new":
 			f.NewSession = true
 			i++
@@ -348,6 +373,16 @@ func scanLaunchArgs(args []string) (*launchFlags, error) {
 			}
 			if v, ok := flagValue(a, "--join"); ok {
 				f.Join, f.JoinTarget = true, v
+				i++
+				continue
+			}
+			// --worktree=NAME: validated here so a bad name fails with exit 2
+			// before any docker command runs (CS-LNCH-043).
+			if v, ok := flagValue(a, "--worktree"); ok {
+				if err := launch.ValidateWorktreeName(v); err != nil {
+					return nil, exitErr(2, "Error: --worktree: %v", err)
+				}
+				f.Worktree, f.WorktreeName = boolTrue(), v
 				i++
 				continue
 			}
@@ -422,6 +457,68 @@ func resolveProjectDir(getenv func(string) string) (string, error) {
 }
 
 func envTrue(v string) bool { return v == "1" || v == "true" || v == "yes" }
+
+// worktreeChoice is the resolved worktree mode for this launch (CS-LNCH-041).
+type worktreeChoice struct {
+	// Enabled is the final answer after the tri-state precedence AND the git
+	// pre-check: false when requested off, or when the project is not inside
+	// a git work tree (StoodDown).
+	Enabled bool
+	// StoodDown records that the mode resolved on but the project is not a
+	// git work tree, so the launch proceeds without it (CS-LNCH-046).
+	StoodDown bool
+	// Root is the git work tree root ("" when none) — where claude anchors
+	// .claude/worktrees/, which is not necessarily the project dir.
+	Root string
+	// Name is the explicit --worktree=NAME value, "" to default (CS-LNCH-043).
+	Name string
+}
+
+// resolveWorktree applies CLI > CLAUDE_SANDBOX_WORKTREE > merged config >
+// default ON (CS-LNCH-042), then the git pre-check (CS-LNCH-046). The tri-state
+// shape is required rather than the OR of CS-LNCH-038: with a true default an
+// OR could never express "off".
+func resolveWorktree(env *Env, projectDir string, f *launchFlags, cfg *cascade.Config) worktreeChoice {
+	wt := worktreeChoice{
+		Enabled: launch.ResolveTristate(f.Worktree, env.Getenv("CLAUDE_SANDBOX_WORKTREE"), cfg.Worktree, true),
+		Name:    f.WorktreeName,
+	}
+	wt.Root = launch.GitRoot(env.Runner, projectDir)
+	if wt.Enabled && wt.Root == "" {
+		// claude itself refuses "--worktree requires a git repository", so
+		// standing down is the only outcome that launches — however the mode
+		// was requested.
+		wt.Enabled, wt.StoodDown = false, true
+	}
+	return wt
+}
+
+// nameFor is the worktree name a NEW container gets: the explicit name, else
+// the instance noun so container, worktree and branch share one word; ralph
+// has no noun and is named "ralph" (CS-LNCH-041/045). Empty when off.
+func (wt worktreeChoice) nameFor(instance string, ralph bool) string {
+	switch {
+	case !wt.Enabled:
+		return ""
+	case wt.Name != "":
+		return wt.Name
+	case ralph:
+		return "ralph"
+	}
+	return instance
+}
+
+// banner is the one stdout line that keeps the default flip from being silent
+// (CS-LNCH-041/046).
+func (wt worktreeChoice) banner(name string) string {
+	switch {
+	case wt.StoodDown:
+		return "Worktree: off (not a git repository)"
+	case !wt.Enabled:
+		return "Worktree: off (shared checkout)"
+	}
+	return fmt.Sprintf("Worktree: %s (%s/%s, branch worktree-%s)", name, launch.WorktreeDir, name, name)
+}
 
 // validateBranch rejects flag combinations that contradict --branch
 // (CS-SESS-042). Branch always means a NEW container forking a conversation,
@@ -501,6 +598,11 @@ func runLaunch(env *Env, args []string) error {
 		cascade.LintEnvFiles(env.Err, envFiles)
 	}
 
+	// Worktree mode (CS-LNCH-041/042/046), resolved once for every path: a new
+	// container names its worktree after itself, a join enters a fresh one,
+	// and attach can only report what the running session has.
+	wt := resolveWorktree(env, projectDir, f, cfg)
+
 	// Multi-session decision (CS-SESS-014..019). Deliberately before any image
 	// work: building an image the user is about to bypass by attaching is waste.
 	decision, err := decideSessions(env, projectDir, f)
@@ -511,7 +613,7 @@ func runLaunch(env *Env, args []string) error {
 	case actionQuit:
 		return nil
 	case actionAttach, actionJoin:
-		done, aerr := joinExistingSession(env, projectDir, f, cfg, envFiles, decision)
+		done, aerr := joinExistingSession(env, projectDir, f, cfg, envFiles, decision, wt)
 		if aerr != nil {
 			return aerr
 		}
@@ -536,6 +638,13 @@ func runLaunch(env *Env, args []string) error {
 	// the flag. A more-local "dangerous: false" overrides an upstream true
 	// through the ordinary cascade merge before this OR is evaluated.
 	dangerous := f.Dangerous || envTrue(env.Getenv("CLAUDE_SANDBOX_DANGEROUS")) || cfg.Dangerous
+
+	// The instance noun names the container AND its worktree, so it is picked
+	// here, before the banner, from the nouns neither running nor already
+	// checked out under .claude/worktrees/ (CS-SESS-007, CS-SESS-045).
+	instance := newInstance(env, projectDir, f, wt.Root)
+	worktree := wt.nameFor(instance, f.Ralph)
+	fmt.Fprintln(env.Out, wt.banner(worktree))
 
 	// Images (CS-IMG). Order: base, CLI image, update check (CLI only), child,
 	// cap. A Claude Code update never touches the base or the child.
@@ -619,7 +728,8 @@ func runLaunch(env *Env, args []string) error {
 		CLIPackageCaches: f.PackageCaches,
 		Cfg:              cfg, EnvFiles: envFiles, ImageName: image,
 		ImageID:  imagebuild.ImageID(env.Runner, image),
-		Instance: newInstance(env, projectDir, f),
+		Instance: instance,
+		Worktree: worktree,
 		PIDClass: newPIDClass(env),
 		Version:  version,
 		Out:      env.Out, Err: env.Err,
@@ -647,6 +757,7 @@ func hostIdentity(getenv func(string) string) (uid, gid int, username, home stri
 
 func newRalphCmd(env *Env) *cobra.Command {
 	o := ralphloop.Options{}
+	var ralphWorktree string
 	var watchdog int
 	var limit, runlog, rawlog string
 	cmd := &cobra.Command{
@@ -706,6 +817,10 @@ func newRalphCmd(env *Env) *cobra.Command {
 	fl.BoolVar(&o.SkipPermissions, "dangerous", false, "Pass --dangerously-skip-permissions to claude")
 	fl.BoolVar(&o.SkipPermissions, "dangerously-skip-permissions", false, "Alias of --dangerous")
 	fl.BoolVar(&o.Resume, "resume", false, "Pass --resume to claude on the first iteration")
+	// Accepted so a worktree-mode launch (CS-LNCH-045) reaches the loop; the
+	// loop's own handling (forwarding it to every iteration, CS-RLP) is the
+	// ralph half of the feature and lands separately.
+	fl.StringVar(&ralphWorktree, "worktree", "", "Run every iteration in the named Claude Code worktree")
 	fl.StringVar(&runlog, "runlog-file", "", "Run log path (default: <ralph-dir>/runlog.json)")
 	fl.StringVar(&rawlog, "raw-log", "", "Raw NDJSON base path (default: <ralph-dir>/runlogs/rawlog)")
 	fl.IntVar(&watchdog, "watchdog-timeout", 15, "Inactivity timeout in minutes (0 to disable)")

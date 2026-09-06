@@ -28,12 +28,12 @@ const psSep = "\x1f"
 
 // psRow builds one line of scripted `docker ps --format` output.
 func psRow(name, status, project, instance string) string {
-	return strings.Join([]string{name, status, project, "claude", instance, "v1", "", "", "", ""}, psSep)
+	return strings.Join([]string{name, status, project, "claude", instance, "v1", "", "", "", "", ""}, psSep)
 }
 
 // psRowFull additionally sets the model, config hash and inputs label.
 func psRowFull(name, status, project, instance, model, hash, inputs string) string {
-	return strings.Join([]string{name, status, project, "claude", instance, "v1", model, hash, inputs, ""}, psSep)
+	return strings.Join([]string{name, status, project, "claude", instance, "v1", model, hash, inputs, "", ""}, psSep)
 }
 
 var _ = Describe("sessions (CS-SESS)", func() {

@@ -19,7 +19,7 @@ import (
 
 // classRow is a docker ps row for another project carrying a pid class.
 func classRow(name, class string) string {
-	return strings.Join([]string{name, "Up 1h", "/elsewhere", "claude", "otter", "v1", "", "", "", class}, psSep)
+	return strings.Join([]string{name, "Up 1h", "/elsewhere", "claude", "otter", "v1", "", "", "", class, ""}, psSep)
 }
 
 var _ = Describe("pid classes (CS-PID, CS-LNCH-039)", func() {

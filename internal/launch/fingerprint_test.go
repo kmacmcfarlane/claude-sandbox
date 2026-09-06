@@ -98,6 +98,15 @@ var _ = Describe("config fingerprint", func() {
 		withLimit := fresh()
 		withLimit.Limit = "5"
 		Expect(hashOf(withLimit)).To(Equal(bare))
+
+		// CS-LNCH-044: the worktree name and the config key behind it.
+		withWorktree := fresh()
+		withWorktree.Worktree = "heron"
+		Expect(hashOf(withWorktree)).To(Equal(bare), "every new container has a different worktree")
+		off := false
+		withKey := fresh()
+		withKey.Cfg = &cascade.Config{Worktree: &off}
+		Expect(hashOf(withKey)).To(Equal(bare), "the key is json:\"-\" so it stays out of the merged-config digest")
 	})
 
 	Describe("CS-SESS-023: each input affects the hash", func() {
