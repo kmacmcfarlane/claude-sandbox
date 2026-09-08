@@ -46,18 +46,26 @@ OPTIONAL_STORY_FIELDS = (
     "claimed_by",
     "requires_reviewed",
     "ticket_mode",
+    "base_sha",
 )
 
 VALID_TICKET_MODES = frozenset({"autonomous", "interactive", "mixed"})
 
+# base_sha: the commit the story's work started from (HEAD when it entered
+# in_progress). Stories accumulate on one run branch, so "the story's diff" is
+# `git diff <base_sha>` — never `git diff main`, which after the first story
+# would include every earlier, already-reviewed story. Recorded by
+# `next-work --claim` and by `set <id> base_sha "$(git rev-parse HEAD)"`.
+BASE_SHA_RE = re.compile(r"^[0-9a-f]{7,40}$")
+
 SCALAR_SET_FIELDS = frozenset(
-    {"status", "priority", "complexity", "blocked_reason", "title", "ticket_mode"}
+    {"status", "priority", "complexity", "blocked_reason", "title", "ticket_mode", "base_sha"}
 )
 TEXT_SET_FIELDS = frozenset(
     {"review_feedback", "notes", "blocked_reason"}
 )
 CLEARABLE_FIELDS = frozenset(
-    {"review_feedback", "blocked_reason", "complexity", "notes", "claimed_by"}
+    {"review_feedback", "blocked_reason", "complexity", "notes", "claimed_by", "base_sha"}
 )
 
 REQUIRED_TOP_LEVEL = ("schema_version", "project", "defaults", "stories")
@@ -629,6 +637,21 @@ def _output_next_work(
     output_stories([result], fmt, fields)
 
 
+def current_head_sha() -> str | None:
+    """HEAD of the current working directory's checkout (the run branch when
+    called from inside ralph's worktree), or None outside a git repository /
+    before the first commit. Best-effort: a claim never fails for lack of it."""
+    try:
+        out = subprocess.check_output(
+            ["git", "rev-parse", "--verify", "HEAD"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+    return out if BASE_SHA_RE.match(out) else None
+
+
 def cmd_next_work(args) -> int:
     """Select the next eligible story using the deterministic work-selection algorithm.
 
@@ -713,10 +736,13 @@ def cmd_next_work(args) -> int:
         print("No eligible work found.", file=sys.stderr)
         return 2
 
-    # Handle --claim: atomically set status and claimed_by
+    # Handle --claim: atomically set status, claimed_by and base_sha
     if claim_worker:
         selected["status"] = "in_progress"
         selected["claimed_by"] = claim_worker
+        base = current_head_sha()
+        if base:
+            selected["base_sha"] = base
         save_yaml_atomic(backlog_path, bl_data, bl_yaml)
 
     _output_next_work(selected, queue, args.format, fields)
@@ -854,6 +880,13 @@ def cmd_set(args) -> int:
             print(
                 f"ERROR: Invalid ticket_mode '{value}' "
                 f"(valid: {', '.join(sorted(VALID_TICKET_MODES))})",
+                file=sys.stderr,
+            )
+            return 1
+    elif field == "base_sha":
+        if not BASE_SHA_RE.match(value):
+            print(
+                f"ERROR: Invalid base_sha '{value}' (expected a 7-40 char hex commit id)",
                 file=sys.stderr,
             )
             return 1
@@ -1189,7 +1222,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--claim",
         metavar="WORKER_ID",
         default=None,
-        help="Atomically claim the selected story: set status=in_progress and claimed_by=WORKER_ID",
+        help="Atomically claim the selected story: set status=in_progress, claimed_by=WORKER_ID and base_sha=HEAD of the current checkout",
     )
     p.add_argument(
         "--format",

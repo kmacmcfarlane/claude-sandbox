@@ -34,6 +34,12 @@ type Options struct {
 	Model            string
 	SkipPermissions  bool
 	Resume           bool
+	// Worktree names the Claude Code worktree every iteration runs in
+	// (`claude --worktree <name>`, CS-RLP-019); "" runs in the shared checkout
+	// with no flag (CS-RLP-021). One worktree per RUN: claude creates
+	// .claude/worktrees/<name> on branch worktree-<name> the first time and
+	// reopens it after that, so the run's stories accumulate on one branch.
+	Worktree         string
 	RunlogFile       string // "" -> <ralph-dir>/runlog.json
 	RawLogBase       string // "" -> <ralph-dir>/runlogs/rawlog
 	WatchdogTimeout  int    // minutes; -1 disables, 0 -> 15
@@ -242,6 +248,42 @@ func (l *Loop) printBanner() {
 	fmt.Fprintf(l.Out, "  limit:     %d\n", l.Limit)
 	fmt.Fprintf(l.Out, "  watchdog:  %s\n", watchdog)
 	fmt.Fprintf(l.Out, "  iter-limit: %s\n", FormatWait(l.IterationTimeout))
+	fmt.Fprintf(l.Out, "  worktree:  %s\n", l.worktreeBanner())
+}
+
+// worktreeBanner is the banner's worktree line (CS-RLP-005): the name plus
+// where claude puts it, or "off" so the shared-checkout mode is never silent.
+func (l *Loop) worktreeBanner() string {
+	if l.Worktree == "" {
+		return "off (shared checkout)"
+	}
+	return fmt.Sprintf("%s (%s/%s, branch %s)", l.Worktree, WorktreeDir, l.Worktree, WorktreeBranch(l.Worktree))
+}
+
+// WorktreeDir is where Claude Code keeps its worktrees, relative to the git
+// root, and WorktreeBranch the branch it checks out there — claude's own
+// convention (CS-LNCH-041), restated here so the loop's prompt block and
+// banner never drift from what the launcher prints.
+const WorktreeDir = ".claude/worktrees"
+
+// WorktreeBranch is the branch claude creates for worktree name.
+func WorktreeBranch(name string) string { return "worktree-" + name }
+
+// whereYouAre is the generated prompt block for worktree mode (CS-RLP-022):
+// the one per-run fact the static prompt files cannot carry is the worktree
+// name, and with it the branch the run's work must stay on. Empty when off
+// (CS-RLP-021) so the prompt is exactly the three files of CS-RLP-011.
+func (l *Loop) whereYouAre() string {
+	if l.Worktree == "" {
+		return ""
+	}
+	name := l.Worktree
+	return fmt.Sprintf(`## Where you are
+
+Ralph launched you with `+"`--worktree %[1]s`"+`. Your working directory is `+"`%[2]s/%[1]s`"+` under the repository root, a Claude Code worktree on branch `+"`%[3]s`"+`. Every iteration of this run reopens the SAME worktree, so the run's work accumulates on `+"`%[3]s`"+`: commit there and leave it there. Never merge into `+"`main`"+` — the run branch `+"`%[3]s`"+` is the deliverable, and a human fast-forwards `+"`main`"+` from it after review.
+
+The project root (main checkout) is `+"`$CLAUDE_SANDBOX_PROJECT_DIR`"+` (`+"`%[4]s`"+`); `+"`.claude-sandbox/`"+` lives there, NOT in the worktree. The stop file is `+"`$CLAUDE_SANDBOX_PROJECT_DIR/.claude-sandbox/ralph/stop`"+`. Claude Code blocks Edit/Write to the main checkout from inside a worktree, so reach it only through Bash: `+"`backlog.py`"+` (which honours `+"`$BACKLOG_REPO_ROOT`"+`) for the backlog, `+"`touch`"+` for the stop file.
+`, name, WorktreeDir, WorktreeBranch(name), l.WorkDir)
 }
 
 // watchdogMinutes maps the tri-state flag: -1 disabled, else minutes.
@@ -464,6 +506,13 @@ func (l *Loop) claudeArgs(resume bool) []string {
 	if l.SkipPermissions {
 		args = append(args, "--dangerously-skip-permissions")
 	}
+	// Every iteration, not first-only like --resume: reopening the same
+	// worktree is claude's own reuse path (CS-RLP-019); absent when off
+	// (CS-RLP-021). Before --model, the same order the launcher uses for
+	// interactive sessions (CS-LNCH-041), so the two argv shapes read alike.
+	if l.Worktree != "" {
+		args = append(args, "--worktree", l.Worktree)
+	}
 	if l.Model != "" {
 		args = append(args, "--model", l.Model)
 	}
@@ -477,13 +526,17 @@ func (l *Loop) claudeArgs(resume bool) []string {
 }
 
 // promptData concatenates the prompt inputs with blank-line separators
-// (CS-RLP-011).
+// (CS-RLP-011): base prompt, the generated worktree block when in worktree
+// mode (CS-RLP-022), the prompt file, the mode addendum.
 func (l *Loop) promptData() ([]byte, error) {
 	parts := [][]byte{}
 	if len(l.PromptRalph) > 0 {
 		parts = append(parts, l.PromptRalph)
 	} else if raw, err := os.ReadFile(filepath.Join(l.RepoRoot, "PROMPT_RALPH.md")); err == nil {
 		parts = append(parts, raw)
+	}
+	if block := l.whereYouAre(); block != "" {
+		parts = append(parts, []byte(block))
 	}
 	for _, f := range []string{l.PromptFile, l.Addendum} {
 		raw, err := os.ReadFile(f)
@@ -493,6 +546,19 @@ func (l *Loop) promptData() ([]byte, error) {
 		parts = append(parts, raw)
 	}
 	return bytes.Join(parts, []byte("\n\n")), nil
+}
+
+// childEnv is what every iteration's claude gets on top of the loop's own
+// environment (CS-RLP-020): the project root, under the name backlog.py
+// honours and the name the launcher sets on the container (CS-LNCH-047).
+// Always, not only in worktree mode — inside a worktree `git rev-parse
+// --show-toplevel` names the worktree, and the scaffold prompts address the
+// sandbox dir through $CLAUDE_SANDBOX_PROJECT_DIR in both modes.
+func (l *Loop) childEnv() []string {
+	return []string{
+		"BACKLOG_REPO_ROOT=" + l.WorkDir,
+		"CLAUDE_SANDBOX_PROJECT_DIR=" + l.WorkDir,
+	}
 }
 
 func (l *Loop) runIteration(iter int, resume bool) int {

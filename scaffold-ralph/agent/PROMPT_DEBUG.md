@@ -1,16 +1,16 @@
 ## Debug mode overlay
 
-You are running in **debug mode**. All normal orchestrator instructions above still apply. This overlay adds decision logging so the user can review a post-mortem trail in `.claude-sandbox/ralph/debug/`.
+You are running in **debug mode**. All normal orchestrator instructions above still apply. This overlay adds decision logging so the user can review a post-mortem trail in `$CLAUDE_SANDBOX_PROJECT_DIR/.claude-sandbox/ralph/debug/`.
 
 ### Setup
 
 Before doing anything else:
-1. Delete any existing `.claude-sandbox/ralph/debug/` directory: `rm -rf .claude-sandbox/ralph/debug`
-2. Create a fresh one: `mkdir -p .claude-sandbox/ralph/debug`
+1. Delete any existing `$CLAUDE_SANDBOX_PROJECT_DIR/.claude-sandbox/ralph/debug/` directory: `rm -rf $CLAUDE_SANDBOX_PROJECT_DIR/.claude-sandbox/ralph/debug`
+2. Create a fresh one: `mkdir -p $CLAUDE_SANDBOX_PROJECT_DIR/.claude-sandbox/ralph/debug`
 
 ### Orchestrator decision logging
 
-Before and after each subagent dispatch, append to `.claude-sandbox/ralph/debug/orchestrator.md`:
+Before and after each subagent dispatch, append to `$CLAUDE_SANDBOX_PROJECT_DIR/.claude-sandbox/ralph/debug/orchestrator.md`:
 
 ```markdown
 ## [timestamp] Story selection
@@ -39,7 +39,7 @@ Before and after each subagent dispatch, append to `.claude-sandbox/ralph/debug/
 ## Decision Logging (DEBUG MODE)
 
 You are running in debug mode. Before returning your verdict, you MUST write a detailed
-decision log to `.claude-sandbox/ralph/debug/<story-id>-<agent-name>.md` (e.g., `.claude-sandbox/ralph/debug/S-028-qa-expert.md`).
+decision log to `$CLAUDE_SANDBOX_PROJECT_DIR/.claude-sandbox/ralph/debug/<story-id>-<agent-name>.md` (e.g., `$CLAUDE_SANDBOX_PROJECT_DIR/.claude-sandbox/ralph/debug/S-028-qa-expert.md`).
 
 This log is used for post-mortem analysis when stories are marked "done" but have runtime issues.
 Be thorough — the point is to understand exactly what you checked and what you didn't.
@@ -82,7 +82,7 @@ For each significant decision:
 
 ### End of cycle
 
-Before exiting, write a final summary to `.claude-sandbox/ralph/debug/summary.md`:
+Before exiting, write a final summary to `$CLAUDE_SANDBOX_PROJECT_DIR/.claude-sandbox/ralph/debug/summary.md`:
 - What story was worked on
 - Full status transition chain (e.g., todo → in_progress → review → testing → done)
 - For each subagent invoked: one-line summary of its verdict
@@ -91,4 +91,4 @@ Before exiting, write a final summary to `.claude-sandbox/ralph/debug/summary.md
 
 ### Git policy
 
-The `.claude-sandbox/ralph/debug/` directory must NOT be committed or included in any git operations. It is ephemeral output for the user to review.
+The `$CLAUDE_SANDBOX_PROJECT_DIR/.claude-sandbox/ralph/debug/` directory must NOT be committed or included in any git operations. It is ephemeral output for the user to review.

@@ -8,5 +8,5 @@ defaults:
   review_feedback_field: "review_feedback"
   requires_field: "requires"
 
-# Add stories with: python3 .claude-sandbox/scripts/backlog/backlog.py add
+# Add stories with: python3 "$BACKLOG_REPO_ROOT/.claude-sandbox/scripts/backlog/backlog.py" add
 stories: []

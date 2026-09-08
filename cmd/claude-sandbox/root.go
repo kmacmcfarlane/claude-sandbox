@@ -757,7 +757,6 @@ func hostIdentity(getenv func(string) string) (uid, gid int, username, home stri
 
 func newRalphCmd(env *Env) *cobra.Command {
 	o := ralphloop.Options{}
-	var ralphWorktree string
 	var watchdog int
 	var limit, runlog, rawlog string
 	cmd := &cobra.Command{
@@ -817,10 +816,10 @@ func newRalphCmd(env *Env) *cobra.Command {
 	fl.BoolVar(&o.SkipPermissions, "dangerous", false, "Pass --dangerously-skip-permissions to claude")
 	fl.BoolVar(&o.SkipPermissions, "dangerously-skip-permissions", false, "Alias of --dangerous")
 	fl.BoolVar(&o.Resume, "resume", false, "Pass --resume to claude on the first iteration")
-	// Accepted so a worktree-mode launch (CS-LNCH-045) reaches the loop; the
-	// loop's own handling (forwarding it to every iteration, CS-RLP) is the
-	// ralph half of the feature and lands separately.
-	fl.StringVar(&ralphWorktree, "worktree", "", "Run every iteration in the named Claude Code worktree")
+	// The launcher hands this over in worktree mode (CS-LNCH-045); the loop
+	// forwards it to every iteration (CS-RLP-019) and generates the
+	// where-you-are prompt block (CS-RLP-022). Empty = shared checkout.
+	fl.StringVar(&o.Worktree, "worktree", "", "Run every iteration in the named Claude Code worktree (.claude/worktrees/NAME, branch worktree-NAME); omit for the shared checkout")
 	fl.StringVar(&runlog, "runlog-file", "", "Run log path (default: <ralph-dir>/runlog.json)")
 	fl.StringVar(&rawlog, "raw-log", "", "Raw NDJSON base path (default: <ralph-dir>/runlogs/rawlog)")
 	fl.IntVar(&watchdog, "watchdog-timeout", 15, "Inactivity timeout in minutes (0 to disable)")

@@ -975,6 +975,166 @@ class TestClaimCLI(unittest.TestCase):
         self.assertEqual(story["status"], "todo")
         self.assertNotIn("claimed_by", story)
 
+    def _run_in(self, cwd, *extra_args):
+        cmd = [
+            sys.executable,
+            SCRIPT,
+            "--backlog",
+            self.backlog_path,
+            "--done",
+            self.done_path,
+            "--repo-root",
+            self.tmpdir,
+            "next-work",
+            "--format",
+            "json",
+        ] + list(extra_args)
+        return subprocess.run(cmd, capture_output=True, text=True, cwd=cwd)
+
+    def _git(self, repo, *args):
+        return subprocess.run(
+            ["git", "-c", "user.name=t", "-c", "user.email=t@t", *args],
+            cwd=repo, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+    def test_claim_records_base_sha_from_cwd_head(self):
+        """--claim records base_sha = HEAD of the checkout it runs in (the run
+        branch inside ralph's worktree), so the story's diff is `git diff
+        <base_sha>` rather than a diff against main."""
+        repo = os.path.join(self.tmpdir, "repo")
+        os.makedirs(repo)
+        self._git(repo, "init", "-q")
+        with open(os.path.join(repo, "f"), "w") as f:
+            f.write("x\n")
+        self._git(repo, "add", "f")
+        self._git(repo, "commit", "-q", "-m", "one")
+        head = self._git(repo, "rev-parse", "HEAD")
+
+        self._make_backlog(
+            [
+                {
+                    "id": "S-001",
+                    "title": "Test story",
+                    "priority": 50,
+                    "status": "todo",
+                    "requires": [],
+                    "acceptance": ["FE: Test"],
+                    "testing": ["command: echo ok"],
+                },
+            ]
+        )
+        result = self._run_in(repo, "--claim", "worker-1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        self.assertEqual(data[0]["base_sha"], head)
+        story = self._read_yaml(self.backlog_path)["stories"][0]
+        self.assertEqual(story["base_sha"], head)
+        self.assertEqual(story["claimed_by"], "worker-1")
+
+    def test_claim_without_git_repo_omits_base_sha(self):
+        """Outside a git repository the claim still succeeds; base_sha is simply absent."""
+        nogit = os.path.join(self.tmpdir, "nogit")
+        os.makedirs(nogit)
+        self._make_backlog(
+            [
+                {
+                    "id": "S-001",
+                    "title": "Test story",
+                    "priority": 50,
+                    "status": "todo",
+                    "requires": [],
+                    "acceptance": ["FE: Test"],
+                    "testing": ["command: echo ok"],
+                },
+            ]
+        )
+        env = dict(os.environ, GIT_CEILING_DIRECTORIES=self.tmpdir)
+        cmd = [
+            sys.executable, SCRIPT, "--backlog", self.backlog_path, "--done", self.done_path,
+            "--repo-root", self.tmpdir, "next-work", "--format", "json", "--claim", "worker-1",
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, cwd=nogit, env=env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        story = self._read_yaml(self.backlog_path)["stories"][0]
+        self.assertEqual(story["status"], "in_progress")
+        self.assertNotIn("base_sha", story)
+
+
+class TestBaseShaCLI(unittest.TestCase):
+    """base_sha is a settable, validated, clearable scalar field."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.backlog_path = os.path.join(self.tmpdir, "backlog.yaml")
+        self.done_path = os.path.join(self.tmpdir, "done.yaml")
+        os.makedirs(os.path.join(self.tmpdir, ".claude-sandbox", "agent"), exist_ok=True)
+        self.yaml = YAML()
+        self.yaml.indent(mapping=2, sequence=4, offset=2)
+        base = {
+            "schema_version": 2,
+            "project": "test",
+            "defaults": {"priority_order": "desc"},
+            "stories": [],
+        }
+        with open(self.done_path, "w") as f:
+            self.yaml.dump(base, f)
+        base["stories"] = [
+            {
+                "id": "S-001",
+                "title": "Story",
+                "priority": 50,
+                "status": "in_progress",
+                "requires": [],
+                "acceptance": ["FE: Test"],
+                "testing": ["command: echo ok"],
+            }
+        ]
+        with open(self.backlog_path, "w") as f:
+            self.yaml.dump(base, f)
+
+    def tearDown(self):
+        import shutil
+
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _run(self, *extra_args):
+        cmd = [
+            sys.executable, SCRIPT, "--backlog", self.backlog_path, "--done", self.done_path,
+            "--repo-root", self.tmpdir,
+        ] + list(extra_args)
+        return subprocess.run(cmd, capture_output=True, text=True)
+
+    def _story(self):
+        with open(self.backlog_path) as f:
+            return self.yaml.load(f)["stories"][0]
+
+    def test_set_base_sha(self):
+        sha = "0123456789abcdef0123456789abcdef01234567"
+        result = self._run("set", "S-001", "base_sha", sha)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self._story()["base_sha"], sha)
+        # Abbreviated ids are accepted too (git rev-parse --short).
+        self.assertEqual(self._run("set", "S-001", "base_sha", "abc1234").returncode, 0)
+
+    def test_set_base_sha_rejects_non_hex(self):
+        result = self._run("set", "S-001", "base_sha", "main")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Invalid base_sha", result.stderr)
+        self.assertNotIn("base_sha", self._story())
+
+    def test_clear_base_sha(self):
+        self.assertEqual(self._run("set", "S-001", "base_sha", "abc1234").returncode, 0)
+        result = self._run("clear", "S-001", "base_sha")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("base_sha", self._story())
+
+    def test_validate_knows_base_sha(self):
+        """base_sha is a known optional field: validate must not warn about it."""
+        self.assertEqual(self._run("set", "S-001", "base_sha", "abc1234").returncode, 0)
+        result = self._run("validate", "--strict")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertNotIn("unknown field", result.stderr + result.stdout)
+
 
 class TestLocking(unittest.TestCase):
     """Tests for file locking mechanism."""

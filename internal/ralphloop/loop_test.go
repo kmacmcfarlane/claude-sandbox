@@ -231,6 +231,38 @@ var _ = Describe("ralph loop", func() {
 			Expect(banner).To(ContainSubstring("limit:     1"))
 			Expect(banner).To(ContainSubstring("watchdog:  disabled"))
 			Expect(banner).To(ContainSubstring("iter-limit: 1m30s"))
+			Expect(banner).To(ContainSubstring("worktree:  off (shared checkout)"))
+		})
+
+		It("CS-RLP-005: the banner names the worktree, its directory and branch when --worktree is set", func() {
+			opts.Worktree = "ralph"
+			script(stepOK())
+			Expect(ralphloop.Run(opts)).To(Equal(0))
+			Expect(out.String()).To(ContainSubstring("worktree:  ralph (.claude/worktrees/ralph, branch worktree-ralph)"))
+		})
+
+		It("CS-RLP-019: the loop's own files stay under the project root's .claude-sandbox/ in worktree mode", func() {
+			opts.Worktree = "ralph"
+			opts.Limit = 2
+			var seen []string
+			opts.RunIter = func(l *ralphloop.Loop, iter int) int {
+				seen = append(seen, l.LockFile, l.StopFile, l.RunlogFile, l.RawLogBase, l.QuotaFile, l.PromptFile, l.WorkDir)
+				Expect(l.LockFile).To(BeAnExistingFile())
+				Expect(filepath.Join(ralphDir, "temp")).To(BeADirectory())
+				Expect(l.Worktree).To(Equal("ralph"), "the same worktree every iteration")
+				return 0
+			}
+			Expect(ralphloop.Run(opts)).To(Equal(0))
+			Expect(seen).To(HaveLen(14), "two iterations")
+			Expect(seen[0]).To(Equal(filepath.Join(ralphDir, "lock")))
+			Expect(seen[1]).To(Equal(filepath.Join(ralphDir, "stop")))
+			Expect(seen[2]).To(Equal(filepath.Join(ralphDir, "runlog.json")))
+			Expect(seen[3]).To(Equal(filepath.Join(ralphDir, "runlogs", "rawlog")))
+			Expect(seen[4]).To(Equal(filepath.Join(ralphDir, "temp", "quota-status")))
+			Expect(seen[5]).To(Equal(filepath.Join(agentDir, "PROMPT.md")))
+			Expect(seen[6]).To(Equal(work), "claude's cwd moves into the worktree; the loop's does not")
+			// Nothing of the loop's lands under the worktree path.
+			Expect(filepath.Join(work, ".claude", "worktrees")).NotTo(BeADirectory())
 		})
 
 		It("CS-RLP-006: runtime skeleton and a fresh runlog are created", func() {

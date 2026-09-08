@@ -22,6 +22,7 @@ Feature: Ralph loop lifecycle (CS-RLP)
       | --model MODEL        | (none)                        |
       | --dangerous          | off                           |
       | --resume             | off                           |
+      | --worktree NAME      | (none: shared checkout)       |
       | --runlog-file [PATH] | <ralph-dir>/runlog.json       |
       | --raw-log [PATH]     | <ralph-dir>/runlogs/rawlog    |
       | --watchdog-timeout N | 15 (minutes; 0 disables)      |
@@ -52,6 +53,8 @@ Feature: Ralph loop lifecycle (CS-RLP)
   Scenario: CS-RLP-005 Startup banner reports effective settings
     Then ralph prints repo, prompt files, stop file, claude bin, model, mode,
       skip-permissions, limit, watchdog, iteration limit, run-log and raw-log paths
+    And a worktree line: "<name> (.claude/worktrees/<name>, branch worktree-<name>)"
+      when --worktree NAME was passed, else "off (shared checkout)"
 
   Scenario: CS-RLP-006 Runtime skeleton and runlog initialization
     When ralph starts
@@ -93,14 +96,20 @@ Feature: Ralph loop lifecycle (CS-RLP)
   Scenario: CS-RLP-011 Prompt assembly
     When an iteration launches claude
     Then stdin is the concatenation, separated by blank lines, of:
-      | /opt/claude-sandbox/PROMPT_RALPH.md (repo-root copy) |
-      | the prompt file                                      |
-      | the mode addendum                                    |
+      | /opt/claude-sandbox/PROMPT_RALPH.md (repo-root copy)     |
+      | the generated "Where you are" block (worktree mode only) |
+      | the prompt file                                          |
+      | the mode addendum                                        |
+    # The generated block is CS-RLP-022; without --worktree it is absent and
+    # the concatenation is exactly the three files.
 
   Scenario: CS-RLP-012 Claude argument assembly
-    Given non-interactive mode with --dangerous, --model opus, --resume
-    Then the first iteration runs: claude -p --dangerously-skip-permissions --model opus --resume --verbose --output-format stream-json
-    And subsequent iterations omit --resume
+    Given non-interactive mode with --dangerous, --model opus, --worktree ralph, --resume
+    Then the first iteration runs: claude -p --dangerously-skip-permissions --worktree ralph --model opus --resume --verbose --output-format stream-json
+    # --worktree precedes --model as it does in the launcher's argv (CS-LNCH-041)
+    And subsequent iterations omit --resume but keep --worktree ralph
+    Given no --worktree
+    Then no --worktree flag appears anywhere in the argv
     Given interactive mode
     Then claude runs with no -p and no stream flags, prompt still piped to stdin
 
@@ -135,3 +144,50 @@ Feature: Ralph loop lifecycle (CS-RLP)
 
   Scenario: CS-RLP-018 Pacing between iterations
     Then ralph sleeps 3 seconds between iterations
+
+  # ---- worktree mode (CS-LNCH-045 hands the loop --worktree <name>) ----
+
+  Scenario: CS-RLP-019 One worktree per run, reopened by every iteration
+    Given ralph was started with --worktree ralph
+    Then EVERY iteration runs claude with --worktree ralph (not first-only like --resume)
+    # Claude Code creates .claude/worktrees/ralph on branch worktree-ralph the
+    # first time and REOPENS it after that; -p runs never clean up, so the
+    # run's stories accumulate on one branch across iterations.
+    And the loop itself keeps running from the project root:
+      the lock, stop file, runlog, raw logs, temp/ and prompt files all resolve
+      under <project>/.claude-sandbox/ regardless of --worktree
+    # .claude-sandbox/ is gitignored in the default layout, so it does not
+    # exist inside the worktree checkout; only claude's cwd moves.
+
+  Scenario: CS-RLP-020 The claude child is told where the project root is
+    When an iteration launches claude
+    Then the child's environment carries, in worktree mode and shared-checkout mode alike:
+      | BACKLOG_REPO_ROOT          | the loop's work dir (project root) |
+      | CLAUDE_SANDBOX_PROJECT_DIR | the loop's work dir (project root) |
+    # backlog.py honours BACKLOG_REPO_ROOT, so backlog.yaml is read and
+    # written in the main checkout even when git rev-parse --show-toplevel
+    # would name the worktree. CLAUDE_SANDBOX_PROJECT_DIR is what the
+    # launcher sets on the container (CS-LNCH-047); the loop re-asserts it so
+    # the scaffold prompts' $CLAUDE_SANDBOX_PROJECT_DIR paths resolve whether
+    # ralph was started by the launcher or by hand.
+
+  Scenario: CS-RLP-021 Worktree off leaves the loop exactly as before
+    Given ralph was started without --worktree (launcher --no-worktree,
+      CLAUDE_SANDBOX_WORKTREE=0, or config worktree: false)
+    Then no --worktree flag is passed to claude on any iteration
+    And the prompt carries no "Where you are" block
+    And claude runs in the shared checkout with the argv of CS-RLP-012
+
+  Scenario: CS-RLP-022 The run branch is the deliverable; ralph never merges into main
+    Given ralph was started with --worktree ralph
+    Then the assembled prompt carries a generated "Where you are" block, after the
+      base prompt, stating:
+      | the working directory is .claude/worktrees/ralph on branch worktree-ralph   |
+      | every iteration reopens the same worktree, so commit on worktree-ralph      |
+      | never merge into main; a human fast-forwards main from the run branch       |
+      | .claude-sandbox/ lives in the main checkout at $CLAUDE_SANDBOX_PROJECT_DIR  |
+      | the stop file is $CLAUDE_SANDBOX_PROJECT_DIR/.claude-sandbox/ralph/stop      |
+      | Edit/Write to the main checkout are blocked; use backlog.py and touch (Bash) |
+    # The scaffold-ralph agent docs (AGENT_FLOW.md, PROMPT*.md) carry no
+    # merge-into-main step at all, in either mode; the loop's block is the
+    # per-run reminder that names the branch.

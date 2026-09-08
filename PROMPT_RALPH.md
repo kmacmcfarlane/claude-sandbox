@@ -9,17 +9,26 @@ You are running inside a **ralph loop** — a fresh Claude Code process is spawn
 3. When you finish (exit code 0), ralph sleeps 3 seconds and starts the next iteration.
 4. On error, ralph exits the loop. On quota/rate-limit, ralph retries automatically.
 
+## Project root and the sandbox directory
+
+Ralph sets two environment variables on your process, in every mode:
+
+- **`CLAUDE_SANDBOX_PROJECT_DIR`** — the project root (the main checkout). `.claude-sandbox/` lives there.
+- **`BACKLOG_REPO_ROOT`** — the same path; `backlog.py` reads it so backlog.yaml is always the main checkout's copy.
+
+Always address sandbox files through `$CLAUDE_SANDBOX_PROJECT_DIR/.claude-sandbox/...`, never by a path relative to your working directory: by default ralph runs you in a Claude Code **worktree** (`.claude/worktrees/<name>`, branch `worktree-<name>`), and `.claude-sandbox/` is not in that checkout. When ralph runs in worktree mode a "Where you are" section follows this one naming the worktree and its branch.
+
 ## Stopping the Loop
 
-Create a **`.claude-sandbox/ralph/stop`** file to halt the loop cleanly. Ralph checks for this file at the start of each iteration and exits if it exists. Example:
+Create the **`$CLAUDE_SANDBOX_PROJECT_DIR/.claude-sandbox/ralph/stop`** file to halt the loop cleanly. Ralph checks for this file at the start of each iteration and exits if it exists. Example:
 
 ```bash
-touch .claude-sandbox/ralph/stop
+touch "$CLAUDE_SANDBOX_PROJECT_DIR/.claude-sandbox/ralph/stop"
 ```
 
 ## Ralph Runtime Directory
 
-All ralph runtime files live under `.claude-sandbox/ralph/` in the project (gitignored):
+All ralph runtime files live under `$CLAUDE_SANDBOX_PROJECT_DIR/.claude-sandbox/ralph/` (gitignored):
 
 ```
 .claude-sandbox/ralph/
@@ -40,7 +49,7 @@ All ralph runtime files live under `.claude-sandbox/ralph/` in the project (giti
 
 ## Maintaining State Across Iterations
 
-- **Git** is the primary state mechanism — commit your work so the next iteration can see it.
+- **Git** is the primary state mechanism — commit your work on the current branch so the next iteration can see it. Never merge into `main`: in worktree mode every iteration reopens the same worktree and the run branch is the deliverable a human reviews.
 - **Files on disk** persist between iterations (the working directory is not wiped).
 - **`.claude-sandbox/ralph/temp/`** is cleared at the start of each iteration — do not store anything important there.
 - **Conversation history is NOT preserved** — each iteration starts with zero context beyond the prompt files.
