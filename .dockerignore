@@ -2,6 +2,10 @@
 .idea
 .DS_Store
 .claude
+# The sandbox's own sidecar: work items, investigations, ralph runlogs and a
+# nested .git. Never needed by a build (`.claude` above is an exact-component
+# match and does not cover it).
+.claude-sandbox
 node_modules
 LICENSE
 README.md
