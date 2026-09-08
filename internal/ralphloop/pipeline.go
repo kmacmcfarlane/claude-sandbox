@@ -97,6 +97,9 @@ func (l *Loop) runIterationReal(iter int, resume bool) int {
 
 	// Wire the pipe chain: prompt -> claude -> stages... -> l.Out.
 	cmds[0].Stdin = bytes.NewReader(promptBytes)
+	// CS-RLP-020: only claude needs the project root; the node stages get
+	// their paths as flags.
+	cmds[0].Env = append(os.Environ(), l.childEnv()...)
 	for i := 0; i < len(cmds)-1; i++ {
 		pipe, perr := cmds[i].StdoutPipe()
 		if perr != nil {

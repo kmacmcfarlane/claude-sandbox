@@ -447,10 +447,13 @@ var _ = Describe("init-ralph subcommand", func() {
 
 		for _, rel := range []string{
 			"agent/PROMPT.md", "agent/PROMPT_AUTO.md", "agent/PROMPT_INTERACTIVE.md",
-			"agent/backlog.yaml", "scripts/backlog/backlog.py", "scripts/worktree/worktree.py",
+			"agent/AGENT_FLOW.md", "agent/backlog.yaml", "scripts/backlog/backlog.py",
 		} {
 			Expect(exists(filepath.Join(sb, rel))).To(BeTrue(), rel)
 		}
+		// The legacy .worktrees/<id> helper is gone: the only worktree
+		// convention is claude's own .claude/worktrees/<name> (CS-LNCH-041).
+		Expect(exists(filepath.Join(sb, "scripts", "worktree"))).To(BeFalse())
 		Expect(r.out.String()).To(MatchRegexp(`\d+ created, \d+ skipped`))
 	})
 

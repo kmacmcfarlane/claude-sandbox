@@ -20,6 +20,15 @@ import (
 	. "github.com/onsi/gomega"
 )
 
+func indexOf(args []string, want string) int {
+	for i, a := range args {
+		if a == want {
+			return i
+		}
+	}
+	return -1
+}
+
 var _ = Describe("defaults (white-box)", func() {
 	It("CS-RLP-001: zero-value options take the documented numeric defaults", func() {
 		o := Options{WorkDir: GinkgoT().TempDir()}
@@ -37,20 +46,43 @@ var _ = Describe("defaults (white-box)", func() {
 })
 
 var _ = Describe("claudeArgs", func() {
-	It("CS-RLP-012: non-interactive with --dangerous, --model opus, --resume builds the full argv", func() {
+	It("CS-RLP-012: non-interactive with --dangerous, --model opus, --worktree ralph, --resume builds the full argv", func() {
+		l := &Loop{Options: Options{SkipPermissions: true, Model: "opus", Worktree: "ralph", Resume: true}}
+		Expect(l.claudeArgs(true)).To(Equal([]string{
+			"-p", "--dangerously-skip-permissions", "--model", "opus", "--worktree", "ralph", "--resume",
+			"--verbose", "--output-format", "stream-json",
+		}))
+	})
+
+	It("CS-RLP-012: subsequent iterations omit --resume but keep --worktree", func() {
+		l := &Loop{Options: Options{SkipPermissions: true, Model: "opus", Worktree: "ralph", Resume: true}}
+		Expect(l.claudeArgs(false)).To(Equal([]string{
+			"-p", "--dangerously-skip-permissions", "--model", "opus", "--worktree", "ralph",
+			"--verbose", "--output-format", "stream-json",
+		}))
+	})
+
+	It("CS-RLP-012 / CS-RLP-021: without --worktree the argv carries no worktree flag at all", func() {
 		l := &Loop{Options: Options{SkipPermissions: true, Model: "opus", Resume: true}}
 		Expect(l.claudeArgs(true)).To(Equal([]string{
 			"-p", "--dangerously-skip-permissions", "--model", "opus", "--resume",
 			"--verbose", "--output-format", "stream-json",
 		}))
+		Expect(l.claudeArgs(false)).NotTo(ContainElement("--worktree"))
 	})
 
-	It("CS-RLP-012: subsequent iterations omit --resume", func() {
-		l := &Loop{Options: Options{SkipPermissions: true, Model: "opus", Resume: true}}
-		Expect(l.claudeArgs(false)).To(Equal([]string{
-			"-p", "--dangerously-skip-permissions", "--model", "opus",
-			"--verbose", "--output-format", "stream-json",
-		}))
+	It("CS-RLP-019: --worktree is forwarded to EVERY iteration, not first-only like --resume", func() {
+		l := &Loop{Options: Options{Worktree: "ralph", Resume: true}}
+		for iter, resume := range []bool{true, false, false} {
+			args := l.claudeArgs(resume)
+			Expect(args).To(ContainElements("--worktree", "ralph"), "iteration %d", iter+1)
+			idx := indexOf(args, "--worktree")
+			Expect(args[idx+1]).To(Equal("ralph"))
+		}
+		// Interactive mode too: the worktree is where the run lives, not a
+		// stream-json concern.
+		l = &Loop{Options: Options{Interactive: true, Worktree: "ralph"}}
+		Expect(l.claudeArgs(false)).To(Equal([]string{"--worktree", "ralph"}))
 	})
 
 	It("CS-RLP-012: interactive mode has no -p and no stream flags", func() {
@@ -90,6 +122,42 @@ var _ = Describe("promptData", func() {
 		data, err := l.promptData()
 		Expect(err).NotTo(HaveOccurred())
 		Expect(string(data)).To(Equal("repo ralph\n\nthe prompt\n\nthe addendum"))
+	})
+
+	It("CS-RLP-022: in worktree mode a generated 'Where you are' block follows the base prompt", func() {
+		l := &Loop{Options: Options{PromptRalph: []byte("ralph base"), Worktree: "ralph", WorkDir: "/srv/proj"}}
+		l.PromptFile = prompt
+		l.Addendum = addendum
+		data, err := l.promptData()
+		Expect(err).NotTo(HaveOccurred())
+		s := string(data)
+		Expect(s).To(HavePrefix("ralph base\n\n## Where you are\n"))
+		Expect(s).To(HaveSuffix("\n\nthe prompt\n\nthe addendum"))
+		for _, want := range []string{
+			"`--worktree ralph`",
+			"`.claude/worktrees/ralph`",
+			"branch `worktree-ralph`",
+			"reopens the SAME worktree",
+			"Never merge into `main`",
+			"a human fast-forwards `main`",
+			"`$CLAUDE_SANDBOX_PROJECT_DIR` (`/srv/proj`)",
+			"`$CLAUDE_SANDBOX_PROJECT_DIR/.claude-sandbox/ralph/stop`",
+			"blocks Edit/Write to the main checkout",
+			"`backlog.py`",
+			"`$BACKLOG_REPO_ROOT`",
+		} {
+			Expect(s).To(ContainSubstring(want))
+		}
+	})
+
+	It("CS-RLP-021: without --worktree the prompt is exactly the three files, no generated block", func() {
+		l := &Loop{Options: Options{PromptRalph: []byte("ralph base"), WorkDir: "/srv/proj"}}
+		l.PromptFile = prompt
+		l.Addendum = addendum
+		data, err := l.promptData()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(string(data)).To(Equal("ralph base\n\nthe prompt\n\nthe addendum"))
+		Expect(string(data)).NotTo(ContainSubstring("Where you are"))
 	})
 
 	It("CS-RLP-011: a missing prompt file is an error", func() {
@@ -161,6 +229,26 @@ var _ = Describe("runIterationReal", func() {
 		Expect(l.runIterationReal(1, false)).To(Equal(0))
 		Expect(l.Out.(*bytes.Buffer).String()).To(ContainSubstring("ralph base\n\nthe prompt\n\nthe addendum"))
 		Expect(l.StderrFile).To(BeAnExistingFile())
+	})
+
+	It("CS-RLP-020: claude's environment carries BACKLOG_REPO_ROOT and CLAUDE_SANDBOX_PROJECT_DIR = the work dir", func() {
+		// A shell stands in for claude and prints the two variables; the
+		// loop's own process does NOT have them set, so anything printed
+		// came from the loop.
+		GinkgoT().Setenv("BACKLOG_REPO_ROOT", "")
+		GinkgoT().Setenv("CLAUDE_SANDBOX_PROJECT_DIR", "")
+		tmp := GinkgoT().TempDir()
+		script := filepath.Join(tmp, "env-claude")
+		Expect(os.WriteFile(script, []byte("#!/bin/sh\necho \"root=$BACKLOG_REPO_ROOT dir=$CLAUDE_SANDBOX_PROJECT_DIR\"\n"), 0o755)).To(Succeed())
+		for _, worktree := range []string{"ralph", ""} { // worktree mode and shared checkout alike
+			l := newLoop(tmp)
+			l.Worktree = worktree
+			l.ClaudeBin = script
+			Expect(l.runIterationReal(1, false)).To(Equal(0))
+			Expect(l.Out.(*bytes.Buffer).String()).To(ContainSubstring("root=" + tmp + " dir=" + tmp))
+		}
+		l := newLoop(tmp)
+		Expect(l.childEnv()).To(ConsistOf("BACKLOG_REPO_ROOT="+tmp, "CLAUDE_SANDBOX_PROJECT_DIR="+tmp))
 	})
 
 	It("CS-RLP-015: the hard iteration timeout kills the iteration and yields exit 124", func() {

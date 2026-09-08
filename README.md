@@ -306,7 +306,7 @@ session anyway. Sessions Claude spawns itself (`claude --bg`, `/bg`) are not slo
 `init-ralph` does everything `init` does, then seeds the **ralph agent scaffolding** into the project:
 
 - `.claude-sandbox/agent/` — generic baseline `PROMPT*.md`, `AGENT_FLOW.md`, `LSP_TOOLS.md`, `BUG_REPORTING.md`, `ideas/`, and stub `PRD.md` / `DEVELOPMENT_PRACTICES.md` / `TEST_PRACTICES.md` / `backlog.yaml`.
-- `.claude-sandbox/scripts/` — the `backlog` (backlog.yaml CRUD) and `worktree` (git-worktree + merge helper) tools that the agents use.
+- `.claude-sandbox/scripts/` — the `backlog` tool (backlog.yaml CRUD) that the agents use.
 
 Both commands are **idempotent** — they never overwrite an existing `config.yaml`, `env`, agent doc, or script. Re-running fills only what's missing and reports what it skipped. This means a project template can lay down its own project-specific `AGENT_FLOW.md` / `DEVELOPMENT_PRACTICES.md` / etc. first, and a subsequent `init-ralph` will keep those and add only the pieces they don't provide.
 
@@ -363,6 +363,12 @@ touch .claude-sandbox/ralph/stop
 
 The container runs under a separate name (`claude-sandbox-ralph`) so it won't conflict with an interactive `claude-sandbox` session.
 
+#### Ralph and worktrees
+
+The loop forwards `--worktree <name>` to **every** iteration, so each iteration reopens the same worktree (`-p` runs never clean up); the run's stories accumulate on the one branch, `worktree-<name>`, which is the run's deliverable. **Ralph never merges into `main`** — review the run branch and fast-forward `main` from it (`git merge --ff-only worktree-ralph`), or open a PR. The loop itself keeps running from the project root: the lock, stop file, runlog, raw logs and prompt files all stay under `<project>/.claude-sandbox/`, which is not in the worktree checkout (it is gitignored). Each iteration's claude gets `CLAUDE_SANDBOX_PROJECT_DIR` and `BACKLOG_REPO_ROOT` (both the project root), and the seeded agent docs address the backlog, the stop file and everything else under `.claude-sandbox/` through those variables — Claude Code blocks Edit/Write to the main checkout from inside a worktree, so the agent reaches them via Bash (`backlog.py`, `touch`). The prompt piped to each iteration carries a generated "Where you are" section naming the worktree and the branch. With `--no-worktree` (or `worktree: false`, `CLAUDE_SANDBOX_WORKTREE=0`) ralph runs in the shared checkout on the current branch, with no flag passed to claude, and the same no-merge rule applies.
+
+Existing projects seeded before this change carry the old agent docs (relative `.claude-sandbox/` paths, a per-story branch + merge-to-main flow, and a `scripts/worktree/` helper); `init-ralph` never overwrites, so re-seed them by hand from `scaffold-ralph/` or set `worktree: false` until you do — see [docs/MIGRATION.md](docs/MIGRATION.md).
+
 Ralph runs in non-interactive mode (`-p`) by default. Use `--interactive` to opt out.
 
 ### Ralph flags
@@ -376,6 +382,7 @@ These flags are passed through to ralph (after `--ralph` and any launcher flags)
 | `--interactive` | off | Run claude interactively (default: non-interactive `-p`) |
 | `--dangerous` | off | Pass `--dangerously-skip-permissions` to claude |
 | `--resume` | off | Pass `--resume` to claude on first iteration |
+| `--worktree NAME` | (set by the launcher: `ralph`) | Run every iteration in the Claude Code worktree `.claude/worktrees/NAME` (branch `worktree-NAME`); omitted when the launcher runs with `--no-worktree` |
 | `--prompt PATH` | `.claude-sandbox/agent/PROMPT.md` | Prompt file |
 | `--stop-file PATH` | `.claude-sandbox/ralph/stop` | Path to stop file |
 | `--claude-bin PATH` | `claude` | Claude binary |
@@ -459,7 +466,7 @@ top-level `.claude-sandbox/` directory:
 | scratch    | `.claude-sandbox/temp/`       |
 | reports    | `.claude-sandbox/reports/`    |
 
-The `agent/` and `scripts/` trees are seeded by [`init-ralph`](#bootstrapping-a-project-init--init-ralph) — `agent/` holds the workflow/prompt docs and `scripts/` holds the `backlog` and `worktree` tools.
+The `agent/` and `scripts/` trees are seeded by [`init-ralph`](#bootstrapping-a-project-init--init-ralph) — `agent/` holds the workflow/prompt docs and `scripts/` holds the `backlog` tool.
 
 This is the only supported layout. Older repos that scattered these files across
 the project root must be migrated — see [docs/MIGRATION.md](docs/MIGRATION.md).
@@ -963,7 +970,7 @@ scaffold/          Base bootstrap seed for init (copied into a project's .claude
   Dockerfile.example  Commented child Dockerfile template (optional; rename to activate)
 scaffold-ralph/    Additional seed for init-ralph (agent workflow + tooling)
   agent/           Generic baseline workflow + prompt docs, ideas/, stubs
-  scripts/         backlog (backlog.yaml CRUD) and worktree (git-worktree + merge) tools
+  scripts/         backlog (backlog.yaml CRUD) tool
 logstream/
   raw-json-logger.js  Transparent NDJSON passthrough that writes every line to a timestamped file
   run-logger.js       Transparent NDJSON passthrough that captures per-iteration metrics

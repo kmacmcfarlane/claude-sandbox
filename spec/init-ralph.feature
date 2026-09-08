@@ -15,7 +15,9 @@ Feature: init-ralph subcommand (CS-INITR)
     When init-ralph runs on a greenfield project
     Then every file of the embedded ralph scaffold exists under .claude-sandbox/
       including agent/PROMPT.md, agent/PROMPT_AUTO.md, agent/PROMPT_INTERACTIVE.md,
-      agent/backlog.yaml, scripts/backlog/backlog.py, scripts/worktree/worktree.py
+      agent/AGENT_FLOW.md, agent/backlog.yaml, scripts/backlog/backlog.py
+    And no scripts/worktree/ tree is seeded — the only worktree convention is
+      Claude Code's own .claude/worktrees/<name> on branch worktree-<name> (CS-LNCH-041)
     And stdout summarizes "N created, M skipped"
 
   Scenario: CS-INITR-003 Existing files are skipped, gaps are filled

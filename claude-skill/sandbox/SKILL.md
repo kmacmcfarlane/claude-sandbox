@@ -83,7 +83,7 @@ git -C .claude-sandbox add -A && git -C .claude-sandbox commit -m "..."
 Run the bootstrap subcommand from the project directory:
 ```bash
 claude-sandbox init          # base: sparse config.yaml + env + Dockerfile.example, gitignore, sidecar
-claude-sandbox init-ralph    # init + ralph agent/ + scripts/ scaffolding (backlog, worktree tools)
+claude-sandbox init-ralph    # init + ralph agent/ + scripts/ scaffolding (backlog tool)
 ```
 These are **positional subcommands** (must be the first argument) and reject launcher/claude flags. Their own options — every interactive prompt has a flag pair that skips it:
 
@@ -138,6 +138,7 @@ Options (pick any):
 claude-sandbox --ralph --docker-socket --dangerous --limit 5
 ```
 - Runs Claude in fresh-context iterations (new process each time)
+- In worktree mode (default) every iteration reopens `.claude/worktrees/ralph` (branch `worktree-ralph`); the run branch is the deliverable — ralph never merges into `main`, a human fast-forwards it. The agent gets `CLAUDE_SANDBOX_PROJECT_DIR` + `BACKLOG_REPO_ROOT` to reach `.claude-sandbox/` in the main checkout
 - Stop gracefully: `touch .claude-sandbox/ralph/stop`
 - Debug: read `.claude-sandbox/ralph/runlogs/rawlog_*` for full NDJSON streams
 - Metrics: `.claude-sandbox/ralph/runlog.json`
@@ -237,4 +238,4 @@ All paths are in the claude-sandbox repo.
 | `notification-hooks.json` | Hook fragment merged into settings.json |
 | `container-context.md` | Injected into container's CLAUDE.md |
 | `scaffold/` | Base bootstrap seed for `init` (sparse config.yaml, env, Dockerfile.example) — embedded in the binary |
-| `scaffold-ralph/` | Ralph scaffolding seed for `init-ralph` (agent/ docs, scripts/ backlog + worktree tools) — embedded |
+| `scaffold-ralph/` | Ralph scaffolding seed for `init-ralph` (agent/ docs, scripts/ backlog tool) — embedded |

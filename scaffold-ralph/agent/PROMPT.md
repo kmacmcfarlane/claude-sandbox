@@ -2,18 +2,18 @@ You are the orchestrator agent operating inside this repository. You coordinate 
 
 At the start of this run, read:
 - CLAUDE.md
-- .claude-sandbox/agent/PRD.md
-- .claude-sandbox/agent/backlog.yaml
-- .claude-sandbox/agent/AGENT_FLOW.md
-- .claude-sandbox/agent/TEST_PRACTICES.md
-- .claude-sandbox/agent/DEVELOPMENT_PRACTICES.md
+- $CLAUDE_SANDBOX_PROJECT_DIR/.claude-sandbox/agent/PRD.md
+- $CLAUDE_SANDBOX_PROJECT_DIR/.claude-sandbox/agent/backlog.yaml
+- $CLAUDE_SANDBOX_PROJECT_DIR/.claude-sandbox/agent/AGENT_FLOW.md
+- $CLAUDE_SANDBOX_PROJECT_DIR/.claude-sandbox/agent/TEST_PRACTICES.md
+- $CLAUDE_SANDBOX_PROJECT_DIR/.claude-sandbox/agent/DEVELOPMENT_PRACTICES.md
 - CHANGELOG.md
 
-Follow .claude-sandbox/agent/AGENT_FLOW.md exactly.
+Follow $CLAUDE_SANDBOX_PROJECT_DIR/.claude-sandbox/agent/AGENT_FLOW.md exactly.
 
 ## Work selection
 
-Use `python3 .claude-sandbox/scripts/backlog/backlog.py` (aliased below as `backlog.py`) to query and update the backlog. Select work per AGENT_FLOW.md section 3:
+Use `python3 "$BACKLOG_REPO_ROOT/.claude-sandbox/scripts/backlog/backlog.py"` (aliased below as `backlog.py`) to query and update the backlog. Select work per AGENT_FLOW.md section 3:
 
 ```bash
 backlog.py next-work --format json
@@ -22,35 +22,22 @@ backlog.py next-work --format json
 This returns the selected story with a `queue` field. Dispatch based on the queue value:
 - `testing` → invoke qa-expert subagent
 - `review` → invoke code-reviewer subagent
-- `in_progress` → invoke fullstack-developer subagent (if story has no branch yet, create one)
-- `uat_feedback` → set in_progress, create new branch from main, invoke fullstack-developer subagent (review_feedback is already set)
+- `in_progress` → invoke fullstack-developer subagent
+- `uat_feedback` → set in_progress, invoke fullstack-developer subagent (review_feedback is already set)
 - `todo` → set status to in_progress, invoke fullstack-developer subagent
 
-Exit code 2 means no eligible work — send discord notification (`💤 [project] No eligible stories — backlog is empty or fully blocked.`), touch `.claude-sandbox/ralph/stop` and exit.
+Exit code 2 means no eligible work — send discord notification (`💤 [project] No eligible stories — backlog is empty or fully blocked.`), touch `$CLAUDE_SANDBOX_PROJECT_DIR/.claude-sandbox/ralph/stop` and exit.
 
-### Worktree-based parallel execution
+### Where files live — worktree and run branch
 
-When running multiple agents in parallel, use worktrees for isolation. See AGENT_FLOW.md section 4.1.1 for details.
+Ralph runs you in a Claude Code worktree by default (`.claude/worktrees/<name>` on branch `worktree-<name>`; the "Where you are" section above names it) and reopens the same worktree every iteration. All of a run's stories are committed on that one branch — the **run branch** — and you never merge into `main`; a human fast-forwards `main` from the run branch after review. See AGENT_FLOW.md section 4.1.
 
-```bash
-# Atomic claim + worktree creation
-STORY=$(backlog.py --repo-root /path/to/main next-work --claim worker-1 --format json)
-python3 .claude-sandbox/scripts/worktree/worktree.py create <story-id>
+`.claude-sandbox/` (backlog, prompts, stop file, ideas, questions) lives in the main checkout at `$CLAUDE_SANDBOX_PROJECT_DIR`, not in the worktree. Claude Code blocks Edit/Write to the main checkout from inside a worktree, so reach those files only through Bash — `backlog.py` for the backlog (it honours `$BACKLOG_REPO_ROOT`), `touch` for the stop file, shell redirection (`cat >> ... <<'EOF'`) for `agent/ideas/*.md` and `agent/QUESTIONS.md`.
 
-# At cycle start: detect stale worktrees
-python3 .claude-sandbox/scripts/worktree/worktree.py detect-stale
+### Service isolation
 
-# After story completion: cleanup
-python3 .claude-sandbox/scripts/worktree/worktree.py remove <story-id>
-
-# Recovery from dead process
-python3 .claude-sandbox/scripts/worktree/worktree.py recover
-```
-
-### Per-worktree stack isolation
-
-If your project starts services (e.g. via docker compose) that must not collide between
-parallel worktrees, scope them per story. Set `STORY_ID` before any command that brings up
+If your project starts services (e.g. via docker compose) that must not collide with another
+session's stack, scope them per story. Set `STORY_ID` before any command that brings up
 a stack so project names and ports are unique. See AGENT_FLOW.md section 4.1.2 for details.
 
 ```bash
@@ -58,27 +45,6 @@ a stack so project names and ports are unique. See AGENT_FLOW.md section 4.1.2 f
 export STORY_ID=S-042
 make test        # Stack scoped to <project>-s-042 (ephemeral ports)
 ```
-
-### Merge conflict resolution (finalization)
-
-When merging a story branch to main, if conflicts occur:
-
-```bash
-# 1. Attempt merge
-git merge story/S-042 --no-edit
-
-# 2. If exit code != 0 (conflicts), run merge helper
-python3 .claude-sandbox/scripts/worktree/merge_helper.py --repo-dir . --format json
-
-# 3. Parse JSON result:
-#    {"status": "resolved", ...}  → git commit to complete merge
-#    {"status": "unresolved", "unresolved": ["file.ext", ...]}
-#       → git merge --abort
-#       → Set story to in_progress with review_feedback describing conflicts
-#       → Developer resolves, then normal review → QA cycle
-```
-
-Trivial files (CHANGELOG.md, backlog.yaml) are auto-resolved. Non-trivial conflicts (code files) require the fullstack developer. The story is NOT marked as blocked — it goes through the normal rework flow.
 
 ## Story marker
 
@@ -117,9 +83,9 @@ Before dispatching the code-reviewer or qa-expert, the orchestrator assembles a 
 1. **Diff output**: Run `git diff main` (includes both staged and unstaged changes). If the branch has commits ahead of main, use `git diff main..HEAD` instead. Include the full output in the prompt.
 2. **Change summary**: Extracted from the fullstack engineer's verdict (see section below). Format as a bullet list of file paths with descriptions.
 3. **Governance docs**: Include the full contents of:
-   - `.claude-sandbox/agent/PRD.md`
-   - `.claude-sandbox/agent/TEST_PRACTICES.md`
-   - `.claude-sandbox/agent/DEVELOPMENT_PRACTICES.md`
+   - `$CLAUDE_SANDBOX_PROJECT_DIR/.claude-sandbox/agent/PRD.md`
+   - `$CLAUDE_SANDBOX_PROJECT_DIR/.claude-sandbox/agent/TEST_PRACTICES.md`
+   - `$CLAUDE_SANDBOX_PROJECT_DIR/.claude-sandbox/agent/DEVELOPMENT_PRACTICES.md`
 
 Wrap each governance doc in a labeled section so the subagent can reference it:
 
@@ -218,7 +184,7 @@ After handling the QA story verdict (approved or rejected), check the QA verdict
 
 1. If sweep result is `FINDINGS`:
    - For each "New bug ticket": get next ID via `backlog.py next-id B`, then pipe the ticket YAML to `backlog.py add` (see AGENT_FLOW.md section 4.4.1 for the template).
-   - For each "Improvement idea": route to the appropriate file under `.claude-sandbox/agent/ideas/` (see "Processing process improvement ideas" below for routing rules). Include `* status: needs_approval`, `* priority: <value>` (using the priority suggested by QA), and `* source: qa`, then send a discord notification:
+   - For each "Improvement idea": route to the appropriate file under `$CLAUDE_SANDBOX_PROJECT_DIR/.claude-sandbox/agent/ideas/` (see "Processing process improvement ideas" below for routing rules). Include `* status: needs_approval`, `* priority: <value>` (using the priority suggested by QA), and `* source: qa`, then send a discord notification:
      `💡 [project] New ideas from qa-expert sweep: <title> — <brief description>, <title> — <brief description>.`
    - If any bug tickets were filed, send a discord notification:
      `🐛 [project] QA sweep: filed N new ticket(s): B-NNN (title — brief description), ... See backlog.yaml.`
@@ -229,12 +195,12 @@ After handling the QA story verdict (approved or rejected), check the QA verdict
 
 After every subagent completes (fullstack-developer, qa-expert), check its response for a "Process Improvements" section. If present:
 
-1. Route each idea to the appropriate file under `.claude-sandbox/agent/ideas/`:
-   - `Features` (net-new capabilities) → `.claude-sandbox/agent/ideas/new_features.md`
-   - `Features` (improvements to existing) → `.claude-sandbox/agent/ideas/enhancements.md`
-   - `Dev Ops` → `.claude-sandbox/agent/ideas/devops.md`
-   - `Workflow` → `.claude-sandbox/agent/ideas/agent_workflow.md`
-   - Testing infrastructure → `.claude-sandbox/agent/ideas/testing.md`
+1. Route each idea to the appropriate file under `$CLAUDE_SANDBOX_PROJECT_DIR/.claude-sandbox/agent/ideas/`:
+   - `Features` (net-new capabilities) → `$CLAUDE_SANDBOX_PROJECT_DIR/.claude-sandbox/agent/ideas/new_features.md`
+   - `Features` (improvements to existing) → `$CLAUDE_SANDBOX_PROJECT_DIR/.claude-sandbox/agent/ideas/enhancements.md`
+   - `Dev Ops` → `$CLAUDE_SANDBOX_PROJECT_DIR/.claude-sandbox/agent/ideas/devops.md`
+   - `Workflow` → `$CLAUDE_SANDBOX_PROJECT_DIR/.claude-sandbox/agent/ideas/agent_workflow.md`
+   - Testing infrastructure → `$CLAUDE_SANDBOX_PROJECT_DIR/.claude-sandbox/agent/ideas/testing.md`
    Format: `### <title>\n* status: needs_approval\n* priority: <value>\n* source: <developer|reviewer|qa|orchestrator>\n<description>`. Use the priority suggested by the subagent. The source maps from the subagent name: fullstack-developer → `developer`, code-reviewer → `reviewer`, qa-expert → `qa`.
 2. **MUST send a discord notification** summarizing ALL new ideas added to agent/ideas/:
    `💡 [project] New ideas from <agent-name>: <title> — <brief description>, <title> — <brief description>.`
@@ -250,7 +216,7 @@ Every addition to agent/ideas/ (whether from process improvements, QA sweep find
 - QA testing passed (qa-expert approved)
 - CHANGELOG.md updated (orchestrator responsibility at finalization — see AGENT_FLOW 4.5)
 - Backlog updated via `backlog.py set <id> status uat` when all gates pass
-- Committed and merged to main with message format: story(<id>): <title> (unless AGENT_FLOW/backlog explicitly overrides)
+- Committed on the run branch with message format: story(<id>): <title> (unless AGENT_FLOW/backlog explicitly overrides) — never merged into main
 
 Note: `uat` → `done` is a user action. Agents never set `status: done`.
 
@@ -261,11 +227,11 @@ Note: `uat` → `done` is a user action. Agents never set `status: done`.
 
 ## Stop conditions
 
-- After a story reaches `uat` and is committed/merged to main, send discord notification (`📦 [project] <id>: Committed and merged to main.`) and exit immediately. Do NOT call `next-work` again — each iteration handles exactly one story. Ralph will start a fresh iteration for the next story.
+- After a story reaches `uat` and is committed on the run branch, send discord notification (`📦 [project] <id>: Committed on <branch>, awaiting review.`) and exit immediately. Do NOT call `next-work` again — each iteration handles exactly one story. Ralph will start a fresh iteration for the next story.
 - If no eligible stories remain across any queue, make no changes, touch the stop file and exit. Note: `uat` stories are not eligible work — they are waiting for user acceptance. Only `uat_feedback` stories (with feedback in `review_feedback`) are eligible.
 - If blocked, record via `backlog.py set <id> status blocked` + `echo "<reason>" | backlog.py set-text <id> blocked_reason` and exit.
 
 How to stop:
-- Touch `.claude-sandbox/ralph/stop` to signal stopping the ralph loop (only if no eligible stories remain).
+- `touch "$CLAUDE_SANDBOX_PROJECT_DIR/.claude-sandbox/ralph/stop"` to signal stopping the ralph loop (only if no eligible stories remain).
 
 Never claim completion unless the above conditions are met.
