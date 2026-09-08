@@ -213,7 +213,7 @@ After a story reaches `uat`, the user may provide feedback via the backlog groom
 - `uat_feedback` = agent's court (feedback to act on)
 
 When the orchestrator picks up a `uat_feedback` story (via `next-work`), it:
-1. Sets `status: in_progress`.
+1. Sets `status: in_progress` and records a fresh base: `backlog.py set <id> base_sha "$(git rev-parse HEAD)"` (section 4.1.3).
 2. Continues on the run branch (section 4.1) — no new branch is created.
 
 The fullstack engineer reads the standard `review_feedback` field without awareness of UAT. The rework follows the normal cycle: `in_progress` → `review` → `testing` → `uat`.
@@ -234,7 +234,7 @@ Subagents report structured verdicts. The **orchestrator** writes all status cha
 
 ### 2.1 Invoking subagents
 
-Use the Task tool to invoke a subagent. Pass the subagent's prompt (from its `.md` file) along with the story context (ID, acceptance criteria, branch name, and any review feedback). The subagent works within the current repository state and returns a structured result.
+Use the Task tool to invoke a subagent. Pass the subagent's prompt (from its `.md` file) along with the story context (ID, acceptance criteria, `base_sha`, and any review feedback). The subagent works within the current repository state and returns a structured result.
 
 ### 2.2 Subagent model selection
 
@@ -330,6 +330,15 @@ Claude Code **blocks the Edit, Write and NotebookEdit tools against the main che
 
 The file lock at `agent/backlog.lock` serializes concurrent backlog access, so a second session may run against the same backlog.
 
+#### 4.1.3 The story's base commit (`base_sha`)
+
+Because every story lands on the same run branch, "the story's diff" cannot be a diff against `main` — after the first story that would include every earlier, already-reviewed story, and `main..HEAD` would show earlier commits while missing the current story's uncommitted work. Each story therefore records the commit it started from:
+
+- When a story enters `in_progress` from `todo` or `uat_feedback`, the orchestrator runs `backlog.py set <id> base_sha "$(git rev-parse HEAD)"`. `next-work --claim <worker>` records it in the same write.
+- The story's change set, for review and QA, is `git diff <base_sha>` (working tree against the base): it covers uncommitted work and any commits the story has already made, and nothing else on the run branch.
+- A story that has no `base_sha` (claimed before the field existed): record one now — the last commit on the branch that is not this story's — and proceed.
+- Finalization does not clear it; a later `uat_feedback` rework records a new one.
+
 #### 4.1.2 Service isolation (concurrent sessions)
 
 If your project starts services (databases, dev servers, containers, stacks) that could collide with another session's stack, scope them per story via a `STORY_ID` env var so that project names, resource names, and ports are unique per story (e.g. `<project>-dev` becomes `<project>-dev-s-042`). The exact mechanism is project-specific.
@@ -342,7 +351,7 @@ If your project starts services (databases, dev servers, containers, stacks) tha
 Based on the story's current status, invoke the appropriate subagent:
 
 #### Story status: `todo` or `in_progress`
-1. If currently `todo`: `backlog.py set <id> status in_progress`
+1. If currently `todo`: `backlog.py set <id> status in_progress` and `backlog.py set <id> base_sha "$(git rev-parse HEAD)"` (section 4.1.3; `next-work --claim` does both)
 2. Assemble the **developer brief** (see section 4.3.6) — story metadata, acceptance criteria, notes, review feedback, constraints, and governance doc contents.
 3. Invoke the **fullstack engineer** subagent with the developer brief.
 4. The developer writes and runs unit/integration tests (`make test`). E2E tests are the QA agent's responsibility — the developer does NOT run the E2E suite.
@@ -357,8 +366,7 @@ Based on the story's current status, invoke the appropriate subagent:
 1. Assemble the **context bundle** (see section 4.3.4) — diff, change summary, and governance doc contents.
 2. Invoke the **code reviewer** subagent with:
    - The context bundle
-   - Story ID, title, and acceptance criteria (from `backlog.py get <id>`)
-   - Branch name (diff against main)
+   - Story ID, title, acceptance criteria and `base_sha` (from `backlog.py get <id>`)
    - **Change summary** extracted from the fullstack engineer's verdict (see section 4.3.2)
 3. The reviewer verifies unit/integration tests pass (`make test`). It does NOT run E2E tests — those are the QA agent's responsibility.
 4. If approved: `backlog.py set <id> status testing`
@@ -370,8 +378,7 @@ Based on the story's current status, invoke the appropriate subagent:
 1. Assemble the **context bundle** (see section 4.3.4) — diff, change summary, and governance doc contents.
 2. Invoke the **QA expert** subagent with:
    - The context bundle
-   - Story ID, title, and acceptance criteria (from `backlog.py get <id>`)
-   - Branch name
+   - Story ID, title, acceptance criteria and `base_sha` (from `backlog.py get <id>`)
    - Code reviewer's approval notes (if any)
    - **Change summary** extracted from the fullstack engineer's verdict (see section 4.3.2)
 3. The QA expert is the sole owner of E2E tests. It will run the E2E suite (the project-defined E2E command) as part of its verification. This command should be self-contained — it starts an isolated stack, runs all E2E tests, and tears down automatically. The orchestrator does NOT need to start any services before dispatching to QA for E2E tests.
@@ -403,7 +410,7 @@ When the fullstack engineer completes successfully, its verdict includes a "Chan
 
 This helps downstream agents orient faster by knowing which files changed and why, reducing redundant exploratory reads. The change summary does NOT replace reading actual source files — reviewers and QA must still read the code. It supplements their initial orientation.
 
-If the fullstack engineer's response does not include a change summary (e.g., older prompt format), the orchestrator should fall back to `git diff --name-only main..HEAD` to generate a file list and pass that instead (without descriptions).
+If the fullstack engineer's response does not include a change summary (e.g., older prompt format), the orchestrator should fall back to `git diff --name-only <base_sha>` (section 4.1.3) to generate a file list and pass that instead (without descriptions).
 
 ### 4.3.3 Bug fix story notes — root cause documentation
 
@@ -422,7 +429,7 @@ Before dispatching the code-reviewer or qa-expert, the orchestrator assembles a 
 
 The context bundle includes:
 
-1. **Diff output**: `git diff main` (includes staged and unstaged changes). If the branch has commits ahead of main, use `git diff main..HEAD` instead.
+1. **Diff output**: `git diff <base_sha>` — the working tree against the story's `base_sha` (section 4.1.3), which includes staged, unstaged and already-committed work of this story and nothing from earlier stories on the run branch. Never `git diff main`.
 2. **Change summary**: Extracted from the fullstack engineer's verdict (see section 4.3.2).
 3. **Governance doc contents**: Full text of `$CLAUDE_SANDBOX_PROJECT_DIR/.claude-sandbox/agent/PRD.md`, `$CLAUDE_SANDBOX_PROJECT_DIR/.claude-sandbox/agent/TEST_PRACTICES.md`, and `$CLAUDE_SANDBOX_PROJECT_DIR/.claude-sandbox/agent/DEVELOPMENT_PRACTICES.md`.
 
@@ -441,7 +448,7 @@ Format in the Agent prompt:
 <contents>
 --- END DEVELOPMENT_PRACTICES.md ---
 
---- BEGIN DIFF (git diff main) ---
+--- BEGIN DIFF (git diff <base_sha>) ---
 <diff output>
 --- END DIFF ---
 ```
@@ -464,7 +471,7 @@ Before dispatching the fullstack engineer, the orchestrator assembles a **develo
 
 The developer brief includes:
 
-1. **Story metadata**: ID, title, branch name, complexity (from `backlog.py get <id>`), queue
+1. **Story metadata**: ID, title, `base_sha`, complexity (from `backlog.py get <id>`), queue
 2. **Acceptance criteria**: From `backlog.py get <id>`
 3. **Notes**: From `backlog.py get <id>` (if present — may contain design context, root cause analysis, or implementation hints)
 4. **Review feedback**: If returning from review/QA (from `review_feedback` field)
@@ -477,7 +484,7 @@ Format in the Agent prompt:
 ## Story Brief
 
 **Story**: <id> — <title>
-**Branch**: <branch>
+**Base**: <base_sha> (work on the current branch; do not create branches or merge)
 **Complexity**: <complexity from backlog, or "not set">
 **Review feedback**: <if any, or "None">
 

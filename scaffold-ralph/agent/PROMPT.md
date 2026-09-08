@@ -23,8 +23,10 @@ This returns the selected story with a `queue` field. Dispatch based on the queu
 - `testing` → invoke qa-expert subagent
 - `review` → invoke code-reviewer subagent
 - `in_progress` → invoke fullstack-developer subagent
-- `uat_feedback` → set in_progress, invoke fullstack-developer subagent (review_feedback is already set)
-- `todo` → set status to in_progress, invoke fullstack-developer subagent
+- `uat_feedback` → set in_progress and record the base (`backlog.py set <id> base_sha "$(git rev-parse HEAD)"`), invoke fullstack-developer subagent (review_feedback is already set)
+- `todo` → set status to in_progress and record the base (`backlog.py set <id> base_sha "$(git rev-parse HEAD)"`; `next-work --claim <worker>` does both), invoke fullstack-developer subagent
+
+`base_sha` is the commit the story started from. Every story of a run lands on the same run branch, so the story's change set is `git diff <base_sha>` — never `git diff main`, which after the first story would include every earlier, already-reviewed story.
 
 Exit code 2 means no eligible work — send discord notification (`💤 [project] No eligible stories — backlog is empty or fully blocked.`), touch `$CLAUDE_SANDBOX_PROJECT_DIR/.claude-sandbox/ralph/stop` and exit.
 
@@ -63,8 +65,8 @@ Read the subagent prompt from `.claude/agents/<name>.md` and invoke via the Task
 - **fullstack-developer**: For `todo` and `in_progress` stories. Assemble a **developer brief** (see below) and invoke via the Task tool. Extract the **complexity** field from the story (via `backlog.py get`) and select the model: use `sonnet` for `low` complexity, `opus` for `medium` or `high` complexity. Default to `sonnet` if complexity is not set. On success, extract the "Change Summary" section from the verdict and store it for downstream dispatch. The developer writes and runs unit/integration tests only (`make test`). E2E tests are the QA agent's responsibility.
 
 **Orchestrator pre-reads**: Do NOT read story-related code files (source code, test files) before dispatching the developer. The developer has its own exploration tools (LSP, Grep, Read) and will read what it needs. Orchestrator pre-reads duplicate work — the story's `notes` field and acceptance criteria provide sufficient context for the developer brief. Reserve orchestrator reads for governance docs and backlog queries only.
-- **code-reviewer**: For `review` stories. Pass the **context bundle** (see below), story ID, acceptance criteria, branch name, and the **change summary** from the fullstack engineer. If no change summary is available, generate one from `git diff --name-only main..HEAD`. Extract the **complexity** field from the fullstack engineer's verdict and select the model accordingly: use `sonnet` for `low` complexity, `opus` for `medium` or `high` complexity. Default to `opus` if complexity is not reported. The reviewer verifies unit/integration tests pass. It does NOT run E2E tests.
-- **qa-expert**: For `testing` stories. Pass the **context bundle** (see below), story ID, acceptance criteria, branch name, path to QA allowed errors file (if one exists), and the **change summary** from the fullstack engineer. Extract the **complexity** field from the fullstack engineer's verdict and select the model accordingly: use `sonnet` for `low` or `medium` complexity, `opus` for `high` complexity. Default to `sonnet` if complexity is not reported. The QA agent is the sole owner of E2E tests — running, authoring, and maintaining them.
+- **code-reviewer**: For `review` stories. Pass the **context bundle** (see below), story ID, acceptance criteria, the story's `base_sha`, and the **change summary** from the fullstack engineer. If no change summary is available, generate one from `git diff --name-only <base_sha>`. Extract the **complexity** field from the fullstack engineer's verdict and select the model accordingly: use `sonnet` for `low` complexity, `opus` for `medium` or `high` complexity. Default to `opus` if complexity is not reported. The reviewer verifies unit/integration tests pass. It does NOT run E2E tests.
+- **qa-expert**: For `testing` stories. Pass the **context bundle** (see below), story ID, acceptance criteria, the story's `base_sha`, path to QA allowed errors file (if one exists), and the **change summary** from the fullstack engineer. Extract the **complexity** field from the fullstack engineer's verdict and select the model accordingly: use `sonnet` for `low` or `medium` complexity, `opus` for `high` complexity. Default to `sonnet` if complexity is not reported. The QA agent is the sole owner of E2E tests — running, authoring, and maintaining them.
 - **debugger**: Invoke on demand when test failures or bugs are encountered.
 - **security-auditor**: Invoke on demand for security-sensitive stories.
 
@@ -80,7 +82,7 @@ Read the subagent prompt from `.claude/agents/<name>.md` and invoke via the Task
 
 Before dispatching the code-reviewer or qa-expert, the orchestrator assembles a **context bundle** and includes it in the Agent prompt. This eliminates redundant file reads by subagents:
 
-1. **Diff output**: Run `git diff main` (includes both staged and unstaged changes). If the branch has commits ahead of main, use `git diff main..HEAD` instead. Include the full output in the prompt.
+1. **Diff output**: Run `git diff <base_sha>` with the story's `base_sha` from `backlog.py get <id>` — the working tree against the commit the story started from, so it covers the story's uncommitted work AND any commits it has already made, and nothing from earlier stories on the run branch. Include the full output in the prompt. If a story has no `base_sha` (claimed before this field existed), record one now from the last commit that is not this story's and use that.
 2. **Change summary**: Extracted from the fullstack engineer's verdict (see section below). Format as a bullet list of file paths with descriptions.
 3. **Governance docs**: Include the full contents of:
    - `$CLAUDE_SANDBOX_PROJECT_DIR/.claude-sandbox/agent/PRD.md`
@@ -102,7 +104,7 @@ Wrap each governance doc in a labeled section so the subagent can reference it:
 <contents>
 --- END DEVELOPMENT_PRACTICES.md ---
 
---- BEGIN DIFF (git diff main) ---
+--- BEGIN DIFF (git diff <base_sha>) ---
 <diff output>
 --- END DIFF ---
 ```
@@ -113,7 +115,7 @@ The orchestrator already reads these files at startup, so this adds no extra fil
 
 Before dispatching the fullstack-developer, assemble a **developer brief** and include it in the Agent prompt. This gives the developer the same governance context that the reviewer and QA expert receive, eliminating redundant file reads:
 
-1. **Story metadata**: ID, title, branch name, complexity (from `backlog.py get <id>`), queue
+1. **Story metadata**: ID, title, `base_sha`, complexity (from `backlog.py get <id>`), queue
 2. **Acceptance criteria**: From `backlog.py get <id>`
 3. **Notes**: From `backlog.py get <id>` (if present — may contain design context, root cause, or implementation hints)
 4. **Review feedback**: If returning from review/QA (from `review_feedback` field)
@@ -126,7 +128,7 @@ Format in the Agent prompt:
 ## Story Brief
 
 **Story**: <id> — <title>
-**Branch**: <branch>
+**Base**: <base_sha> (work on the current branch; do not create branches or merge)
 **Complexity**: <complexity from backlog, or "not set">
 **Review feedback**: <if any, or "None">
 
@@ -163,7 +165,7 @@ Change summary (from fullstack engineer):
 - <file path>: <description>
 ```
 
-This helps downstream agents orient faster. If the fullstack engineer's response lacks a change summary, fall back to `git diff --name-only main..HEAD` for the file list.
+This helps downstream agents orient faster. If the fullstack engineer's response lacks a change summary, fall back to `git diff --name-only <base_sha>` for the file list.
 
 ## Status management
 

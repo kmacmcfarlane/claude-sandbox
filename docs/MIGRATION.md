@@ -39,8 +39,11 @@ git mv agent                     .claude-sandbox/agent         2>/dev/null || tr
 
 # Agent tooling that references the backlog (move WITH agent/, not the whole scripts/):
 git mv scripts/backlog           .claude-sandbox/scripts/backlog   2>/dev/null || true
-# The old scripts/worktree/ helper (worktree.py + merge_helper.py) is retired — delete it:
-git rm -r scripts/worktree .claude-sandbox/scripts/worktree 2>/dev/null || true
+# The old scripts/worktree/ helper (worktree.py + merge_helper.py) is retired — delete it.
+# Two commands, not one: `git rm` with two pathspecs removes NOTHING when either
+# matches nothing, and the sidecar copy is gitignored, so it needs a plain rm.
+git rm -r scripts/worktree 2>/dev/null || true
+rm -rf .claude-sandbox/scripts/worktree
 ```
 
 **Important — refactor the moved tooling's paths.** `scripts/backlog/backlog.py` hardcodes

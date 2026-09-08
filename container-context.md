@@ -48,8 +48,11 @@ one-time setup (idempotent). Use `setup-lsp-plugins --check` to verify status.
   `$CLAUDE_SANDBOX_PROJECT_DIR` (`git rev-parse --git-common-dir` finds it too);
   `.claude-sandbox/` (config, env, ralph runtime, investigations, the stop file)
   lives there, not in the worktree. Edit sandbox files there only when the task
-  is about the sandbox itself. Sessions launched with `--no-worktree` work in
-  the shared checkout.
+  is about the sandbox itself — except the writes a ralph run's own prompts
+  direct (the backlog via `backlog.py`, `agent/ideas/`, `agent/QUESTIONS.md`,
+  the `ralph/stop` file), which are routine and go through Bash because the
+  harness blocks Edit/Write to the main checkout from inside a worktree.
+  Sessions launched with `--no-worktree` work in the shared checkout.
 - `/home/claude` is symlinked to the host user's home directory (e.g. `/home/rt`). Both paths work. Build-time files from the Dockerfile are relocated here automatically.
 - **The scratchpad survives the container.** The launcher points
   `CLAUDE_CODE_TMPDIR` inside the host-mounted Claude config directory, so the

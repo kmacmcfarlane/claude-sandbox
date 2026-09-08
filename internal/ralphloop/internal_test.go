@@ -49,7 +49,7 @@ var _ = Describe("claudeArgs", func() {
 	It("CS-RLP-012: non-interactive with --dangerous, --model opus, --worktree ralph, --resume builds the full argv", func() {
 		l := &Loop{Options: Options{SkipPermissions: true, Model: "opus", Worktree: "ralph", Resume: true}}
 		Expect(l.claudeArgs(true)).To(Equal([]string{
-			"-p", "--dangerously-skip-permissions", "--model", "opus", "--worktree", "ralph", "--resume",
+			"-p", "--dangerously-skip-permissions", "--worktree", "ralph", "--model", "opus", "--resume",
 			"--verbose", "--output-format", "stream-json",
 		}))
 	})
@@ -57,7 +57,7 @@ var _ = Describe("claudeArgs", func() {
 	It("CS-RLP-012: subsequent iterations omit --resume but keep --worktree", func() {
 		l := &Loop{Options: Options{SkipPermissions: true, Model: "opus", Worktree: "ralph", Resume: true}}
 		Expect(l.claudeArgs(false)).To(Equal([]string{
-			"-p", "--dangerously-skip-permissions", "--model", "opus", "--worktree", "ralph",
+			"-p", "--dangerously-skip-permissions", "--worktree", "ralph", "--model", "opus",
 			"--verbose", "--output-format", "stream-json",
 		}))
 	})

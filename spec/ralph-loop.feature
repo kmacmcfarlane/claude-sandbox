@@ -105,7 +105,8 @@ Feature: Ralph loop lifecycle (CS-RLP)
 
   Scenario: CS-RLP-012 Claude argument assembly
     Given non-interactive mode with --dangerous, --model opus, --worktree ralph, --resume
-    Then the first iteration runs: claude -p --dangerously-skip-permissions --model opus --worktree ralph --resume --verbose --output-format stream-json
+    Then the first iteration runs: claude -p --dangerously-skip-permissions --worktree ralph --model opus --resume --verbose --output-format stream-json
+    # --worktree precedes --model as it does in the launcher's argv (CS-LNCH-041)
     And subsequent iterations omit --resume but keep --worktree ralph
     Given no --worktree
     Then no --worktree flag appears anywhere in the argv

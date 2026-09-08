@@ -506,14 +506,15 @@ func (l *Loop) claudeArgs(resume bool) []string {
 	if l.SkipPermissions {
 		args = append(args, "--dangerously-skip-permissions")
 	}
-	if l.Model != "" {
-		args = append(args, "--model", l.Model)
-	}
 	// Every iteration, not first-only like --resume: reopening the same
 	// worktree is claude's own reuse path (CS-RLP-019); absent when off
-	// (CS-RLP-021).
+	// (CS-RLP-021). Before --model, the same order the launcher uses for
+	// interactive sessions (CS-LNCH-041), so the two argv shapes read alike.
 	if l.Worktree != "" {
 		args = append(args, "--worktree", l.Worktree)
+	}
+	if l.Model != "" {
+		args = append(args, "--model", l.Model)
 	}
 	if resume {
 		args = append(args, "--resume")
