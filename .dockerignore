@@ -10,3 +10,8 @@ README.md
 test/
 hooks/
 package.json
+# Build artifacts: the root-level Go binary (from `go build` at the root) and the
+# shim's build output + Go module/build caches. The builder stage compiles from
+# source, so nothing here is needed by any image build.
+claude-sandbox
+bin/dist/
