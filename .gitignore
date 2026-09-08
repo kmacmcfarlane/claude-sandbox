@@ -17,3 +17,6 @@ __pycache__/
 
 # Go build cache for the shim-built binary
 /bin/dist/
+
+# go build ./cmd/claude-sandbox from the repo root drops the binary here
+/claude-sandbox
