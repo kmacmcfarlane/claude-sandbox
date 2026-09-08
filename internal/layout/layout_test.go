@@ -76,7 +76,16 @@ var _ = Describe("layout lifecycle", func() {
 		Expect(setup(false, ptr(true))).To(Succeed())
 		Expect(exists(filepath.Join(sb, "temp"))).To(BeTrue())
 		Expect(exists(filepath.Join(sb, "reports"))).To(BeTrue())
-		Expect(exists(filepath.Join(sb, "investigations"))).To(BeTrue())
+
+		By("investigations/ is a claude-kit convention, not a sandbox skeleton dir")
+		Expect(exists(filepath.Join(sb, "investigations"))).To(BeFalse())
+
+		By("a pre-existing investigations/ dir is user data and survives untouched")
+		inv := filepath.Join(sb, "investigations", "some-series")
+		Expect(os.MkdirAll(inv, 0o755)).To(Succeed())
+		write(filepath.Join(inv, "01-plan.md"), "keep me\n")
+		Expect(setup(false, ptr(true))).To(Succeed())
+		Expect(read(filepath.Join(inv, "01-plan.md"))).To(Equal("keep me\n"))
 	})
 
 	It("CS-LAY-002: CLAUDE.md is seeded once and never overwritten", func() {

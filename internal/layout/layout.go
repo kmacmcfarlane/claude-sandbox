@@ -27,7 +27,6 @@ claude-sandbox's per-project "foreign" files, consolidated out of the host tree.
 - ` + "`agent/`" + ` — workflow docs + backlog
 - ` + "`temp/`" + ` — scratch (uncommittable)
 - ` + "`reports/`" + ` — durable outputs (bench, parity diffs, QA logs)
-- ` + "`investigations/`" + ` — investigation records, one directory per series
 
 ## Committing changes here
 
@@ -68,7 +67,10 @@ func (o *Options) errw() io.Writer {
 // .gitignore, and (when trackInHost is false) the sidecar git repo.
 func Setup(project string, trackInHost bool, opts Options) error {
 	sb := paths.SandboxDir(project)
-	for _, d := range []string{filepath.Join(sb, "temp"), filepath.Join(sb, "reports"), filepath.Join(sb, "investigations")} {
+	// The skeleton is temp/ and reports/ only. investigations/ is a claude-kit
+	// investigate/implement convention, not a sandbox path: never created here,
+	// and an existing one is user data that is left alone.
+	for _, d := range []string{filepath.Join(sb, "temp"), filepath.Join(sb, "reports")} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			return err
 		}
