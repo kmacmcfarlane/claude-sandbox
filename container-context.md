@@ -46,7 +46,7 @@ one-time setup (idempotent). Use `setup-lsp-plugins --check` to verify status.
   `<project>/.claude/worktrees/<name>` on branch `worktree-<name>`, and the
   harness blocks edits to the shared checkout. The project root is always
   `$CLAUDE_SANDBOX_PROJECT_DIR` (`git rev-parse --git-common-dir` finds it too);
-  `.claude-sandbox/` (config, env, ralph runtime, investigations, the stop file)
+  `.claude-sandbox/` (config, env, ralph runtime, the stop file)
   lives there, not in the worktree. Edit sandbox files there only when the task
   is about the sandbox itself — except the writes a ralph run's own prompts
   direct (the backlog via `backlog.py`, `agent/ideas/`, `agent/QUESTIONS.md`,
