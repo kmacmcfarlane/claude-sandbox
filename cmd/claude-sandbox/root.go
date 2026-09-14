@@ -160,7 +160,7 @@ const launchUsage = `Usage:
   claude-sandbox sessions                 # list running sandbox sessions
   claude-sandbox --attach                 # reattach after losing a terminal
   claude-sandbox --branch                 # fork a conversation into a new container
-  claude-sandbox --no-worktree            # work in the shared checkout, not a worktree
+  claude-sandbox --worktree               # work in a private worktree, not the shared checkout
   claude-sandbox init                     # bootstrap .claude-sandbox/ (config, env, gitignore)
   claude-sandbox init-ralph               # bootstrap + seed ralph agent scaffolding
   PROJECT_DIR=/other claude-sandbox       # launch claude in /other
@@ -195,12 +195,16 @@ Options:
   --package-caches          Mount ~/.cache/claude-sandbox/{go-mod,go-build,npm,pip} writable
                             and point GOMODCACHE/GOCACHE/npm_config_cache/PIP_CACHE_DIR at them
 
-Worktree mode (on by default; config key 'worktree: false' turns it off):
+Worktree mode (off by default for interactive launches, on for --ralph;
+config key 'worktree: true|false' changes the default for both):
   --worktree[=NAME]         Run claude in its own worktree, .claude/worktrees/NAME on branch
                             worktree-NAME (default NAME: the container's instance noun;
                             ralph: "ralph"). An existing NAME is reopened. Outside a git
-                            repository the launch proceeds without it
-  --no-worktree             Run claude in the shared checkout instead
+                            repository the launch proceeds without it. A worktree has its
+                            own session history: --resume there lists only conversations
+                            started in it (Ctrl+W in the picker shows the others)
+  --no-worktree             Run claude in the shared checkout (the interactive default;
+                            turns ralph's worktree off)
 
 Multiple sessions (when a session is already running for this project):
   --new                     Launch a new container without prompting
@@ -223,7 +227,8 @@ Environment variables:
   CLAUDE_SANDBOX_DOCKERFILE               Override child Dockerfile name
   CLAUDE_SANDBOX_HOST_ACCESS_*_ENABLED    Enable ssh/git/docker-socket/aws/package-caches mounts
   CLAUDE_SANDBOX_NO_UPDATE_CHECK          Skip Claude Code version check
-  CLAUDE_SANDBOX_WORKTREE=0|1             Worktree mode off/on (flag > env > config 'worktree' > on)
+  CLAUDE_SANDBOX_WORKTREE=0|1             Worktree mode off/on (flag > env > config 'worktree' >
+                                          default: off interactive, on ralph)
 
 Inside the container, CLAUDE_SANDBOX_PROJECT_DIR names the project root (where
 .claude-sandbox/ lives) — a session in a worktree cannot otherwise tell.
@@ -475,12 +480,16 @@ type worktreeChoice struct {
 }
 
 // resolveWorktree applies CLI > CLAUDE_SANDBOX_WORKTREE > merged config >
-// default ON (CS-LNCH-042), then the git pre-check (CS-LNCH-046). The tri-state
-// shape is required rather than the OR of CS-LNCH-038: with a true default an
-// OR could never express "off".
+// default (CS-LNCH-042), then the git pre-check (CS-LNCH-046). The default is
+// OFF for interactive launches and ON for ralph: Claude Code files
+// transcripts by working directory, so a worktree has its own empty history
+// and `--resume` there lists none of the repo's conversations — an
+// interactive launch must be transparent, an unattended ralph run should be
+// isolated (CS-LNCH-041/045). The tri-state shape is required rather than
+// the OR of CS-LNCH-038: with a true default an OR could never express "off".
 func resolveWorktree(env *Env, projectDir string, f *launchFlags, cfg *cascade.Config) worktreeChoice {
 	wt := worktreeChoice{
-		Enabled: launch.ResolveTristate(f.Worktree, env.Getenv("CLAUDE_SANDBOX_WORKTREE"), cfg.Worktree, true),
+		Enabled: launch.ResolveTristate(f.Worktree, env.Getenv("CLAUDE_SANDBOX_WORKTREE"), cfg.Worktree, f.Ralph),
 		Name:    f.WorktreeName,
 	}
 	wt.Root = launch.GitRoot(env.Runner, projectDir)
@@ -508,14 +517,16 @@ func (wt worktreeChoice) nameFor(instance string, ralph bool) string {
 	return instance
 }
 
-// banner is the one stdout line that keeps the default flip from being silent
-// (CS-LNCH-041/046).
+// banner is the one stdout line that makes a worktree visible, or a requested
+// one's stand-down (CS-LNCH-041/046). It is "" — nothing printed — when the
+// session simply works in the shared checkout: the interactive default must
+// not narrate itself.
 func (wt worktreeChoice) banner(name string) string {
 	switch {
 	case wt.StoodDown:
 		return "Worktree: off (not a git repository)"
 	case !wt.Enabled:
-		return "Worktree: off (shared checkout)"
+		return ""
 	}
 	return fmt.Sprintf("Worktree: %s (%s/%s, branch worktree-%s)", name, launch.WorktreeDir, name, name)
 }
@@ -644,7 +655,9 @@ func runLaunch(env *Env, args []string) error {
 	// checked out under .claude/worktrees/ (CS-SESS-007, CS-SESS-045).
 	instance := newInstance(env, projectDir, f, wt.Root)
 	worktree := wt.nameFor(instance, f.Ralph)
-	fmt.Fprintln(env.Out, wt.banner(worktree))
+	if b := wt.banner(worktree); b != "" {
+		fmt.Fprintln(env.Out, b)
+	}
 
 	// Images (CS-IMG). Order: base, CLI image, update check (CLI only), child,
 	// cap. A Claude Code update never touches the base or the child.

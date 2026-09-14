@@ -41,8 +41,9 @@ one-time setup (idempotent). Use `setup-lsp-plugins --check` to verify status.
   (`~/.claude/sessions/<pid>.json`) is shared through the mounted config dir, so
   `/peers` and `SendMessage` reach sessions in other sandboxes without Remote
   Control. Sessions Claude spawns itself (`--bg`, `/bg`) are not slotted.
-- **You may be inside a worktree.** By default the launcher starts `claude` with
-  `--worktree <name>`, so your working directory is
+- **You may be inside a worktree.** Ralph runs by default, and interactive
+  sessions launched with `--worktree` (or config `worktree: true`), start
+  `claude` with `--worktree <name>`, so your working directory is
   `<project>/.claude/worktrees/<name>` on branch `worktree-<name>`, and the
   harness blocks edits to the shared checkout. The project root is always
   `$CLAUDE_SANDBOX_PROJECT_DIR` (`git rev-parse --git-common-dir` finds it too);
@@ -52,7 +53,7 @@ one-time setup (idempotent). Use `setup-lsp-plugins --check` to verify status.
   direct (the backlog via `backlog.py`, `agent/ideas/`, `agent/QUESTIONS.md`,
   the `ralph/stop` file), which are routine and go through Bash because the
   harness blocks Edit/Write to the main checkout from inside a worktree.
-  Sessions launched with `--no-worktree` work in the shared checkout.
+  Interactive sessions work in the shared checkout by default.
 - `/home/claude` is symlinked to the host user's home directory (e.g. `/home/rt`). Both paths work. Build-time files from the Dockerfile are relocated here automatically.
 - **The scratchpad survives the container.** The launcher points
   `CLAUDE_CODE_TMPDIR` inside the host-mounted Claude config directory, so the

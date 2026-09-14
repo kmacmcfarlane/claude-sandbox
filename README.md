@@ -65,9 +65,9 @@ claude-sandbox --attach
 # Fork a conversation into a new container, to chase a side idea in parallel:
 claude-sandbox --branch
 
-# Work in the shared checkout instead of a worktree (the default is a worktree
-# per session, .claude/worktrees/<instance>):
-claude-sandbox --no-worktree
+# Work in a private worktree (.claude/worktrees/<instance>) instead of the
+# shared checkout — opt-in for interactive sessions, ralph's default:
+claude-sandbox --worktree
 
 # Bootstrap .claude-sandbox/ in a repo (config, env, gitignore):
 claude-sandbox init
@@ -99,8 +99,8 @@ These flags are consumed by the launcher and control the container environment. 
 | `--no-update-check` | | Skip Claude Code version check at launch |
 | `--ralph` | | Launch the ralph loop runner instead of interactive claude |
 | `--limit N` | | Stop ralph after N iterations (only valid with `--ralph`) |
-| `--worktree[=NAME]` | | Run claude in its own Claude Code worktree, `.claude/worktrees/NAME` on branch `worktree-NAME` — the **default**; NAME defaults to the container's instance noun (`ralph` for ralph), and an existing NAME is reopened. See [Worktree mode](#worktree-mode) |
-| `--no-worktree` | | Run claude in the shared checkout instead (durable alternatives: `worktree: false` in config.yaml, or `CLAUDE_SANDBOX_WORKTREE=0`) |
+| `--worktree[=NAME]` | | Run claude in its own Claude Code worktree, `.claude/worktrees/NAME` on branch `worktree-NAME` — **off by default for interactive sessions, on for `--ralph`**; NAME defaults to the container's instance noun (`ralph` for ralph), and an existing NAME is reopened. See [Worktree mode](#worktree-mode) |
+| `--no-worktree` | | Run claude in the shared checkout (the interactive default; turns ralph's worktree off). Durable alternatives for both: `worktree: true`/`false` in config.yaml, or `CLAUDE_SANDBOX_WORKTREE=1`/`0` |
 | `--new` | | Launch a new container without prompting, even if sessions are running |
 | `--branch` | | Fork a conversation into a new container (claude's `--resume` picker chooses which); add claude's `--name "my-name"` to name the fork |
 | `--attach[=INSTANCE]` | | Reattach to a running session instead of launching |
@@ -157,7 +157,7 @@ container.
 
 More than one sandbox session can run in the same project. Container names are unique per project directory, so two checkouts that merely share a directory name (say a dozen directories all called `infrastructure`) no longer collide.
 
-By default each container works in its **own worktree** named after its instance noun — container `…-otter`, worktree `.claude/worktrees/otter`, branch `worktree-otter` — so concurrent sessions stop editing the same files ([Worktree mode](#worktree-mode)). A joined session (`--join`) gets its own, claude-named worktree rather than sharing the primary's; attaching cannot change where a running session works, so `--attach` just reports it. With `--no-worktree` sessions share the checkout itself, as they always did.
+By default interactive sessions share the checkout itself. With `--worktree` (or `worktree: true` in config) each container works in its **own worktree** named after its instance noun — container `…-otter`, worktree `.claude/worktrees/otter`, branch `worktree-otter` — so concurrent sessions stop editing the same files ([Worktree mode](#worktree-mode)). In that mode a joined session (`--join`) gets its own, claude-named worktree rather than sharing the primary's; attaching cannot change where a running session works, so `--attach` just reports it.
 
 ### Listing what is running
 
@@ -215,7 +215,7 @@ claude-sandbox --branch                             # pick any past or running c
 claude-sandbox --branch --name "something sidequest"  # same, and name the fork up front
 ```
 
-`--branch` launches a new container running `claude --worktree <new-noun> --resume --fork-session`: claude's own session picker chooses the conversation, and `--fork-session` gives the copy a new session id. The fork lands in the new container's own worktree (a forked session starts where it was launched; the launcher's `--worktree` is what puts it in its own tree), so the original's worktree is untouched. It works whether or not anything is currently running, so an old conversation can be branched too. The `[b]` prompt choice is the shorthand for the common case — it forks the **newest** conversation for the directory (via `--continue --fork-session`), which is the running session's, since that session is actively appending to its transcript. To branch a specific older one, use `--branch` and pick from the menu.
+`--branch` launches a new container running `claude --resume --fork-session`: claude's own session picker chooses the conversation, and `--fork-session` gives the copy a new session id. In [worktree mode](#worktree-mode) the launcher prepends `--worktree <new-noun>`, so the fork lands in the new container's own worktree (a forked session starts where it was launched) and the original's is untouched. It works whether or not anything is currently running, so an old conversation can be branched too. The `[b]` prompt choice is the shorthand for the common case — it forks the **newest** conversation for the directory (via `--continue --fork-session`), which is the running session's, since that session is actively appending to its transcript. To branch a specific older one, use `--branch` and pick from the menu.
 
 To name the fork up front instead of `/rename`-ing afterwards, add claude's own `--name` (short form `-n`) — it passes through like any claude flag and sets the display name shown in the resume picker and terminal title. It composes with `--branch` or stands alone to name any new session at launch: `claude-sandbox --name "big refactor"`. (There is deliberately no `--branch=NAME` form: on `--attach=`/`--join=` the `=` value picks a *target*, and a value that instead named the result would make the same syntax mean two things.)
 
@@ -382,7 +382,7 @@ These flags are passed through to ralph (after `--ralph` and any launcher flags)
 | `--interactive` | off | Run claude interactively (default: non-interactive `-p`) |
 | `--dangerous` | off | Pass `--dangerously-skip-permissions` to claude |
 | `--resume` | off | Pass `--resume` to claude on first iteration |
-| `--worktree NAME` | (set by the launcher: `ralph`) | Run every iteration in the Claude Code worktree `.claude/worktrees/NAME` (branch `worktree-NAME`); omitted when the launcher runs with `--no-worktree` |
+| `--worktree NAME` | (set by the launcher: `ralph`) | Run every iteration in the Claude Code worktree `.claude/worktrees/NAME` (branch `worktree-NAME`); omitted when the launcher runs with `--no-worktree` or `worktree: false` |
 | `--prompt PATH` | `.claude-sandbox/agent/PROMPT.md` | Prompt file |
 | `--stop-file PATH` | `.claude-sandbox/ralph/stop` | Path to stop file |
 | `--claude-bin PATH` | `claude` | Claude binary |
@@ -541,15 +541,18 @@ dangerous: true
 
 #### Worktree mode
 
-Every launch runs claude with its own `--worktree <name>`, so the session works in `<repo-root>/.claude/worktrees/<name>` on branch `worktree-<name>` instead of the shared checkout (Claude Code creates the worktree, reopens it when the directory exists, and blocks edits to the main checkout from inside). The name is the container's instance noun — one word for the container, the worktree and the branch — or `ralph` for a ralph run; `--worktree=NAME` names it explicitly, which is also how a kept worktree is deliberately reopened (the noun picker skips nouns whose worktree already exists, so an accidental reopen cannot happen). Every launch prints one `Worktree: …` banner line.
+With `--worktree` the launcher runs claude with its own `--worktree <name>`, so the session works in `<repo-root>/.claude/worktrees/<name>` on branch `worktree-<name>` instead of the shared checkout (Claude Code creates the worktree, reopens it when the directory exists, and blocks edits to the main checkout from inside). The name is the container's instance noun — one word for the container, the worktree and the branch — or `ralph` for a ralph run; `--worktree=NAME` names it explicitly, which is also how a kept worktree is deliberately reopened (the noun picker skips nouns whose worktree already exists, so an accidental reopen cannot happen). A launch that uses a worktree prints one `Worktree: …` banner line; a launch in the shared checkout prints nothing.
 
-Turn it off per project, or for a whole workspace through the cascade:
+**The default is off for interactive sessions and on for ralph.** Claude Code files session transcripts by working directory, and a worktree is a different directory: a session started in one has its own, initially empty history, so `claude-sandbox --resume` in a repo would open a picker listing none of the conversations started there (the `Ctrl+W` filter in the picker is the only clue). An interactive launch has to be transparent — the repo you are standing in is the repo claude sees, history included — so isolation is something a person opts into. Ralph is an unattended agent whose run branch is its deliverable, so it stays isolated unless told otherwise. If you launched sessions while the mode was on by default, their transcripts live under the worktree directory; `Ctrl+W` in the resume picker shows them.
+
+Change the default per project, or for a whole workspace through the cascade — one key governs both kinds of launch:
 
 ```yaml
-worktree: false
+worktree: true    # every interactive session gets a worktree
+# worktree: false # ralph runs in the shared checkout too
 ```
 
-Precedence is `--worktree`/`--no-worktree` > `CLAUDE_SANDBOX_WORKTREE` (`1`/`true`/`yes` on, `0`/`false`/`no` off — a falsy value is an explicit off, unlike `CLAUDE_SANDBOX_DANGEROUS`, because the default here is on) > the merged config key (a more-local `worktree: true` overrides an upstream `false` and vice versa) > on. The choice is per session: like the model it is recorded on the container (`claude-sandbox.worktree` label, the `WORKTREE` column of `sessions`) but never counts as config drift for `--attach`/`--join`.
+Precedence is `--worktree`/`--no-worktree` > `CLAUDE_SANDBOX_WORKTREE` (`1`/`true`/`yes` on, `0`/`false`/`no` off — a falsy value is an explicit off, unlike `CLAUDE_SANDBOX_DANGEROUS`, because ralph's default is on) > the merged config key (a more-local `worktree: true` overrides an upstream `false` and vice versa) > the per-kind default. The choice is per session: like the model it is recorded on the container (`claude-sandbox.worktree` label, the `WORKTREE` column of `sessions`) but never counts as config drift for `--attach`/`--join`.
 
 What it costs: a worktree is a fresh checkout, so anything untracked that a project's tooling reads from the working directory — `.env`, `node_modules`, `.claude-sandbox/` itself (gitignored in sidecar mode) — is not there. Claude Code copies `.claude/settings.local.json` and whatever a `.worktreeinclude` file lists, and can symlink directories via its `worktree.symlinkDirectories` setting; the sandbox's own files live in the main checkout, which the container finds through `CLAUDE_SANDBOX_PROJECT_DIR` (always set) or `git rev-parse --git-common-dir`. Outside a git repository the launcher stands down (`Worktree: off (not a git repository)`) and launches without the flag. `claude-sandbox` never prunes worktrees — `git worktree list` / `git worktree remove` are the tools; `-p` runs (ralph) never clean up and interactive sessions ask on exit.
 
@@ -701,7 +704,7 @@ If no `.claude-sandbox/Dockerfile` is found anywhere up to `/`, the launcher war
 | `CLAUDE_SANDBOX_DOCKERFILE_DIR` | `$PROJECT_DIR` | Directory containing the child Dockerfile |
 | `CLAUDE_SANDBOX_DOCKERFILE` | `Dockerfile` | Filename of the child Dockerfile |
 | `CLAUDE_SANDBOX_DANGEROUS` | (unset) | Set to `1` or `true` to skip permission prompts (equivalent to `--dangerous`) |
-| `CLAUDE_SANDBOX_WORKTREE` | (unset = on) | `0`/`false`/`no` runs sessions in the shared checkout (equivalent to `--no-worktree`); `1`/`true`/`yes` forces worktree mode over a config `worktree: false` |
+| `CLAUDE_SANDBOX_WORKTREE` | (unset: off interactive, on ralph) | `1`/`true`/`yes` runs sessions in their own worktree (equivalent to `--worktree`); `0`/`false`/`no` runs them in the shared checkout, ralph included; either overrides a config `worktree` key |
 | `CLAUDE_SANDBOX_BASE_ONLY` | (unset) | Set to `1` or `true` to skip child Dockerfile and use base image only |
 | `CLAUDE_SANDBOX_NO_UPDATE_CHECK` | (unset) | Set to `1` or `true` to skip Claude Code version check at launch |
 

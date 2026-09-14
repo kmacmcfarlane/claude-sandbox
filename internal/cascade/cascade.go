@@ -96,8 +96,9 @@ type Config struct {
 	// the --dangerous flag or CLAUDE_SANDBOX_DANGEROUS=1 (CS-LNCH-038).
 	Dangerous bool `yaml:"dangerous"`
 	// Worktree turns claude's --worktree mode on or off for every launch
-	// (CS-LNCH-041/042). A pointer, because the default is ON and an explicit
-	// false must be distinguishable from unset. Excluded from the JSON form
+	// (CS-LNCH-041/042). A pointer, because the default differs by launch
+	// kind (off interactive, on ralph) and an explicit value must be
+	// distinguishable from unset. Excluded from the JSON form
 	// the config-drift fingerprint hashes: it is a per-session choice, like
 	// the model (CS-LNCH-044).
 	Worktree      *bool      `yaml:"worktree" json:"-"`

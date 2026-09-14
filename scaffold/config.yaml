@@ -90,14 +90,17 @@
 # to override an upstream config that enables it.
 # dangerous: false
 
-# Run every session in its own Claude Code worktree (.claude/worktrees/<name>
-# on branch worktree-<name>, named after the container's instance noun; ralph
-# uses "ralph") instead of the shared checkout. On by default. Same effect as
-# launching with --worktree / --no-worktree or setting CLAUDE_SANDBOX_WORKTREE
-# (1/true/yes on, 0/false/no off); precedence is flag > env > this key > on.
-# The cascade applies: a more-local value overrides an upstream one. Outside a
-# git repository the launcher stands down and launches without it.
-# worktree: true
+# Run sessions in their own Claude Code worktree (.claude/worktrees/<name> on
+# branch worktree-<name>, named after the container's instance noun; ralph
+# uses "ralph") instead of the shared checkout. Default: off for interactive
+# sessions (a worktree has its own session history, so `--resume` there would
+# not list the conversations started in the repo), on for ralph. One key
+# governs both. Same effect as launching with --worktree / --no-worktree or
+# setting CLAUDE_SANDBOX_WORKTREE (1/true/yes on, 0/false/no off); precedence
+# is flag > env > this key > the per-kind default. The cascade applies: a
+# more-local value overrides an upstream one. Outside a git repository the
+# launcher stands down and launches without it.
+# worktree: false
 
 # Disable the Claude Code version check at launch.
 # Also controllable via --no-update-check flag or CLAUDE_SANDBOX_NO_UPDATE_CHECK=1.

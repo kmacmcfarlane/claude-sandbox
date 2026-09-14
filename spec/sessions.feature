@@ -2,10 +2,10 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
 
   A project can have more than one sandbox session running at once. The
   project is bind-mounted at its real host path, so sessions in the same
-  project share the repository — by default each one works in its own
-  worktree named after its container (CS-LNCH-041), and with --no-worktree
-  they share the checkout itself. What differs between the mechanisms is
-  durability:
+  project share the repository — by default they share the checkout itself,
+  and with --worktree (or config worktree: true) each one works in its own
+  worktree named after its container (CS-LNCH-041). What differs between the
+  mechanisms is durability:
 
     - a session in its OWN container is PID 1, so it can be reattached with
       `docker attach` and survives losing its terminal;
@@ -160,8 +160,9 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
     And a terminal is attached
     When branch is chosen at the tier-1 prompt
     Then a new container launches through the normal pipeline
-    And its claude command carries "--worktree <new-noun> --continue --fork-session"
-      before any passthrough arguments
+    And its claude command carries "--continue --fork-session" before any
+      passthrough arguments, preceded by "--worktree <new-noun>" when worktree
+      mode resolves on (CS-LNCH-042)
     # --continue resolves to the newest conversation for this directory, which
     # is the running session's (it is actively appending to its transcript);
     # --fork-session gives the copy a new session id so both continue
@@ -175,11 +176,13 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
     When "claude-sandbox --branch" is run
     Then no session prompt is shown, whether or not sessions are running
     And a new container launches through the normal pipeline
-    And its claude command carries "--worktree <new-noun> --resume --fork-session"
-      before any passthrough arguments
-    # A --fork-session starts where claude was launched; the launcher's own
-    # --worktree is what lands the fork in its own tree, so a branch never
-    # shares the original's worktree.
+    And its claude command carries "--resume --fork-session" before any
+      passthrough arguments, preceded by "--worktree <new-noun>" when worktree
+      mode resolves on (CS-LNCH-042)
+    # A --fork-session starts where claude was launched; in worktree mode the
+    # launcher's own --worktree is what lands the fork in its own tree, so a
+    # branch never shares the original's worktree. By default (mode off) the
+    # fork shares the checkout, and --resume's picker sees the same history.
     And running sessions are not required — a past conversation can be branched
 
   Scenario: CS-SESS-041 --branch is a bypass flag but the picker still needs a terminal

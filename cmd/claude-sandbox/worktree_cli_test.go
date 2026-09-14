@@ -3,8 +3,9 @@ package main
 // Spec: spec/launch.feature (CS-LNCH-041..047) and spec/sessions.feature
 // (CS-SESS-045..047) — worktree mode end to end through MainWithEnv. The
 // fixture's project directory is not a git work tree, so every test that wants
-// the default ON scripts `git rev-parse --show-toplevel` (gitProject); the
-// others exercise the stand-down (CS-LNCH-046).
+// a worktree scripts `git rev-parse --show-toplevel` (gitProject); the others
+// exercise the stand-down (CS-LNCH-046). The interactive default is OFF, so
+// tests that want a worktree ask for one (--worktree, the env var or the key).
 
 import (
 	"os"
@@ -36,9 +37,17 @@ var _ = Describe("worktree mode (CS-LNCH-041..047, CS-SESS-045..047)", func() {
 
 	nounRe := `[a-z]+(-[0-9]+)?`
 
-	It("CS-LNCH-041, CS-LNCH-026: on by default — claude --worktree <instance> precedes --model and passthrough, and names the container", func() {
+	It("CS-LNCH-041, CS-LNCH-026: off by default — a plain launch is plain claude, no banner", func() {
 		gitProject(f)
 		Expect(f.run("--dangerous", "--model", "opus", "--resume")).To(Equal(0), f.errw.String())
+		Expect(f.execLine()).To(HaveSuffix(" claude-sandbox:run claude --dangerously-skip-permissions --model opus --resume"))
+		Expect(f.execLine()).NotTo(ContainSubstring("--worktree"))
+		Expect(f.out.String()).NotTo(ContainSubstring("Worktree:"), "the shared-checkout default does not narrate itself")
+	})
+
+	It("CS-LNCH-041, CS-LNCH-026: --worktree — claude --worktree <instance> precedes --model and passthrough, and names the container", func() {
+		gitProject(f)
+		Expect(f.run("--worktree", "--dangerous", "--model", "opus", "--resume")).To(Equal(0), f.errw.String())
 		line := f.execLine()
 		re := regexp.MustCompile(`--name claude-sandbox-` + regexp.QuoteMeta(imagebuild.ProjectSlug(f.proj)) +
 			`-(` + nounRe + `) claude-sandbox:run claude --dangerously-skip-permissions --worktree (` + nounRe + `) --model opus --resume$`)
@@ -49,11 +58,11 @@ var _ = Describe("worktree mode (CS-LNCH-041..047, CS-SESS-045..047)", func() {
 			"Worktree: " + m[1] + " (.claude/worktrees/" + m[1] + ", branch worktree-" + m[1] + ")"))
 	})
 
-	It("CS-LNCH-041: --no-worktree launches plain claude and says so", func() {
+	It("CS-LNCH-041: --no-worktree is accepted and launches plain claude, silently", func() {
 		gitProject(f)
 		Expect(f.run("--no-worktree")).To(Equal(0))
 		Expect(f.execLine()).To(HaveSuffix(" claude-sandbox:run claude"))
-		Expect(f.out.String()).To(ContainSubstring("Worktree: off (shared checkout)"))
+		Expect(f.out.String()).NotTo(ContainSubstring("Worktree:"))
 	})
 
 	It("CS-LNCH-041: --worktree is launcher-owned, never a passthrough boundary", func() {
@@ -62,8 +71,8 @@ var _ = Describe("worktree mode (CS-LNCH-041..047, CS-SESS-045..047)", func() {
 		Expect(f.execLine()).To(MatchRegexp(` claude --dangerously-skip-permissions --worktree ` + nounRe + `$`))
 	})
 
-	DescribeTable("CS-LNCH-042: precedence is tri-state — CLI > env (falsy is an explicit off) > merged config > on",
-		func(yaml, envVal, cli string, want bool) {
+	DescribeTable("CS-LNCH-042: precedence is tri-state — CLI > env (falsy is an explicit off) > merged config > default (off interactive, on ralph)",
+		func(yaml, envVal, cli string, ralph, want bool) {
 			gitProject(f)
 			if yaml != "" {
 				writeFile(filepath.Join(f.proj, ".claude-sandbox", "config.yaml"), "worktree: "+yaml+"\n")
@@ -72,24 +81,30 @@ var _ = Describe("worktree mode (CS-LNCH-041..047, CS-SESS-045..047)", func() {
 				f.envmap["CLAUDE_SANDBOX_WORKTREE"] = envVal
 			}
 			var args []string
+			if ralph {
+				args = append(args, "--ralph")
+			}
 			if cli != "" {
 				args = append(args, cli)
 			}
 			Expect(f.run(args...)).To(Equal(0), f.errw.String())
 			if want {
-				Expect(f.execLine()).To(ContainSubstring(" claude --worktree "))
+				Expect(f.execLine()).To(ContainSubstring(" --worktree "))
 			} else {
 				Expect(f.execLine()).NotTo(ContainSubstring("--worktree"))
 			}
 		},
-		Entry("unset/unset/absent -> on", "", "", "", true),
-		Entry("false/unset/absent -> off", "false", "", "", false),
-		Entry("false/1/absent -> on", "false", "1", "", true),
-		Entry("true/0/absent -> off", "true", "0", "", false),
-		Entry("true/no/absent -> off", "true", "no", "", false),
-		Entry("unset/maybe/absent -> on (unrecognized env is unset)", "", "maybe", "", true),
-		Entry("true/unset/--no-worktree -> off", "true", "", "--no-worktree", false),
-		Entry("false/0/--worktree -> on", "false", "0", "--worktree", true),
+		Entry("unset/unset/absent interactive -> off", "", "", "", false, false),
+		Entry("unset/unset/absent ralph -> on", "", "", "", true, true),
+		Entry("true/unset/absent interactive -> on", "true", "", "", false, true),
+		Entry("false/unset/absent ralph -> off", "false", "", "", true, false),
+		Entry("false/1/absent interactive -> on", "false", "1", "", false, true),
+		Entry("true/0/absent ralph -> off", "true", "0", "", true, false),
+		Entry("true/no/absent interactive -> off", "true", "no", "", false, false),
+		Entry("unset/maybe/absent interactive -> off (unrecognized env is unset)", "", "maybe", "", false, false),
+		Entry("unset/maybe/absent ralph -> on (unrecognized env is unset)", "", "maybe", "", true, true),
+		Entry("true/unset/--no-worktree interactive -> off", "true", "", "--no-worktree", false, false),
+		Entry("false/0/--worktree ralph -> on", "false", "0", "--worktree", true, true),
 	)
 
 	It("CS-LNCH-042: the cascade merges the key like any scalar — a local true overrides an upstream false", func() {
@@ -146,7 +161,7 @@ var _ = Describe("worktree mode (CS-LNCH-041..047, CS-SESS-045..047)", func() {
 		Expect(f.fake.Execed.Args).To(ContainElement("claude-sandbox.confighash=" + bare))
 	})
 
-	It("CS-LNCH-045, CS-LNCH-027: ralph launches carry --worktree ralph before passthrough", func() {
+	It("CS-LNCH-045, CS-LNCH-027: ralph launches carry --worktree ralph by default, before passthrough", func() {
 		gitProject(f)
 		Expect(f.run("--ralph", "--limit", "5", "--dangerous", "--verbose")).To(Equal(0))
 		Expect(f.execLine()).To(HaveSuffix(
@@ -165,7 +180,7 @@ var _ = Describe("worktree mode (CS-LNCH-041..047, CS-SESS-045..047)", func() {
 		Expect(g.execLine()).To(HaveSuffix("/opt/claude-sandbox/bin/ralph"))
 	})
 
-	It("CS-LNCH-046: outside a git work tree the mode stands down with a banner, however it was requested", func() {
+	It("CS-LNCH-046: outside a git work tree a requested worktree stands down with a banner, however it was requested", func() {
 		for _, args := range [][]string{{}, {"--worktree"}, {"--worktree=feature-x"}, {"--ralph"}} {
 			g := newCLIFixture() // no gitProject: rev-parse returns nothing
 			g.envmap["CLAUDE_SANDBOX_WORKTREE"] = "1"
@@ -174,6 +189,15 @@ var _ = Describe("worktree mode (CS-LNCH-041..047, CS-SESS-045..047)", func() {
 			Expect(g.out.String()).To(ContainSubstring("Worktree: off (not a git repository)"), "%v", args)
 			Expect(g.fake.Execed.Args).To(ContainElement("claude-sandbox.worktree="))
 		}
+		// --ralph asks by default; a plain interactive launch never asked.
+		g := newCLIFixture()
+		Expect(g.run("--ralph")).To(Equal(0))
+		Expect(g.out.String()).To(ContainSubstring("Worktree: off (not a git repository)"))
+
+		h := newCLIFixture()
+		Expect(h.run()).To(Equal(0))
+		Expect(h.execLine()).NotTo(ContainSubstring("--worktree"))
+		Expect(h.out.String()).NotTo(ContainSubstring("Worktree:"), "nothing was requested, nothing stood down")
 	})
 
 	It("CS-LNCH-047, CS-LNCH-029: the container always receives CLAUDE_SANDBOX_PROJECT_DIR", func() {
@@ -203,7 +227,7 @@ var _ = Describe("worktree mode (CS-LNCH-041..047, CS-SESS-045..047)", func() {
 			}
 			gitProject(f)
 			running()
-			Expect(f.run("--no-session-check")).To(Equal(0))
+			Expect(f.run("--worktree", "--no-session-check")).To(Equal(0))
 			Expect(f.execLine()).To(ContainSubstring("-zenith claude-sandbox:run claude --worktree zenith"))
 		})
 
@@ -215,10 +239,11 @@ var _ = Describe("worktree mode (CS-LNCH-041..047, CS-SESS-045..047)", func() {
 			Expect(f.execLine()).To(HaveSuffix(" claude --worktree otter"))
 		})
 
-		It("CS-SESS-046: join enters its own worktree with a bare --worktree before --model", func() {
+		It("CS-SESS-046: join enters its own worktree with a bare --worktree before --model when the mode resolves on", func() {
 			gitProject(f)
 			running(psRowWorktree("cs-a", "Up 1 hour", f.proj, "otter", "otter"))
 			noTTY()
+			f.envmap["CLAUDE_SANDBOX_WORKTREE"] = "1"
 			Expect(f.run("--join=otter", "--model", "opus")).To(Equal(0), f.errw.String())
 			Expect(f.execLine()).To(HaveSuffix("pidslot -- claude --worktree --model opus"))
 			Expect(f.execLine()).NotTo(ContainSubstring("--worktree otter"), "never the primary's worktree")
@@ -232,10 +257,14 @@ var _ = Describe("worktree mode (CS-LNCH-041..047, CS-SESS-045..047)", func() {
 			Expect(f.execLine()).To(HaveSuffix("pidslot -- claude --worktree side"))
 		})
 
-		It("CS-SESS-046: --no-worktree (or a non-git project) joins the shared checkout", func() {
+		It("CS-SESS-046: the default, --no-worktree, or a non-git project joins the shared checkout", func() {
 			gitProject(f)
 			running(psRowWorktree("cs-a", "Up 1 hour", f.proj, "otter", "otter"))
 			noTTY()
+			Expect(f.run("--join=otter")).To(Equal(0))
+			Expect(f.execLine()).To(HaveSuffix("pidslot -- claude"), "the interactive default is the shared checkout")
+
+			f.fake.Execed = nil
 			Expect(f.run("--join=otter", "--no-worktree")).To(Equal(0))
 			Expect(f.execLine()).To(HaveSuffix("pidslot -- claude"))
 
@@ -251,7 +280,7 @@ var _ = Describe("worktree mode (CS-LNCH-041..047, CS-SESS-045..047)", func() {
 			gitProject(f)
 			running(psRowWorktree("cs-a", "Up 1 hour", f.proj, "otter", "otter"))
 			noTTY()
-			Expect(f.run("--attach=otter")).To(Equal(0), f.errw.String())
+			Expect(f.run("--attach=otter", "--worktree")).To(Equal(0), f.errw.String())
 			Expect(f.execLine()).To(HavePrefix("docker attach "))
 			Expect(f.errw.String()).To(ContainSubstring("Note: session 'otter' runs in worktree 'otter' (branch worktree-otter)."))
 			Expect(f.errw.String()).NotTo(ContainSubstring("cannot change"))
@@ -270,25 +299,50 @@ var _ = Describe("worktree mode (CS-LNCH-041..047, CS-SESS-045..047)", func() {
 			g.fake.On("docker ps", psRow("cs-a", "Up 1 hour", g.proj, "otter")+"\n", nil)
 			g.fake.On("docker top", "PID  COMMAND\n1  claude\n", nil)
 			g.env.Prompter = &prompt.Scripted{IsTTY: false}
-			Expect(g.run("--attach=otter")).To(Equal(0))
+			Expect(g.run("--attach=otter", "--worktree")).To(Equal(0))
 			Expect(g.errw.String()).To(ContainSubstring("runs in the shared checkout; --worktree/--no-worktree cannot change a running session."))
+
+			// The default request matches a shared-checkout session: a plain note.
+			h := newCLIFixture()
+			gitProject(h)
+			h.fake.On("docker ps", psRow("cs-a", "Up 1 hour", h.proj, "otter")+"\n", nil)
+			h.fake.On("docker top", "PID  COMMAND\n1  claude\n", nil)
+			h.env.Prompter = &prompt.Scripted{IsTTY: false}
+			Expect(h.run("--attach=otter")).To(Equal(0))
+			Expect(h.errw.String()).To(ContainSubstring("runs in the shared checkout."))
+			Expect(h.errw.String()).NotTo(ContainSubstring("cannot change"))
 		})
 
-		It("CS-SESS-039: [b] composes --worktree <new-noun> with --continue --fork-session", func() {
+		It("CS-SESS-039: [b] composes --worktree <new-noun> with --continue --fork-session when the mode resolves on", func() {
 			gitProject(f)
 			running(psRowWorktree("cs-a", "Up 1 hour", f.proj, "otter", "otter"))
 			f.env.Prompter = &prompt.Scripted{IsTTY: true, Answers: []string{"b"}}
-			Expect(f.run("--verbose")).To(Equal(0))
+			Expect(f.run("--worktree", "--verbose")).To(Equal(0))
 			line := f.execLine()
 			Expect(line).To(MatchRegexp(` claude --worktree (` + nounRe + `) --continue --fork-session --verbose$`))
 			Expect(line).NotTo(ContainSubstring("--worktree otter "), "the fork gets its own worktree")
+
+			g := newCLIFixture()
+			gitProject(g)
+			g.fake.On("docker ps", psRowWorktree("cs-a", "Up 1 hour", g.proj, "otter", "otter")+"\n", nil)
+			g.fake.On("docker top", "PID  COMMAND\n1  claude\n", nil)
+			g.env.Prompter = &prompt.Scripted{IsTTY: true, Answers: []string{"b"}}
+			Expect(g.run("--verbose")).To(Equal(0))
+			Expect(g.execLine()).To(HaveSuffix(" claude --continue --fork-session --verbose"), "by default the fork shares the checkout")
 		})
 
-		It("CS-SESS-040: --branch composes --worktree <new-noun> with --resume --fork-session", func() {
+		It("CS-SESS-040: --branch composes --worktree <new-noun> with --resume --fork-session when the mode resolves on", func() {
 			gitProject(f)
 			running()
-			Expect(f.run("--branch", "--name", "sidequest")).To(Equal(0))
+			Expect(f.run("--worktree", "--branch", "--name", "sidequest")).To(Equal(0))
 			Expect(f.execLine()).To(MatchRegexp(` claude --worktree ` + nounRe + ` --resume --fork-session --name sidequest$`))
+
+			g := newCLIFixture()
+			gitProject(g)
+			g.fake.On("docker ps", "\n", nil)
+			g.fake.On("docker top", "PID  COMMAND\n1  claude\n", nil)
+			Expect(g.run("--branch", "--name", "sidequest")).To(Equal(0))
+			Expect(g.execLine()).To(HaveSuffix(" claude --resume --fork-session --name sidequest"), "by default the fork shares the checkout")
 		})
 
 		It("CS-SESS-010, CS-SESS-012: the listing and JSON carry the worktree", func() {
