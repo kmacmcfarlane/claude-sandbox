@@ -43,7 +43,19 @@ Feature: init-ralph subcommand (CS-INITR)
     When init-ralph seeds scripts/backlog/backlog.py
     Then the file has its executable bit set
 
-  Scenario: CS-INITR-007 __pycache__ contents are never seeded
+  Scenario: CS-INITR-007 Tooling debris in the scaffold tree is never seeded
+    # assets.go embeds scaffold-ralph with the `all:` prefix, which admits
+    # `.`- and `_`-prefixed entries and has no exclusion syntax, so a binary
+    # built from a working tree that ran the backlog tests carries whatever
+    # pytest left on disk. The seeding walk is the enforceable filter.
+    Given the embedded ralph scaffold contains, beside its real files,
+      a "__pycache__/" directory, a stray "*.pyc" outside it,
+      a ".pytest_cache/" directory and another dot-directory
+    When init-ralph seeds the scaffold
+    Then no __pycache__ directory, .pyc or .pyo file, .pytest_cache directory,
+      or any dot-prefixed directory or file is created under .claude-sandbox/
+    And every real scaffold file (e.g. scripts/backlog/backlog.py) is still seeded
+    And the same debris is excluded from the Docker build context and gitignored
 
   Scenario: CS-INITR-008 Completion message includes ralph next steps
     When init-ralph completes

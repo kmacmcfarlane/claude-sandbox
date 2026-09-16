@@ -19,3 +19,9 @@ package.json
 # source, so nothing here is needed by any image build.
 claude-sandbox
 bin/dist/
+# Python tooling debris under scaffold-ralph/scripts (a pytest run leaves it on
+# disk, gitignored). The builder stage embeds scaffold-ralph with `all:`, which
+# would bake it into the binary; keep it out of the build context entirely.
+__pycache__
+*.pyc
+.pytest_cache
