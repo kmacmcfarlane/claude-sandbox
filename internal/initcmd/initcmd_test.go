@@ -48,6 +48,16 @@ func nonGitFake() *execx.Fake {
 	return f
 }
 
+// hostTrackedFake scripts a git work tree whose host repo does NOT ignore
+// .claude-sandbox/ — the coherent state for trackInHost true. A bare Fake
+// lets check-ignore succeed, which layout reads as a whole-dir ignore and
+// refuses the host-tracked entries over (CS-LAY-018).
+func hostTrackedFake() *execx.Fake {
+	f := &execx.Fake{}
+	f.On("check-ignore", "", execx.Fail(1))
+	return f
+}
+
 // run bundles one initcmd.Run invocation's collaborators.
 type run struct {
 	out, errOut bytes.Buffer
@@ -250,7 +260,7 @@ var _ = Describe("init subcommand", func() {
 			// Inherited true + git work tree => host-tracked layout: ephemeral
 			// gitignore entries, no sidecar repo (see layout.feature).
 			r := &run{
-				fake:     &execx.Fake{}, // all git calls succeed: inside a work tree
+				fake:     hostTrackedFake(), // inside a work tree, dir not ignored
 				prompter: &prompt.Scripted{IsTTY: true, Answers: []string{""}},
 			}
 			Expect(r.init(proj, initcmd.Flags{Gitignore: ptr(true)})).To(Succeed())
@@ -386,7 +396,7 @@ var _ = Describe("init subcommand", func() {
 			sb = filepath.Join(proj, ".claude-sandbox")
 
 			r := &run{
-				fake:     &execx.Fake{}, // git work tree; .gitignore missing entries
+				fake:     hostTrackedFake(), // git work tree; .gitignore missing entries
 				prompter: &prompt.Scripted{IsTTY: false},
 			}
 			Expect(r.init(proj, initcmd.Flags{Yes: true})).To(Succeed())
@@ -423,7 +433,7 @@ var _ = Describe("init subcommand", func() {
 		It("CS-INIT-028: the gitignore entries implied by trackInHost are written without a prompt", func() {
 			By("interactive: the trackInHost answer is the only prompt; entries follow it")
 			r := &run{
-				fake:     &execx.Fake{}, // git work tree; .gitignore missing entries
+				fake:     hostTrackedFake(), // git work tree; .gitignore missing entries
 				prompter: &prompt.Scripted{IsTTY: true, Answers: []string{"y"}},
 			}
 			Expect(r.init(proj, initcmd.Flags{})).To(Succeed())

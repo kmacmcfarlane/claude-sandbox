@@ -1,9 +1,11 @@
 package layout_test
 
-// Spec: spec/layout.feature (CS-LAY-001..014, 017). CS-LAY-015/016 (launcher
-// adoption) live in cmd/claude-sandbox. Git behavior is scripted through
-// execx.Fake: unmatched commands succeed, so by default the project IS a git
-// work tree and check-ignore reports the path as ignored.
+// Spec: spec/layout.feature (CS-LAY-001..014, 017, 018). CS-LAY-015/016
+// (launcher adoption) live in cmd/claude-sandbox. Git behavior is scripted
+// through execx.Fake: unmatched commands succeed, so by default the project IS
+// a git work tree and check-ignore reports the path as ignored. Host-tracked
+// (trackInHost true) tests call hostTracks() so the host does NOT ignore the
+// directory — otherwise they would land in the CS-LAY-018 conflict path.
 
 import (
 	"bytes"
@@ -53,6 +55,10 @@ var _ = Describe("layout lifecycle", func() {
 	var fake *execx.Fake
 	var sp *prompt.Scripted
 	var out, errOut bytes.Buffer
+
+	// hostTracks scripts git check-ignore to fail: the host repo does not
+	// ignore .claude-sandbox/, the coherent state for trackInHost true.
+	hostTracks := func() { fake.On("check-ignore", "", execx.Fail(1)) }
 
 	setup := func(track bool, gitignore *bool) error {
 		return layout.Setup(proj, track, layout.Options{
@@ -161,6 +167,7 @@ var _ = Describe("layout lifecycle", func() {
 
 	Describe("trackInHost = true (host-tracked, no sidecar)", func() {
 		It("CS-LAY-009: host-tracked mode gitignores only ephemeral content", func() {
+			hostTracks()
 			Expect(setup(true, ptr(true))).To(Succeed())
 
 			content := read(hostGI)
@@ -185,6 +192,7 @@ var _ = Describe("layout lifecycle", func() {
 			Expect(countLine(read(hostGI), "/.claude-sandbox/")).To(Equal(1))
 
 			By("trackInHost true, proposed alongside the .claude-sandbox/ entries")
+			hostTracks()
 			proj2 := filepath.Join(GinkgoT().TempDir(), "p2")
 			Expect(os.MkdirAll(proj2, 0o755)).To(Succeed())
 			var err2 bytes.Buffer
@@ -222,6 +230,7 @@ var _ = Describe("layout lifecycle", func() {
 		})
 
 		It("CS-LAY-017: declining gitignore management skips the line too", func() {
+			hostTracks()
 			Expect(setup(true, ptr(false))).To(Succeed())
 			Expect(errOut.String()).To(ContainSubstring("  " + wt + "\n"))
 			Expect(errOut.String()).To(ContainSubstring("Skipped .gitignore update."))
@@ -229,8 +238,98 @@ var _ = Describe("layout lifecycle", func() {
 		})
 	})
 
+	Describe("mode conflict: host-tracked config over a sidecar layout", func() {
+		const wt = ".claude/worktrees/"
+		trueLines := []string{
+			".claude-sandbox/env", ".claude-sandbox/temp/", ".claude-sandbox/ralph/",
+			"!.claude-sandbox/config.yaml", "!.claude-sandbox/Dockerfile",
+		}
+		expectRefused := func(errText string) {
+			for _, l := range trueLines {
+				Expect(errText).NotTo(ContainSubstring("  "+l+"\n"), l)
+			}
+			Expect(strings.Count(errText, "WARNING: trackInHost is true but")).To(Equal(1), "one warning")
+			Expect(errText).To(ContainSubstring("skipping the host-tracked .gitignore entries"))
+			Expect(errText).To(ContainSubstring("set trackInHost: false in .claude-sandbox/config.yaml"))
+			Expect(errText).To(ContainSubstring("and delete any .claude-sandbox/env, temp/, ralph/, !config.yaml or !Dockerfile lines already in .gitignore"))
+			Expect(errText).To(ContainSubstring("drop the ignore rule (`git check-ignore -v .claude-sandbox` names it) and .claude-sandbox/.git"))
+			Expect(errText).NotTo(ContainSubstring("(sidecar layout)"))
+		}
+
+		It("CS-LAY-018: a whole-dir ignore refuses the host-tracked entries and warns", func() {
+			// Default fake: check-ignore succeeds => the host ignores .claude-sandbox/.
+			write(hostGI, "/.claude-sandbox/\n")
+			Expect(setup(true, ptr(true))).To(Succeed())
+
+			content := read(hostGI)
+			for _, l := range trueLines {
+				Expect(countLine(content, l)).To(BeZero(), l)
+			}
+			expectRefused(errOut.String())
+			Expect(errOut.String()).To(ContainSubstring("but the host repo already ignores .claude-sandbox/; skipping"))
+			Expect(errOut.String()).NotTo(ContainSubstring(".claude-sandbox/.git exists"))
+
+			By("the worktrees line is still proposed and added (CS-LAY-017)")
+			Expect(errOut.String()).To(ContainSubstring("  " + wt + "\n"))
+			Expect(countLine(content, wt)).To(Equal(1))
+			Expect(countLine(content, "/.claude-sandbox/")).To(Equal(1), "the existing rule is left alone")
+
+			By("no sidecar is initialized in host-tracked mode, as before")
+			Expect(fake.CommandLines()).NotTo(ContainElement(ContainSubstring(" init -q")))
+			Expect(exists(filepath.Join(sb, ".gitignore"))).To(BeFalse())
+
+			By("a second run proposes nothing and leaves the tree clean")
+			errOut.Reset()
+			Expect(setup(true, ptr(true))).To(Succeed())
+			Expect(read(hostGI)).To(Equal(content))
+			Expect(errOut.String()).NotTo(ContainSubstring("These entries are missing"))
+			Expect(strings.Count(errOut.String(), "WARNING: trackInHost is true but")).To(Equal(1))
+		})
+
+		It("CS-LAY-018: a sidecar .git without the ignore refuses the entries too", func() {
+			hostTracks()
+			Expect(os.MkdirAll(filepath.Join(sb, ".git"), 0o755)).To(Succeed())
+			Expect(setup(true, ptr(true))).To(Succeed())
+
+			content := read(hostGI)
+			for _, l := range trueLines {
+				Expect(countLine(content, l)).To(BeZero(), l)
+			}
+			expectRefused(errOut.String())
+			Expect(errOut.String()).To(ContainSubstring("but .claude-sandbox/.git exists; skipping"))
+			Expect(errOut.String()).NotTo(ContainSubstring("already ignores"))
+			Expect(countLine(content, wt)).To(Equal(1))
+		})
+
+		It("CS-LAY-018: both conditions are named in the one warning", func() {
+			write(hostGI, "/.claude-sandbox/\n")
+			Expect(os.MkdirAll(filepath.Join(sb, ".git"), 0o755)).To(Succeed())
+			Expect(setup(true, ptr(true))).To(Succeed())
+			expectRefused(errOut.String())
+			Expect(errOut.String()).To(ContainSubstring("but the host repo already ignores .claude-sandbox/ and .claude-sandbox/.git exists; skipping"))
+		})
+
+		It("CS-LAY-018: a covering rule means not even the worktrees line is proposed", func() {
+			write(hostGI, "/.claude-sandbox/\n.claude/\n")
+			Expect(setup(true, ptr(true))).To(Succeed())
+			Expect(read(hostGI)).To(Equal("/.claude-sandbox/\n.claude/\n"))
+			Expect(errOut.String()).NotTo(ContainSubstring("These entries are missing"))
+			Expect(errOut.String()).To(ContainSubstring("WARNING: trackInHost is true but"))
+		})
+
+		It("CS-LAY-018: with neither condition the CS-LAY-009 entries are proposed unchanged", func() {
+			hostTracks()
+			Expect(setup(true, ptr(false))).To(Succeed())
+			Expect(errOut.String()).NotTo(ContainSubstring("WARNING: trackInHost"))
+			for _, l := range trueLines {
+				Expect(errOut.String()).To(ContainSubstring("  "+l+"\n"), l)
+			}
+		})
+	})
+
 	Describe("gitignore editing mechanics", func() {
 		It("CS-LAY-010: only missing lines are proposed, matched exactly", func() {
+			hostTracks()
 			write(hostGI, ".claude-sandbox/env\n")
 			Expect(setup(true, ptr(false))).To(Succeed())
 
@@ -241,6 +340,7 @@ var _ = Describe("layout lifecycle", func() {
 		})
 
 		It("CS-LAY-011: appends preserve a well-formed file", func() {
+			hostTracks()
 			write(hostGI, "vendor") // non-empty, no trailing newline
 			Expect(setup(true, ptr(true))).To(Succeed())
 
@@ -253,6 +353,7 @@ var _ = Describe("layout lifecycle", func() {
 		})
 
 		It("CS-LAY-012: the gitignore prompt defaults to yes", func() {
+			hostTracks()
 			sp.IsTTY = true
 			sp.Answers = []string{""}
 			Expect(setup(true, nil)).To(Succeed())
@@ -272,6 +373,7 @@ var _ = Describe("layout lifecycle", func() {
 		})
 
 		It("CS-LAY-013: no terminal: gitignore update is skipped, never blocks", func() {
+			hostTracks()
 			sp.IsTTY = false
 			Expect(setup(true, nil)).To(Succeed())
 			Expect(errOut.String()).To(ContainSubstring("(no tty; skipping .gitignore update)"))
@@ -279,6 +381,7 @@ var _ = Describe("layout lifecycle", func() {
 		})
 
 		It("CS-LAY-014: CS_GITIGNORE_ASSUME overrides the gitignore prompt", func() {
+			hostTracks()
 			os.Setenv("CS_GITIGNORE_ASSUME", "y")
 			DeferCleanup(os.Unsetenv, "CS_GITIGNORE_ASSUME")
 			Expect(setup(true, nil)).To(Succeed())
