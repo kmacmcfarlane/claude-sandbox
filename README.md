@@ -484,7 +484,13 @@ Set in `.claude-sandbox/config.yaml`. Controls how the directory is version-cont
 - **`true` (your own projects):** the directory is tracked by the host repo; no
   sidecar. The launcher gitignores `.claude-sandbox/env` (secrets),
   `.claude-sandbox/temp/` (scratch), and `.claude-sandbox/ralph/` (ephemeral loop
-  runtime) — everything else under `.claude-sandbox/` is committed.
+  runtime) — everything else under `.claude-sandbox/` is committed. If the host repo
+  already ignores the whole `.claude-sandbox/` directory or a sidecar `.claude-sandbox/.git`
+  exists (a checkout in `false` mode under a parent config that says `true`), the launcher
+  refuses to append these entries — git cannot re-include inside an ignored directory, so
+  they would only dirty the tree — and warns instead: either set `trackInHost: false` in the
+  local `.claude-sandbox/config.yaml`, or remove the `/.claude-sandbox/` ignore and the
+  sidecar `.git` to track the directory in the host. Modes are never switched silently.
 
 ```yaml
 # trackInHost: true

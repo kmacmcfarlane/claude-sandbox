@@ -141,3 +141,29 @@ Feature: .claude-sandbox/ layout lifecycle (CS-LAY)
     Given the gitignore update is declined (--no-gitignore, CS_GITIGNORE_ASSUME=n, or "n")
     When SetupLayout runs
     Then ".claude/worktrees/" is not written either
+
+  # ---- mode conflict: host-tracked config over a sidecar layout ----
+
+  Scenario: CS-LAY-018 Host-tracked entries are refused over a whole-dir ignore or an existing sidecar
+    # git cannot re-include a path inside an ignored directory, so beneath a
+    # "/.claude-sandbox/" rule the host-tracked lines are dead: the negations
+    # do nothing and the appended lines only leave the tree permanently dirty.
+    # Observed in claude-sandbox itself (2026-09-04): a workspace parent
+    # config set trackInHost: true over a checkout in sidecar mode, and every
+    # launch re-appended the five lines. Modes are never silently switched —
+    # the launcher warns and leaves the choice to the user.
+    Given the project is a git work tree and the effective trackInHost is true
+    And EITHER the host repo already ignores the .claude-sandbox/ directory (git check-ignore)
+      OR .claude-sandbox/.git exists (a sidecar repo), or both
+    When SetupLayout runs
+    Then none of the host-tracked entries (CS-LAY-009) is proposed or appended
+    And stderr carries one warning that names the conflict — saying which condition
+      fired: the whole-dir ignore, the sidecar .git, or both — and the two remedies:
+      set trackInHost: false in the local .claude-sandbox/config.yaml, or remove the
+      /.claude-sandbox/ ignore and .claude-sandbox/.git to track the directory in the host
+    And ".claude/worktrees/" is still proposed when missing (CS-LAY-017), and not
+      when a covering rule already exists
+    And nothing else changes: no sidecar repo is initialized in host-tracked mode, as before
+    Given neither condition holds
+    When SetupLayout runs with trackInHost true
+    Then the host-tracked entries are proposed exactly as in CS-LAY-009

@@ -92,6 +92,16 @@ func Setup(project string, trackInHost bool, opts Options) error {
 		// negations defensively re-include config/Dockerfile against broad
 		// host ignore rules; no-ops otherwise.
 		if hostIsGit {
+			// CS-LAY-018: over a whole-dir ignore or a sidecar repo these
+			// lines are dead (git cannot re-include inside an ignored dir) and
+			// only leave the tree dirty. Warn, never switch modes, and still
+			// propose the worktrees line alone.
+			if conflict := hostTrackConflict(opts.Runner, project, sb); conflict != "" {
+				fmt.Fprintf(opts.errw(), "WARNING: trackInHost is true but %s (sidecar layout); skipping the host-tracked .gitignore entries, which would be dead.\n", conflict)
+				fmt.Fprintln(opts.errw(), "  Either set trackInHost: false in .claude-sandbox/config.yaml, or remove the /.claude-sandbox/ ignore and .claude-sandbox/.git to track it in the host.")
+				gitignoreAdd(hostGI, opts, withWorktreesLine(hostGI)...)
+				return nil
+			}
 			gitignoreAdd(hostGI, opts, withWorktreesLine(hostGI,
 				".claude-sandbox/env", ".claude-sandbox/temp/", ".claude-sandbox/ralph/",
 				"!.claude-sandbox/config.yaml", "!.claude-sandbox/Dockerfile")...)
@@ -154,6 +164,25 @@ func withWorktreesLine(gi string, lines ...string) []string {
 func isGitWorkTree(r execx.Runner, dir string) bool {
 	err := r.Run(execx.Cmd{Name: "git", Args: []string{"-C", dir, "rev-parse", "--is-inside-work-tree"}, Stdout: io.Discard, Stderr: io.Discard})
 	return err == nil
+}
+
+// hostTrackConflict reports why host-tracked (trackInHost: true) .gitignore
+// entries would be dead — CS-LAY-018: the host repo already ignores the whole
+// .claude-sandbox/ directory, a sidecar .git exists inside it, or both.
+// Returns "" when neither condition holds.
+func hostTrackConflict(r execx.Runner, project, sb string) string {
+	ignored := gitIgnores(r, project, sb)
+	_, err := os.Stat(filepath.Join(sb, ".git"))
+	sidecar := err == nil
+	switch {
+	case ignored && sidecar:
+		return "the host repo already ignores .claude-sandbox/ and .claude-sandbox/.git exists"
+	case ignored:
+		return "the host repo already ignores .claude-sandbox/"
+	case sidecar:
+		return ".claude-sandbox/.git exists"
+	}
+	return ""
 }
 
 func gitIgnores(r execx.Runner, project, path string) bool {
