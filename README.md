@@ -299,9 +299,9 @@ session anyway. Sessions Claude spawns itself (`claude --bg`, `/bg`) are not slo
 
 - Creates `.claude-sandbox/config.yaml` (from the example) and `.claude-sandbox/env`, and prints the config cascade when parent directories contribute files.
 - Prompts for **`trackInHost`** (default `false`) — unless `--track-in-host` / `--no-track-in-host` is passed, or there is no tty. When a parent `.claude-sandbox/config.yaml` already sets it, the prompt shows the inherited value: press Enter to inherit (nothing written locally — the commented hint records the inherited value and its source), or answer `y`/`n` to write a local override. See [`trackInHost`](#claude-sandboxconfigyaml) for what it controls.
-- Seeds `Dockerfile.example` — when a parent `.claude-sandbox/Dockerfile` exists, offers to copy it as the starting point (default yes; `--copy-parent-dockerfile` / `--no-copy-parent-dockerfile` skip the prompt).
-- Runs the standard layout setup: `temp/`+`reports/` skeleton, seeded `.claude-sandbox/CLAUDE.md`, host `.gitignore` entries (prompted; `--gitignore` / `--no-gitignore` skip the prompt), and (when `trackInHost: false`) the internal sidecar git repo.
-- `--yes` accepts every prompt's default, for scripted bootstraps.
+- Seeds `Dockerfile.example` without asking — a copy of the nearest parent `.claude-sandbox/Dockerfile` when one exists (the report names it), the generic scaffold example otherwise. It is inactive until renamed. `--no-copy-parent-dockerfile` forces the generic example; `--copy-parent-dockerfile` is accepted and is the default.
+- Runs the standard layout setup: `temp/`+`reports/` skeleton, seeded `.claude-sandbox/CLAUDE.md`, the host `.gitignore` entries that the `trackInHost` answer implies (written without a further prompt — the answer already chose them; `--no-gitignore` skips them, `--gitignore` is the default), and (when `trackInHost: false`) the internal sidecar git repo.
+- A fresh interactive `init` therefore asks exactly **one** question — `trackInHost`. `--yes` answers it with the default for scripted bootstraps; the other flags are non-interactive overrides, not prompt-skippers. (The launch-time `.gitignore` prompt, which guards a hand-edited `.gitignore` outside a bootstrap, is unchanged.)
 
 `init-ralph` does everything `init` does, then seeds the **ralph agent scaffolding** into the project:
 

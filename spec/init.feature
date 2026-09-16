@@ -138,54 +138,94 @@ Feature: init subcommand (CS-INIT)
     Then stdout notes that /ws/.claude-sandbox/env will layer under the project env
     And the project env seed does not contain the parent's variables
 
-  @new
-  Scenario: CS-INIT-021 Parent Dockerfile found: prompt to seed the example from it
+  @changed
+  Scenario: CS-INIT-021 Parent Dockerfile found: the example is a copy of it, no prompt
+    # Earlier behavior: a "seed Dockerfile.example from it?" prompt (default
+    # yes). The operator invoked init to bootstrap; the file is inactive until
+    # renamed, so a question whose default nobody declines is noise. Now the
+    # copy just happens and the report says where it came from.
     Given /ws/.claude-sandbox/Dockerfile exists
     And the project has no Dockerfile or Dockerfile.example
     When init runs interactively
-    Then a prompt offers to seed Dockerfile.example from the parent Dockerfile, default yes
-    When the user presses Enter
-    Then .claude-sandbox/Dockerfile.example is a copy of the parent Dockerfile
+    Then no copy prompt is shown
+    And .claude-sandbox/Dockerfile.example is a copy of the parent Dockerfile
+    And stdout reports Dockerfile.example as "created" and names the parent Dockerfile it was copied from
 
-  @new
-  Scenario: CS-INIT-022 Parent Dockerfile prompt declined: scaffold example is seeded
+  @changed
+  Scenario: CS-INIT-022 --no-copy-parent-dockerfile seeds the generic example instead
+    # Earlier behavior: this was the "answered n at the copy prompt" path.
     Given /ws/.claude-sandbox/Dockerfile exists
-    When init runs and the user answers "n" at the copy prompt
+    When "claude-sandbox init --no-copy-parent-dockerfile --no-track-in-host" is run
     Then Dockerfile.example is the generic scaffold example
+    And no prompt was shown
 
-  @new
-  Scenario: CS-INIT-023 --copy-parent-dockerfile / --no-copy-parent-dockerfile skip the prompt
+  @changed
+  Scenario: CS-INIT-023 --copy-parent-dockerfile / --no-copy-parent-dockerfile remain as overrides
+    # There is no prompt to skip any more; the flags pin the outcome for scripts.
     Given /ws/.claude-sandbox/Dockerfile exists
     When "claude-sandbox init --copy-parent-dockerfile --no-track-in-host" is run
     Then Dockerfile.example is a copy of the parent Dockerfile and no prompt was shown
     When run instead with --no-copy-parent-dockerfile
     Then Dockerfile.example is the generic scaffold example and no prompt was shown
+    # --copy-parent-dockerfile without a parent Dockerfile falls back to the
+    # generic example (nothing to copy) — it is not an error.
 
-  @new
-  Scenario: CS-INIT-024 No parent Dockerfile: no copy prompt
+  Scenario: CS-INIT-024 No parent Dockerfile: generic example, no prompt
     Given no ancestor .claude-sandbox/Dockerfile exists
     When init runs interactively
     Then no copy prompt is shown and the generic example is seeded
 
-  # ---- new: uniform prompt flags ----
+  # ---- gitignore entries follow the trackInHost answer; flags are overrides ----
 
-  @new
-  Scenario: CS-INIT-025 --yes accepts every prompt's default non-interactively
+  @changed
+  Scenario: CS-INIT-025 --yes accepts the trackInHost prompt's default non-interactively
+    # Earlier wording: "accepts every prompt's default". init now has one
+    # prompt (trackInHost); the Dockerfile copy and the gitignore entries are
+    # not prompted in the first place, so --yes only stands in for that one.
     Given an upstream config sets "trackInHost: true", a parent Dockerfile exists,
       and the host repo's .gitignore is missing sandbox entries
     When "claude-sandbox init --yes" is run without a terminal
     Then trackInHost is inherited (prompt default)
-    And Dockerfile.example is copied from the parent (prompt default)
-    And the .gitignore entries are added (prompt default)
+    And Dockerfile.example is copied from the parent
+    And the .gitignore entries for host-tracked mode are added
     And the command completes without blocking on any prompt
 
-  @new
-  Scenario: CS-INIT-026 --gitignore / --no-gitignore control the gitignore prompt
+  @changed
+  Scenario: CS-INIT-026 --gitignore / --no-gitignore override the gitignore entries
+    # Earlier wording: "control the gitignore prompt". init no longer prompts
+    # for them (CS-INIT-028); --gitignore is accepted and equals the default,
+    # --no-gitignore is the only way to bootstrap without touching .gitignore.
     Given the host repo's .gitignore is missing sandbox entries
     When "claude-sandbox init --no-track-in-host --gitignore" is run
     Then the entries are appended without prompting
     When run instead with --no-gitignore
     Then the entries are not appended and no prompt is shown
+
+  @new
+  Scenario: CS-INIT-028 The gitignore entries implied by trackInHost are written without a prompt
+    # The trackInHost answer already chose the shape of the host .gitignore
+    # (CS-LAY-003 vs CS-LAY-009); asking "Add them?" afterwards made the
+    # operator confirm a decision they had just made. The launch-time prompt
+    # (CS-LAY-012/013) is unchanged — it guards a hand-edited .gitignore
+    # outside a bootstrap.
+    Given the project is a git work tree whose .gitignore is missing sandbox entries
+    And an interactive terminal
+    When init runs and the user answers the trackInHost prompt
+    Then the host .gitignore entries for the resolved mode are appended
+    And no "Add them?" prompt is shown
+    And the same holds without a terminal (the entries are appended, not skipped)
+    # CS_GITIGNORE_ASSUME (CS-LAY-014) is still honoured when no flag is
+    # passed: =n skips the entries on init too, without prompting.
+
+  @new
+  Scenario: CS-INIT-029 A greenfield interactive init asks exactly one question
+    Given a project with no .claude-sandbox/ and no upstream config
+    And the project is a git work tree whose .gitignore is missing sandbox entries
+    And a parent .claude-sandbox/Dockerfile exists
+    And an interactive terminal
+    When "claude-sandbox init" is run
+    Then exactly one prompt is shown, and it is the trackInHost question
+    And Dockerfile.example, the .gitignore entries and the layout are all set up from that one answer
 
   Scenario: CS-INIT-027 Completion message lists next steps
     When init completes

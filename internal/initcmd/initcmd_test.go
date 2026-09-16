@@ -309,27 +309,29 @@ var _ = Describe("init subcommand", func() {
 				write(parentDF, parentContent)
 			})
 
-			It("CS-INIT-021: parent Dockerfile found: prompt to seed the example from it, default yes", func() {
-				r := &run{prompter: &prompt.Scripted{IsTTY: true, Answers: []string{""}}}
+			It("CS-INIT-021: parent Dockerfile found: the example is a copy of it, no prompt", func() {
+				r := &run{prompter: &prompt.Scripted{IsTTY: true}}
 				Expect(r.init(proj, initcmd.Flags{TrackInHost: ptr(false)})).To(Succeed())
 
-				Expect(r.prompter.Asked).To(ContainElement(And(
-					ContainSubstring("Found parent Dockerfile"),
-					ContainSubstring(parentDF))))
+				Expect(r.prompter.Asked).To(BeEmpty())
 				Expect(read(filepath.Join(sb, "Dockerfile.example"))).To(Equal(parentContent))
+				Expect(r.out.String()).To(ContainSubstring("created  Dockerfile.example (copied from " + parentDF))
 			})
 
-			It("CS-INIT-022: parent Dockerfile prompt declined: scaffold example is seeded", func() {
-				r := &run{prompter: &prompt.Scripted{IsTTY: true, Answers: []string{"n"}}}
-				Expect(r.init(proj, initcmd.Flags{TrackInHost: ptr(false)})).To(Succeed())
+			It("CS-INIT-022: --no-copy-parent-dockerfile seeds the generic example instead", func() {
+				r := &run{prompter: &prompt.Scripted{IsTTY: true}}
+				Expect(r.init(proj, initcmd.Flags{
+					TrackInHost: ptr(false), CopyParentDockerfile: ptr(false),
+				})).To(Succeed())
 
+				Expect(r.prompter.Asked).To(BeEmpty())
 				generic, err := scaffold.ReadBase("Dockerfile.example")
 				Expect(err).NotTo(HaveOccurred())
 				Expect(read(filepath.Join(sb, "Dockerfile.example"))).To(Equal(string(generic)))
 			})
 
-			It("CS-INIT-023: --copy-parent-dockerfile / --no-copy-parent-dockerfile skip the prompt", func() {
-				r := &run{}
+			It("CS-INIT-023: --copy-parent-dockerfile / --no-copy-parent-dockerfile remain as overrides", func() {
+				r := &run{prompter: &prompt.Scripted{IsTTY: true}}
 				Expect(r.init(proj, initcmd.Flags{
 					TrackInHost: ptr(false), CopyParentDockerfile: ptr(true),
 				})).To(Succeed())
@@ -339,7 +341,7 @@ var _ = Describe("init subcommand", func() {
 				By("run instead with --no-copy-parent-dockerfile")
 				proj2 := filepath.Join(ws, "p2")
 				mkdir(proj2)
-				r2 := &run{}
+				r2 := &run{prompter: &prompt.Scripted{IsTTY: true}}
 				Expect(r2.init(proj2, initcmd.Flags{
 					TrackInHost: ptr(false), CopyParentDockerfile: ptr(false),
 				})).To(Succeed())
@@ -350,19 +352,30 @@ var _ = Describe("init subcommand", func() {
 			})
 		})
 
-		It("CS-INIT-024: no parent Dockerfile: no copy prompt", func() {
+		It("CS-INIT-023: --copy-parent-dockerfile without a parent Dockerfile falls back to the generic example", func() {
+			r := &run{prompter: &prompt.Scripted{IsTTY: true}}
+			Expect(r.init(proj, initcmd.Flags{
+				TrackInHost: ptr(false), CopyParentDockerfile: ptr(true),
+			})).To(Succeed())
+			generic, err := scaffold.ReadBase("Dockerfile.example")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(read(filepath.Join(sb, "Dockerfile.example"))).To(Equal(string(generic)))
+			Expect(r.prompter.Asked).To(BeEmpty())
+		})
+
+		It("CS-INIT-024: no parent Dockerfile: generic example, no prompt", func() {
 			r := &run{prompter: &prompt.Scripted{IsTTY: true}}
 			Expect(r.init(proj, initcmd.Flags{TrackInHost: ptr(false)})).To(Succeed())
 
-			Expect(r.prompter.Asked).NotTo(ContainElement(ContainSubstring("parent Dockerfile")))
+			Expect(r.prompter.Asked).To(BeEmpty())
 			generic, err := scaffold.ReadBase("Dockerfile.example")
 			Expect(err).NotTo(HaveOccurred())
 			Expect(read(filepath.Join(sb, "Dockerfile.example"))).To(Equal(string(generic)))
 		})
 	})
 
-	Describe("uniform prompt flags", func() {
-		It("CS-INIT-025: --yes accepts every prompt's default non-interactively", func() {
+	Describe("gitignore entries follow trackInHost; flags are overrides", func() {
+		It("CS-INIT-025: --yes accepts the trackInHost prompt's default non-interactively", func() {
 			ws := filepath.Join(tmp, "ws")
 			wsCfg := filepath.Join(ws, ".claude-sandbox", "config.yaml")
 			write(wsCfg, "trackInHost: true\n")
@@ -381,13 +394,14 @@ var _ = Describe("init subcommand", func() {
 			By("trackInHost inherited (prompt default)")
 			Expect(r.out.String()).To(ContainSubstring("trackInHost inherited: true"))
 			Expect(read(filepath.Join(sb, "config.yaml"))).NotTo(MatchRegexp(`(?m)^trackInHost:`))
-			By("Dockerfile.example copied from the parent (prompt default)")
+			By("Dockerfile.example copied from the parent")
 			Expect(read(filepath.Join(sb, "Dockerfile.example"))).To(ContainSubstring("# parent marker"))
-			By(".gitignore entries added (prompt default; effective trackInHost true)")
+			By(".gitignore entries for host-tracked mode added")
 			Expect(read(filepath.Join(proj, ".gitignore"))).To(ContainSubstring(".claude-sandbox/env"))
+			Expect(r.errOut.String()).NotTo(ContainSubstring("Add them?"))
 		})
 
-		It("CS-INIT-026: --gitignore / --no-gitignore control the gitignore prompt", func() {
+		It("CS-INIT-026: --gitignore / --no-gitignore override the gitignore entries", func() {
 			r := &run{fake: &execx.Fake{}} // git work tree
 			Expect(r.init(proj, initcmd.Flags{
 				TrackInHost: ptr(false), Gitignore: ptr(true),
@@ -404,6 +418,64 @@ var _ = Describe("init subcommand", func() {
 			})).To(Succeed())
 			Expect(exists(filepath.Join(proj2, ".gitignore"))).To(BeFalse())
 			Expect(r2.prompter.Asked).To(BeEmpty())
+		})
+
+		It("CS-INIT-028: the gitignore entries implied by trackInHost are written without a prompt", func() {
+			By("interactive: the trackInHost answer is the only prompt; entries follow it")
+			r := &run{
+				fake:     &execx.Fake{}, // git work tree; .gitignore missing entries
+				prompter: &prompt.Scripted{IsTTY: true, Answers: []string{"y"}},
+			}
+			Expect(r.init(proj, initcmd.Flags{})).To(Succeed())
+			Expect(r.prompter.Asked).To(HaveLen(1))
+			Expect(r.prompter.Asked[0]).To(ContainSubstring("Track in host repo?"))
+			Expect(r.prompter.Asked).NotTo(ContainElement(ContainSubstring("Add them?")))
+			gi := read(filepath.Join(proj, ".gitignore"))
+			Expect(gi).To(ContainSubstring(".claude-sandbox/env")) // host-tracked shape
+			Expect(gi).NotTo(ContainSubstring("/.claude-sandbox/\n"))
+
+			By("no terminal: the entries are appended, not skipped")
+			proj2 := filepath.Join(tmp, "p2")
+			mkdir(proj2)
+			r2 := &run{fake: &execx.Fake{}, prompter: &prompt.Scripted{IsTTY: false}}
+			Expect(r2.init(proj2, initcmd.Flags{})).To(Succeed())
+			Expect(read(filepath.Join(proj2, ".gitignore"))).To(ContainSubstring("/.claude-sandbox/")) // foreign-safe shape
+			Expect(r2.errOut.String()).NotTo(ContainSubstring("skipping .gitignore update"))
+
+			By("CS_GITIGNORE_ASSUME=n is still honoured when no flag is passed")
+			os.Setenv("CS_GITIGNORE_ASSUME", "n")
+			DeferCleanup(os.Unsetenv, "CS_GITIGNORE_ASSUME")
+			proj3 := filepath.Join(tmp, "p3")
+			mkdir(proj3)
+			r3 := &run{fake: &execx.Fake{}, prompter: &prompt.Scripted{IsTTY: true, Answers: []string{"y"}}}
+			Expect(r3.init(proj3, initcmd.Flags{})).To(Succeed())
+			Expect(r3.prompter.Asked).To(HaveLen(1))
+			Expect(exists(filepath.Join(proj3, ".gitignore"))).To(BeFalse())
+		})
+
+		It("CS-INIT-029: a greenfield interactive init asks exactly one question", func() {
+			// Worst case for prompt count: a parent Dockerfile to copy, a git
+			// work tree whose .gitignore lacks every entry, no upstream config.
+			ws := filepath.Join(tmp, "ws")
+			parentDF := filepath.Join(ws, ".claude-sandbox", "Dockerfile")
+			write(parentDF, "FROM claude-sandbox\n# parent marker\n")
+			proj = filepath.Join(ws, "p")
+			mkdir(proj)
+			sb = filepath.Join(proj, ".claude-sandbox")
+
+			r := &run{
+				fake:     &execx.Fake{}, // git work tree
+				prompter: &prompt.Scripted{IsTTY: true, Answers: []string{""}},
+			}
+			Expect(r.init(proj, initcmd.Flags{})).To(Succeed())
+
+			Expect(r.prompter.Asked).To(HaveLen(1))
+			Expect(r.prompter.Asked[0]).To(ContainSubstring("Track in host repo?"))
+			By("everything else follows from that one answer (Enter = false)")
+			Expect(read(filepath.Join(sb, "config.yaml"))).To(MatchRegexp(`(?m)^trackInHost: false$`))
+			Expect(read(filepath.Join(sb, "Dockerfile.example"))).To(ContainSubstring("# parent marker"))
+			Expect(read(filepath.Join(proj, ".gitignore"))).To(ContainSubstring("/.claude-sandbox/"))
+			Expect(exists(filepath.Join(sb, ".gitignore"))).To(BeTrue()) // sidecar layout
 		})
 	})
 
