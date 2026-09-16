@@ -201,6 +201,11 @@ Feature: init subcommand (CS-INIT)
     When run instead with --no-gitignore
     Then the entries are not appended and no prompt is shown
 
+  Scenario: CS-INIT-027 Completion message lists next steps
+    When init completes
+    Then stdout ends with numbered next steps (env secrets, config review, Dockerfile activation)
+    And a "Launch:  claude-sandbox" hint
+
   @new
   Scenario: CS-INIT-028 The gitignore entries implied by trackInHost are written without a prompt
     # The trackInHost answer already chose the shape of the host .gitignore
@@ -226,8 +231,3 @@ Feature: init subcommand (CS-INIT)
     When "claude-sandbox init" is run
     Then exactly one prompt is shown, and it is the trackInHost question
     And Dockerfile.example, the .gitignore entries and the layout are all set up from that one answer
-
-  Scenario: CS-INIT-027 Completion message lists next steps
-    When init completes
-    Then stdout ends with numbered next steps (env secrets, config review, Dockerfile activation)
-    And a "Launch:  claude-sandbox" hint

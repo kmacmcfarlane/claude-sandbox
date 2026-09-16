@@ -492,8 +492,9 @@ The `env` file is gitignored in both modes. In both modes the launcher also adds
 `.claude/worktrees/` (Claude Code's harness-native worktrees, `.claude/worktrees/<name>`
 on branch `worktree-<name>`) to the host `.gitignore` — in the same prompt, never
 duplicated, and skipped when an existing rule such as `.claude/`, `.claude/*` or
-`/.claude/worktrees/` already covers it. Declining the prompt (`--no-gitignore`,
-`CS_GITIGNORE_ASSUME=n`) skips this line along with the rest.
+`/.claude/worktrees/` already covers it. Declining the launch-time prompt (or setting
+`CS_GITIGNORE_ASSUME=n`) skips this line along with the rest; on `init`, where the
+entries are written without a prompt, `--no-gitignore` does the same.
 
 ### `.claude-sandbox/env`
 
