@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from backlog import (
     _get_all_stories,
     _requires_satisfied,
+    _requires_reviewed_satisfied,
     _select_highest_priority,
 )
 from ruamel.yaml import YAML
@@ -112,6 +113,16 @@ class TestRequiresSatisfied(unittest.TestCase):
         d1 = _make_story(id="S-001", status="done")
         d2 = _make_story(id="S-002", status="in_progress")
         self.assertFalse(_requires_satisfied(story, [story, d1, d2]))
+
+    def test_diamond_dependency(self):
+        """Diamond: A requires B and C, both B and C require D.
+        D appears in two branches but is not circular."""
+        d = _make_story(id="S-001", status="done", requires=[])
+        b = _make_story(id="S-002", status="done", requires=["S-001"])
+        c = _make_story(id="S-003", status="done", requires=["S-001"])
+        a = _make_story(id="S-004", status="todo", requires=["S-002", "S-003"])
+        self.assertTrue(_requires_satisfied(a, [a, b, c, d]))
+
 
 
 class TestSelectHighestPriority(unittest.TestCase):
@@ -791,6 +802,37 @@ class TestStatusCLI(unittest.TestCase):
         counts = {k: v for k, v in data.items() if not k.startswith("_")}
         self.assertEqual(counts, {})
 
+    def test_source_both(self):
+        """`status --source both` is accepted; counts still cover the active backlog only
+        (adapted from the pre-migration copy, which expected done-file counts)."""
+        self._write(self.backlog_path, self._base([
+            self._story("S-001", "todo"),
+        ]))
+        self._write(self.done_path, self._base([
+            self._story("S-010", "done"),
+            self._story("S-011", "done"),
+        ]))
+        result = self._run("--format", "json", "status", "--source", "both")
+        self.assertEqual(result.returncode, 0)
+        data = json.loads(result.stdout)
+        counts = {k: v for k, v in data.items() if not k.startswith("_")}
+        self.assertEqual(counts, {"todo": 1})
+
+    def test_source_done_only(self):
+        """`status --source done` is accepted; the active backlog is still what is counted
+        (adapted from the pre-migration copy, which expected {"done": 1})."""
+        self._write(self.backlog_path, self._base([
+            self._story("S-001", "todo"),
+        ]))
+        self._write(self.done_path, self._base([
+            self._story("S-010", "done"),
+        ]))
+        result = self._run("--format", "json", "status", "--source", "done")
+        self.assertEqual(result.returncode, 0)
+        data = json.loads(result.stdout)
+        counts = {k: v for k, v in data.items() if not k.startswith("_")}
+        self.assertEqual(counts, {"todo": 1})
+
     def test_yaml_output(self):
         self._write(self.backlog_path, self._base([
             self._story("S-001", "todo"),
@@ -1399,6 +1441,238 @@ class TestRepoRoot(unittest.TestCase):
             self.assertEqual(len(data), 1)
         finally:
             shutil.rmtree(tmpdir2, ignore_errors=True)
+
+
+class TestRequiresReviewedSatisfied(unittest.TestCase):
+    """Tests for _requires_reviewed_satisfied helper."""
+
+    def test_empty_requires_reviewed(self):
+        story = _make_story(requires_reviewed=[])
+        self.assertTrue(_requires_reviewed_satisfied(story, []))
+
+    def test_no_requires_reviewed_field(self):
+        story = _make_story()
+        self.assertTrue(_requires_reviewed_satisfied(story, []))
+
+    def test_dep_done(self):
+        story = _make_story(id="S-002", requires_reviewed=["S-001"])
+        dep = _make_story(id="S-001", status="done")
+        self.assertTrue(_requires_reviewed_satisfied(story, [story, dep]))
+
+    def test_dep_closed(self):
+        story = _make_story(id="S-002", requires_reviewed=["S-001"])
+        dep = _make_story(id="S-001", status="closed")
+        self.assertTrue(_requires_reviewed_satisfied(story, [story, dep]))
+
+    def test_dep_uat_not_satisfied(self):
+        """Key difference from _requires_satisfied: uat does NOT satisfy requires_reviewed."""
+        story = _make_story(id="S-002", requires_reviewed=["S-001"])
+        dep = _make_story(id="S-001", status="uat")
+        self.assertFalse(_requires_reviewed_satisfied(story, [story, dep]))
+
+    def test_dep_uat_feedback_not_satisfied(self):
+        story = _make_story(id="S-002", requires_reviewed=["S-001"])
+        dep = _make_story(id="S-001", status="uat_feedback")
+        self.assertFalse(_requires_reviewed_satisfied(story, [story, dep]))
+
+    def test_dep_in_progress_not_satisfied(self):
+        story = _make_story(id="S-002", requires_reviewed=["S-001"])
+        dep = _make_story(id="S-001", status="in_progress")
+        self.assertFalse(_requires_reviewed_satisfied(story, [story, dep]))
+
+    def test_dep_todo_not_satisfied(self):
+        story = _make_story(id="S-002", requires_reviewed=["S-001"])
+        dep = _make_story(id="S-001", status="todo")
+        self.assertFalse(_requires_reviewed_satisfied(story, [story, dep]))
+
+    def test_transitive_all_done(self):
+        c = _make_story(id="S-001", status="done", requires_reviewed=[])
+        b = _make_story(id="S-002", status="done", requires_reviewed=["S-001"])
+        a = _make_story(id="S-003", status="todo", requires_reviewed=["S-002"])
+        self.assertTrue(_requires_reviewed_satisfied(a, [a, b, c]))
+
+    def test_transitive_chain_broken_by_uat(self):
+        """A requires_reviewed B, B requires_reviewed C, C is uat (not done)."""
+        c = _make_story(id="S-001", status="uat", requires_reviewed=[])
+        b = _make_story(id="S-002", status="done", requires_reviewed=["S-001"])
+        a = _make_story(id="S-003", status="todo", requires_reviewed=["S-002"])
+        self.assertFalse(_requires_reviewed_satisfied(a, [a, b, c]))
+
+    def test_missing_dep(self):
+        story = _make_story(id="S-002", requires_reviewed=["S-999"])
+        self.assertFalse(_requires_reviewed_satisfied(story, [story]))
+
+    def test_mixed_requires_and_requires_reviewed(self):
+        """Both requires and requires_reviewed must be independently satisfied."""
+        spike = _make_story(id="S-001", status="uat")  # uat satisfies requires but NOT requires_reviewed
+        foundation = _make_story(id="S-002", status="done")
+        story = _make_story(id="S-003", requires=["S-002"], requires_reviewed=["S-001"])
+        all_stories = [story, spike, foundation]
+        # requires is satisfied (S-002 is done), but requires_reviewed is not (S-001 is uat)
+        self.assertTrue(_requires_satisfied(story, all_stories))
+        self.assertFalse(_requires_reviewed_satisfied(story, all_stories))
+
+
+class TestNextWorkInteractive(unittest.TestCase):
+    """Tests for interactive story filtering in next-work.
+
+    Adapted from the project's pre-migration copy: the new backlog.py keys on
+    `ticket_mode: interactive` (the legacy `interactive: true` field is ignored)."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.backlog_path = os.path.join(self.tmpdir, "backlog.yaml")
+        self.done_path = os.path.join(self.tmpdir, "backlog_done.yaml")
+
+        # Create done file
+        with open(self.done_path, "w") as f:
+            f.write("schema_version: 2\nproject: test\ndefaults: {}\nstories: []\n")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _write_backlog(self, stories_yaml):
+        with open(self.backlog_path, "w") as f:
+            f.write(f"schema_version: 2\nproject: test\ndefaults: {{}}\nstories:\n{stories_yaml}")
+
+    def test_interactive_excluded_with_non_interactive_flag(self):
+        self._write_backlog(dedent("""\
+          - id: S-001
+            title: "Interactive spike"
+            priority: 50
+            status: todo
+            ticket_mode: interactive
+            requires: []
+            acceptance: ["BE: Test"]
+            testing: ["manual test"]
+          - id: S-002
+            title: "Normal story"
+            priority: 40
+            status: todo
+            requires: []
+            acceptance: ["BE: Test"]
+            testing: ["command: echo ok"]
+        """))
+        cmd = [
+            sys.executable, SCRIPT,
+            "--backlog", self.backlog_path,
+            "--done", self.done_path,
+            "--format", "json",
+            "next-work", "--non-interactive",
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0)
+        data = json.loads(result.stdout)
+        # S-001 is interactive and should be skipped; S-002 should be selected
+        self.assertEqual(data[0]["id"], "S-002")
+
+    def test_interactive_included_without_flag(self):
+        self._write_backlog(dedent("""\
+          - id: S-001
+            title: "Interactive spike"
+            priority: 50
+            status: todo
+            ticket_mode: interactive
+            requires: []
+            acceptance: ["BE: Test"]
+            testing: ["manual test"]
+        """))
+        cmd = [
+            sys.executable, SCRIPT,
+            "--backlog", self.backlog_path,
+            "--done", self.done_path,
+            "--format", "json",
+            "next-work",
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0)
+        data = json.loads(result.stdout)
+        self.assertEqual(data[0]["id"], "S-001")
+
+
+class TestNextWorkRequiresReviewed(unittest.TestCase):
+    """Tests for requires_reviewed gate in next-work."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.backlog_path = os.path.join(self.tmpdir, "backlog.yaml")
+        self.done_path = os.path.join(self.tmpdir, "backlog_done.yaml")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _write_files(self, backlog_yaml, done_yaml=None):
+        with open(self.backlog_path, "w") as f:
+            f.write(f"schema_version: 2\nproject: test\ndefaults: {{}}\nstories:\n{backlog_yaml}")
+        with open(self.done_path, "w") as f:
+            done_content = done_yaml or ""
+            f.write(f"schema_version: 2\nproject: test\ndefaults: {{}}\nstories:\n{done_content}")
+
+    def test_blocks_when_dep_is_uat(self):
+        self._write_files(dedent("""\
+          - id: S-001
+            title: "Spike"
+            priority: 80
+            status: uat
+            requires: []
+            acceptance: ["BE: Test"]
+            testing: ["manual"]
+          - id: S-002
+            title: "Depends on spike"
+            priority: 50
+            status: todo
+            requires: []
+            requires_reviewed: [S-001]
+            acceptance: ["BE: Test"]
+            testing: ["command: echo ok"]
+        """))
+        cmd = [
+            sys.executable, SCRIPT,
+            "--backlog", self.backlog_path,
+            "--done", self.done_path,
+            "--format", "json",
+            "next-work",
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        # S-001 is uat (not selectable by next-work), S-002 is blocked by requires_reviewed
+        self.assertEqual(result.returncode, 2, f"Expected no eligible work, got: {result.stdout}")
+
+    def test_passes_when_dep_is_done(self):
+        # Spike is done (archived to done file)
+        self._write_files(
+            backlog_yaml=dedent("""\
+          - id: S-002
+            title: "Depends on spike"
+            priority: 50
+            status: todo
+            requires: []
+            requires_reviewed: [S-001]
+            acceptance: ["BE: Test"]
+            testing: ["command: echo ok"]
+            """),
+            done_yaml=dedent("""\
+          - id: S-001
+            title: "Spike"
+            priority: 80
+            status: done
+            requires: []
+            acceptance: ["BE: Test"]
+            testing: ["manual"]
+            """),
+        )
+        cmd = [
+            sys.executable, SCRIPT,
+            "--backlog", self.backlog_path,
+            "--done", self.done_path,
+            "--format", "json",
+            "next-work",
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0)
+        data = json.loads(result.stdout)
+        self.assertEqual(data[0]["id"], "S-002")
 
 
 if __name__ == "__main__":
