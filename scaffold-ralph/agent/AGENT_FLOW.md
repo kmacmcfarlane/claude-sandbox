@@ -330,6 +330,10 @@ Claude Code **blocks the Edit, Write and NotebookEdit tools against the main che
 
 The file lock at `agent/backlog.lock` serializes concurrent backlog access, so a second session may run against the same backlog.
 
+#### 4.1.2 Service isolation (concurrent sessions)
+
+If your project starts services (databases, dev servers, containers, stacks) that could collide with another session's stack, scope them per story via a `STORY_ID` env var so that project names, resource names, and ports are unique per story (e.g. `<project>-dev` becomes `<project>-dev-s-042`). The exact mechanism is project-specific.
+
 #### 4.1.3 The story's base commit (`base_sha`)
 
 Because every story lands on the same run branch, "the story's diff" cannot be a diff against `main` — after the first story that would include every earlier, already-reviewed story, and `main..HEAD` would show earlier commits while missing the current story's uncommitted work. Each story therefore records the commit it started from:
@@ -338,10 +342,6 @@ Because every story lands on the same run branch, "the story's diff" cannot be a
 - The story's change set, for review and QA, is `git diff <base_sha>` (working tree against the base): it covers uncommitted work and any commits the story has already made, and nothing else on the run branch.
 - A story that has no `base_sha` (claimed before the field existed): record one now — the last commit on the branch that is not this story's — and proceed.
 - Finalization does not clear it; a later `uat_feedback` rework records a new one.
-
-#### 4.1.2 Service isolation (concurrent sessions)
-
-If your project starts services (databases, dev servers, containers, stacks) that could collide with another session's stack, scope them per story via a `STORY_ID` env var so that project names, resource names, and ports are unique per story (e.g. `<project>-dev` becomes `<project>-dev-s-042`). The exact mechanism is project-specific.
 
 ### 4.2 Check for requirements changes
 - Inspect the git commit history (or working set) for changes to the $CLAUDE_SANDBOX_PROJECT_DIR/.claude-sandbox/agent/PRD.md or answers provided in $CLAUDE_SANDBOX_PROJECT_DIR/.claude-sandbox/agent/QUESTIONS.md
