@@ -178,7 +178,7 @@ After each subagent completes, update backlog via `backlog.py`:
 
 Note: Agents never set `status: done`. The user manually moves stories from `uat` to `done` after acceptance.
 
-**Discord notifications (MANDATORY):** After every status change above, send a discord notification via `mcp__discord__send_discord_notification` using the message format and emojis defined in AGENT_FLOW.md section 9.2. Also send notifications when: no eligible work remains (section 9.3), and after committing/merging to main (section 9.3). Notifications are best-effort — if the tool fails, continue normally.
+**Discord notifications (MANDATORY):** After every status change above, send a discord notification via `mcp__discord__send_discord_notification` using the message format and emojis defined in AGENT_FLOW.md section 9.2. Also send notifications when: no eligible work remains (section 9.3), and after committing on the run branch (section 9.3). Notifications are best-effort — if the tool fails, continue normally.
 
 ### Processing QA sweep findings
 

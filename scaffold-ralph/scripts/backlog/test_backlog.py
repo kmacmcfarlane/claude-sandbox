@@ -1135,6 +1135,69 @@ class TestBaseShaCLI(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         self.assertNotIn("unknown field", result.stderr + result.stdout)
 
+    def _write_base_sha(self, value):
+        """Write base_sha straight into the file, bypassing `set` (which validates)."""
+        with open(self.backlog_path) as f:
+            data = self.yaml.load(f)
+        data["stories"][0]["base_sha"] = value
+        with open(self.backlog_path, "w") as f:
+            self.yaml.dump(data, f)
+
+    def test_validate_rejects_malformed_base_sha(self):
+        """validate enforces BASE_SHA_RE (7-40 lowercase hex) in both strict and
+        non-strict mode, so a malformed base fails here rather than at the
+        orchestrator's `git diff <base_sha>`."""
+        for bad in ("abcdef", "zzz"):
+            for flags in ((), ("--strict",)):
+                with self.subTest(base_sha=bad, flags=flags):
+                    self._write_base_sha(bad)
+                    result = self._run("validate", *flags)
+                    self.assertEqual(result.returncode, 1, result.stderr + result.stdout)
+                    self.assertIn(f"invalid base_sha '{bad}'", result.stderr)
+
+    def test_validate_accepts_well_formed_base_sha(self):
+        for good in ("abc1234", "0123456789abcdef0123456789abcdef01234567"):
+            for flags in ((), ("--strict",)):
+                with self.subTest(base_sha=good, flags=flags):
+                    self._write_base_sha(good)
+                    result = self._run("validate", *flags)
+                    self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+                    self.assertNotIn("base_sha", result.stderr + result.stdout)
+
+    def _add(self, base_sha):
+        story = dedent(f"""\
+            id: S-002
+            title: Added story
+            priority: 40
+            status: todo
+            requires: []
+            base_sha: {base_sha}
+            acceptance:
+              - "FE: Test"
+            testing:
+              - "command: echo ok"
+        """)
+        cmd = [
+            sys.executable, SCRIPT, "--backlog", self.backlog_path, "--done", self.done_path,
+            "--repo-root", self.tmpdir, "add",
+        ]
+        return subprocess.run(cmd, input=story, capture_output=True, text=True)
+
+    def test_add_rejects_malformed_base_sha(self):
+        result = self._add("zzz")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("invalid base_sha 'zzz'", result.stderr)
+        with open(self.backlog_path) as f:
+            ids = [s["id"] for s in self.yaml.load(f)["stories"]]
+        self.assertNotIn("S-002", ids)
+
+    def test_add_accepts_well_formed_base_sha(self):
+        result = self._add("abc1234")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        with open(self.backlog_path) as f:
+            stories = {s["id"]: s for s in self.yaml.load(f)["stories"]}
+        self.assertEqual(stories["S-002"]["base_sha"], "abc1234")
+
 
 class TestLocking(unittest.TestCase):
     """Tests for file locking mechanism."""

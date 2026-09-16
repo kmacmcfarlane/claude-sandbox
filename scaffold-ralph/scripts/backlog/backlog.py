@@ -417,6 +417,13 @@ def validate_story(
                 f"(valid: {', '.join(sorted(VALID_TICKET_MODES))})"
             )
 
+    if "base_sha" in story and story["base_sha"] is not None:
+        if not BASE_SHA_RE.match(str(story["base_sha"])):
+            errors.append(
+                f"{sid}: invalid base_sha '{story['base_sha']}' "
+                f"(expected a 7-40 char hex commit id)"
+            )
+
     if "acceptance" in story:
         if not isinstance(story["acceptance"], list) or len(story["acceptance"]) == 0:
             errors.append(f"{sid}: 'acceptance' must be a non-empty list")
