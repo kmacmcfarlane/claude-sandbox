@@ -83,6 +83,8 @@ Feature: .claude-sandbox/ layout lifecycle (CS-LAY)
     And each added line appears exactly once
 
   Scenario: CS-LAY-012 The gitignore prompt defaults to yes
+    # Launch path. `init` / `init-ralph` resolve the answer themselves and
+    # never reach this prompt (CS-INIT-028).
     Given an interactive terminal
     When the user presses Enter at the "Add them?" prompt
     Then the entries are appended
@@ -97,7 +99,9 @@ Feature: .claude-sandbox/ layout lifecycle (CS-LAY)
   @changed
   Scenario: CS-LAY-014 Automation override for the gitignore prompt
     # bash: CS_GITIGNORE_ASSUME=y|n env var. Go keeps the env var for test
-    # automation AND adds the --gitignore/--no-gitignore/--yes flags (CS-INIT-025/026).
+    # automation AND adds the --gitignore/--no-gitignore init flags
+    # (CS-INIT-026). On init the entries are written without a prompt
+    # (CS-INIT-028); the flags and this env var override that.
     Given CS_GITIGNORE_ASSUME=y is set
     Then entries are appended without prompting
     Given CS_GITIGNORE_ASSUME=n is set

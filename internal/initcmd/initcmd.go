@@ -25,9 +25,9 @@ import (
 type Flags struct {
 	Ralph                bool  // init-ralph: also seed the ralph scaffold
 	TrackInHost          *bool // --track-in-host / --no-track-in-host
-	Gitignore            *bool // --gitignore / --no-gitignore
-	CopyParentDockerfile *bool // --copy-parent-dockerfile / --no-copy-parent-dockerfile
-	Yes                  bool  // --yes: accept every prompt's default
+	Gitignore            *bool // --gitignore / --no-gitignore (override; default true, CS-INIT-028)
+	CopyParentDockerfile *bool // --copy-parent-dockerfile / --no-copy-parent-dockerfile (override; default copy when found)
+	Yes                  bool  // --yes: accept the trackInHost prompt's default
 }
 
 // Deps are the injected environment.
@@ -43,8 +43,8 @@ const promptTimeout = 60 * time.Second
 // Run bootstraps .claude-sandbox/ in project and returns without launching.
 func Run(project string, f Flags, d Deps) error {
 	if f.Yes {
-		// --yes: every prompt resolves to its default, non-interactively
-		// (CS-INIT-025).
+		// --yes: the one prompt init has (trackInHost) resolves to its
+		// default, non-interactively (CS-INIT-025).
 		d.Prompter = &prompt.Fixed{Out: d.Err}
 	}
 	sb := paths.SandboxDir(project)
@@ -159,10 +159,15 @@ func Run(project string, f Flags, d Deps) error {
 		}
 		effective = cascade.TrackInHost(all)
 	}
+	// The trackInHost answer already chose the shape of the host .gitignore,
+	// so init writes the entries without a further prompt (CS-INIT-028):
+	// --gitignore/--no-gitignore override, else CS_GITIGNORE_ASSUME when set
+	// (left to layout, CS-LAY-014), else yes. Passing a non-nil Gitignore is
+	// what keeps layout.Setup from prompting; the launch path still passes nil.
 	gi := f.Gitignore
-	if gi == nil && f.Yes {
+	if gi == nil && os.Getenv("CS_GITIGNORE_ASSUME") == "" {
 		t := true
-		gi = &t // gitignore prompt default is yes
+		gi = &t
 	}
 	if err := layout.Setup(project, effective, layout.Options{
 		Runner: d.Runner, Prompter: d.Prompter, Out: d.Out, Err: d.Err, Gitignore: gi,
@@ -187,8 +192,10 @@ func promptTrackInHost(p prompt.Prompter) bool {
 	return p.Confirm(pre, "Track in host repo?", false, promptTimeout)
 }
 
-// seedDockerfileExample seeds Dockerfile.example, preferring a copy of a
-// parent .claude-sandbox/Dockerfile when one exists (CS-INIT-021..024).
+// seedDockerfileExample seeds Dockerfile.example without prompting: a copy of
+// the nearest parent .claude-sandbox/Dockerfile when one exists, the generic
+// scaffold example otherwise; --copy-parent-dockerfile /
+// --no-copy-parent-dockerfile pin the choice (CS-INIT-021..024).
 func seedDockerfileExample(project, sb string, f Flags, d Deps) error {
 	if fileExists(filepath.Join(sb, "Dockerfile")) || fileExists(filepath.Join(sb, "Dockerfile.example")) {
 		fmt.Fprintln(d.Out, "  skipped  Dockerfile.example (exists)")
@@ -198,16 +205,9 @@ func seedDockerfileExample(project, sb string, f Flags, d Deps) error {
 	if err != nil {
 		return err
 	}
-	copyParent := false
-	if parentDockerfile != "" {
-		switch {
-		case f.CopyParentDockerfile != nil:
-			copyParent = *f.CopyParentDockerfile
-		default:
-			copyParent = d.Prompter.Confirm("",
-				fmt.Sprintf("Found parent Dockerfile at %s — seed Dockerfile.example from it?", parentDockerfile),
-				true, promptTimeout)
-		}
+	copyParent := parentDockerfile != ""
+	if copyParent && f.CopyParentDockerfile != nil {
+		copyParent = *f.CopyParentDockerfile
 	}
 	var seed []byte
 	source := "rename to Dockerfile to activate"

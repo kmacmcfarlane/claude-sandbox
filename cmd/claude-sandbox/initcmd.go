@@ -40,11 +40,11 @@ func newInitCmd(env *Env, ralph bool) *cobra.Command {
 	fl := cmd.Flags()
 	fl.BoolVar(&trackYes, "track-in-host", false, "set trackInHost: true (skip the interactive prompt)")
 	fl.BoolVar(&trackNo, "no-track-in-host", false, "set trackInHost: false (skip the interactive prompt)")
-	fl.BoolVar(&giYes, "gitignore", false, "add .gitignore entries without prompting")
-	fl.BoolVar(&giNo, "no-gitignore", false, "skip .gitignore updates without prompting")
-	fl.BoolVar(&cpYes, "copy-parent-dockerfile", false, "seed Dockerfile.example from a parent Dockerfile without prompting")
-	fl.BoolVar(&cpNo, "no-copy-parent-dockerfile", false, "seed the generic Dockerfile.example without prompting")
-	fl.BoolVar(&yes, "yes", false, "accept every prompt's default (non-interactive)")
+	fl.BoolVar(&giYes, "gitignore", false, "add the host .gitignore entries for the trackInHost mode (the default)")
+	fl.BoolVar(&giNo, "no-gitignore", false, "do not add the host .gitignore entries")
+	fl.BoolVar(&cpYes, "copy-parent-dockerfile", false, "seed Dockerfile.example from a parent Dockerfile when one exists (the default)")
+	fl.BoolVar(&cpNo, "no-copy-parent-dockerfile", false, "seed the generic Dockerfile.example even when a parent Dockerfile exists")
+	fl.BoolVar(&yes, "yes", false, "accept the trackInHost prompt's default (non-interactive)")
 	return cmd
 }
 

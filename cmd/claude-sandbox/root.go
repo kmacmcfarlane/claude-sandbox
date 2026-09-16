@@ -172,10 +172,11 @@ Commands (bootstrap the project, then exit — launcher flags do not apply):
   completion SHELL          Print a shell completion script (bash, zsh, fish, powershell)
                             e.g. source <(claude-sandbox completion zsh)
      --track-in-host / --no-track-in-host              set trackInHost (skip the prompt)
-     --gitignore / --no-gitignore                      answer the .gitignore prompt
+     --gitignore / --no-gitignore                      add (default) / skip the host .gitignore entries
      --copy-parent-dockerfile / --no-copy-parent-dockerfile
-                                                       answer the parent-Dockerfile prompt
-     --yes                                             accept every prompt's default
+                                                       copy a parent Dockerfile into Dockerfile.example
+                                                       (default when one exists) / seed the generic one
+     --yes                                             accept the trackInHost prompt's default
 
 Options:
   --help, -h                Show this help message and exit

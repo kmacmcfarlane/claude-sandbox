@@ -85,20 +85,21 @@ Run the bootstrap subcommand from the project directory:
 claude-sandbox init          # base: sparse config.yaml + env + Dockerfile.example, gitignore, sidecar
 claude-sandbox init-ralph    # init + ralph agent/ + scripts/ scaffolding (backlog tool)
 ```
-These are **positional subcommands** (must be the first argument) and reject launcher/claude flags. Their own options — every interactive prompt has a flag pair that skips it:
+These are **positional subcommands** (must be the first argument) and reject launcher/claude flags. A fresh interactive `init` asks exactly **one** question — how `.claude-sandbox/` is version-controlled (`trackInHost`); everything else is derived from that answer. Their own options — one flag pair answers the prompt, the others are non-interactive overrides of the derived defaults:
 
-| Flag | Prompt it answers |
+| Flag | What it decides |
 |---|---|
-| `--track-in-host` / `--no-track-in-host` | how `.claude-sandbox/` is version-controlled |
-| `--gitignore` / `--no-gitignore` | whether to append host `.gitignore` entries |
-| `--copy-parent-dockerfile` / `--no-copy-parent-dockerfile` | seed `Dockerfile.example` from a parent `Dockerfile` |
-| `--yes` | accept **every** prompt's default, non-interactively (scripted bootstraps, CI) |
+| `--track-in-host` / `--no-track-in-host` | how `.claude-sandbox/` is version-controlled (the only prompt; the flag skips it) |
+| `--gitignore` / `--no-gitignore` | whether the host `.gitignore` entries implied by `trackInHost` are written (default yes, no prompt; `--no-gitignore` skips them) |
+| `--copy-parent-dockerfile` / `--no-copy-parent-dockerfile` | whether `Dockerfile.example` is a copy of a parent `Dockerfile` when one exists (default yes, no prompt; `--no-copy-parent-dockerfile` seeds the generic example) |
+| `--yes` | accept the `trackInHost` prompt's default, non-interactively (scripted bootstraps, CI) |
 
 - Both are **idempotent**: existing files are never overwritten, so template-provided docs win and re-running fills only gaps.
 - The seeded `config.yaml`/`env` are **sparse (fully commented)** — they override nothing in the cascade; uncomment a key to set it for this project.
 - `init` prints the **config cascade** when parent directories contribute files, and notes inherited `env` files (which layer under the project's — they are never copied).
 - **Inherited `trackInHost`:** when an upstream config already sets it, the prompt shows the inherited value as the default. Press Enter to inherit (nothing is written locally; the seeded file's commented hint records the inherited value and its source path), or answer `y`/`n` to write a local override.
-- **Parent `Dockerfile`:** if an ancestor `.claude-sandbox/Dockerfile` exists, `init` offers to seed `Dockerfile.example` from it (default yes) instead of the generic template — a useful starting point for divergence, since Dockerfiles are nearest-wins and never merged.
+- **Parent `Dockerfile`:** if an ancestor `.claude-sandbox/Dockerfile` exists, `init` seeds `Dockerfile.example` as a copy of it (no prompt; the report names the source) instead of the generic template — a useful starting point for divergence, since Dockerfiles are nearest-wins and never merged. `--no-copy-parent-dockerfile` forces the generic example.
+- **Host `.gitignore`:** the entries implied by the `trackInHost` answer are written without a further prompt (`--no-gitignore` skips them). The launch-time "Add them?" prompt, which guards a hand-edited `.gitignore` outside a bootstrap, is unchanged.
 - Rename `.claude-sandbox/Dockerfile.example` → `Dockerfile` to activate project-specific tooling.
 - Then run `claude-sandbox` to launch.
 
