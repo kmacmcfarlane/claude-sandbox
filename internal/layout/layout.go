@@ -97,8 +97,9 @@ func Setup(project string, trackInHost bool, opts Options) error {
 			// only leave the tree dirty. Warn, never switch modes, and still
 			// propose the worktrees line alone.
 			if conflict := hostTrackConflict(opts.Runner, project, sb); conflict != "" {
-				fmt.Fprintf(opts.errw(), "WARNING: trackInHost is true but %s (sidecar layout); skipping the host-tracked .gitignore entries, which would be dead.\n", conflict)
-				fmt.Fprintln(opts.errw(), "  Either set trackInHost: false in .claude-sandbox/config.yaml, or remove the /.claude-sandbox/ ignore and .claude-sandbox/.git to track it in the host.")
+				fmt.Fprintf(opts.errw(), "WARNING: trackInHost is true but %s; skipping the host-tracked .gitignore entries, which would be dead there.\n", conflict)
+				fmt.Fprintln(opts.errw(), "  Either set trackInHost: false in .claude-sandbox/config.yaml (and delete any .claude-sandbox/env, temp/, ralph/, !config.yaml or !Dockerfile lines already in .gitignore — they are dead),")
+				fmt.Fprintln(opts.errw(), "  or drop the ignore rule (`git check-ignore -v .claude-sandbox` names it) and .claude-sandbox/.git to track the directory in the host.")
 				gitignoreAdd(hostGI, opts, withWorktreesLine(hostGI)...)
 				return nil
 			}

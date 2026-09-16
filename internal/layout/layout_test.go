@@ -251,7 +251,9 @@ var _ = Describe("layout lifecycle", func() {
 			Expect(strings.Count(errText, "WARNING: trackInHost is true but")).To(Equal(1), "one warning")
 			Expect(errText).To(ContainSubstring("skipping the host-tracked .gitignore entries"))
 			Expect(errText).To(ContainSubstring("set trackInHost: false in .claude-sandbox/config.yaml"))
-			Expect(errText).To(ContainSubstring("remove the /.claude-sandbox/ ignore and .claude-sandbox/.git"))
+			Expect(errText).To(ContainSubstring("and delete any .claude-sandbox/env, temp/, ralph/, !config.yaml or !Dockerfile lines already in .gitignore"))
+			Expect(errText).To(ContainSubstring("drop the ignore rule (`git check-ignore -v .claude-sandbox` names it) and .claude-sandbox/.git"))
+			Expect(errText).NotTo(ContainSubstring("(sidecar layout)"))
 		}
 
 		It("CS-LAY-018: a whole-dir ignore refuses the host-tracked entries and warns", func() {
@@ -264,7 +266,7 @@ var _ = Describe("layout lifecycle", func() {
 				Expect(countLine(content, l)).To(BeZero(), l)
 			}
 			expectRefused(errOut.String())
-			Expect(errOut.String()).To(ContainSubstring("the host repo already ignores .claude-sandbox/ (sidecar layout)"))
+			Expect(errOut.String()).To(ContainSubstring("but the host repo already ignores .claude-sandbox/; skipping"))
 			Expect(errOut.String()).NotTo(ContainSubstring(".claude-sandbox/.git exists"))
 
 			By("the worktrees line is still proposed and added (CS-LAY-017)")
@@ -294,7 +296,7 @@ var _ = Describe("layout lifecycle", func() {
 				Expect(countLine(content, l)).To(BeZero(), l)
 			}
 			expectRefused(errOut.String())
-			Expect(errOut.String()).To(ContainSubstring("but .claude-sandbox/.git exists (sidecar layout)"))
+			Expect(errOut.String()).To(ContainSubstring("but .claude-sandbox/.git exists; skipping"))
 			Expect(errOut.String()).NotTo(ContainSubstring("already ignores"))
 			Expect(countLine(content, wt)).To(Equal(1))
 		})
@@ -304,7 +306,7 @@ var _ = Describe("layout lifecycle", func() {
 			Expect(os.MkdirAll(filepath.Join(sb, ".git"), 0o755)).To(Succeed())
 			Expect(setup(true, ptr(true))).To(Succeed())
 			expectRefused(errOut.String())
-			Expect(errOut.String()).To(ContainSubstring("the host repo already ignores .claude-sandbox/ and .claude-sandbox/.git exists (sidecar layout)"))
+			Expect(errOut.String()).To(ContainSubstring("but the host repo already ignores .claude-sandbox/ and .claude-sandbox/.git exists; skipping"))
 		})
 
 		It("CS-LAY-018: a covering rule means not even the worktrees line is proposed", func() {

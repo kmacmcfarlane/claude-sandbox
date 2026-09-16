@@ -157,10 +157,13 @@ Feature: .claude-sandbox/ layout lifecycle (CS-LAY)
       OR .claude-sandbox/.git exists (a sidecar repo), or both
     When SetupLayout runs
     Then none of the host-tracked entries (CS-LAY-009) is proposed or appended
-    And stderr carries one warning that names the conflict — saying which condition
-      fired: the whole-dir ignore, the sidecar .git, or both — and the two remedies:
-      set trackInHost: false in the local .claude-sandbox/config.yaml, or remove the
-      /.claude-sandbox/ ignore and .claude-sandbox/.git to track the directory in the host
+    And stderr carries one warning that names exactly what fired — the whole-dir
+      ignore, the sidecar .git, or both — and the two remedies: set trackInHost: false
+      in the local .claude-sandbox/config.yaml (and delete any of the five lines a
+      previous launch already appended — they are dead), or drop the ignore rule
+      (`git check-ignore -v .claude-sandbox` names it, wherever it lives: the project
+      .gitignore, a parent's, .git/info/exclude or core.excludesFile) and
+      .claude-sandbox/.git to track the directory in the host
     And ".claude/worktrees/" is still proposed when missing (CS-LAY-017), and not
       when a covering rule already exists
     And nothing else changes: no sidecar repo is initialized in host-tracked mode, as before
