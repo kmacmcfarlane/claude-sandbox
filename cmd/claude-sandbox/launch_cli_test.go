@@ -138,6 +138,58 @@ var _ = Describe("launcher CLI (end-to-end argv)", func() {
 		Expect(args).To(ContainElement(f.proj + ":" + f.proj))
 	})
 
+	Describe("the project directory is the physical path (CS-LNCH-048)", func() {
+		var link string
+
+		BeforeEach(func() {
+			// f.proj is already symlink-free (the fixture resolves its temp
+			// dir); link is a symlink to it, standing in for a checkout
+			// reached through a linked path.
+			link = filepath.Join(filepath.Dir(f.proj), "link")
+			Expect(os.Symlink(f.proj, link)).To(Succeed())
+		})
+
+		// standIn puts the launcher in dir the way a shell would: cwd AND
+		// $PWD, which os.Getwd honours — the very condition that made the
+		// working-directory default return the logical path.
+		standIn := func(dir string) {
+			delete(f.envmap, "PROJECT_DIR")
+			GinkgoT().Chdir(dir)
+			GinkgoT().Setenv("PWD", dir)
+		}
+
+		expectPhysical := func() {
+			args := f.fake.Execed.Args
+			Expect(args).To(ContainElements("-w", f.proj))
+			Expect(args).To(ContainElement(f.proj + ":" + f.proj))
+			Expect(args).To(ContainElement("claude-sandbox.project=" + f.proj))
+			Expect(f.execLine()).To(MatchRegexp(
+				`--name claude-sandbox-` + regexp.QuoteMeta(imagebuild.ProjectSlug(f.proj)) + `-[a-z]+ `))
+			Expect(strings.Join(args, " ")).NotTo(ContainSubstring(link))
+		}
+
+		It("CS-LNCH-048: a symlinked working directory resolves to the physical path and says so", func() {
+			standIn(link)
+			Expect(f.run()).To(Equal(0))
+			expectPhysical()
+			Expect(f.out.String()).To(ContainSubstring("Project: " + f.proj + " (resolved from " + link + ")\n"))
+		})
+
+		It("CS-LNCH-048: PROJECT_DIR pointing at a symlink resolves the same way", func() {
+			f.envmap["PROJECT_DIR"] = link
+			Expect(f.run()).To(Equal(0))
+			expectPhysical()
+			Expect(f.out.String()).To(ContainSubstring("Project: " + f.proj + " (resolved from " + link + ")\n"))
+		})
+
+		It("CS-LNCH-048: an unsymlinked working directory prints no Project line", func() {
+			standIn(f.proj)
+			Expect(f.run()).To(Equal(0))
+			expectPhysical()
+			Expect(f.out.String()).NotTo(ContainSubstring("Project: "))
+		})
+	})
+
 	It("CS-LNCH-026: interactive command shape and container name", func() {
 		Expect(f.run("--dangerous", "--model", "opus", "--resume")).To(Equal(0))
 		// The instance noun is chosen at random, so match its shape rather than

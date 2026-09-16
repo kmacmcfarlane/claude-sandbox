@@ -58,6 +58,34 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
   Scenario: CS-LNCH-006 PROJECT_DIR overrides the working directory
     Given PROJECT_DIR=/other/proj is set
     Then the project directory is the resolved absolute /other/proj
+    # "Resolved" means the physical path: symlinks are evaluated on this
+    # branch and on the working-directory default alike (CS-LNCH-048).
+
+  Scenario: CS-LNCH-048 The project directory is the physical path
+    # One repo reached through a symlink otherwise becomes two projects. The
+    # working-directory default honoured the logical $PWD while PROJECT_DIR
+    # was symlink-resolved, so /home/you/kmac/repo (a link into
+    # /home/you/work/src/.../repo) got its own container slug (the h6 hashes
+    # the absolute path), its own Claude Code transcript slug (claude --resume
+    # from one path could not see conversations started from the other), a
+    # separate instance-noun pool and PID-class view, and a different
+    # fingerprint. The launcher therefore always uses the physical path.
+    Given the working directory /home/you/kmac/repo is a symlink to
+      /home/you/work/src/github.com/you/repo
+    When claude-sandbox is run without PROJECT_DIR
+    Then the project directory is /home/you/work/src/github.com/you/repo
+    And the same-path mount, -w, the claude-sandbox.project label, the
+      project slug's <h6> (CS-LNCH-028), the config cascade walk (CS-CASC),
+      the child Dockerfile parent search (CS-IMG-011) and the fingerprint
+      (CS-SESS-020) all use that physical path, never the logical one
+    And one line "Project: <physical> (resolved from <logical>)" is printed
+      before the config cascade report so the redirect is visible
+    Given PROJECT_DIR=/home/you/kmac/repo is set instead
+    Then the project directory and the line are the same
+    Given the working directory is not reached through any symlink
+    Then no "Project:" line is printed
+    # Sessions launched from the logical path before this stayed filed under
+    # its transcript slug; Ctrl+A in claude's resume picker still lists them.
 
   # ---- core mounts ----
 
