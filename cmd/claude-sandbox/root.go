@@ -444,22 +444,45 @@ func repoRoot(getenv func(string) string) string {
 	return filepath.Dir(filepath.Dir(exe))
 }
 
+// resolveProjectDir returns the canonical project directory: PROJECT_DIR when
+// set, else the working directory — on both branches the physical
+// (symlink-resolved) absolute path (CS-LNCH-006, CS-LNCH-048).
 func resolveProjectDir(getenv func(string) string) (string, error) {
-	dir := getenv("PROJECT_DIR")
-	if dir == "" {
-		return os.Getwd()
+	dir, _, err := resolveProjectDirFrom(getenv, io.Discard)
+	return dir, err
+}
+
+// resolveProjectDirFrom also returns the path as given — the logical working
+// directory (os.Getwd honours $PWD, so a shell standing in a symlink reports
+// the link) or the absolute PROJECT_DIR — so the launch can show the redirect
+// when the two differ (CS-LNCH-048). One repo reached through a symlink used
+// to be two projects: the working-directory default kept the logical path
+// while PROJECT_DIR was resolved, and the container slug, transcript slug,
+// noun pool and fingerprint all hash the path. When EvalSymlinks fails the
+// given absolute path is returned for both and a warning goes to errw — the
+// one case where the launch is not on the physical path.
+func resolveProjectDirFrom(getenv func(string) string, errw io.Writer) (dir, given string, err error) {
+	given = getenv("PROJECT_DIR")
+	if given == "" {
+		if given, err = os.Getwd(); err != nil {
+			return "", "", err
+		}
+	} else {
+		abs, aerr := filepath.Abs(given)
+		if aerr != nil {
+			return "", "", aerr
+		}
+		if fi, serr := os.Stat(abs); serr != nil || !fi.IsDir() {
+			return "", "", fmt.Errorf("PROJECT_DIR %s is not a directory", given)
+		}
+		given = abs
 	}
-	abs, err := filepath.Abs(dir)
-	if err != nil {
-		return "", err
+	resolved, rerr := filepath.EvalSymlinks(given)
+	if rerr != nil {
+		fmt.Fprintf(errw, "WARNING: could not resolve symlinks in %s (%v); using it as given\n", given, rerr)
+		return given, given, nil
 	}
-	if fi, serr := os.Stat(abs); serr != nil || !fi.IsDir() {
-		return "", fmt.Errorf("PROJECT_DIR %s is not a directory", dir)
-	}
-	if resolved, rerr := filepath.EvalSymlinks(abs); rerr == nil {
-		return resolved, nil
-	}
-	return abs, nil
+	return resolved, given, nil
 }
 
 func envTrue(v string) bool { return v == "1" || v == "true" || v == "yes" }
@@ -577,9 +600,14 @@ func runLaunch(env *Env, args []string) error {
 	if err := validateBranch(f); err != nil {
 		return err
 	}
-	projectDir, err := resolveProjectDir(env.Getenv)
+	projectDir, givenDir, err := resolveProjectDirFrom(env.Getenv, env.Err)
 	if err != nil {
 		return err
+	}
+	if projectDir != givenDir {
+		// The redirect is visible (CS-LNCH-048): the container, the slug and
+		// the transcript store all use the physical path, not the one typed.
+		fmt.Fprintf(env.Out, "Project: %s (resolved from %s)\n", projectDir, givenDir)
 	}
 
 	// Config + env cascade (CS-CASC, CS-LNCH-024).

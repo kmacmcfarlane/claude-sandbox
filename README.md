@@ -157,6 +157,8 @@ container.
 
 More than one sandbox session can run in the same project. Container names are unique per project directory, so two checkouts that merely share a directory name (say a dozen directories all called `infrastructure`) no longer collide.
 
+The project directory is always the **physical** path: the launcher resolves symlinks whether it takes the directory from `PROJECT_DIR` or from the working directory. A repo reached through a symlink (say `~/kmac/repo` linking into `~/work/src/github.com/you/repo`) would otherwise be two projects — the container slug hashes the absolute path, and Claude Code files transcripts by working directory, so `claude-sandbox --resume` from one path could not see conversations started from the other, and each path had its own instance-noun pool and config fingerprint. The [parent directory search](#parent-directory-search) climbs the physical parents too, so a workspace-level `.claude-sandbox/config.yaml`, `env` or `Dockerfile` beside the *symlink* is not found — put it above the real checkout. When the resolved path differs from the one you stood in, the launcher prints `Project: <physical> (resolved from <logical>)` before the config cascade. Sessions launched from a symlinked path before this stay filed under that path's transcript slug; `Ctrl+A` in claude's resume picker still lists them.
+
 By default interactive sessions share the checkout itself. With `--worktree` (or `worktree: true` in config) each container works in its **own worktree** named after its instance noun — container `…-otter`, worktree `.claude/worktrees/otter`, branch `worktree-otter` — so concurrent sessions stop editing the same files ([Worktree mode](#worktree-mode)). In that mode a joined session (`--join`) gets its own, claude-named worktree rather than sharing the primary's; attaching cannot change where a running session works, so `--attach` just reports it.
 
 ### Listing what is running
@@ -686,7 +688,7 @@ See `scaffold/Dockerfile.example` in this repo for a commented template (`claude
 
 ### Parent directory search
 
-The config, Dockerfile, and env files (under `.claude-sandbox/`) are all resolved by walking parent directories from the project root (like direnv). `config.yaml` and `env` **cascade** — every file found from the root down to the project is merged/layered, more-local values winning (see [Config cascade](#config-cascade-monorepo--workspace-defaults)). The child `Dockerfile` is **nearest-wins** — the closest one up the tree is used wholesale.
+The config, Dockerfile, and env files (under `.claude-sandbox/`) are all resolved by walking parent directories from the project root (like direnv) — the **physical** root, symlinks resolved, so the parents climbed are those of the real checkout, not of a symlink it was reached through (see [Multiple sessions](#multiple-sessions)). `config.yaml` and `env` **cascade** — every file found from the root down to the project is merged/layered, more-local values winning (see [Config cascade](#config-cascade-monorepo--workspace-defaults)). The child `Dockerfile` is **nearest-wins** — the closest one up the tree is used wholesale.
 
 If no `.claude-sandbox/Dockerfile` is found anywhere up to `/`, the launcher warns and uses the base image directly. Set `baseOnly: true` in `.claude-sandbox/config.yaml` (or `CLAUDE_SANDBOX_BASE_ONLY=1`) to suppress the warning and skip the search.
 
@@ -694,7 +696,7 @@ If no `.claude-sandbox/Dockerfile` is found anywhere up to `/`, the launcher war
 
 | Variable | Default | Description |
 |---|---|---|
-| `PROJECT_DIR` | `$(pwd)` | Project directory to mount |
+| `PROJECT_DIR` | `$(pwd)` | Project directory to mount. Either way the launcher uses the **physical** path (symlinks resolved) and prints `Project: <physical> (resolved from <logical>)` when that differs — see [Multiple sessions](#multiple-sessions) |
 | `ANTHROPIC_API_KEY` | (none) | Passed through to the container |
 | `CLAUDE_NOTIFICATION_WEBHOOK_URL` | (none) | Discord webhook for interactive notification hooks (permission prompts, idle) |
 | `CLAUDE_SANDBOX_HOST_ACCESS_SSH_ENABLED` | (unset) | Mount `~/.ssh/` read-only (equivalent to `--ssh`) |
