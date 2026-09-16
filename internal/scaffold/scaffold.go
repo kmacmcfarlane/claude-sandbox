@@ -37,15 +37,39 @@ func SeedFile(dest string, content []byte) (bool, error) {
 // placeholder is substituted (literally) in newly created files only, and
 // seeded .py files are made executable. Returns created/skipped counts.
 func SeedRalph(sandboxDir, projectName string, out io.Writer) (created, skipped int, err error) {
-	root := "scaffold-ralph"
-	err = fs.WalkDir(assets.ScaffoldRalph, root, func(path string, d fs.DirEntry, werr error) error {
+	return seedRalphFrom(assets.ScaffoldRalph, "scaffold-ralph", sandboxDir, projectName, out)
+}
+
+// skipEntry reports whether a scaffold entry is tooling debris that must
+// never be seeded (CS-INITR-007): __pycache__ and .pytest_cache directories,
+// any dot-prefixed entry, and compiled Python bytecode (.pyc/.pyo, any case,
+// file or directory). assets.go embeds the tree with the `all:` prefix (no
+// exclusion syntax), so a binary built from a working tree that ran the
+// backlog tests carries whatever pytest left on disk — this walk is the
+// enforceable filter, not the embed pattern.
+func skipEntry(d fs.DirEntry) bool {
+	name := d.Name()
+	if strings.HasPrefix(name, ".") || name == "__pycache__" {
+		return true
+	}
+	lower := strings.ToLower(name)
+	return strings.HasSuffix(lower, ".pyc") || strings.HasSuffix(lower, ".pyo")
+}
+
+// seedRalphFrom is SeedRalph over an arbitrary fs.FS rooted at root, so tests
+// can plant debris the embedded tree never carries in a clean checkout.
+func seedRalphFrom(fsys fs.FS, root, sandboxDir, projectName string, out io.Writer) (created, skipped int, err error) {
+	err = fs.WalkDir(fsys, root, func(path string, d fs.DirEntry, werr error) error {
 		if werr != nil {
 			return werr
 		}
-		if d.IsDir() {
-			if d.Name() == "__pycache__" {
+		if path != root && skipEntry(d) {
+			if d.IsDir() {
 				return fs.SkipDir
 			}
+			return nil
+		}
+		if d.IsDir() {
 			return nil
 		}
 		rel := strings.TrimPrefix(path, root+"/")
@@ -54,7 +78,7 @@ func SeedRalph(sandboxDir, projectName string, out io.Writer) (created, skipped 
 			skipped++
 			return nil
 		}
-		raw, rerr := assets.ScaffoldRalph.ReadFile(path)
+		raw, rerr := fs.ReadFile(fsys, path)
 		if rerr != nil {
 			return rerr
 		}

@@ -63,13 +63,21 @@ var _ = Describe("ralph scaffold seeding", func() {
 		Expect(fi.Mode().Perm() & 0o111).NotTo(BeZero())
 	})
 
-	It("CS-INITR-007: __pycache__ contents are never seeded", func() {
+	It("CS-INITR-007: the real embedded tree seeds no __pycache__, bytecode or dot-entries", func() {
+		// The planted-debris proof lives in scaffold_internal_test.go (it
+		// needs the seedRalphFrom seam); this guards the binary actually built.
 		_, _, err := scaffold.SeedRalph(sb, "myproj", io.Discard)
 		Expect(err).NotTo(HaveOccurred())
 
 		Expect(filepath.WalkDir(sb, func(path string, d fs.DirEntry, werr error) error {
 			Expect(werr).NotTo(HaveOccurred())
-			Expect(strings.Contains(path, "__pycache__")).To(BeFalse(), path)
+			if path == sb {
+				return nil
+			}
+			name := d.Name()
+			Expect(name).NotTo(Equal("__pycache__"), path)
+			Expect(strings.HasPrefix(name, ".")).To(BeFalse(), path)
+			Expect(strings.HasSuffix(name, ".pyc") || strings.HasSuffix(name, ".pyo")).To(BeFalse(), path)
 			return nil
 		})).To(Succeed())
 	})

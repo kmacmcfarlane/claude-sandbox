@@ -19,3 +19,15 @@ package.json
 # source, so nothing here is needed by any image build.
 claude-sandbox
 bin/dist/
+# Python tooling debris under scaffold-ralph/scripts (a pytest run leaves it on
+# disk, gitignored) and any dot-entry under the scaffold trees. The builder
+# stage embeds scaffold-ralph with `all:`, which would bake them into the
+# binary; keep them out of the build context entirely. Patterns are matched
+# per component with Go filepath.Match and are root-anchored unless prefixed
+# with `**/` (CS-INITR-007 asserts these exact lines).
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/.pytest_cache
+scaffold-ralph/**/.*
+scaffold/**/.*

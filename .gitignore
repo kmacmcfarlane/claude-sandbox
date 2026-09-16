@@ -6,9 +6,10 @@
 
 node_modules/
 
-# Python bytecode (scaffold-ralph/scripts test runs)
+# Python tooling debris (scaffold-ralph/scripts test runs)
 __pycache__/
 *.pyc
+.pytest_cache/
 
 # Consolidated layout (foreign-safe default): .claude-sandbox/ is a SIDECAR
 # git repo — work items, investigations, config all live in its own history,
