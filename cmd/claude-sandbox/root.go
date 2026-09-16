@@ -448,7 +448,7 @@ func repoRoot(getenv func(string) string) string {
 // set, else the working directory — on both branches the physical
 // (symlink-resolved) absolute path (CS-LNCH-006, CS-LNCH-048).
 func resolveProjectDir(getenv func(string) string) (string, error) {
-	dir, _, err := resolveProjectDirFrom(getenv)
+	dir, _, err := resolveProjectDirFrom(getenv, io.Discard)
 	return dir, err
 }
 
@@ -459,8 +459,9 @@ func resolveProjectDir(getenv func(string) string) (string, error) {
 // to be two projects: the working-directory default kept the logical path
 // while PROJECT_DIR was resolved, and the container slug, transcript slug,
 // noun pool and fingerprint all hash the path. When EvalSymlinks fails the
-// given absolute path is returned for both.
-func resolveProjectDirFrom(getenv func(string) string) (dir, given string, err error) {
+// given absolute path is returned for both and a warning goes to errw — the
+// one case where the launch is not on the physical path.
+func resolveProjectDirFrom(getenv func(string) string, errw io.Writer) (dir, given string, err error) {
 	given = getenv("PROJECT_DIR")
 	if given == "" {
 		if given, err = os.Getwd(); err != nil {
@@ -476,10 +477,12 @@ func resolveProjectDirFrom(getenv func(string) string) (dir, given string, err e
 		}
 		given = abs
 	}
-	if resolved, rerr := filepath.EvalSymlinks(given); rerr == nil {
-		return resolved, given, nil
+	resolved, rerr := filepath.EvalSymlinks(given)
+	if rerr != nil {
+		fmt.Fprintf(errw, "WARNING: could not resolve symlinks in %s (%v); using it as given\n", given, rerr)
+		return given, given, nil
 	}
-	return given, given, nil
+	return resolved, given, nil
 }
 
 func envTrue(v string) bool { return v == "1" || v == "true" || v == "yes" }
@@ -597,7 +600,7 @@ func runLaunch(env *Env, args []string) error {
 	if err := validateBranch(f); err != nil {
 		return err
 	}
-	projectDir, givenDir, err := resolveProjectDirFrom(env.Getenv)
+	projectDir, givenDir, err := resolveProjectDirFrom(env.Getenv, env.Err)
 	if err != nil {
 		return err
 	}
