@@ -11,6 +11,11 @@ import "embed"
 var Scaffold embed.FS
 
 // ScaffoldRalph is the additional seed for `init-ralph` (agent/ + scripts/).
+// `all:` admits `.`- and `_`-prefixed entries, but the seeding walk
+// (internal/scaffold.skipEntry, CS-INITR-007) drops every dot-prefixed entry,
+// __pycache__ and Python bytecode — so a future `.gitignore`/`.env.example`
+// seed under scaffold-ralph/ will NOT be seeded until that filter is taught
+// to allow it.
 //
 //go:embed all:scaffold-ralph
 var ScaffoldRalph embed.FS

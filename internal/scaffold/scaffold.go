@@ -42,19 +42,18 @@ func SeedRalph(sandboxDir, projectName string, out io.Writer) (created, skipped 
 
 // skipEntry reports whether a scaffold entry is tooling debris that must
 // never be seeded (CS-INITR-007): __pycache__ and .pytest_cache directories,
-// any dot-prefixed entry, and compiled Python bytecode. assets.go embeds the
-// tree with the `all:` prefix (no exclusion syntax), so a binary built from a
-// working tree that ran the backlog tests carries whatever pytest left on
-// disk — this walk is the enforceable filter, not the embed pattern.
+// any dot-prefixed entry, and compiled Python bytecode (.pyc/.pyo, any case,
+// file or directory). assets.go embeds the tree with the `all:` prefix (no
+// exclusion syntax), so a binary built from a working tree that ran the
+// backlog tests carries whatever pytest left on disk — this walk is the
+// enforceable filter, not the embed pattern.
 func skipEntry(d fs.DirEntry) bool {
 	name := d.Name()
 	if strings.HasPrefix(name, ".") || name == "__pycache__" {
 		return true
 	}
-	if !d.IsDir() && (strings.HasSuffix(name, ".pyc") || strings.HasSuffix(name, ".pyo")) {
-		return true
-	}
-	return false
+	lower := strings.ToLower(name)
+	return strings.HasSuffix(lower, ".pyc") || strings.HasSuffix(lower, ".pyo")
 }
 
 // seedRalphFrom is SeedRalph over an arbitrary fs.FS rooted at root, so tests
