@@ -55,7 +55,7 @@ func shortDigest(b []byte) string {
 
 // configFingerprint hashes the effective launch and returns the hash plus the
 // per-file digests used to explain a mismatch.
-func (in *Inputs) configFingerprint(p *Plan, ha hostAccess) (string, []InputDigest) {
+func (in *Inputs) configFingerprint(p *Plan, ha hostAccess, sharedPeerRegistry bool) (string, []InputDigest) {
 	inputs := make([]InputDigest, 0, len(in.EnvFiles)+len(in.shadowDigests)+2)
 
 	// (1) The merged cascade config. Canonical JSON of the post-merge struct:
@@ -94,6 +94,13 @@ func (in *Inputs) configFingerprint(p *Plan, ha hostAccess) (string, []InputDige
 		fmt.Fprintf(&env, "mount=%s\n", v)
 	}
 	fmt.Fprintf(&env, "ssh=%t git=%t docker=%t aws=%t packageCaches=%t\n", ha.SSH, ha.Git, ha.DockerSocket, ha.AWS, ha.PackageCaches)
+	// CS-LNCH-052: hashed, unlike the per-session choices excluded below. It
+	// is a property of the environment — identical for every session of one
+	// config — and attach/join skip mount assembly, so a container launched
+	// without the bridge cannot message across trees however the config reads
+	// now. The resolved mounts above already move with it; this line makes the
+	// dependency explicit rather than incidental.
+	fmt.Fprintf(&env, "sharedPeerRegistry=%t\n", sharedPeerRegistry)
 	fmt.Fprintf(&env, "uid=%d gid=%d user=%s home=%s\n", in.HostUID, in.HostGID, in.HostUser, in.Home)
 	fmt.Fprintf(&env, "memory=%s\n", p.MemoryLimit)
 

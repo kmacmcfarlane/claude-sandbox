@@ -48,6 +48,33 @@ var _ = Describe("config cascade", func() {
 		Expect(cfg.MemoryLimit).To(Equal("4g"))
 	})
 
+	It("CS-LNCH-052: sharedPeerRegistry merges like any other scalar", func() {
+		files := writeConfigs(tmp,
+			"sharedPeerRegistry: true\n",
+			"sharedPeerRegistry: false\n",
+		)
+		cfg, err := cascade.Load(files)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.SharedPeerRegistry).NotTo(BeNil())
+		Expect(*cfg.SharedPeerRegistry).To(BeFalse())
+
+		files = writeConfigs(tmp,
+			"sharedPeerRegistry: false\n",
+			"sharedPeerRegistry: true\n",
+		)
+		cfg, err = cascade.Load(files)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.SharedPeerRegistry).NotTo(BeNil())
+		Expect(*cfg.SharedPeerRegistry).To(BeTrue())
+
+		// Unset anywhere in the cascade stays nil, which resolves to off
+		// while remaining distinguishable from an explicit false.
+		files = writeConfigs(tmp, "model: opus\n")
+		cfg, err = cascade.Load(files)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.SharedPeerRegistry).To(BeNil())
+	})
+
 	It("CS-CASC-002: upstream keys survive when the local file is sparse", func() {
 		files := writeConfigs(tmp,
 			"model: opus\n",

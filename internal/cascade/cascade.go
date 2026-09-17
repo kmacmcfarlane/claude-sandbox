@@ -101,13 +101,25 @@ type Config struct {
 	// distinguishable from unset. Excluded from the JSON form
 	// the config-drift fingerprint hashes: it is a per-session choice, like
 	// the model (CS-LNCH-044).
-	Worktree      *bool      `yaml:"worktree" json:"-"`
-	TrackInHost   *bool      `yaml:"trackInHost"`
-	BaseOnly      bool       `yaml:"baseOnly"`
-	DockerfileDir string     `yaml:"dockerfileDir"`
-	Dockerfile    string     `yaml:"dockerfile"`
-	HostAccess    HostAccess `yaml:"hostAccess"`
-	Mounts        []Mount    `yaml:"mounts"`
+	Worktree *bool `yaml:"worktree" json:"-"`
+	// SharedPeerRegistry bridges Claude Code's peer registry and messaging
+	// sockets across containers whose CLAUDE_CONFIG_DIR differs
+	// (CS-LNCH-049..053). Opt-in, default off: the config-dir split is
+	// usually a deliberate work/personal boundary. A pointer, because
+	// resolution is tri-state (CS-LNCH-052) — a falsy
+	// CLAUDE_SANDBOX_SHARED_PEER_REGISTRY must be able to turn an upstream
+	// "true" off for one session, which an OR shape cannot express.
+	// json:"-" like Worktree, but for the opposite reason: the RESOLVED
+	// value is hashed explicitly by the drift fingerprint, so hashing the
+	// key here as well would only make an unset key and an explicit
+	// "false" — which launch identically — look like drift against each other.
+	SharedPeerRegistry *bool      `yaml:"sharedPeerRegistry" json:"-"`
+	TrackInHost        *bool      `yaml:"trackInHost"`
+	BaseOnly           bool       `yaml:"baseOnly"`
+	DockerfileDir      string     `yaml:"dockerfileDir"`
+	Dockerfile         string     `yaml:"dockerfile"`
+	HostAccess         HostAccess `yaml:"hostAccess"`
+	Mounts             []Mount    `yaml:"mounts"`
 
 	// DetachKeys overrides the key sequence that detaches from an attached
 	// session. Empty means the built-in default; see defaultDetachKeys.

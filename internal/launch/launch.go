@@ -283,17 +283,41 @@ func Build(in Inputs) (*Plan, error) {
 	// beneath the root by uid, project and session id, so one root is shared
 	// safely. Precedence: host env > env file (docker -e would silently beat
 	// --env-file, so stand down) > derived default.
+	//
+	// tmpRoot records the value the launcher resolved, so the shared peer
+	// registry (CS-LNCH-050) can mount over the socket root beneath it. It
+	// stays empty when an env file owns the key, because its value is the
+	// consumer's and is not parsed here.
+	tmpRoot := ""
 	switch {
 	case in.getenv("CLAUDE_CODE_TMPDIR") != "":
 		v := in.getenv("CLAUDE_CODE_TMPDIR")
 		p.EnvFlags = append(p.EnvFlags, "CLAUDE_CODE_TMPDIR="+v)
+		tmpRoot = v
 		if !underAnyMount(p.Volumes, v) {
 			fmt.Fprintf(in.Out, "Warning: CLAUDE_CODE_TMPDIR=%s is not under any container mount; scratchpad files will be lost when the session exits.\n", v)
 		}
 	case envFilesDefine(in.EnvFiles, "CLAUDE_CODE_TMPDIR"):
 		// The env file supplies it; adding -e would override the file.
 	case dirExists(configDir):
-		p.EnvFlags = append(p.EnvFlags, "CLAUDE_CODE_TMPDIR="+filepath.Join(configDir, "tmp"))
+		tmpRoot = filepath.Join(configDir, "tmp")
+		p.EnvFlags = append(p.EnvFlags, "CLAUDE_CODE_TMPDIR="+tmpRoot)
+	}
+
+	// CS-LNCH-049..053: opt-in bridge for peer discovery and messaging across
+	// containers whose CLAUDE_CONFIG_DIR differs. Resolved AFTER the tmpdir
+	// above because the socket root hangs off it. Default off: with the key
+	// unset this adds nothing and the argv is unchanged.
+	// Tri-state, not the OR shape of `dangerous`: an operator whose workspace
+	// config sets sharedPeerRegistry true must be able to keep ONE session off
+	// the shared registry with CLAUDE_SANDBOX_SHARED_PEER_REGISTRY=0. A
+	// fall-through there would silently cross the boundary they just opted out
+	// of. Same argument as worktree mode (CS-LNCH-042).
+	sharedPeers := ResolveTristate(nil, in.getenv("CLAUDE_SANDBOX_SHARED_PEER_REGISTRY"), in.Cfg.SharedPeerRegistry, false)
+	if sharedPeers {
+		if err := in.assembleSharedPeerRegistry(p, configDir, tmpRoot); err != nil {
+			return nil, err
+		}
 	}
 
 	// CS-SESS-020/021: hash the effective configuration, then record it and the
@@ -301,7 +325,7 @@ func Build(in Inputs) (*Plan, error) {
 	// is joining a container built from the config now on disk.
 	p.ConfigHash, p.ConfigInputs = in.configFingerprint(p, hostAccess{
 		SSH: ssh, Git: git, DockerSocket: dockerSocket, AWS: aws, PackageCaches: packageCaches,
-	})
+	}, sharedPeers)
 
 	// CS-LNCH-032: identity labels. Discovery filters on these rather than
 	// parsing container names, which are lossy.
@@ -516,12 +540,17 @@ func (in *Inputs) assembleAWS(p *Plan) {
 	}
 }
 
+// SandboxHomeRoot is the one tree under $HOME that belongs to the sandbox
+// alone. Every fixed host-side directory the launcher mounts derives from it,
+// so the roots cannot drift apart.
+const SandboxHomeRoot = ".cache/claude-sandbox"
+
 // PackageCacheRoot is the sandbox-only tree under $HOME that the package-cache
 // lever mounts (CS-LNCH-037). Fixed on purpose: pointing this at the host's
 // own ~/go, ~/.npm or ~/.cache/pip would let a session plant a module the
 // host's toolchain then trusts (Go verifies zips on download, not extracted
 // dirs). Confined here, the blast radius is other sandbox sessions.
-const PackageCacheRoot = ".cache/claude-sandbox"
+const PackageCacheRoot = SandboxHomeRoot
 
 // packageCaches maps each cache dir name to the env var that redirects its
 // toolchain (CS-LNCH-035).
@@ -545,6 +574,127 @@ func (in *Inputs) assemblePackageCaches(p *Plan) error {
 		}
 		p.Volumes = append(p.Volumes, fmt.Sprintf("%s:%s", dir, dir))
 		p.EnvFlags = append(p.EnvFlags, c.env+"="+dir)
+	}
+	return nil
+}
+
+// PeerRegistryRoot is the sandbox-only tree under $HOME that the shared peer
+// registry mounts over the container's <config dir>/sessions and
+// <CLAUDE_CODE_TMPDIR>/cc-socks (CS-LNCH-050/051). Fixed, like
+// PackageCacheRoot: a free-form path could name one tree's own
+// <config dir>/sessions as the shared root, putting other trees' sandboxes
+// into a registry the host's own claude also writes. A dedicated root cannot.
+const PeerRegistryRoot = SandboxHomeRoot + "/peers"
+
+// peerRegistryDirs are the two subdirectories of PeerRegistryRoot: the peer
+// registry itself and the inbox-socket root.
+const (
+	peerSessionsDir = "sessions"
+	peerSocketsDir  = "cc-socks"
+)
+
+// peerDirMode matches the mode Claude Code itself gives <config dir>/sessions
+// and <CLAUDE_CODE_TMPDIR>/cc-socks. The registry holds one <pid>.json and one
+// <pid>.<hash>.key per live session, so on a multi-user host 0755 would let
+// any other local user enumerate every sandbox session in the shared root.
+const peerDirMode = 0o700
+
+// assembleSharedPeerRegistry mounts one shared host directory over the
+// container's peer registry and over its socket root, so containers whose
+// CLAUDE_CONFIG_DIR differs still see one another (CS-LNCH-050).
+//
+// Both mounts are READ-WRITE on purpose: every session writes its own
+// <pid>.json into the registry, and connect() on a unix socket under a
+// read-only bind mount fails with EROFS — a :ro socket root would break
+// exactly the messaging this exists to enable.
+//
+// The bridge REPLACES the container's own registry and socket root rather than
+// unioning them: a bind mount hides whatever the destination held. Every
+// session that is to be visible must therefore be opted in and (re)launched —
+// sessions still running against the real <config dir>/sessions, the host's own
+// claude included, neither see the bridged ones nor are seen by them.
+//
+// BOTH SIDES of each mount are created here, before docker run, as the invoking
+// user (CS-LNCH-051). The source for the reason the package caches do it:
+// docker creates a missing bind source as root and the entrypoint never chowns
+// a mount point. The DESTINATION for the mirror image of that: its parent is
+// the read-write same-path bind of the config dir, so a mountpoint docker
+// creates as root materialises on the HOST and outlives the container, leaving
+// a root-owned ~/.claude/tmp/cc-socks that every later un-bridged sandbox — and
+// the host's own claude — would then fail to write its inbox socket into.
+//
+// That argument holds ONLY for a destination that is a host path behind a bind,
+// so each one is guarded by underAnyMount (CS-LNCH-051). Unguarded, the same
+// call would fail the launch outright on a socket root that exists only inside
+// the container — exactly the path the warning below is here to degrade
+// gracefully — and would create the config dir on the host when it is absent,
+// flipping dirExists for the NEXT launch.
+func (in *Inputs) assembleSharedPeerRegistry(p *Plan, configDir, tmpRoot string) error {
+	root := filepath.Join(in.Home, PeerRegistryRoot)
+
+	sessions := filepath.Join(root, peerSessionsDir)
+	if err := in.mkPeerDir(sessions); err != nil {
+		return err
+	}
+	// Guarded BEFORE the mount is appended: afterwards the destination would
+	// be under a mount by definition — its own.
+	dstSessions := filepath.Join(configDir, peerSessionsDir)
+	if err := in.mkPeerDest(p, dstSessions); err != nil {
+		return err
+	}
+	p.Volumes = append(p.Volumes, fmt.Sprintf("%s:%s", sessions, dstSessions))
+
+	// CS-LNCH-053: the bridge crosses a boundary the operator drew on purpose,
+	// and a workspace-level config key can switch it on for a session that
+	// never asked. Like the Worktree banner, it prints only when the mode is
+	// actually in use — including on the degrade path below, which is still a
+	// bridged launch and still names the shared root.
+	fmt.Fprintf(in.Out, "Peer registry: shared (%s) - /peers and SendMessage reach every other opted-in sandbox on this host, and only those.\n", root)
+
+	if tmpRoot == "" {
+		// No config dir, or an env file owns CLAUDE_CODE_TMPDIR — its value is
+		// the consumer's and is not parsed here, so the socket root is unknown.
+		// Discovery is still bridged; messaging is not.
+		fmt.Fprintln(in.Out, "Warning: sharedPeerRegistry: CLAUDE_CODE_TMPDIR is not resolved by the launcher, so the message socket root is not bridged; peers will be listed but not reachable.")
+		return nil
+	}
+	socks := filepath.Join(root, peerSocketsDir)
+	if err := in.mkPeerDir(socks); err != nil {
+		return err
+	}
+	dstSocks := filepath.Join(tmpRoot, peerSocketsDir)
+	if err := in.mkPeerDest(p, dstSocks); err != nil {
+		return err
+	}
+	p.Volumes = append(p.Volumes, fmt.Sprintf("%s:%s", socks, dstSocks))
+	return nil
+}
+
+// mkPeerDest creates a mount DESTINATION, but only when it is a host path
+// behind an existing bind — the one case where docker would otherwise create
+// it as root on the host. Anything else is left to docker: creating it here
+// would either fail the launch or plant a directory tree on the host that the
+// host was never meant to own.
+//
+// The predicate is deliberately underSamePathMount, not underAnyMount. dst is
+// a CONTAINER path, and mkPeerDir creates it on the HOST; the two are the same
+// path only under a same-path mount. A cascade `mounts:` entry may set host !=
+// container (CS-LNCH-021), and then a container path like /data/tmp/cc-socks
+// would be created under a host /data that means nothing here — failing the
+// launch on a permission error instead of degrading. The registry and socket
+// destinations sit under the config dir's own <cfg>:<cfg> mount, so the normal
+// path is unaffected.
+func (in *Inputs) mkPeerDest(p *Plan, dst string) error {
+	if !underSamePathMount(p.Volumes, dst) {
+		return nil
+	}
+	return in.mkPeerDir(dst)
+}
+
+// mkPeerDir creates one side of a peer-registry mount as the invoking user.
+func (in *Inputs) mkPeerDir(dir string) error {
+	if err := os.MkdirAll(dir, peerDirMode); err != nil {
+		return fmt.Errorf("shared peer registry: creating %s: %w", dir, err)
 	}
 	return nil
 }
@@ -657,6 +807,26 @@ func underAnyMount(volumes []string, path string) bool {
 	for _, v := range volumes {
 		parts := strings.Split(v, ":")
 		if len(parts) < 2 {
+			continue
+		}
+		dst := filepath.Clean(parts[1])
+		if path == dst || strings.HasPrefix(path, dst+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// underSamePathMount reports whether path lies inside (or at) a mount whose
+// host and container sides are the SAME path — the only case in which a
+// container path is also a meaningful host path. underAnyMount answers a
+// different question (is this visible in the container at all) and must not be
+// substituted for it when the answer is used to create something on the host.
+func underSamePathMount(volumes []string, path string) bool {
+	path = filepath.Clean(path)
+	for _, v := range volumes {
+		parts := strings.Split(v, ":")
+		if len(parts) < 2 || filepath.Clean(parts[0]) != filepath.Clean(parts[1]) {
 			continue
 		}
 		dst := filepath.Clean(parts[1])

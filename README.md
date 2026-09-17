@@ -295,6 +295,48 @@ same treatment. It is always on; if the helper cannot apply the class it warns a
 session anyway. Sessions Claude spawns itself (`claude --bg`, `/bg`) are not slotted. Details:
 [How it works → Session registry and PID classes](#session-registry-and-pid-classes).
 
+**Across different `CLAUDE_CONFIG_DIR`s.** All of that holds only for sandboxes that share one
+config directory. The registry is `<config dir>/sessions/<pid>.json` and the inbox socket is
+`$CLAUDE_CODE_TMPDIR/cc-socks/<pid>.sock` (the launcher derives that root from the config dir
+too), so a tree that exports its own `CLAUDE_CONFIG_DIR` — a work checkout with an `.envrc`,
+say — has a registry and a socket root of its own, and its sessions can neither list nor
+message the sessions in your personal tree. That split is usually deliberate, so the bridge is
+opt-in and off everywhere by default:
+
+```yaml
+sharedPeerRegistry: true
+```
+
+With the key on, the launcher mounts one shared host directory —
+`~/.cache/claude-sandbox/peers/{sessions,cc-socks}`, created before `docker run` and mounted
+**read-write** (`connect()` on a unix socket under a read-only bind mount fails with `EROFS`) —
+over the container's `<config dir>/sessions` and `<CLAUDE_CODE_TMPDIR>/cc-socks`, whatever
+those resolve to. Every opted-in container on the host then shares one registry and one socket
+root and can discover and message each other. Set it in each tree you want bridged (through the
+cascade if you want a whole workspace), or via `CLAUDE_SANDBOX_SHARED_PEER_REGISTRY=1`.
+
+A bridged launch prints one line saying so (`Peer registry: shared (…)`), like the `Worktree:`
+banner — the key can arrive from a workspace-level config a session never asked for.
+
+**The bridge replaces, it does not union.** A bind mount hides whatever the destination held, so
+a bridged session no longer reads the real `<config dir>/sessions` at all: every session you want
+to see must be opted in and **relaunched**. Sessions already running without the bridge — and the
+`claude` you run directly on the host — neither appear in a bridged session's `/peers` nor see the
+bridged ones. Turning the key on will therefore make `/peers` look *emptier* until the sessions
+you care about have been restarted with it.
+
+No collision handling is needed: [PID classes](#session-registry-and-pid-classes) are already
+allocated without replacement across **all** running sandboxes on the host, so two containers
+can never write the same `<pid>.json`.
+
+**What it crosses.** This deliberately punches through the work/personal boundary those
+separate config dirs draw: sessions in one tree become visible to, and messageable from,
+sessions in the other. Only the registry and the socket root are shared — no transcripts, no
+credentials, no settings — but a peer can send a message that the receiving session acts on, so
+enable it only between trees you would let talk to each other. Unlike the model or the
+worktree, it counts as **config drift**: a container launched without the bridge cannot be
+talked to across trees, and `--attach`/`--join` report the difference.
+
 ## Bootstrapping a project (`init` / `init-ralph`)
 
 `init` sets up the `.claude-sandbox/` directory in the current project and exits (it does **not** launch a container):
@@ -567,6 +609,43 @@ Precedence is `--worktree`/`--no-worktree` > `CLAUDE_SANDBOX_WORKTREE` (`1`/`tru
 
 What it costs: a worktree is a fresh checkout, so anything untracked that a project's tooling reads from the working directory — `.env`, `node_modules`, `.claude-sandbox/` itself (gitignored in sidecar mode) — is not there. Claude Code copies `.claude/settings.local.json` and whatever a `.worktreeinclude` file lists, and can symlink directories via its `worktree.symlinkDirectories` setting; the sandbox's own files live in the main checkout, which the container finds through `CLAUDE_SANDBOX_PROJECT_DIR` (always set) or `git rev-parse --git-common-dir`. Outside a git repository the launcher stands down (`Worktree: off (not a git repository)`) and launches without the flag. `claude-sandbox` never prunes worktrees — `git worktree list` / `git worktree remove` are the tools; `-p` runs (ralph) never clean up and interactive sessions ask on exit.
 
+#### Shared peer registry
+
+Off by default. Bridges Claude Code's peer discovery (`/peers`, `ListAgents`) and messaging
+(`SendMessage`) across sandboxes whose `CLAUDE_CONFIG_DIR` differs, which otherwise hold
+disjoint registries and socket roots:
+
+```yaml
+sharedPeerRegistry: true
+```
+
+The launcher creates `~/.cache/claude-sandbox/peers/sessions` and
+`~/.cache/claude-sandbox/peers/cc-socks` on the host (as you, before `docker run` — Docker
+would otherwise create a missing bind source as root) and mounts them **read-write** over the
+container's `<config dir>/sessions` and `<CLAUDE_CODE_TMPDIR>/cc-socks`. The host root is fixed
+and not configurable, for the same reason as the package caches: a free-form path could name one
+tree's own `<config dir>/sessions`, putting other trees' sandboxes into a registry your host's
+own `claude` also writes. Both sides of both mounts are created `0700` (the mode Claude Code
+itself uses), destinations included — a mountpoint Docker creates as root lands on the *host*,
+where a root-owned `~/.claude/tmp/cc-socks` would break every later un-bridged sandbox. A
+destination that exists only inside the container (a `CLAUDE_CODE_TMPDIR` outside every mount)
+is left to Docker, so the launch still succeeds and nothing lands on the host.
+
+Resolution is **tri-state**, like [worktree mode](#worktree-mode):
+`CLAUDE_SANDBOX_SHARED_PEER_REGISTRY` of `1`/`true`/`yes` enables it over an unset or false
+config, `0`/`false`/`no` is an explicit **off** that overrides an upstream `true` (so you can keep
+one session off a workspace-wide bridge), anything else is unset. Precedence is env var > merged
+config > off, and the key cascades like any other scalar. A bridged launch prints one
+`Peer registry: shared (…)` banner line.
+
+The bridge **replaces** the container's registry and socket root rather than unioning them, so
+every session that is to be visible must be opted in and relaunched — see
+[Messaging between sessions](#messaging-between-sessions).
+
+It is part of the config-drift fingerprint (unlike the model and the worktree, it is a property
+of the environment, not a per-session choice). See
+[Messaging between sessions](#messaging-between-sessions) for what the boundary crossing means.
+
 #### Host access
 
 Control which host resources are mounted into the container. Each can be enabled via CLI flags, environment variables, or YAML. Precedence: CLI flag > env var > YAML.
@@ -716,6 +795,7 @@ If no `.claude-sandbox/Dockerfile` is found anywhere up to `/`, the launcher war
 | `CLAUDE_SANDBOX_DOCKERFILE` | `Dockerfile` | Filename of the child Dockerfile |
 | `CLAUDE_SANDBOX_DANGEROUS` | (unset) | Set to `1` or `true` to skip permission prompts (equivalent to `--dangerous`) |
 | `CLAUDE_SANDBOX_WORKTREE` | (unset: off interactive, on ralph) | `1`/`true`/`yes` runs sessions in their own worktree (equivalent to `--worktree`); `0`/`false`/`no` runs them in the shared checkout, ralph included; either overrides a config `worktree` key |
+| `CLAUDE_SANDBOX_SHARED_PEER_REGISTRY` | (unset) | `1`/`true`/`yes` shares the Claude Code peer registry and message sockets with other opted-in sandboxes regardless of `CLAUDE_CONFIG_DIR` (equivalent to `sharedPeerRegistry: true`); `0`/`false`/`no` is an explicit off that overrides a config `true` |
 | `CLAUDE_SANDBOX_BASE_ONLY` | (unset) | Set to `1` or `true` to skip child Dockerfile and use base image only |
 | `CLAUDE_SANDBOX_NO_UPDATE_CHECK` | (unset) | Set to `1` or `true` to skip Claude Code version check at launch |
 
