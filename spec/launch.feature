@@ -482,6 +482,12 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
   # everywhere: the config-dir split is usually a deliberate work/personal
   # boundary, and only the operator knows which trees should be bridged.
   #
+  # The bridge REPLACES the container's registry and socket root; a bind mount
+  # hides whatever the destination held, so it does not union the two. Every
+  # session that is to be visible must be opted in and (re)launched: sessions
+  # still running against the real <config dir>/sessions — the host's own
+  # claude included — neither see the bridged ones nor are seen by them.
+  #
   # No collision handling is needed or wanted: internal/pidslot already
   # allocates pid classes without replacement across ALL running sandboxes on
   # the host (CS-PID-004), so two containers can never write the same
@@ -507,11 +513,21 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       in the cascade defines CLAUDE_CODE_TMPDIR) only the registry is mounted,
       with a warning that messaging is not bridged
 
-  Scenario: CS-LNCH-051 The shared directories are created on the host before docker run
+  Scenario: CS-LNCH-051 Both sides of each mount are created on the host before docker run
     Given the shared peer registry is enabled and ~/.cache/claude-sandbox/peers does not exist
     Then the launcher creates sessions/ and cc-socks/ (as the invoking user) before assembling the mounts
     # Docker creates a missing bind source as root and the entrypoint deliberately
     # never chowns a mount point — an uncreated dir would be unwritable for the session.
+    And it creates the DESTINATION paths too — <config dir>/sessions and
+      <CLAUDE_CODE_TMPDIR>/cc-socks — when they do not exist
+    # The mirror image of the same argument: the destination's parent is the
+    # read-write same-path bind of the config dir, so a mountpoint docker
+    # creates as root materialises on the HOST and outlives the container. A
+    # root-owned ~/.claude/tmp/cc-socks would then break every later
+    # un-bridged sandbox, and the host's own claude, for good.
+    And all four are created 0700, the mode Claude Code itself uses for them
+    # 0755 would let any other local user on a multi-user host enumerate every
+    # sandbox session's <pid>.json and <pid>.<hash>.key in the shared root.
     And the host root is fixed at ~/.cache/claude-sandbox/peers and is not configurable
     # A free-form path would let one tree's <config dir>/sessions be named as
     # the shared root by accident, which would have another tree's sandboxes
@@ -521,8 +537,14 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
   Scenario: CS-LNCH-052 The shared peer registry cascades and counts as drift
     Then the key merges like any other scalar: a more-local "sharedPeerRegistry: false"
       overrides an upstream true and vice versa
-    And CLAUDE_SANDBOX_SHARED_PEER_REGISTRY=1 enables it over an unset or false config
+    And resolution is TRI-STATE, like worktree mode (CS-LNCH-042) and unlike
+      `dangerous` (CS-LNCH-038): CLAUDE_SANDBOX_SHARED_PEER_REGISTRY of
+      "1"/"true"/"yes" enables it over an unset or false config, and "0"/"false"/"no"
+      is an explicit OFF that overrides a config "true" — anything else is unset
       (precedence: env var > merged config > off)
+    # An OR shape would leave an operator whose workspace config sets the key
+    # true unable to keep ONE session off the shared registry, silently
+    # crossing the boundary they just opted out of.
     And the config-drift fingerprint (CS-SESS-020) changes when it changes
     # Unlike the model, the instance noun, the pid class and the worktree
     # (CS-LNCH-040/044), this is not a per-session choice: it is a property of
@@ -530,3 +552,13 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     # skip mount assembly, so a container launched without the bridge cannot
     # message across trees however the config reads now — that is drift worth
     # reporting.
+
+  Scenario: CS-LNCH-053 A bridged launch says so
+    # The key can arrive from a workspace-level config a session never asked
+    # for, and it crosses a boundary the operator drew on purpose. The
+    # Worktree banner (CS-LNCH-041) sets the precedent: announce a mode with
+    # consequences, and only when it is in use.
+    Given the shared peer registry is enabled
+    Then stdout carries one line naming the shared host root and that /peers and
+      SendMessage now reach every other opted-in sandbox on this host, and only those
+    And nothing is printed when the bridge is off

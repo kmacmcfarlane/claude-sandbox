@@ -45,7 +45,10 @@ one-time setup (idempotent). Use `setup-lsp-plugins --check` to verify status.
   the registry and the socket root both live under `CLAUDE_CONFIG_DIR`, so a
   tree exporting its own does not appear. The `sharedPeerRegistry: true`
   config key (off by default) bridges that — it mounts one shared host
-  directory over both paths in every opted-in container.
+  directory over both paths in every opted-in container, and the launcher
+  prints a `Peer registry: shared (…)` line when it is on. That bridge
+  REPLACES the per-tree registry rather than adding to it, so a bridged
+  session sees only the other sessions launched with the key on.
 - **You may be inside a worktree.** Ralph runs by default, and interactive
   sessions launched with `--worktree` (or config `worktree: true`), start
   `claude` with `--worktree <name>`, so your working directory is

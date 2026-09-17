@@ -315,6 +315,16 @@ those resolve to. Every opted-in container on the host then shares one registry 
 root and can discover and message each other. Set it in each tree you want bridged (through the
 cascade if you want a whole workspace), or via `CLAUDE_SANDBOX_SHARED_PEER_REGISTRY=1`.
 
+A bridged launch prints one line saying so (`Peer registry: shared (…)`), like the `Worktree:`
+banner — the key can arrive from a workspace-level config a session never asked for.
+
+**The bridge replaces, it does not union.** A bind mount hides whatever the destination held, so
+a bridged session no longer reads the real `<config dir>/sessions` at all: every session you want
+to see must be opted in and **relaunched**. Sessions already running without the bridge — and the
+`claude` you run directly on the host — neither appear in a bridged session's `/peers` nor see the
+bridged ones. Turning the key on will therefore make `/peers` look *emptier* until the sessions
+you care about have been restarted with it.
+
 No collision handling is needed: [PID classes](#session-registry-and-pid-classes) are already
 allocated without replacement across **all** running sandboxes on the host, so two containers
 can never write the same `<pid>.json`.
@@ -615,8 +625,20 @@ would otherwise create a missing bind source as root) and mounts them **read-wri
 container's `<config dir>/sessions` and `<CLAUDE_CODE_TMPDIR>/cc-socks`. The host root is fixed
 and not configurable, for the same reason as the package caches: a free-form path could name one
 tree's own `<config dir>/sessions`, putting other trees' sandboxes into a registry your host's
-own `claude` also writes. `CLAUDE_SANDBOX_SHARED_PEER_REGISTRY=1` enables it for one launch;
-precedence is env var > merged config > off, and the key cascades like any other scalar.
+own `claude` also writes. Both sides of both mounts are created `0700` (the mode Claude Code
+itself uses), destinations included — a mountpoint Docker creates as root lands on the *host*,
+where a root-owned `~/.claude/tmp/cc-socks` would break every later un-bridged sandbox.
+
+Resolution is **tri-state**, like [worktree mode](#worktree-mode):
+`CLAUDE_SANDBOX_SHARED_PEER_REGISTRY` of `1`/`true`/`yes` enables it over an unset or false
+config, `0`/`false`/`no` is an explicit **off** that overrides an upstream `true` (so you can keep
+one session off a workspace-wide bridge), anything else is unset. Precedence is env var > merged
+config > off, and the key cascades like any other scalar. A bridged launch prints one
+`Peer registry: shared (…)` banner line.
+
+The bridge **replaces** the container's registry and socket root rather than unioning them, so
+every session that is to be visible must be opted in and relaunched — see
+[Messaging between sessions](#messaging-between-sessions).
 
 It is part of the config-drift fingerprint (unlike the model and the worktree, it is a property
 of the environment, not a per-session choice). See
@@ -771,7 +793,7 @@ If no `.claude-sandbox/Dockerfile` is found anywhere up to `/`, the launcher war
 | `CLAUDE_SANDBOX_DOCKERFILE` | `Dockerfile` | Filename of the child Dockerfile |
 | `CLAUDE_SANDBOX_DANGEROUS` | (unset) | Set to `1` or `true` to skip permission prompts (equivalent to `--dangerous`) |
 | `CLAUDE_SANDBOX_WORKTREE` | (unset: off interactive, on ralph) | `1`/`true`/`yes` runs sessions in their own worktree (equivalent to `--worktree`); `0`/`false`/`no` runs them in the shared checkout, ralph included; either overrides a config `worktree` key |
-| `CLAUDE_SANDBOX_SHARED_PEER_REGISTRY` | (unset) | Set to `1`/`true`/`yes` to share the Claude Code peer registry and message sockets with other opted-in sandboxes regardless of `CLAUDE_CONFIG_DIR` (equivalent to `sharedPeerRegistry: true`) |
+| `CLAUDE_SANDBOX_SHARED_PEER_REGISTRY` | (unset) | `1`/`true`/`yes` shares the Claude Code peer registry and message sockets with other opted-in sandboxes regardless of `CLAUDE_CONFIG_DIR` (equivalent to `sharedPeerRegistry: true`); `0`/`false`/`no` is an explicit off that overrides a config `true` |
 | `CLAUDE_SANDBOX_BASE_ONLY` | (unset) | Set to `1` or `true` to skip child Dockerfile and use base image only |
 | `CLAUDE_SANDBOX_NO_UPDATE_CHECK` | (unset) | Set to `1` or `true` to skip Claude Code version check at launch |
 

@@ -450,12 +450,14 @@ var _ = Describe("launch.Build", func() {
 			mkdir(cfgDir)
 		})
 		enable := func() {
-			in.Cfg = &cascade.Config{SharedPeerRegistry: true}
+			t := true
+			in.Cfg = &cascade.Config{SharedPeerRegistry: &t}
 		}
 
 		It("CS-LNCH-049: adds nothing when the key is unset, and an explicit false is byte-identical", func() {
 			before := build().DockerArgs(proj)
-			in.Cfg = &cascade.Config{SharedPeerRegistry: false}
+			f := false
+			in.Cfg = &cascade.Config{SharedPeerRegistry: &f}
 			Expect(build().DockerArgs(proj)).To(Equal(before))
 			for _, v := range before {
 				Expect(v).NotTo(ContainSubstring("claude-sandbox/peers"))
@@ -519,6 +521,30 @@ var _ = Describe("launch.Build", func() {
 			Expect(filepath.Join(root, "sessions")).To(BeADirectory())
 			Expect(filepath.Join(root, "cc-socks")).To(BeADirectory())
 			Expect(launch.PeerRegistryRoot).To(Equal(".cache/claude-sandbox/peers"))
+			// One root for every fixed host-side mount, so they cannot drift.
+			Expect(launch.PeerRegistryRoot).To(HavePrefix(launch.PackageCacheRoot + "/"))
+		})
+
+		It("CS-LNCH-051: creates the mount DESTINATIONS too, so docker never makes them as root", func() {
+			enable()
+			Expect(filepath.Join(cfgDir, "sessions")).NotTo(BeADirectory())
+			Expect(filepath.Join(cfgDir, "tmp", "cc-socks")).NotTo(BeADirectory())
+			build()
+			Expect(filepath.Join(cfgDir, "sessions")).To(BeADirectory())
+			Expect(filepath.Join(cfgDir, "tmp", "cc-socks")).To(BeADirectory())
+		})
+
+		It("CS-LNCH-051: creates all four directories 0700", func() {
+			enable()
+			build()
+			for _, d := range []string{
+				filepath.Join(root, "sessions"), filepath.Join(root, "cc-socks"),
+				filepath.Join(cfgDir, "sessions"), filepath.Join(cfgDir, "tmp", "cc-socks"),
+			} {
+				fi, err := os.Stat(d)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(fi.Mode().Perm()).To(Equal(os.FileMode(0o700)), d)
+			}
 		})
 
 		It("CS-LNCH-052: the env var enables it over an unset or false config", func() {
@@ -526,6 +552,34 @@ var _ = Describe("launch.Build", func() {
 			p := build()
 			Expect(p.Volumes).To(ContainElement(
 				filepath.Join(root, "sessions") + ":" + filepath.Join(cfgDir, "sessions")))
+			f := false
+			in.Cfg = &cascade.Config{SharedPeerRegistry: &f}
+			Expect(build().Volumes).To(ContainElement(
+				filepath.Join(root, "sessions") + ":" + filepath.Join(cfgDir, "sessions")))
+		})
+
+		It("CS-LNCH-052: a falsy env var is an explicit off over a config true", func() {
+			enable()
+			for _, v := range []string{"0", "false", "no", "NO"} {
+				env["CLAUDE_SANDBOX_SHARED_PEER_REGISTRY"] = v
+				for _, vol := range build().Volumes {
+					Expect(vol).NotTo(ContainSubstring("claude-sandbox/peers"), v)
+				}
+			}
+			// Anything else is unset, so the config still wins.
+			env["CLAUDE_SANDBOX_SHARED_PEER_REGISTRY"] = "maybe"
+			Expect(build().Volumes).To(ContainElement(
+				filepath.Join(root, "sessions") + ":" + filepath.Join(cfgDir, "sessions")))
+		})
+
+		It("CS-LNCH-053: prints one banner naming the shared root, only when bridged", func() {
+			Expect(build()).NotTo(BeNil())
+			Expect(out.String()).NotTo(ContainSubstring("Peer registry:"))
+			enable()
+			out.Reset()
+			build()
+			Expect(out.String()).To(ContainSubstring("Peer registry: shared (" + root + ")"))
+			Expect(out.String()).To(ContainSubstring("every other opted-in sandbox on this host, and only those"))
 		})
 
 		It("CS-LNCH-052: the fingerprint changes with the key", func() {
