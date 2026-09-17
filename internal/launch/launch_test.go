@@ -442,6 +442,99 @@ var _ = Describe("launch.Build", func() {
 		})
 	})
 
+	Describe("shared peer registry (CS-LNCH-049..052)", func() {
+		var root, cfgDir string
+		BeforeEach(func() {
+			root = filepath.Join(home, ".cache", "claude-sandbox", "peers")
+			cfgDir = filepath.Join(home, ".claude")
+			mkdir(cfgDir)
+		})
+		enable := func() {
+			in.Cfg = &cascade.Config{SharedPeerRegistry: true}
+		}
+
+		It("CS-LNCH-049: adds nothing when the key is unset, and an explicit false is byte-identical", func() {
+			before := build().DockerArgs(proj)
+			in.Cfg = &cascade.Config{SharedPeerRegistry: false}
+			Expect(build().DockerArgs(proj)).To(Equal(before))
+			for _, v := range before {
+				Expect(v).NotTo(ContainSubstring("claude-sandbox/peers"))
+			}
+			Expect(root).NotTo(BeADirectory())
+		})
+
+		It("CS-LNCH-050: mounts the shared registry and socket root read-write", func() {
+			enable()
+			p := build()
+			Expect(p.Volumes).To(ContainElement(
+				filepath.Join(root, "sessions") + ":" + filepath.Join(cfgDir, "sessions")))
+			Expect(p.Volumes).To(ContainElement(
+				filepath.Join(root, "cc-socks") + ":" + filepath.Join(cfgDir, "tmp", "cc-socks")))
+			// EROFS on connect() would break messaging: neither may be :ro.
+			for _, v := range p.Volumes {
+				if strings.Contains(v, filepath.Join("claude-sandbox", "peers")) {
+					Expect(v).NotTo(HaveSuffix(":ro"))
+				}
+			}
+		})
+
+		It("CS-LNCH-050: the host side is the same directory under any CLAUDE_CONFIG_DIR", func() {
+			enable()
+			alt := filepath.Join(home, "alt-cfg")
+			mkdir(alt)
+			env["CLAUDE_CONFIG_DIR"] = alt
+			p := build()
+			Expect(p.Volumes).To(ContainElement(
+				filepath.Join(root, "sessions") + ":" + filepath.Join(alt, "sessions")))
+			Expect(p.Volumes).To(ContainElement(
+				filepath.Join(root, "cc-socks") + ":" + filepath.Join(alt, "tmp", "cc-socks")))
+		})
+
+		It("CS-LNCH-050: follows a host-env CLAUDE_CODE_TMPDIR for the socket root", func() {
+			enable()
+			env["CLAUDE_CODE_TMPDIR"] = filepath.Join(proj, "scratch")
+			p := build()
+			Expect(p.Volumes).To(ContainElement(
+				filepath.Join(root, "cc-socks") + ":" + filepath.Join(proj, "scratch", "cc-socks")))
+		})
+
+		It("CS-LNCH-050: bridges the registry only, with a warning, when the socket root is unknown", func() {
+			enable()
+			ef := filepath.Join(proj, "env")
+			touch(ef, "CLAUDE_CODE_TMPDIR=/somewhere/else\n")
+			in.EnvFiles = []string{ef}
+			p := build()
+			Expect(p.Volumes).To(ContainElement(
+				filepath.Join(root, "sessions") + ":" + filepath.Join(cfgDir, "sessions")))
+			for _, v := range p.Volumes {
+				Expect(v).NotTo(ContainSubstring("cc-socks"))
+			}
+			Expect(out.String()).To(ContainSubstring("sharedPeerRegistry"))
+		})
+
+		It("CS-LNCH-051: creates both host directories before docker run, under the fixed root", func() {
+			enable()
+			Expect(root).NotTo(BeADirectory())
+			build()
+			Expect(filepath.Join(root, "sessions")).To(BeADirectory())
+			Expect(filepath.Join(root, "cc-socks")).To(BeADirectory())
+			Expect(launch.PeerRegistryRoot).To(Equal(".cache/claude-sandbox/peers"))
+		})
+
+		It("CS-LNCH-052: the env var enables it over an unset or false config", func() {
+			env["CLAUDE_SANDBOX_SHARED_PEER_REGISTRY"] = "1"
+			p := build()
+			Expect(p.Volumes).To(ContainElement(
+				filepath.Join(root, "sessions") + ":" + filepath.Join(cfgDir, "sessions")))
+		})
+
+		It("CS-LNCH-052: the fingerprint changes with the key", func() {
+			off := build().ConfigHash
+			enable()
+			Expect(build().ConfigHash).NotTo(Equal(off))
+		})
+	})
+
 	It("CS-LNCH-019: mounts the parent DIRECTORY of AWS path vars read-only, deduplicated", func() {
 		t := true
 		in.CLIAWS = &t

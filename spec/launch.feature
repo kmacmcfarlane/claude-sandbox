@@ -466,3 +466,67 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     # The one fact a session inside .claude/worktrees/<name> cannot otherwise
     # get without `git rev-parse --git-common-dir`: where .claude-sandbox/
     # lives.
+
+  # ---- shared peer registry ----
+  # Claude Code keys peer discovery on <config dir>/sessions/<pid>.json and
+  # puts each session's inbox socket at $CLAUDE_CODE_TMPDIR/cc-socks/<pid>.sock
+  # (CS-LNCH-034 derives that root from the config dir). Both therefore live
+  # under CLAUDE_CONFIG_DIR — so two trees that export different config dirs
+  # (e.g. a work tree with its own .envrc and a personal one) hold disjoint
+  # registries and disjoint socket roots: their sessions can neither enumerate
+  # nor message each other.
+  #
+  # The bridge mounts ONE shared host directory over each of those two paths,
+  # whatever CLAUDE_CONFIG_DIR resolves to, so every opted-in container on the
+  # host shares one registry and one socket root. It is OPT-IN and default OFF
+  # everywhere: the config-dir split is usually a deliberate work/personal
+  # boundary, and only the operator knows which trees should be bridged.
+  #
+  # No collision handling is needed or wanted: internal/pidslot already
+  # allocates pid classes without replacement across ALL running sandboxes on
+  # the host (CS-PID-004), so two containers can never write the same
+  # <pid>.json. Cross-PID-namespace messaging already works between sandboxes
+  # that share one config dir.
+
+  Scenario: CS-LNCH-049 The shared peer registry is off by default
+    Given no config sets sharedPeerRegistry and CLAUDE_SANDBOX_SHARED_PEER_REGISTRY is unset
+    Then the assembled docker run argv is identical to what it would be without the feature
+    And nothing under ~/.cache/claude-sandbox/peers is mounted or created
+
+  Scenario: CS-LNCH-050 The shared peer registry bridges registry and sockets
+    Given the merged config sets "sharedPeerRegistry: true"
+    Then "-v ~/.cache/claude-sandbox/peers/sessions:<config dir>/sessions" is added
+    And "-v ~/.cache/claude-sandbox/peers/cc-socks:<resolved CLAUDE_CODE_TMPDIR>/cc-socks" is added
+    And both are read-write — neither carries ":ro"
+    # connect() on a unix socket under a read-only bind mount fails with
+    # EROFS, so a :ro socket root would break exactly the messaging this
+    # exists to enable. The registry side is written by every session too.
+    And this holds whether the config dir is $HOME/.claude or a CLAUDE_CONFIG_DIR
+      pointing anywhere else — the host side is the same directory either way
+    And when the socket root cannot be resolved (no config dir, or an env file
+      in the cascade defines CLAUDE_CODE_TMPDIR) only the registry is mounted,
+      with a warning that messaging is not bridged
+
+  Scenario: CS-LNCH-051 The shared directories are created on the host before docker run
+    Given the shared peer registry is enabled and ~/.cache/claude-sandbox/peers does not exist
+    Then the launcher creates sessions/ and cc-socks/ (as the invoking user) before assembling the mounts
+    # Docker creates a missing bind source as root and the entrypoint deliberately
+    # never chowns a mount point — an uncreated dir would be unwritable for the session.
+    And the host root is fixed at ~/.cache/claude-sandbox/peers and is not configurable
+    # A free-form path would let one tree's <config dir>/sessions be named as
+    # the shared root by accident, which would have another tree's sandboxes
+    # writing into a registry that its own host claude also owns. A fixed
+    # sandbox-only root (the PackageCacheRoot precedent, CS-LNCH-037) cannot.
+
+  Scenario: CS-LNCH-052 The shared peer registry cascades and counts as drift
+    Then the key merges like any other scalar: a more-local "sharedPeerRegistry: false"
+      overrides an upstream true and vice versa
+    And CLAUDE_SANDBOX_SHARED_PEER_REGISTRY=1 enables it over an unset or false config
+      (precedence: env var > merged config > off)
+    And the config-drift fingerprint (CS-SESS-020) changes when it changes
+    # Unlike the model, the instance noun, the pid class and the worktree
+    # (CS-LNCH-040/044), this is not a per-session choice: it is a property of
+    # the environment, identical for every session of one config. attach/join
+    # skip mount assembly, so a container launched without the bridge cannot
+    # message across trees however the config reads now — that is drift worth
+    # reporting.

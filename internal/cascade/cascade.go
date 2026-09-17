@@ -101,13 +101,23 @@ type Config struct {
 	// distinguishable from unset. Excluded from the JSON form
 	// the config-drift fingerprint hashes: it is a per-session choice, like
 	// the model (CS-LNCH-044).
-	Worktree      *bool      `yaml:"worktree" json:"-"`
-	TrackInHost   *bool      `yaml:"trackInHost"`
-	BaseOnly      bool       `yaml:"baseOnly"`
-	DockerfileDir string     `yaml:"dockerfileDir"`
-	Dockerfile    string     `yaml:"dockerfile"`
-	HostAccess    HostAccess `yaml:"hostAccess"`
-	Mounts        []Mount    `yaml:"mounts"`
+	Worktree *bool `yaml:"worktree" json:"-"`
+	// SharedPeerRegistry bridges Claude Code's peer registry and messaging
+	// sockets across containers whose CLAUDE_CONFIG_DIR differs
+	// (CS-LNCH-049..052). Opt-in, default off: the config-dir split is
+	// usually a deliberate work/personal boundary. A plain bool, not a
+	// pointer, precisely because the default is false in every launch kind —
+	// so an unset key and an explicit false must be indistinguishable, right
+	// down to the fingerprint and the argv. It is NOT excluded from that
+	// fingerprint: it shapes the container's mounts, not one session's
+	// choices.
+	SharedPeerRegistry bool       `yaml:"sharedPeerRegistry"`
+	TrackInHost        *bool      `yaml:"trackInHost"`
+	BaseOnly           bool       `yaml:"baseOnly"`
+	DockerfileDir      string     `yaml:"dockerfileDir"`
+	Dockerfile         string     `yaml:"dockerfile"`
+	HostAccess         HostAccess `yaml:"hostAccess"`
+	Mounts             []Mount    `yaml:"mounts"`
 
 	// DetachKeys overrides the key sequence that detaches from an attached
 	// session. Empty means the built-in default; see defaultDetachKeys.

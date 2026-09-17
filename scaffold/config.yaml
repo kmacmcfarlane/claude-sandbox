@@ -102,6 +102,19 @@
 # launcher stands down and launches without it.
 # worktree: false
 
+# Share Claude Code's peer registry and message sockets with every other
+# opted-in sandbox on this host, regardless of CLAUDE_CONFIG_DIR. Default: off.
+# Discovery (/peers, ListAgents) reads <config dir>/sessions/<pid>.json and
+# messaging (SendMessage) uses $CLAUDE_CODE_TMPDIR/cc-socks/<pid>.sock, both
+# under CLAUDE_CONFIG_DIR — so trees that export different config dirs (a work
+# checkout with its own .envrc, say) cannot see or message each other. Turning
+# this on mounts ~/.cache/claude-sandbox/peers/{sessions,cc-socks} read-write
+# over those two container paths, so every opted-in container shares one
+# registry and one socket root. Enable it only between trees you would let
+# talk to each other — it crosses that boundary on purpose. Same effect as
+# CLAUDE_SANDBOX_SHARED_PEER_REGISTRY=1; the cascade applies.
+# sharedPeerRegistry: false
+
 # Disable the Claude Code version check at launch.
 # Also controllable via --no-update-check flag or CLAUDE_SANDBOX_NO_UPDATE_CHECK=1.
 # disableUpdateCheck: false

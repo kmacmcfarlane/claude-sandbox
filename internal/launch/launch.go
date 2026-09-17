@@ -283,17 +283,36 @@ func Build(in Inputs) (*Plan, error) {
 	// beneath the root by uid, project and session id, so one root is shared
 	// safely. Precedence: host env > env file (docker -e would silently beat
 	// --env-file, so stand down) > derived default.
+	//
+	// tmpRoot records the value the launcher resolved, so the shared peer
+	// registry (CS-LNCH-050) can mount over the socket root beneath it. It
+	// stays empty when an env file owns the key, because its value is the
+	// consumer's and is not parsed here.
+	tmpRoot := ""
 	switch {
 	case in.getenv("CLAUDE_CODE_TMPDIR") != "":
 		v := in.getenv("CLAUDE_CODE_TMPDIR")
 		p.EnvFlags = append(p.EnvFlags, "CLAUDE_CODE_TMPDIR="+v)
+		tmpRoot = v
 		if !underAnyMount(p.Volumes, v) {
 			fmt.Fprintf(in.Out, "Warning: CLAUDE_CODE_TMPDIR=%s is not under any container mount; scratchpad files will be lost when the session exits.\n", v)
 		}
 	case envFilesDefine(in.EnvFiles, "CLAUDE_CODE_TMPDIR"):
 		// The env file supplies it; adding -e would override the file.
 	case dirExists(configDir):
-		p.EnvFlags = append(p.EnvFlags, "CLAUDE_CODE_TMPDIR="+filepath.Join(configDir, "tmp"))
+		tmpRoot = filepath.Join(configDir, "tmp")
+		p.EnvFlags = append(p.EnvFlags, "CLAUDE_CODE_TMPDIR="+tmpRoot)
+	}
+
+	// CS-LNCH-049..052: opt-in bridge for peer discovery and messaging across
+	// containers whose CLAUDE_CONFIG_DIR differs. Resolved AFTER the tmpdir
+	// above because the socket root hangs off it. Default off: with the key
+	// unset this adds nothing and the argv is unchanged.
+	sharedPeers := resolveFlag(nil, in.getenv("CLAUDE_SANDBOX_SHARED_PEER_REGISTRY"), &in.Cfg.SharedPeerRegistry)
+	if sharedPeers {
+		if err := in.assembleSharedPeerRegistry(p, configDir, tmpRoot); err != nil {
+			return nil, err
+		}
 	}
 
 	// CS-SESS-020/021: hash the effective configuration, then record it and the
@@ -301,7 +320,7 @@ func Build(in Inputs) (*Plan, error) {
 	// is joining a container built from the config now on disk.
 	p.ConfigHash, p.ConfigInputs = in.configFingerprint(p, hostAccess{
 		SSH: ssh, Git: git, DockerSocket: dockerSocket, AWS: aws, PackageCaches: packageCaches,
-	})
+	}, sharedPeers)
 
 	// CS-LNCH-032: identity labels. Discovery filters on these rather than
 	// parsing container names, which are lossy.
@@ -546,6 +565,57 @@ func (in *Inputs) assemblePackageCaches(p *Plan) error {
 		p.Volumes = append(p.Volumes, fmt.Sprintf("%s:%s", dir, dir))
 		p.EnvFlags = append(p.EnvFlags, c.env+"="+dir)
 	}
+	return nil
+}
+
+// PeerRegistryRoot is the sandbox-only tree under $HOME that the shared peer
+// registry mounts over the container's <config dir>/sessions and
+// <CLAUDE_CODE_TMPDIR>/cc-socks (CS-LNCH-050/051). Fixed, like
+// PackageCacheRoot: a free-form path could name one tree's own
+// <config dir>/sessions as the shared root, putting other trees' sandboxes
+// into a registry the host's own claude also writes. A dedicated root cannot.
+const PeerRegistryRoot = ".cache/claude-sandbox/peers"
+
+// peerRegistryDirs are the two subdirectories of PeerRegistryRoot: the peer
+// registry itself and the inbox-socket root.
+const (
+	peerSessionsDir = "sessions"
+	peerSocketsDir  = "cc-socks"
+)
+
+// assembleSharedPeerRegistry mounts one shared host directory over the
+// container's peer registry and over its socket root, so containers whose
+// CLAUDE_CONFIG_DIR differs still see one another (CS-LNCH-050).
+//
+// Both mounts are READ-WRITE on purpose: every session writes its own
+// <pid>.json into the registry, and connect() on a unix socket under a
+// read-only bind mount fails with EROFS — a :ro socket root would break
+// exactly the messaging this exists to enable.
+//
+// The directories are created here, before docker run, as the invoking user
+// (CS-LNCH-051), for the same reason as the package caches: docker creates a
+// missing bind source as root and the entrypoint never chowns a mount point.
+func (in *Inputs) assembleSharedPeerRegistry(p *Plan, configDir, tmpRoot string) error {
+	root := filepath.Join(in.Home, PeerRegistryRoot)
+
+	sessions := filepath.Join(root, peerSessionsDir)
+	if err := os.MkdirAll(sessions, 0o755); err != nil {
+		return fmt.Errorf("shared peer registry: creating %s: %w", sessions, err)
+	}
+	p.Volumes = append(p.Volumes, fmt.Sprintf("%s:%s", sessions, filepath.Join(configDir, peerSessionsDir)))
+
+	if tmpRoot == "" {
+		// No config dir, or an env file owns CLAUDE_CODE_TMPDIR — its value is
+		// the consumer's and is not parsed here, so the socket root is unknown.
+		// Discovery is still bridged; messaging is not.
+		fmt.Fprintln(in.Out, "Warning: sharedPeerRegistry: CLAUDE_CODE_TMPDIR is not resolved by the launcher, so the message socket root is not bridged; peers will be listed but not reachable.")
+		return nil
+	}
+	socks := filepath.Join(root, peerSocketsDir)
+	if err := os.MkdirAll(socks, 0o755); err != nil {
+		return fmt.Errorf("shared peer registry: creating %s: %w", socks, err)
+	}
+	p.Volumes = append(p.Volumes, fmt.Sprintf("%s:%s", socks, filepath.Join(tmpRoot, peerSocketsDir)))
 	return nil
 }
 

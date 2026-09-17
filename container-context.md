@@ -41,6 +41,11 @@ one-time setup (idempotent). Use `setup-lsp-plugins --check` to verify status.
   (`~/.claude/sessions/<pid>.json`) is shared through the mounted config dir, so
   `/peers` and `SendMessage` reach sessions in other sandboxes without Remote
   Control. Sessions Claude spawns itself (`--bg`, `/bg`) are not slotted.
+  Discovery reaches only sandboxes that share this session's config directory:
+  the registry and the socket root both live under `CLAUDE_CONFIG_DIR`, so a
+  tree exporting its own does not appear. The `sharedPeerRegistry: true`
+  config key (off by default) bridges that — it mounts one shared host
+  directory over both paths in every opted-in container.
 - **You may be inside a worktree.** Ralph runs by default, and interactive
   sessions launched with `--worktree` (or config `worktree: true`), start
   `claude` with `--worktree <name>`, so your working directory is
