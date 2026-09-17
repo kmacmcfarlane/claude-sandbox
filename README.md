@@ -627,7 +627,9 @@ and not configurable, for the same reason as the package caches: a free-form pat
 tree's own `<config dir>/sessions`, putting other trees' sandboxes into a registry your host's
 own `claude` also writes. Both sides of both mounts are created `0700` (the mode Claude Code
 itself uses), destinations included — a mountpoint Docker creates as root lands on the *host*,
-where a root-owned `~/.claude/tmp/cc-socks` would break every later un-bridged sandbox.
+where a root-owned `~/.claude/tmp/cc-socks` would break every later un-bridged sandbox. A
+destination that exists only inside the container (a `CLAUDE_CODE_TMPDIR` outside every mount)
+is left to Docker, so the launch still succeeds and nothing lands on the host.
 
 Resolution is **tri-state**, like [worktree mode](#worktree-mode):
 `CLAUDE_SANDBOX_SHARED_PEER_REGISTRY` of `1`/`true`/`yes` enables it over an unset or false

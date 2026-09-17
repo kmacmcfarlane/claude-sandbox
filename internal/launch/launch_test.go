@@ -442,7 +442,7 @@ var _ = Describe("launch.Build", func() {
 		})
 	})
 
-	Describe("shared peer registry (CS-LNCH-049..052)", func() {
+	Describe("shared peer registry (CS-LNCH-049..053)", func() {
 		var root, cfgDir string
 		BeforeEach(func() {
 			root = filepath.Join(home, ".cache", "claude-sandbox", "peers")
@@ -547,6 +547,26 @@ var _ = Describe("launch.Build", func() {
 			}
 		})
 
+		It("CS-LNCH-051: leaves a container-only socket root to docker and still launches", func() {
+			enable()
+			env["CLAUDE_CODE_TMPDIR"] = "/var/tmp/container-only"
+			p, err := launch.Build(in)
+			Expect(err).NotTo(HaveOccurred())
+			Expect("/var/tmp/container-only").NotTo(BeADirectory())
+			Expect(p.Volumes).To(ContainElement(
+				filepath.Join(root, "cc-socks") + ":/var/tmp/container-only/cc-socks"))
+		})
+
+		It("CS-LNCH-051: creates no destination when the config dir is absent and unmounted", func() {
+			enable()
+			Expect(os.RemoveAll(cfgDir)).To(Succeed())
+			p, err := launch.Build(in)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfgDir).NotTo(BeADirectory())
+			Expect(p.Volumes).To(ContainElement(
+				filepath.Join(root, "sessions") + ":" + filepath.Join(cfgDir, "sessions")))
+		})
+
 		It("CS-LNCH-052: the env var enables it over an unset or false config", func() {
 			env["CLAUDE_SANDBOX_SHARED_PEER_REGISTRY"] = "1"
 			p := build()
@@ -580,6 +600,16 @@ var _ = Describe("launch.Build", func() {
 			build()
 			Expect(out.String()).To(ContainSubstring("Peer registry: shared (" + root + ")"))
 			Expect(out.String()).To(ContainSubstring("every other opted-in sandbox on this host, and only those"))
+		})
+
+		It("CS-LNCH-053: prints the banner on the degrade path too, with the warning after it", func() {
+			enable()
+			Expect(os.RemoveAll(cfgDir)).To(Succeed())
+			build()
+			banner := strings.Index(out.String(), "Peer registry: shared (")
+			warn := strings.Index(out.String(), "not bridged")
+			Expect(banner).NotTo(Equal(-1))
+			Expect(warn).To(BeNumerically(">", banner), "the warning qualifies the banner")
 		})
 
 		It("CS-LNCH-052: the fingerprint changes with the key", func() {

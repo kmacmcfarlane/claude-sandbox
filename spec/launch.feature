@@ -528,6 +528,16 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     And all four are created 0700, the mode Claude Code itself uses for them
     # 0755 would let any other local user on a multi-user host enumerate every
     # sandbox session's <pid>.json and <pid>.<hash>.key in the shared root.
+    But a DESTINATION is created only when it lies under an existing mount, i.e.
+      when it is a host path docker would otherwise create as root
+    And a destination that exists only inside the container — a CLAUDE_CODE_TMPDIR
+      outside every mount, or <config dir>/sessions when the config dir is absent
+      and therefore not mounted — is left to docker: the launch still succeeds,
+      and nothing is created on the host
+    # Creating those would either fail the launch on a path the host cannot make
+    # (the warning path of CS-LNCH-050 must degrade, not die) or plant a tree
+    # the host was never meant to own — including the config dir itself, which
+    # would flip its existence check for the NEXT launch.
     And the host root is fixed at ~/.cache/claude-sandbox/peers and is not configurable
     # A free-form path would let one tree's <config dir>/sessions be named as
     # the shared root by accident, which would have another tree's sandboxes
@@ -562,3 +572,6 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     Then stdout carries one line naming the shared host root and that /peers and
       SendMessage now reach every other opted-in sandbox on this host, and only those
     And nothing is printed when the bridge is off
+    And the line is printed on the degrade path of CS-LNCH-050 too — a launch
+      whose socket root is unresolved is still bridged for discovery, and the
+      warning that follows qualifies the banner rather than replacing it

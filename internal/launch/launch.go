@@ -304,7 +304,7 @@ func Build(in Inputs) (*Plan, error) {
 		p.EnvFlags = append(p.EnvFlags, "CLAUDE_CODE_TMPDIR="+tmpRoot)
 	}
 
-	// CS-LNCH-049..052: opt-in bridge for peer discovery and messaging across
+	// CS-LNCH-049..053: opt-in bridge for peer discovery and messaging across
 	// containers whose CLAUDE_CONFIG_DIR differs. Resolved AFTER the tmpdir
 	// above because the socket root hangs off it. Default off: with the key
 	// unset this adds nothing and the argv is unchanged.
@@ -622,6 +622,13 @@ const peerDirMode = 0o700
 // creates as root materialises on the HOST and outlives the container, leaving
 // a root-owned ~/.claude/tmp/cc-socks that every later un-bridged sandbox — and
 // the host's own claude — would then fail to write its inbox socket into.
+//
+// That argument holds ONLY for a destination that is a host path behind a bind,
+// so each one is guarded by underAnyMount (CS-LNCH-051). Unguarded, the same
+// call would fail the launch outright on a socket root that exists only inside
+// the container — exactly the path the warning below is here to degrade
+// gracefully — and would create the config dir on the host when it is absent,
+// flipping dirExists for the NEXT launch.
 func (in *Inputs) assembleSharedPeerRegistry(p *Plan, configDir, tmpRoot string) error {
 	root := filepath.Join(in.Home, PeerRegistryRoot)
 
@@ -629,11 +636,20 @@ func (in *Inputs) assembleSharedPeerRegistry(p *Plan, configDir, tmpRoot string)
 	if err := in.mkPeerDir(sessions); err != nil {
 		return err
 	}
+	// Guarded BEFORE the mount is appended: afterwards the destination would
+	// be under a mount by definition — its own.
 	dstSessions := filepath.Join(configDir, peerSessionsDir)
-	if err := in.mkPeerDir(dstSessions); err != nil {
+	if err := in.mkPeerDest(p, dstSessions); err != nil {
 		return err
 	}
 	p.Volumes = append(p.Volumes, fmt.Sprintf("%s:%s", sessions, dstSessions))
+
+	// CS-LNCH-053: the bridge crosses a boundary the operator drew on purpose,
+	// and a workspace-level config key can switch it on for a session that
+	// never asked. Like the Worktree banner, it prints only when the mode is
+	// actually in use — including on the degrade path below, which is still a
+	// bridged launch and still names the shared root.
+	fmt.Fprintf(in.Out, "Peer registry: shared (%s) - /peers and SendMessage reach every other opted-in sandbox on this host, and only those.\n", root)
 
 	if tmpRoot == "" {
 		// No config dir, or an env file owns CLAUDE_CODE_TMPDIR — its value is
@@ -647,17 +663,23 @@ func (in *Inputs) assembleSharedPeerRegistry(p *Plan, configDir, tmpRoot string)
 		return err
 	}
 	dstSocks := filepath.Join(tmpRoot, peerSocketsDir)
-	if err := in.mkPeerDir(dstSocks); err != nil {
+	if err := in.mkPeerDest(p, dstSocks); err != nil {
 		return err
 	}
 	p.Volumes = append(p.Volumes, fmt.Sprintf("%s:%s", socks, dstSocks))
-
-	// CS-LNCH-053: the bridge crosses a boundary the operator drew on purpose,
-	// and a workspace-level config key can switch it on for a session that
-	// never asked. Like the Worktree banner, it prints only when the mode is
-	// actually in use.
-	fmt.Fprintf(in.Out, "Peer registry: shared (%s) - /peers and SendMessage reach every other opted-in sandbox on this host, and only those.\n", root)
 	return nil
+}
+
+// mkPeerDest creates a mount DESTINATION, but only when it is a host path
+// behind an existing bind — the one case where docker would otherwise create
+// it as root on the host. A container-only path is left to docker: creating it
+// here would either fail the launch or plant a directory tree on the host that
+// the host was never meant to own.
+func (in *Inputs) mkPeerDest(p *Plan, dst string) error {
+	if !underAnyMount(p.Volumes, dst) {
+		return nil
+	}
+	return in.mkPeerDir(dst)
 }
 
 // mkPeerDir creates one side of a peer-registry mount as the invoking user.
