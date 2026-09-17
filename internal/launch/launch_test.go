@@ -557,6 +557,21 @@ var _ = Describe("launch.Build", func() {
 				filepath.Join(root, "cc-socks") + ":/var/tmp/container-only/cc-socks"))
 		})
 
+		It("CS-LNCH-051: creates no destination under a mount whose host and container differ", func() {
+			enable()
+			hostSide := filepath.Join(home, "srv-data")
+			in.Cfg.Mounts = []cascade.Mount{{Host: hostSide, Container: "/data", Writable: true}}
+			env["CLAUDE_CODE_TMPDIR"] = "/data/tmp"
+			p, err := launch.Build(in)
+			Expect(err).NotTo(HaveOccurred())
+			// /data is a container path; nothing may be created under it, or
+			// under the host side it maps to, on the host.
+			Expect("/data").NotTo(BeADirectory())
+			Expect(filepath.Join(hostSide, "tmp")).NotTo(BeADirectory())
+			Expect(p.Volumes).To(ContainElement(
+				filepath.Join(root, "cc-socks") + ":/data/tmp/cc-socks"))
+		})
+
 		It("CS-LNCH-051: creates no destination when the config dir is absent and unmounted", func() {
 			enable()
 			Expect(os.RemoveAll(cfgDir)).To(Succeed())

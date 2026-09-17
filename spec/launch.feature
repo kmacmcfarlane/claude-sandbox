@@ -528,12 +528,16 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     And all four are created 0700, the mode Claude Code itself uses for them
     # 0755 would let any other local user on a multi-user host enumerate every
     # sandbox session's <pid>.json and <pid>.<hash>.key in the shared root.
-    But a DESTINATION is created only when it lies under an existing mount, i.e.
-      when it is a host path docker would otherwise create as root
-    And a destination that exists only inside the container — a CLAUDE_CODE_TMPDIR
-      outside every mount, or <config dir>/sessions when the config dir is absent
-      and therefore not mounted — is left to docker: the launch still succeeds,
-      and nothing is created on the host
+    But a DESTINATION is created only when it lies under a SAME-PATH mount, the
+      only case in which a container path is also a meaningful host path and so
+      the one docker would otherwise create as root on the host
+    # Merely lying under some mount is not enough: a cascade `mounts:` entry may
+    # set host != container (CS-LNCH-021), and a container path under it names
+    # nothing on the host.
+    And every other destination — a CLAUDE_CODE_TMPDIR outside every mount or
+      under a non-same-path one, or <config dir>/sessions when the config dir is
+      absent and therefore not mounted — is left to docker: the launch still
+      succeeds, and nothing is created on the host
     # Creating those would either fail the launch on a path the host cannot make
     # (the warning path of CS-LNCH-050 must degrade, not die) or plant a tree
     # the host was never meant to own — including the config dir itself, which

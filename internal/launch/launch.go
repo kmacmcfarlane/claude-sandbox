@@ -672,11 +672,20 @@ func (in *Inputs) assembleSharedPeerRegistry(p *Plan, configDir, tmpRoot string)
 
 // mkPeerDest creates a mount DESTINATION, but only when it is a host path
 // behind an existing bind — the one case where docker would otherwise create
-// it as root on the host. A container-only path is left to docker: creating it
-// here would either fail the launch or plant a directory tree on the host that
-// the host was never meant to own.
+// it as root on the host. Anything else is left to docker: creating it here
+// would either fail the launch or plant a directory tree on the host that the
+// host was never meant to own.
+//
+// The predicate is deliberately underSamePathMount, not underAnyMount. dst is
+// a CONTAINER path, and mkPeerDir creates it on the HOST; the two are the same
+// path only under a same-path mount. A cascade `mounts:` entry may set host !=
+// container (CS-LNCH-021), and then a container path like /data/tmp/cc-socks
+// would be created under a host /data that means nothing here — failing the
+// launch on a permission error instead of degrading. The registry and socket
+// destinations sit under the config dir's own <cfg>:<cfg> mount, so the normal
+// path is unaffected.
 func (in *Inputs) mkPeerDest(p *Plan, dst string) error {
-	if !underAnyMount(p.Volumes, dst) {
+	if !underSamePathMount(p.Volumes, dst) {
 		return nil
 	}
 	return in.mkPeerDir(dst)
@@ -798,6 +807,26 @@ func underAnyMount(volumes []string, path string) bool {
 	for _, v := range volumes {
 		parts := strings.Split(v, ":")
 		if len(parts) < 2 {
+			continue
+		}
+		dst := filepath.Clean(parts[1])
+		if path == dst || strings.HasPrefix(path, dst+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// underSamePathMount reports whether path lies inside (or at) a mount whose
+// host and container sides are the SAME path — the only case in which a
+// container path is also a meaningful host path. underAnyMount answers a
+// different question (is this visible in the container at all) and must not be
+// substituted for it when the answer is used to create something on the host.
+func underSamePathMount(volumes []string, path string) bool {
+	path = filepath.Clean(path)
+	for _, v := range volumes {
+		parts := strings.Split(v, ":")
+		if len(parts) < 2 || filepath.Clean(parts[0]) != filepath.Clean(parts[1]) {
 			continue
 		}
 		dst := filepath.Clean(parts[1])
