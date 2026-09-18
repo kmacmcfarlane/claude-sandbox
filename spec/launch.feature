@@ -1,7 +1,7 @@
 Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
   The default (no-subcommand) invocation builds images as needed, assembles
   the container invocation, reserves the container with "docker create" under
-  the host launch lock, and execs "docker start -ai" on it (CS-LNCH-056,
+  the host launch lock, and execs "docker start -ai" on it (CS-LNCH-057,
   CS-SESS-048). Tests assert on the constructed docker argv via the injected
   command runner.
   Go home: internal/launch, cmd/claude-sandbox.
@@ -350,7 +350,7 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     Then docker start receives --detach-keys with the resolved sequence
     And docker create does not
     # The keys belong to the client that attaches, and that is "docker start
-    # -ai" now; "docker create" attaches nothing (CS-LNCH-056).
+    # -ai" now; "docker create" attaches nothing (CS-LNCH-057).
     And the sequence defaults to "ctrl-q,ctrl-q"
     And the detachKeys config key overrides it
 
@@ -681,7 +681,7 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
 
   # ---- reserve, then attach ----
 
-  Scenario: CS-LNCH-056 Every new container is created, then started attached
+  Scenario: CS-LNCH-057 Every new container is created, then started attached
     # Interactive, ralph, --branch and the tier-1 [b] fork alike. The single
     # "docker run" is split so the container NAME (and with it the instance
     # noun and pid class) is reserved atomically by "docker create" while the

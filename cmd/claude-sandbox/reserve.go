@@ -1,6 +1,6 @@
 package main
 
-// Race-free launch reservation (CS-SESS-048..054, CS-LNCH-056). The instance
+// Race-free launch reservation (CS-SESS-048..054, CS-LNCH-057). The instance
 // noun and the pid class are chosen from what discovery sees, and a container
 // becomes visible to discovery only once it exists. So the choice and the
 // "docker create" that makes it visible run inside one short, host-wide
@@ -148,7 +148,10 @@ func reserveContainer(env *Env, in launch.Inputs, wt worktreeChoice, ralph bool)
 				fmt.Fprintf(env.Err, "Removed %s: an earlier launch created it but it never started.\n", plan.ContainerName)
 				continue
 			}
-			return nil, exitErr(2, "Error: a ralph container (%s) already exists for this project; stop it or wait for it to finish.", plan.ContainerName)
+			return nil, exitErr(2, "Error: a ralph container (%s) already exists for this project. "+
+				"If it is running, stop it or wait for it to finish; if a ralph launch just failed to start, "+
+				"its never-started container is reclaimed automatically once it is %s old, so retry in a few seconds.",
+				plan.ContainerName, minReclaimAge)
 		}
 		if attempt >= maxCreateAttempts {
 			return nil, exitErr(2, "Error: container name %s is already in use; gave up after %d attempts to reserve a free instance name.", plan.ContainerName, attempt)
@@ -193,7 +196,7 @@ func pidClassFrom(found []sessions.Session) string {
 
 // startReserved hands the process over to "docker start -ai". Exec returns only
 // on failure, and the reservation would then sit as an orphan until the next
-// launch's stale cleanup, so it is removed here first (CS-LNCH-056).
+// launch's stale cleanup, so it is removed here first (CS-LNCH-057).
 func startReserved(env *Env, plan *launch.Plan) error {
 	err := plan.Start(env.Runner)
 	if err != nil {

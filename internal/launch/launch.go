@@ -1,6 +1,6 @@
 // Package launch assembles the container invocation: mounts, shadow-file
 // injections, host-access resolution, the container command, and the
-// create-then-start hand-off (CS-LNCH-056).
+// create-then-start hand-off (CS-LNCH-057).
 // Spec: spec/launch.feature (CS-LNCH).
 package launch
 
@@ -357,7 +357,7 @@ func Build(in Inputs) (*Plan, error) {
 // CreateArgs renders the plan as the "docker create" argv: every flag the old
 // single "docker run" carried — -it, --rm, --init, mounts, env, labels, the
 // name, the image and the command — minus the detach keys, which belong to
-// the client that attaches (StartArgs). CS-LNCH-056.
+// the client that attaches (StartArgs). CS-LNCH-057.
 func (p *Plan) CreateArgs(workdir string) []string {
 	args := []string{"create", "-it", "--rm", "--init"}
 	for _, v := range p.Volumes {
@@ -419,7 +419,7 @@ func (e *CreateError) Unwrap() error {
 	return nil
 }
 
-// Reserve creates the container without starting it (CS-LNCH-056). The name,
+// Reserve creates the container without starting it (CS-LNCH-057). The name,
 // and with it the instance noun and pid class on its labels, is taken
 // atomically: docker refuses a second create with the same name. Anything
 // docker prints on success (kernel capability warnings) is forwarded to warn.
@@ -450,7 +450,7 @@ func isNameConflict(stderr string) bool {
 		(strings.Contains(stderr, "The container name") && strings.Contains(stderr, "is already in use"))
 }
 
-// Start hands the process over to "docker start -ai" (CS-LNCH-056), whose exit
+// Start hands the process over to "docker start -ai" (CS-LNCH-057), whose exit
 // code is the container's. It returns only if the exec itself failed.
 func (p *Plan) Start(r execx.Runner) error {
 	return r.Exec(execx.Cmd{Name: "docker", Args: p.StartArgs()})

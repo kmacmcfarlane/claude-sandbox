@@ -110,7 +110,7 @@ func (f *cliFixture) execLine() string {
 }
 
 // launched returns the last "docker create" — the reserved container, carrying
-// every flag, mount, env var and label of the launch (CS-LNCH-056).
+// every flag, mount, env var and label of the launch (CS-LNCH-057).
 func (f *cliFixture) launched() *execx.Cmd {
 	for i := len(f.fake.Calls) - 1; i >= 0; i-- {
 		c := f.fake.Calls[i]

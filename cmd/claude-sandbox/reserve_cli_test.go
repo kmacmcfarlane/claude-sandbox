@@ -1,7 +1,7 @@
 package main
 
 // Spec: spec/sessions.feature (CS-SESS-048..054) and spec/launch.feature
-// (CS-LNCH-056) — every new container is reserved with docker create inside
+// (CS-LNCH-057) — every new container is reserved with docker create inside
 // the host launch lock, then started with docker start -ai. The fixture's
 // fakeLock records where in the fake runner's call log the lock was taken and
 // released, so these tests assert what ran inside the critical section.
@@ -66,11 +66,11 @@ func createCount(f *cliFixture) int {
 	return n
 }
 
-var _ = Describe("launch reservation (CS-SESS-048..054, CS-LNCH-056)", func() {
+var _ = Describe("launch reservation (CS-SESS-048..054, CS-LNCH-057)", func() {
 	var f *cliFixture
 	BeforeEach(func() { f = newCLIFixture() })
 
-	It("CS-LNCH-056, CS-SESS-048: discovery, pick and create run under the lock; start is exec'd after release", func() {
+	It("CS-LNCH-057, CS-SESS-048: discovery, pick and create run under the lock; start is exec'd after release", func() {
 		Expect(f.run()).To(Equal(0), f.errw.String())
 
 		held := f.lock.held()
@@ -88,7 +88,7 @@ var _ = Describe("launch reservation (CS-SESS-048..054, CS-LNCH-056)", func() {
 		Expect(f.execLine()).To(Equal("docker start -ai --detach-keys=ctrl-q,ctrl-q " + name))
 	})
 
-	It("CS-LNCH-056: ralph, --branch and the [b] fork are reserved and started the same way", func() {
+	It("CS-LNCH-057: ralph, --branch and the [b] fork are reserved and started the same way", func() {
 		cases := []struct {
 			args []string
 			tty  []string
@@ -108,7 +108,7 @@ var _ = Describe("launch reservation (CS-SESS-048..054, CS-LNCH-056)", func() {
 		}
 	})
 
-	It("CS-LNCH-056: a failed start exec removes the reservation before reporting", func() {
+	It("CS-LNCH-057: a failed start exec removes the reservation before reporting", func() {
 		g := newCLIFixture()
 		failing := &execFailRunner{Fake: g.fake}
 		g.env.Runner = failing
@@ -287,6 +287,9 @@ var _ = Describe("launch reservation (CS-SESS-048..054, CS-LNCH-056)", func() {
 		Expect(f.fake.CommandLines()).NotTo(ContainElement(HavePrefix("docker rm ")))
 		Expect(f.errw.String()).To(ContainSubstring("a ralph container"))
 		Expect(f.errw.String()).To(ContainSubstring("already exists for this project"))
+		// The message also covers the caller's own failed start, which is
+		// not running and clears by itself.
+		Expect(f.errw.String()).To(ContainSubstring("reclaimed automatically once it is 10s old"))
 
 		// An unreadable creation time is treated as young, never as old.
 		g := newCLIFixture()

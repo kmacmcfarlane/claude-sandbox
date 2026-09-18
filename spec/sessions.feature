@@ -387,7 +387,7 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
     # All three resolve through one helper so they cannot disagree.
     Then --detach-keys is passed to each of:
       | path         | session                                  |
-      | docker start | the primary session of a new container (never docker create, CS-LNCH-056) |
+      | docker start | the primary session of a new container (never docker create, CS-LNCH-057) |
       | docker attach| a reattached session                      |
       | docker exec  | a joined session                          |
     And all three use the same resolved sequence
@@ -453,7 +453,7 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
   # name — or the same pid class, which silently overwrote a peer-registry
   # record (~/.claude/sessions/<pid>.json). Every new container is therefore
   # RESERVED with "docker create" inside a short host-wide critical section,
-  # then started (CS-LNCH-056).
+  # then started (CS-LNCH-057).
 
   Scenario: CS-SESS-048 Nouns and classes are reserved under a host launch lock
     When a new container is launched (interactive, ralph, --branch or the [b] fork)
@@ -526,14 +526,16 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
       picked, and "docker create" is retried
     And after 3 attempts the launch fails with exit 2 and an error naming the conflict
     And a ralph launch, whose name is fixed, fails on the first conflict with an
-      error saying a ralph container already exists for this project
+      error saying a ralph container already exists for this project, and that
+      one which never started clears on its own after 10 seconds
     But when the ralph container holding the name is in the "created" state (a
       reservation whose "docker start" failed after the exec, which the launcher
       can no longer clean up) AND was created more than 10 seconds ago, it is
       removed and the create retried once
     And a younger "created" holder is never removed: the lock is released
       before the exec of "docker start", so it may be a concurrent launch about
-      to start; that launch fails with the "already exists" error instead
+      to start. The launch attempting the reclaim fails with the "already
+      exists" error instead, and the holder is left untouched
     # Read with "docker inspect --type container -f '{{.State.Status}} {{.Created}}'";
     # {{.Created}} is RFC 3339 with nanoseconds, not the docker ps layout.
     And a "Conflicting options" error is not a name conflict

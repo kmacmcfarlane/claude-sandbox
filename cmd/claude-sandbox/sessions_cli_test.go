@@ -183,7 +183,7 @@ var _ = Describe("sessions (CS-SESS)", func() {
 			running()
 			Expect(f.run()).To(Equal(0))
 			byPath["start"] = f.execLine()
-			// CS-LNCH-056: the keys belong to the attaching client, never to create.
+			// CS-LNCH-057: the keys belong to the attaching client, never to create.
 			Expect(f.launchLine()).NotTo(ContainSubstring("--detach-keys"))
 
 			for _, choice := range []string{"a", "j"} {

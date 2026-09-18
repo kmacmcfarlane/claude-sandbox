@@ -972,14 +972,15 @@ steps (`--rm` never fires for a container that never started); the next launch r
 with `docker rm` under the lock. If `docker create` still reports a name `Conflict` — something
 that does not take the lock got there first — the launcher re-picks and retries, up to three
 attempts, then fails with a clear error. A ralph launch, whose name is fixed, fails on the
-first conflict — unless the container holding the name is itself a `created` reservation
+first conflict (the error says to stop the running one, or to retry in a few seconds when it is
+the never-started leftover of a ralph launch that just failed) — unless the container holding the name is itself a `created` reservation
 more than 10 seconds old that never started (its `docker start` failed after the launcher had exec'd it, e.g. no TTY or
 a mount error); that one is removed and the create retried once. Only docker's name conflict
 (`Conflict. The container name … is already in use`) counts; `Conflicting options` flag errors
 are reported as they are. If the lock cannot be taken within 30 seconds, the launcher warns and
 launches without it: names stay unique (docker refuses a duplicate), but pid classes are then
 unprotected, so a launch at the same moment may get the same class.
-Spec: `spec/sessions.feature` CS-SESS-048..054, `spec/launch.feature` CS-LNCH-056.
+Spec: `spec/sessions.feature` CS-SESS-048..054, `spec/launch.feature` CS-LNCH-057.
 
 ### Image layering
 

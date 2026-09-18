@@ -42,7 +42,7 @@ func newInitCLI(vars map[string]string) *initCLI {
 	return c
 }
 
-// launched returns the reserving docker create (CS-LNCH-056).
+// launched returns the reserving docker create (CS-LNCH-057).
 func (c *initCLI) launched() *execx.Cmd {
 	f := &cliFixture{fake: c.fake, errw: &bytes.Buffer{}}
 	return f.launched()

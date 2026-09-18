@@ -986,7 +986,7 @@ var _ = Describe("launch.Build", func() {
 		Expect(build().DetachKeys).To(Equal(launch.DefaultDetachKeys))
 	})
 
-	It("CS-LNCH-029, CS-LNCH-056: create leads with -it --rm --init; start is -ai with the keys and the name", func() {
+	It("CS-LNCH-029, CS-LNCH-057: create leads with -it --rm --init; start is -ai with the keys and the name", func() {
 		p := build()
 		args := p.CreateArgs(proj)
 		Expect(args[0:4]).To(Equal([]string{"create", "-it", "--rm", "--init"}))
@@ -994,7 +994,7 @@ var _ = Describe("launch.Build", func() {
 		Expect(p.StartArgs()).To(Equal([]string{"start", "-ai", "--detach-keys=ctrl-q,ctrl-q", p.ContainerName}))
 	})
 
-	Describe("CS-LNCH-056: reserve, then start", func() {
+	Describe("CS-LNCH-057: reserve, then start", func() {
 		It("reserves with docker create and hands off to docker start -ai", func() {
 			fake := &execx.Fake{}
 			p := build()
