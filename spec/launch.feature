@@ -258,10 +258,32 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     Then stdout lists each level root-first with its contributing files
     And Dockerfile lines are annotated "(nearest wins)"
 
-  Scenario: CS-LNCH-025 Missing env cascade warns and suggests init
+  @changed
+  Scenario: CS-LNCH-025 Missing env cascade warns and says where an env belongs
+    # Earlier wording: suggested "claude-sandbox init" as the way to create
+    # .claude-sandbox/env. init now seeds only env.example (CS-INIT-004).
     Given no .claude-sandbox/env exists in the project or any parent
-    Then a warning explains the file's purpose and suggests "claude-sandbox init"
+    And the project has no .claude-sandbox/env.example
+    Then a warning explains the file's purpose
+    And it says to create .claude-sandbox/env in a parent (workspace) directory for
+      shared values or in the project for a project-only override, and names
+      "claude-sandbox init" as the way to seed env.example to copy from
     And the launch proceeds with no --env-file flags
+
+  @new
+  Scenario: CS-LNCH-056 A project with only env.example gets a one-line note, not a warning
+    # A freshly init'd project has env.example and, without a workspace env,
+    # no env anywhere. Warning on every launch would nag about the state init
+    # itself produced.
+    Given no .claude-sandbox/env exists in the project or any parent
+    And the project's own .claude-sandbox/env.example exists
+    Then stderr carries exactly one line more than a launch with a clean project env:
+      a "Note:" (no "WARNING") saying no env file is in the cascade and
+      env.example is a template that is not read
+    And an env.example in a parent directory only does not count — a stray
+      ~/.claude-sandbox/env.example must not turn the warning into a note for
+      every project under $HOME
+    And the launch proceeds with no --env-file flags — env.example is never passed
 
   # ---- container command & runtime env ----
 

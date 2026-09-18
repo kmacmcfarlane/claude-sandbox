@@ -104,6 +104,17 @@ Feature: Config cascade and env stacking (CS-CASC)
       | /ws/.claude-sandbox/env   |
       | /ws/p/.claude-sandbox/env |
 
+  @new
+  Scenario: CS-CASC-030 env.example is a template, never an env file
+    # init seeds .claude-sandbox/env.example (CS-INIT-004). Only a file named
+    # exactly "env" is part of the env cascade.
+    Given /ws/.claude-sandbox/env contains "TOKEN=upstream"
+    And /ws/p/.claude-sandbox/env.example contains "TOKEN=example"
+    And /ws/p/.claude-sandbox/env does not exist
+    When the launcher assembles docker arguments in /ws/p
+    Then the only --env-file flag is /ws/.claude-sandbox/env, so TOKEN=upstream reaches the container
+    And env.example is not linted and not listed in the cascade report
+
   Scenario: CS-CASC-011 Mount entries must define host and container
     Given a merged config with a mount missing "container"
     When the launcher validates mounts
@@ -190,3 +201,141 @@ Feature: Config cascade and env stacking (CS-CASC)
     When the launcher assembles docker arguments
     Then warnings are printed to stderr for both files
     And the launch proceeds — linting never blocks or rewrites the files
+
+  # ---- env override notice ----
+  # Env files stack root-first and the later file wins (CS-CASC-010). That
+  # precedence is correct but was silent: a stale project env that defines a
+  # key shadows every upstream edit to it, and a refreshed upstream token
+  # "never takes effect". The launcher names the overridden keys at startup.
+  # Env files hold secrets, so the notice carries key NAMES only, never values.
+  # Keys are read by the env-file reader the linter shares, which follows
+  # docker's --env-file parsing: a UTF-8 BOM on the first line is dropped,
+  # leading whitespace is trimmed, blank and '#' comment lines are skipped,
+  # and the key runs to the first '='. A line ending in CRLF never carries
+  # the '\r' into a key name: docker's line scanner drops it, so a bare
+  # "KEY\r" is key KEY (an assignment's '\r' stays on the VALUE, where the
+  # CS-CASC-016 linter reports it). A bare KEY line (no '=') is docker's
+  # pass-through of the launcher's own environment, so it defines KEY exactly
+  # when the launcher's environment has KEY set (CS-CASC-027/028). Lines
+  # docker rejects (an empty key, a key containing a blank) are never named.
+  # A key assigned twice in the SAME file is not a cross-file override and is
+  # not reported.
+  # Informational, printed to stdout beside the cascade report; never blocks.
+
+  Scenario: CS-CASC-021 A key defined upstream and in the project env is named once
+    Given env files, root-first:
+      | level | content          |
+      | /ws   | GITLAB_TOKEN=new |
+      | /ws/p | GITLAB_TOKEN=old |
+    When the launcher prints the cascade
+    Then exactly one line is printed:
+      """
+      Env override: GITLAB_TOKEN in /ws/p/.claude-sandbox/env overrides /ws/.claude-sandbox/env
+      """
+
+  Scenario: CS-CASC-022 Several overridden keys share one line per winning file
+    Given env files, root-first:
+      | level | content                 |
+      | /ws   | FOO=1, BAR=2, ONLY_UP=3 |
+      | /ws/p | BAR=4, FOO=5, ONLY_P=6  |
+    When the launcher prints the cascade
+    Then exactly one line is printed:
+      """
+      Env override: BAR, FOO in /ws/p/.claude-sandbox/env overrides /ws/.claude-sandbox/env
+      """
+    # Keys are listed in the winning file's order; keys defined in only one
+    # file are not named.
+
+  Scenario: CS-CASC-023 Three or more levels: one line per winning file
+    Given env files, root-first:
+      | level   | content  |
+      | /ws     | A=1, B=1 |
+      | /ws/p   | A=2, C=2 |
+      | /ws/p/q | A=3, C=3 |
+    When the launcher prints the cascade
+    Then exactly one line is printed:
+      """
+      Env override: A in /ws/p/q/.claude-sandbox/env overrides /ws/p/.claude-sandbox/env, /ws/.claude-sandbox/env; C in /ws/p/q/.claude-sandbox/env overrides /ws/p/.claude-sandbox/env
+      """
+    # A key is attributed to the MOST-LOCAL file that defines it (the one
+    # docker uses). Provenance is exact per key: keys that override the same
+    # set of files share a segment ("A, C in … overrides …"), files listed
+    # nearest-first; keys with different sets get separate segments joined
+    # by "; " on the same line. Each file that wins at least one key gets its
+    # own line, most-local first — e.g. if /ws/p alone also overrode B, a
+    # second line "Env override: B in /ws/p/... overrides /ws/..." follows.
+
+  Scenario: CS-CASC-024 Nothing is printed when no key is defined in two files
+    Given env files, root-first:
+      | level | content                       |
+      | /ws   | FOO=1                         |
+      | /ws/p | BAR=2, # FOO=3, FOO           |
+    And the launcher's environment does not set FOO
+    When the launcher prints the cascade
+    Then no env override line is printed
+    # Commented-out lines never count; a bare FOO line counts only when the
+    # launcher's environment sets FOO (CS-CASC-027/028).
+
+  Scenario: CS-CASC-025 The notice never contains a value
+    Given env files, root-first:
+      | level | content              |
+      | /ws   | SECRET=upstream-val  |
+      | /ws/p | SECRET=local-val     |
+    When the launcher prints the cascade
+    Then the output names SECRET
+    And the output contains neither "upstream-val" nor "local-val"
+
+  Scenario Outline: CS-CASC-026 Indented and BOM-prefixed keys are read as docker reads them
+    Given an upstream env file containing "GITLAB_TOKEN=new"
+    And a project env file whose only line is <line>
+    When the launcher prints the cascade
+    Then the line "Env override: GITLAB_TOKEN in /ws/p/.claude-sandbox/env overrides /ws/.claude-sandbox/env" is printed
+    Examples:
+      | line                                | why                                   |
+      | "  GITLAB_TOKEN=stale"              | leading blanks are trimmed            |
+      | "\tGITLAB_TOKEN=stale"              | a leading tab is trimmed              |
+      | "\xEF\xBB\xBFGITLAB_TOKEN=stale"     | a UTF-8 BOM on line 1 is dropped      |
+      | "GITLAB_TOKEN=stale\r"              | a CRLF ending stays out of the key    |
+    # The linter shares the reader: an indented quoted value
+    # ("  KEY=\"x\"") is reported under key KEY, and an indented
+    # "  # KEY=\"x\"" is a comment, as docker treats it.
+
+  Scenario Outline: CS-CASC-027 A bare key overrides when the launcher's environment sets it
+    Given an upstream env file containing "GITLAB_TOKEN=new"
+    And a project env file whose only line is <line>
+    And the launcher's environment sets GITLAB_TOKEN
+    When the launcher prints the cascade
+    Then exactly one line is printed:
+      """
+      Env override: GITLAB_TOKEN in /ws/p/.claude-sandbox/env overrides /ws/.claude-sandbox/env
+      """
+    Examples:
+      | line                | why                                          |
+      | "GITLAB_TOKEN\n"    | LF line ending                               |
+      | "GITLAB_TOKEN\r\n"  | CRLF line ending: the '\r' is not in the key |
+      | "GITLAB_TOKEN\r"    | a trailing '\r' with no final newline        |
+    # docker substitutes the launcher's value for the bare line, which beats
+    # the upstream assignment. Set-but-empty counts as set (docker passes
+    # GITLAB_TOKEN= through). The host value is never printed. Verified on
+    # Docker 29.8.0: a bare "CRB\r" line resolved CRB from the launcher's
+    # environment and won over an upstream CRB=up.
+
+  Scenario: CS-CASC-028 A bare key is not a definition when the launcher's environment lacks it
+    Given env files, root-first:
+      | level | content          |
+      | /ws   | GITLAB_TOKEN=new |
+      | /ws/p | GITLAB_TOKEN     |
+    And the launcher's environment does not set GITLAB_TOKEN
+    When the launcher prints the cascade
+    Then no env override line is printed
+    # docker drops a bare key it cannot resolve; the upstream value applies.
+
+  Scenario: CS-CASC-029 Keys docker rejects are never named
+    Given env files, root-first:
+      | level | content          |
+      | /ws   | =x, BAD KEY=1    |
+      | /ws/p | =y, BAD KEY=2    |
+    When the launcher prints the cascade
+    Then no env override line is printed
+    # docker refuses such a file outright ("no variable name", "variable
+    # contains whitespaces"); the notice names only keys docker would set.

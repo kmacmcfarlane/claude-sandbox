@@ -8,7 +8,8 @@ Feature: init-ralph subcommand (CS-INITR)
   Scenario: CS-INITR-001 init-ralph performs the full init first
     Given a greenfield project
     When "claude-sandbox init-ralph --no-track-in-host" is run
-    Then config.yaml, env, and Dockerfile.example are seeded exactly as by init
+    Then config.yaml, env.example, and Dockerfile.example are seeded exactly as by init
+    And no .claude-sandbox/env is created (CS-INIT-030)
     And it accepts the same option flags as init
 
   Scenario: CS-INITR-002 The ralph scaffold tree is seeded under .claude-sandbox/

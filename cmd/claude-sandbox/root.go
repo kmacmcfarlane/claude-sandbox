@@ -33,6 +33,11 @@ type Env struct {
 	Out      io.Writer
 	Err      io.Writer
 	Getenv   func(string) string
+	// LookupEnv tells set-but-empty from unset (the env override notice
+	// resolves bare env-file keys with it, CS-CASC-027). defaultEnv wires
+	// os.LookupEnv. Nil falls back to Getenv, which cannot see set-but-empty
+	// (it reads as unset); only test Envs that never launch leave it nil.
+	LookupEnv func(string) (string, bool)
 
 	// PidslotOps overrides the pidslot helper's process seams under test.
 	PidslotOps *pidslot.Ops
@@ -45,13 +50,23 @@ type Env struct {
 	Now func() time.Time
 }
 
+// lookupEnv is Env.LookupEnv with the Getenv fallback.
+func (e *Env) lookupEnv(k string) (string, bool) {
+	if e.LookupEnv != nil {
+		return e.LookupEnv(k)
+	}
+	v := e.Getenv(k)
+	return v, v != ""
+}
+
 func defaultEnv() *Env {
 	return &Env{
-		Runner:   execx.System{},
-		Prompter: &prompt.TTY{},
-		Out:      os.Stdout,
-		Err:      os.Stderr,
-		Getenv:   os.Getenv,
+		Runner:    execx.System{},
+		Prompter:  &prompt.TTY{},
+		Out:       os.Stdout,
+		Err:       os.Stderr,
+		Getenv:    os.Getenv,
+		LookupEnv: os.LookupEnv,
 	}
 }
 
@@ -628,6 +643,8 @@ func runLaunch(env *Env, args []string) error {
 		return err
 	}
 	cascade.PrintReport(env.Out, projectDir)
+	// Name env keys a more-local file shadows — names only (CS-CASC-021..029).
+	cascade.PrintEnvOverrides(env.Out, envFiles, env.lookupEnv)
 	cfg, err := cascade.Load(configFiles)
 	if err != nil {
 		return err
@@ -636,11 +653,7 @@ func runLaunch(env *Env, args []string) error {
 		return err
 	}
 	if len(envFiles) == 0 {
-		fmt.Fprintf(env.Err, "WARNING: env file not found (.claude-sandbox/env) in %s or any parent\n\n", projectDir)
-		fmt.Fprintf(env.Err, "This file provides environment variables needed by Claude Code\n")
-		fmt.Fprintf(env.Err, "(e.g. DISCORD_WEBHOOK_URL for MCP server notifications).\n\n")
-		fmt.Fprintf(env.Err, "To create it, bootstrap the project and fill in your values:\n")
-		fmt.Fprintf(env.Err, "  claude-sandbox init   # creates .claude-sandbox/env (and config)\n")
+		warnNoEnv(env.Err, projectDir)
 	} else {
 		// Warn-only lint of every cascade level (CS-CASC-020).
 		cascade.LintEnvFiles(env.Err, envFiles)
@@ -882,4 +895,28 @@ func newRalphCmd(env *Env) *cobra.Command {
 	fl.IntVar(&o.QuotaMaxWait, "quota-max-wait", 18000, "Max seconds to wait for quota reset")
 	fl.MarkHidden("dangerously-skip-permissions")
 	return cmd
+}
+
+// warnNoEnv reports an env cascade with no .claude-sandbox/env at any level.
+// When the project's own env.example exists (what init seeds) it is one Note
+// line, since the state is the one init produced (CS-LNCH-056); otherwise the
+// full warning (CS-LNCH-025). Only the project level counts: a stray
+// ~/.claude-sandbox/env.example must not soften the warning for every project
+// under $HOME. env.example itself is never read (CS-CASC-030).
+func warnNoEnv(w io.Writer, projectDir string) {
+	if ex := filepath.Join(paths.SandboxDir(projectDir), paths.EnvExampleName); isRegularFile(ex) {
+		fmt.Fprintf(w, "Note: no .claude-sandbox/env in the cascade; %s is a template and is not read.\n", ex)
+		return
+	}
+	fmt.Fprintf(w, "WARNING: env file not found (.claude-sandbox/env) in %s or any parent\n\n", projectDir)
+	fmt.Fprintf(w, "This file provides environment variables needed by Claude Code\n")
+	fmt.Fprintf(w, "(e.g. DISCORD_WEBHOOK_URL for MCP server notifications).\n\n")
+	fmt.Fprintf(w, "Create .claude-sandbox/env in a parent (workspace) directory for values shared\n")
+	fmt.Fprintf(w, "by every project below it, or in this project for a project-only override.\n")
+	fmt.Fprintf(w, "  claude-sandbox init   # seeds .claude-sandbox/env.example to copy from\n")
+}
+
+func isRegularFile(p string) bool {
+	fi, err := os.Stat(p)
+	return err == nil && fi.Mode().IsRegular()
 }

@@ -90,7 +90,10 @@ func newCLIFixture() *cliFixture {
 		Out:      f.out,
 		Err:      f.errw,
 		Getenv:   func(k string) string { return f.envmap[k] },
-		Lock:     f.lock,
+		// LookupEnv mirrors os.LookupEnv over envmap, so a key mapped to ""
+		// is set-but-empty rather than unset (CS-CASC-027).
+		LookupEnv: func(k string) (string, bool) { v, ok := f.envmap[k]; return v, ok },
+		Lock:      f.lock,
 	}
 	return f
 }
@@ -293,11 +296,52 @@ var _ = Describe("launcher CLI (end-to-end argv)", func() {
 		Expect(f.launched().Args).To(ContainElements("--env-file", filepath.Join(f.proj, ".claude-sandbox", "env")))
 	})
 
-	It("CS-LNCH-025: warns and suggests init when no env cascade exists, launching without --env-file", func() {
+	It("CS-LNCH-025: warns and says where an env belongs when no env cascade exists, launching without --env-file", func() {
 		Expect(f.run()).To(Equal(0))
-		Expect(f.errw.String()).To(ContainSubstring("env file not found"))
-		Expect(f.errw.String()).To(ContainSubstring("claude-sandbox init"))
+		errOut := f.errw.String()
+		Expect(errOut).To(ContainSubstring("WARNING: env file not found"))
+		Expect(errOut).To(ContainSubstring("in a parent (workspace) directory"))
+		Expect(errOut).To(ContainSubstring("project-only override"))
+		Expect(errOut).To(ContainSubstring("claude-sandbox init   # seeds .claude-sandbox/env.example"))
+		Expect(errOut).NotTo(ContainSubstring("creates .claude-sandbox/env"))
 		Expect(f.launched().Args).NotTo(ContainElement("--env-file"))
+	})
+
+	It("CS-LNCH-056: a project with only env.example gets a one-line note, not a warning", func() {
+		example := filepath.Join(f.proj, ".claude-sandbox", "env.example")
+		writeFile(example, "# TOKEN=x\n")
+		Expect(f.run()).To(Equal(0))
+		errOut := f.errw.String()
+		Expect(errOut).NotTo(ContainSubstring("WARNING"))
+		note := "Note: no .claude-sandbox/env in the cascade; " + example + " is a template and is not read."
+		Expect(strings.Count(errOut, note)).To(Equal(1))
+		Expect(f.launched().Args).NotTo(ContainElement("--env-file"))
+		Expect(f.launched().Args).NotTo(ContainElement(example))
+
+		By("exactly one stderr line more than a launch with a clean project env")
+		base := newCLIFixture()
+		writeFile(filepath.Join(base.proj, ".claude-sandbox", "env"), "CLEAN=value\n")
+		Expect(base.run()).To(Equal(0))
+		lines := func(s string) []string {
+			var out []string
+			for _, l := range strings.Split(s, "\n") {
+				if strings.TrimSpace(l) != "" {
+					out = append(out, strings.ReplaceAll(l, base.proj, f.proj))
+				}
+			}
+			return out
+		}
+		got, want := lines(errOut), lines(base.errw.String())
+		Expect(got).To(HaveLen(len(want) + 1))
+		Expect(got).To(ContainElements(want))
+		Expect(got).To(ContainElement(note))
+
+		By("an env.example only in a parent directory does not count")
+		g := newCLIFixture()
+		writeFile(filepath.Join(filepath.Dir(g.proj), ".claude-sandbox", "env.example"), "# TOKEN=x\n")
+		Expect(g.run()).To(Equal(0))
+		Expect(g.errw.String()).To(ContainSubstring("WARNING: env file not found"))
+		Expect(g.errw.String()).NotTo(ContainSubstring("Note: no .claude-sandbox/env"))
 	})
 
 	It("CS-LNCH-030: --version reports host and baked-image versions with a mismatch note", func() {

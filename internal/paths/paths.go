@@ -29,6 +29,12 @@ var foreignMap = map[string]string{
 	Scripts:    ".claude-sandbox/scripts",
 }
 
+// EnvExampleName is the env template `init` seeds beside config.yaml
+// (CS-INIT-004). It is deliberately NOT a logical key: it is never part of the
+// env cascade, never an --env-file and never linted (CS-CASC-030) — only a
+// file named exactly "env" is.
+const EnvExampleName = "env.example"
+
 // SandboxDir returns <project>/.claude-sandbox.
 func SandboxDir(project string) string { return filepath.Join(project, ".claude-sandbox") }
 
