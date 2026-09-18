@@ -170,3 +170,19 @@ Feature: .claude-sandbox/ layout lifecycle (CS-LAY)
     Given neither condition holds
     When SetupLayout runs with trackInHost true
     Then the host-tracked entries are proposed exactly as in CS-LAY-009
+
+  # ---- env.example stays trackable ----
+
+  @new
+  Scenario: CS-LAY-019 env.example is never gitignored
+    # init seeds .claude-sandbox/env.example (CS-INIT-004). It holds no
+    # secrets, so it is committed wherever the rest of .claude-sandbox/ is.
+    # The "env" rules match only a file named exactly env: gitignore patterns
+    # without a wildcard never match a longer name.
+    Given the project is a git work tree
+    When SetupLayout runs with trackInHost false
+    Then no line of the sidecar .gitignore matches env.example, so the sidecar repo tracks it
+      (the host's "/.claude-sandbox/" rule covers the whole directory by design, CS-LAY-003)
+    When SetupLayout runs with trackInHost true
+    Then no line added to the host .gitignore matches .claude-sandbox/env.example
+      (".claude-sandbox/env" is still added, CS-LAY-009)

@@ -14,6 +14,7 @@ import (
 
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/initcmd"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/paths"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/prompt"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/scaffold"
 )
@@ -79,7 +80,7 @@ func (r *run) init(project string, f initcmd.Flags) error {
 }
 
 var _ = Describe("init subcommand", func() {
-	var tmp, proj, sb, cfg, env string
+	var tmp, proj, sb, cfg, env, envExample string
 
 	BeforeEach(func() {
 		os.Unsetenv("CS_GITIGNORE_ASSUME")
@@ -89,10 +90,11 @@ var _ = Describe("init subcommand", func() {
 		sb = filepath.Join(proj, ".claude-sandbox")
 		cfg = filepath.Join(sb, "config.yaml")
 		env = filepath.Join(sb, "env")
+		envExample = filepath.Join(sb, "env.example")
 	})
 
 	Describe("seeding (idempotent, sparse)", func() {
-		It("CS-INIT-004: greenfield init seeds config.yaml, env, and Dockerfile.example", func() {
+		It("CS-INIT-004: greenfield init seeds config.yaml, env.example, and Dockerfile.example", func() {
 			r := &run{}
 			Expect(r.init(proj, initcmd.Flags{TrackInHost: ptr(false)})).To(Succeed())
 
@@ -106,24 +108,27 @@ var _ = Describe("init subcommand", func() {
 				Expect(trimmed).To(HavePrefix("#"), "uncommented line: %q", line)
 			}
 
-			By("env: every variable commented")
-			Expect(exists(env)).To(BeTrue())
-			for _, line := range strings.Split(read(env), "\n") {
+			By("env.example: every variable commented; no real env")
+			Expect(exists(envExample)).To(BeTrue())
+			for _, line := range strings.Split(read(envExample), "\n") {
 				trimmed := strings.TrimSpace(line)
 				if trimmed != "" {
 					Expect(trimmed).To(HavePrefix("#"), "uncommented line: %q", line)
 				}
 			}
+			Expect(exists(env)).To(BeFalse())
 
 			Expect(exists(filepath.Join(sb, "Dockerfile.example"))).To(BeTrue())
 			Expect(r.out.String()).To(ContainSubstring("created  config.yaml"))
-			Expect(r.out.String()).To(ContainSubstring("created  env"))
+			Expect(r.out.String()).To(ContainSubstring("created  env.example"))
+			Expect(r.out.String()).NotTo(MatchRegexp(`created  env(\s|$)`))
 			Expect(r.out.String()).To(ContainSubstring("created  Dockerfile.example"))
 		})
 
 		It("CS-INIT-005: existing files are never overwritten", func() {
 			write(cfg, "model: opus\n")
 			write(env, "MY_VAR=1\n")
+			write(envExample, "# MY_EXAMPLE=1\n")
 			write(filepath.Join(sb, "Dockerfile.example"), "FROM custom\n")
 
 			r := &run{}
@@ -131,9 +136,10 @@ var _ = Describe("init subcommand", func() {
 
 			Expect(read(cfg)).To(Equal("model: opus\n"))
 			Expect(read(env)).To(Equal("MY_VAR=1\n"))
+			Expect(read(envExample)).To(Equal("# MY_EXAMPLE=1\n"))
 			Expect(read(filepath.Join(sb, "Dockerfile.example"))).To(Equal("FROM custom\n"))
 			Expect(r.out.String()).To(ContainSubstring("skipped  config.yaml"))
-			Expect(r.out.String()).To(ContainSubstring("skipped  env"))
+			Expect(r.out.String()).To(ContainSubstring("skipped  env.example"))
 			Expect(r.out.String()).To(ContainSubstring("skipped  Dockerfile.example"))
 		})
 
@@ -283,6 +289,7 @@ var _ = Describe("init subcommand", func() {
 			sb = filepath.Join(proj, ".claude-sandbox")
 			cfg = filepath.Join(sb, "config.yaml")
 			env = filepath.Join(sb, "env")
+			envExample = filepath.Join(sb, "env.example")
 		})
 
 		It("CS-INIT-019: init prints the config cascade when ancestors contribute", func() {
@@ -306,8 +313,9 @@ var _ = Describe("init subcommand", func() {
 			Expect(r.init(proj, initcmd.Flags{TrackInHost: ptr(false)})).To(Succeed())
 
 			Expect(r.out.String()).To(ContainSubstring(parentEnv))
-			Expect(r.out.String()).To(ContainSubstring("layers under this project's env"))
-			Expect(read(env)).NotTo(ContainSubstring("PARENT_VAR"))
+			Expect(r.out.String()).To(ContainSubstring("is inherited by this project"))
+			Expect(exists(env)).To(BeFalse())
+			Expect(read(envExample)).NotTo(ContainSubstring("PARENT_VAR"))
 		})
 
 		Context("with a parent Dockerfile", func() {
@@ -495,10 +503,57 @@ var _ = Describe("init subcommand", func() {
 
 		out := r.out.String()
 		Expect(out).To(ContainSubstring("Done. Next steps:"))
-		Expect(out).To(ContainSubstring("1. Add secrets / env vars to .claude-sandbox/env"))
+		Expect(out).To(ContainSubstring("1. Put secrets / env vars"))
+		Expect(out).To(ContainSubstring("in an upstream .claude-sandbox/env"))
+		Expect(out).To(ContainSubstring(".claude-sandbox/env.example → .claude-sandbox/env for a project-only override"))
 		Expect(out).To(ContainSubstring("2. Review .claude-sandbox/config.yaml"))
 		Expect(out).To(ContainSubstring("Dockerfile.example"))
 		Expect(strings.TrimSpace(out)).To(HaveSuffix("Launch:  claude-sandbox"))
+	})
+
+	It("CS-INIT-030: init never creates a real env, in any mode", func() {
+		for _, tc := range []struct {
+			name  string
+			flags initcmd.Flags
+			fake  func() *execx.Fake
+		}{
+			{"init --no-track-in-host", initcmd.Flags{TrackInHost: ptr(false)}, nonGitFake},
+			{"init --track-in-host", initcmd.Flags{TrackInHost: ptr(true)}, hostTrackedFake},
+			{"init --yes", initcmd.Flags{Yes: true}, nonGitFake},
+			{"init --no-gitignore", initcmd.Flags{TrackInHost: ptr(false), Gitignore: ptr(false)}, nonGitFake},
+			{"init-ralph --no-track-in-host", initcmd.Flags{Ralph: true, TrackInHost: ptr(false)}, nonGitFake},
+			{"init-ralph --track-in-host", initcmd.Flags{Ralph: true, TrackInHost: ptr(true)}, hostTrackedFake},
+		} {
+			p := filepath.Join(GinkgoT().TempDir(), "p")
+			mkdir(p)
+			r := &run{fake: tc.fake()}
+			Expect(r.init(p, tc.flags)).To(Succeed(), tc.name)
+			Expect(exists(filepath.Join(p, ".claude-sandbox", "env"))).To(BeFalse(), tc.name)
+			Expect(exists(filepath.Join(p, ".claude-sandbox", "env.example"))).To(BeTrue(), tc.name)
+		}
+
+		By("the env.example header says it is an example and where secrets belong")
+		r := &run{}
+		Expect(r.init(proj, initcmd.Flags{TrackInHost: ptr(false)})).To(Succeed())
+		header := read(envExample)
+		Expect(header).To(ContainSubstring("EXAMPLE ONLY"))
+		Expect(header).To(ContainSubstring("never reads this file"))
+		Expect(header).To(ContainSubstring("<workspace>/.claude-sandbox/env"))
+		Expect(header).To(ContainSubstring("Copy this file to .claude-sandbox/env"))
+		Expect(header).To(ContainSubstring("per-project override"))
+		Expect(header).To(ContainSubstring("OVERRIDE the same keys"))
+		Expect(header).NotTo(ContainSubstring(".env.claude-sandbox"))
+
+		By("an upstream-only token is the whole env cascade after init")
+		ws := filepath.Join(tmp, "ws")
+		p := filepath.Join(ws, "p")
+		mkdir(p)
+		upstream := filepath.Join(ws, ".claude-sandbox", "env")
+		write(upstream, "TOKEN=upstream\n")
+		Expect((&run{}).init(p, initcmd.Flags{TrackInHost: ptr(false)})).To(Succeed())
+		envs, err := paths.CollectUp(p, paths.Env)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(envs).To(Equal([]string{upstream}))
 	})
 })
 
@@ -518,7 +573,8 @@ var _ = Describe("init-ralph subcommand", func() {
 		Expect(r.init(proj, initcmd.Flags{Ralph: true, TrackInHost: ptr(false)})).To(Succeed())
 
 		Expect(exists(filepath.Join(sb, "config.yaml"))).To(BeTrue())
-		Expect(exists(filepath.Join(sb, "env"))).To(BeTrue())
+		Expect(exists(filepath.Join(sb, "env.example"))).To(BeTrue())
+		Expect(exists(filepath.Join(sb, "env"))).To(BeFalse())
 		Expect(exists(filepath.Join(sb, "Dockerfile.example"))).To(BeTrue())
 		Expect(read(filepath.Join(sb, "config.yaml"))).To(MatchRegexp(`(?m)^trackInHost: false$`))
 	})

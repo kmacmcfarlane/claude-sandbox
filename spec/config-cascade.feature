@@ -104,6 +104,17 @@ Feature: Config cascade and env stacking (CS-CASC)
       | /ws/.claude-sandbox/env   |
       | /ws/p/.claude-sandbox/env |
 
+  @new
+  Scenario: CS-CASC-030 env.example is a template, never an env file
+    # init seeds .claude-sandbox/env.example (CS-INIT-004). Only a file named
+    # exactly "env" is part of the env cascade.
+    Given /ws/.claude-sandbox/env contains "TOKEN=upstream"
+    And /ws/p/.claude-sandbox/env.example contains "TOKEN=example"
+    And /ws/p/.claude-sandbox/env does not exist
+    When the launcher assembles docker arguments in /ws/p
+    Then the only --env-file flag is /ws/.claude-sandbox/env, so TOKEN=upstream reaches the container
+    And env.example is not linted and not listed in the cascade report
+
   Scenario: CS-CASC-011 Mount entries must define host and container
     Given a merged config with a mount missing "container"
     When the launcher validates mounts

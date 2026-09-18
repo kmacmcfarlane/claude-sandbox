@@ -628,11 +628,7 @@ func runLaunch(env *Env, args []string) error {
 		return err
 	}
 	if len(envFiles) == 0 {
-		fmt.Fprintf(env.Err, "WARNING: env file not found (.claude-sandbox/env) in %s or any parent\n\n", projectDir)
-		fmt.Fprintf(env.Err, "This file provides environment variables needed by Claude Code\n")
-		fmt.Fprintf(env.Err, "(e.g. DISCORD_WEBHOOK_URL for MCP server notifications).\n\n")
-		fmt.Fprintf(env.Err, "To create it, bootstrap the project and fill in your values:\n")
-		fmt.Fprintf(env.Err, "  claude-sandbox init   # creates .claude-sandbox/env (and config)\n")
+		warnNoEnv(env.Err, projectDir)
 	} else {
 		// Warn-only lint of every cascade level (CS-CASC-020).
 		cascade.LintEnvFiles(env.Err, envFiles)
@@ -872,4 +868,21 @@ func newRalphCmd(env *Env) *cobra.Command {
 	fl.IntVar(&o.QuotaMaxWait, "quota-max-wait", 18000, "Max seconds to wait for quota reset")
 	fl.MarkHidden("dangerously-skip-permissions")
 	return cmd
+}
+
+// warnNoEnv reports an env cascade with no .claude-sandbox/env at any level.
+// When an env.example exists (what init seeds) it is one Note line, since the
+// state is the one init produced (CS-LNCH-056); otherwise the full warning
+// (CS-LNCH-025). env.example itself is never read (CS-CASC-030).
+func warnNoEnv(w io.Writer, projectDir string) {
+	if ex := paths.FindUpFile(projectDir, filepath.Join(".claude-sandbox", paths.EnvExampleName)); ex != "" {
+		fmt.Fprintf(w, "Note: no .claude-sandbox/env in the cascade; %s is a template and is not read.\n", ex)
+		return
+	}
+	fmt.Fprintf(w, "WARNING: env file not found (.claude-sandbox/env) in %s or any parent\n\n", projectDir)
+	fmt.Fprintf(w, "This file provides environment variables needed by Claude Code\n")
+	fmt.Fprintf(w, "(e.g. DISCORD_WEBHOOK_URL for MCP server notifications).\n\n")
+	fmt.Fprintf(w, "Create .claude-sandbox/env in a parent (workspace) directory for values shared\n")
+	fmt.Fprintf(w, "by every project below it, or in this project for a project-only override.\n")
+	fmt.Fprintf(w, "  claude-sandbox init   # seeds .claude-sandbox/env.example to copy from\n")
 }

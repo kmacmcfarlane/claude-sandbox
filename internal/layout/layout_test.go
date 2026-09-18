@@ -1,6 +1,6 @@
 package layout_test
 
-// Spec: spec/layout.feature (CS-LAY-001..014, 017, 018). CS-LAY-015/016
+// Spec: spec/layout.feature (CS-LAY-001..014, 017..019). CS-LAY-015/016
 // (launcher adoption) live in cmd/claude-sandbox. Git behavior is scripted
 // through execx.Fake: unmatched commands succeed, so by default the project IS
 // a git work tree and check-ignore reports the path as ignored. Host-tracked
@@ -48,6 +48,32 @@ func countLine(content, line string) int {
 		}
 	}
 	return n
+}
+
+// gitignoreMatches is a deliberately small gitignore matcher for CS-LAY-019:
+// it reports whether one .gitignore line (negations and comments never
+// ignore) would ignore rel or any of its ancestor directories. A pattern with
+// no inner slash matches a basename at any depth; otherwise it is anchored to
+// the .gitignore's directory. Enough for the literal and simple-glob lines
+// layout writes.
+func gitignoreMatches(line, rel string) bool {
+	line = strings.TrimSpace(line)
+	if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "!") {
+		return false
+	}
+	pat := strings.TrimSuffix(line, "/")
+	anchored := strings.Contains(strings.TrimPrefix(pat, "/"), "/") || strings.HasPrefix(pat, "/")
+	pat = strings.TrimPrefix(pat, "/")
+	for cand := rel; cand != "." && cand != "/" && cand != ""; cand = filepath.Dir(cand) {
+		target := cand
+		if !anchored {
+			target = filepath.Base(cand)
+		}
+		if ok, _ := filepath.Match(pat, target); ok {
+			return true
+		}
+	}
+	return false
 }
 
 var _ = Describe("layout lifecycle", func() {
@@ -179,6 +205,37 @@ var _ = Describe("layout lifecycle", func() {
 			}
 			Expect(exists(filepath.Join(sb, ".gitignore"))).To(BeFalse())
 			Expect(fake.CommandLines()).NotTo(ContainElement(ContainSubstring(" init -q")))
+		})
+	})
+
+	Describe("env.example", func() {
+		It("CS-LAY-019: env.example is never gitignored", func() {
+			By("the matcher itself: the env rules match env, not env.example")
+			Expect(gitignoreMatches("env", "env")).To(BeTrue())
+			Expect(gitignoreMatches(".claude-sandbox/env", ".claude-sandbox/env")).To(BeTrue())
+			Expect(gitignoreMatches("env", "env.example")).To(BeFalse())
+			Expect(gitignoreMatches("env*", "env.example")).To(BeTrue())
+
+			By("trackInHost false: the sidecar .gitignore leaves env.example tracked")
+			Expect(setup(false, ptr(true))).To(Succeed())
+			sidecar := read(filepath.Join(sb, ".gitignore"))
+			Expect(countLine(sidecar, "env")).To(Equal(1))
+			for _, l := range strings.Split(sidecar, "\n") {
+				Expect(gitignoreMatches(l, "env.example")).To(BeFalse(), l)
+			}
+
+			By("trackInHost true: no host line matches .claude-sandbox/env.example")
+			proj = filepath.Join(GinkgoT().TempDir(), "p2")
+			Expect(os.MkdirAll(proj, 0o755)).To(Succeed())
+			sb = filepath.Join(proj, ".claude-sandbox")
+			hostGI = filepath.Join(proj, ".gitignore")
+			hostTracks()
+			Expect(setup(true, ptr(true))).To(Succeed())
+			host := read(hostGI)
+			Expect(countLine(host, ".claude-sandbox/env")).To(Equal(1))
+			for _, l := range strings.Split(host, "\n") {
+				Expect(gitignoreMatches(l, ".claude-sandbox/env.example")).To(BeFalse(), l)
+			}
 		})
 	})
 

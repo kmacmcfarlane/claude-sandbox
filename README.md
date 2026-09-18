@@ -69,7 +69,7 @@ claude-sandbox --branch
 # shared checkout — opt-in for interactive sessions, ralph's default:
 claude-sandbox --worktree
 
-# Bootstrap .claude-sandbox/ in a repo (config, env, gitignore):
+# Bootstrap .claude-sandbox/ in a repo (config, env.example, gitignore):
 claude-sandbox init
 
 # Bootstrap + seed the ralph agent scaffolding (agent/ + scripts/):
@@ -347,7 +347,7 @@ talked to across trees, and `--attach`/`--join` report the difference.
 
 `init` sets up the `.claude-sandbox/` directory in the current project and exits (it does **not** launch a container):
 
-- Creates `.claude-sandbox/config.yaml` (from the example) and `.claude-sandbox/env`, and prints the config cascade when parent directories contribute files.
+- Creates `.claude-sandbox/config.yaml` (from the example) and `.claude-sandbox/env.example`, and prints the config cascade when parent directories contribute files. It never creates a real `.claude-sandbox/env` — see [`.claude-sandbox/env`](#claude-sandboxenv) for why, and where secrets belong.
 - Prompts for **`trackInHost`** (default `false`) — unless `--track-in-host` / `--no-track-in-host` is passed, or there is no tty. When a parent `.claude-sandbox/config.yaml` already sets it, the prompt shows the inherited value: press Enter to inherit (nothing written locally — the commented hint records the inherited value and its source), or answer `y`/`n` to write a local override. See [`trackInHost`](#claude-sandboxconfigyaml) for what it controls.
 - Seeds `Dockerfile.example` without asking — a copy of the nearest parent `.claude-sandbox/Dockerfile` when one exists (the report names it), the generic scaffold example otherwise. It is inactive until renamed. `--no-copy-parent-dockerfile` forces the generic example; `--copy-parent-dockerfile` is accepted and is the default.
 - Runs the standard layout setup: `temp/`+`reports/` skeleton, seeded `.claude-sandbox/CLAUDE.md`, the host `.gitignore` entries that the `trackInHost` answer implies (written without a further prompt — the answer already chose them; `--no-gitignore` skips them, `--gitignore` is the default), and (when `trackInHost: false`) the internal sidecar git repo.
@@ -358,7 +358,7 @@ talked to across trees, and `--attach`/`--join` report the difference.
 - `.claude-sandbox/agent/` — generic baseline `PROMPT*.md`, `AGENT_FLOW.md`, `LSP_TOOLS.md`, `BUG_REPORTING.md`, `ideas/`, and stub `PRD.md` / `DEVELOPMENT_PRACTICES.md` / `TEST_PRACTICES.md` / `backlog.yaml`.
 - `.claude-sandbox/scripts/` — the `backlog` tool (backlog.yaml CRUD) that the agents use.
 
-Both commands are **idempotent** — they never overwrite an existing `config.yaml`, `env`, agent doc, or script. Re-running fills only what's missing and reports what it skipped. This means a project template can lay down its own project-specific `AGENT_FLOW.md` / `DEVELOPMENT_PRACTICES.md` / etc. first, and a subsequent `init-ralph` will keep those and add only the pieces they don't provide.
+Both commands are **idempotent** — they never overwrite an existing `config.yaml`, `env.example`, agent doc, or script, and never touch an existing `env`. Re-running fills only what's missing and reports what it skipped. This means a project template can lay down its own project-specific `AGENT_FLOW.md` / `DEVELOPMENT_PRACTICES.md` / etc. first, and a subsequent `init-ralph` will keep those and add only the pieces they don't provide.
 
 ```bash
 # Own project — track the sandbox dir in this repo:
@@ -393,8 +393,10 @@ Merge rules:
   overrides the upstream value; upstream-only variables still apply.
 - **`Dockerfile`**: NOT merged — the nearest one up the tree wins wholesale.
 
-`init` seeds a **sparse, fully-commented** `config.yaml` and `env`, so a freshly-inited
-sub-project overrides nothing: the workspace catch-all keeps acting as the default.
+`init` seeds a **sparse, fully-commented** `config.yaml` and an `env.example` (never a
+real `env`), so a freshly-inited sub-project overrides nothing: the workspace catch-all
+keeps acting as the default. `env.example` is a template — the launcher never reads,
+lints or lists it.
 Uncomment a key locally only to set or override it for that project. The one exception is
 `trackInHost`: `init` writes it explicitly (flag or prompt) *unless* an upstream config
 already defines it — then it's inherited and the local line stays commented.
@@ -566,7 +568,22 @@ DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/YOUR_ID/YOUR_TOKEN
 CLAUDE_NOTIFICATION_WEBHOOK_URL=https://discord.com/api/webhooks/YOUR_ID/YOUR_TOKEN
 ```
 
-Run `claude-sandbox init` to create `.claude-sandbox/env` (from the scaffold), then fill in your values. This file is gitignored — do not commit it.
+**Put shared secrets upstream.** A token every project needs belongs in a workspace-level
+`.claude-sandbox/env` in a parent directory: every project below it inherits it, and a
+refresh there reaches them all. A project `.claude-sandbox/env` is for a genuine
+per-project override only — its keys override the same keys upstream, so a stale token
+copied into a project env silently hides the fresh one upstream.
+
+`claude-sandbox init` never creates `.claude-sandbox/env`. It seeds
+`.claude-sandbox/env.example`, a commented template that the launcher never reads; copy it
+to `.claude-sandbox/env` only when a project needs its own values. `env.example` holds no
+secrets and is not gitignored (commit it with the rest of `.claude-sandbox/`); a real
+`env` is gitignored in both `trackInHost` modes — do not commit it. Existing project `env`
+files keep working unchanged.
+
+With no `env` at any level, the launcher warns at startup and says where one belongs —
+unless an `env.example` exists (a freshly-inited project), in which case it prints a
+single `Note:` line instead.
 
 **Do not quote values.** `KEY=value`, one per line; blank lines and `#` comments are the only special syntax. Unlike Docker Compose's `env_file`, direnv, or shell `source`, `docker run --env-file` performs **no quote stripping and no variable expansion** — every character after `=` is part of the value. So `JIRA_API_TOKEN="ATATT…"` arrives with the quotes attached: the variable is present, non-empty, and two characters too long, and the only symptom is an auth failure from the consuming service (often a misleading 403/404 rather than a 401). The launcher warns at startup for any value wrapped in matching quotes, and for values carrying a CRLF carriage return; it does not rewrite them, so literal quotes remain possible if you actually want them.
 
@@ -1085,7 +1102,7 @@ spec/              Gherkin behavioral spec — scenario IDs referenced by the Gi
 scripts/check-spec-coverage.sh  CI check: every scenario ID appears in a test
 scaffold/          Base bootstrap seed for init (copied into a project's .claude-sandbox/)
   config.yaml      Starter config
-  env              Starter env file
+  env.example      Starter env template (seeded as .claude-sandbox/env.example; never read)
   Dockerfile.example  Commented child Dockerfile template (optional; rename to activate)
 scaffold-ralph/    Additional seed for init-ralph (agent workflow + tooling)
   agent/           Generic baseline workflow + prompt docs, ideas/, stubs

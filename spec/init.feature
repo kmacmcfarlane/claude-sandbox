@@ -1,12 +1,14 @@
 Feature: init subcommand (CS-INIT)
   `claude-sandbox init` bootstraps .claude-sandbox/ in the project and exits.
   It is a positional subcommand (first argument), idempotent, and never
-  overwrites an existing file. Seeded config/env are sparse (fully commented)
-  so they override nothing in the cascade.
+  overwrites an existing file. The seeded config is sparse (fully commented)
+  so it overrides nothing in the cascade. init never creates a real env: it
+  seeds env.example, a template the launcher never reads, so nothing
+  project-level shadows an upstream (workspace) env after a bootstrap.
   Go home: internal/initcmd (+ internal/layout, internal/scaffold).
 
   Background:
-    Given the scaffold seeds config.yaml, env, and Dockerfile.example
+    Given the scaffold seeds config.yaml, env.example, and Dockerfile.example
 
   # ---- invocation shape ----
 
@@ -24,20 +26,30 @@ Feature: init subcommand (CS-INIT)
 
   # ---- seeding (idempotent, sparse) ----
 
-  Scenario: CS-INIT-004 Greenfield init seeds config.yaml, env, and Dockerfile.example
+  @changed
+  Scenario: CS-INIT-004 Greenfield init seeds config.yaml, env.example, and Dockerfile.example
+    # Earlier behavior: a fully commented .claude-sandbox/env was seeded. A
+    # project env later filled in by hand silently shadowed upstream keys (a
+    # refreshed workspace token never reached the container), so init now
+    # seeds only the example (operator decision, 2026-09-18).
     Given a project with no .claude-sandbox/
     When "claude-sandbox init --no-track-in-host" is run
     Then .claude-sandbox/config.yaml exists and every non-trackInHost key is commented
-    And .claude-sandbox/env exists and every variable is commented
+    And .claude-sandbox/env.example exists and every variable is commented
+    And .claude-sandbox/env does not exist
     And .claude-sandbox/Dockerfile.example exists
     And stdout reports each file as "created"
     And the process exits 0 without launching a container
 
+  @changed
   Scenario: CS-INIT-005 Existing files are never overwritten
-    Given a project where .claude-sandbox/config.yaml, env, and Dockerfile.example already exist with custom content
+    Given a project where .claude-sandbox/config.yaml, env.example, and Dockerfile.example already exist with custom content
+    And .claude-sandbox/env exists with custom content
     When "claude-sandbox init --no-track-in-host" is run
-    Then the existing file contents are unchanged
-    And stdout reports each file as "skipped"
+    Then the existing file contents are unchanged, env included
+    And stdout reports config.yaml, env.example and Dockerfile.example as "skipped"
+    # An existing real env is never touched, deleted or migrated; it stays
+    # fully supported by the launch cascade (CS-CASC-010, CS-CASC-020).
 
   Scenario: CS-INIT-006 An existing Dockerfile suppresses the Dockerfile.example seed
     Given a project where .claude-sandbox/Dockerfile exists
@@ -131,12 +143,15 @@ Feature: init subcommand (CS-INIT)
     Then stdout lists each contributing level root-first with the files it provides
     # Same report the launcher prints at startup.
 
-  @new
+  @changed
   Scenario: CS-INIT-020 Inherited env files are reported, never copied
+    # Earlier wording: the note said the parent "layers under this project's
+    # env", which init no longer creates.
     Given /ws/.claude-sandbox/env exists
     When init runs in /ws/p
-    Then stdout notes that /ws/.claude-sandbox/env will layer under the project env
-    And the project env seed does not contain the parent's variables
+    Then stdout notes that /ws/.claude-sandbox/env is inherited by this project
+    And no .claude-sandbox/env is created in /ws/p
+    And the seeded env.example does not contain the parent's variables
 
   @changed
   Scenario: CS-INIT-021 Parent Dockerfile found: the example is a copy of it, no prompt
@@ -204,6 +219,8 @@ Feature: init subcommand (CS-INIT)
   Scenario: CS-INIT-027 Completion message lists next steps
     When init completes
     Then stdout ends with numbered next steps (env secrets, config review, Dockerfile activation)
+    And the env step says to put secrets in an upstream (workspace) .claude-sandbox/env,
+      or to copy .claude-sandbox/env.example to .claude-sandbox/env for a project-only override
     And a "Launch:  claude-sandbox" hint
 
   @new
@@ -231,3 +248,17 @@ Feature: init subcommand (CS-INIT)
     When "claude-sandbox init" is run
     Then exactly one prompt is shown, and it is the trackInHost question
     And Dockerfile.example, the .gitignore entries and the layout are all set up from that one answer
+
+  # ---- env.example, never a real env ----
+
+  @new
+  Scenario: CS-INIT-030 init never creates a real env, in any mode
+    Given a project with no .claude-sandbox/env
+    When "claude-sandbox init" or "claude-sandbox init-ralph" runs with any combination of options
+    Then .claude-sandbox/env does not exist afterwards
+    And the seeded .claude-sandbox/env.example header says it is an example only:
+      copy it to .claude-sandbox/env only for a genuine per-project override,
+      prefer the upstream (workspace) .claude-sandbox/env for shared secrets,
+      and keys in a project env override the same keys upstream
+    And a token set only in an upstream .claude-sandbox/env reaches the
+      container unshadowed (the launch cascade has no project-level env file)
