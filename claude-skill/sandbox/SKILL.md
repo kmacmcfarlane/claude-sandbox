@@ -69,7 +69,7 @@ This supports a catch-all `.claude-sandbox/` at a workspace root that provides d
 
 ### `trackInHost` — how `.claude-sandbox/` is version-controlled
 Set in `.claude-sandbox/config.yaml`:
-- **`false` (default, foreign-safe):** the launcher adds `/.claude-sandbox/` to the host `.gitignore` and creates an internal **sidecar git repo** inside `.claude-sandbox/` for history. Use when working in someone else's repo — nothing leaks into their history.
+- **`false` (default, foreign-safe):** the launcher adds `/.claude-sandbox/` to the host `.gitignore` and creates an internal **sidecar git repo** inside `.claude-sandbox/` for history. Use when working in someone else's repo — nothing leaks into their history. If the host already tracks files under `.claude-sandbox/`, the launcher skips that ignore line and the sidecar init and warns instead (fix: `trackInHost: true`, or copy the dir aside and `git rm -r --cached .claude-sandbox` to adopt the sidecar — that commit deletes the dir from every other clone that pulls it). An existing ignore rule over tracked files is hiding new files now; remove it either way (`git check-ignore -v .claude-sandbox/ignore-probe` names it).
 - **`true` (your own projects):** the dir is tracked by the host repo; no sidecar. Only `.claude-sandbox/env`, `.claude-sandbox/temp/`, and `.claude-sandbox/ralph/` are gitignored.
 
 **Sidecar commit SOP (when `trackInHost: false`):** after grooming the backlog or changing the agent flow, PROMPT the user to commit in the sidecar — do not auto-commit:
@@ -179,7 +179,7 @@ JIRA_API_TOKEN="ATATT…"   # WRONG — quotes become part of the token
 JIRA_API_TOKEN=ATATT…     # right
 ```
 
-The launcher lints every env file in the cascade at startup and warns for values wrapped in matching quotes and for CRLF carriage returns. It is **warn-only** — it never rewrites the file, so literal quotes stay possible when genuinely wanted. If a value looks right but fails, also check the file's line endings (`file .claude-sandbox/env`).
+The launcher lints every env file in the cascade at startup and warns for values wrapped in matching quotes. It is **warn-only** — it never rewrites the file, so literal quotes stay possible when genuinely wanted. CRLF line endings are harmless: docker drops the trailing carriage return from each line, so they are not a cause of a failing value.
 
 ### A sibling sandbox is missing from `/peers`
 
@@ -237,7 +237,7 @@ All paths are in the claude-sandbox repo.
 | `entrypoint.sh` | Container entrypoint (UID/GID remapping) — still bash, deliberately |
 | `logstream/*.js` | Ralph NDJSON pipeline stages — still Node, deliberately |
 | `Dockerfile` | Base image (multi-stage: builds the Go binary, then the runtime image) |
-| `notification-hooks.json` | Hook fragment merged into settings.json |
+| `notification-hooks.json` | Notification hooks, baked into the base image as a managed-settings drop-in (`/etc/claude-code/managed-settings.d/`); the host `settings.json` is live, not shadowed |
 | `container-context.md` | Injected into container's CLAUDE.md |
 | `scaffold/` | Base bootstrap seed for `init` (sparse config.yaml, env, Dockerfile.example) — embedded in the binary |
 | `scaffold-ralph/` | Ralph scaffolding seed for `init-ralph` (agent/ docs, scripts/ backlog tool) — embedded |

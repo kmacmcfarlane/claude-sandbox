@@ -28,8 +28,6 @@ type EnvWarningKind string
 const (
 	// EnvWarningQuoted: the value is wrapped in matching quotes.
 	EnvWarningQuoted EnvWarningKind = "quoted"
-	// EnvWarningCarriageReturn: the value carries a CRLF carriage return.
-	EnvWarningCarriageReturn EnvWarningKind = "carriage-return"
 )
 
 // EnvWarning is one lint finding, located in the file.
@@ -45,11 +43,6 @@ type EnvWarning struct {
 // Lines renders the warning as the launcher prints it to stderr.
 func (w EnvWarning) Lines() []string {
 	switch w.Kind {
-	case EnvWarningCarriageReturn:
-		return []string{
-			fmt.Sprintf("WARNING: %s:%d: value for %s ends with a carriage return (CRLF line endings).", w.File, w.Line, w.Key),
-			"         docker --env-file keeps it as part of the value. Convert the file to LF.",
-		}
 	case EnvWarningQuoted:
 		return []string{
 			fmt.Sprintf("WARNING: %s:%d: value for %s is wrapped in %c quotes.", w.File, w.Line, w.Key, w.Quote),
@@ -60,10 +53,10 @@ func (w EnvWarning) Lines() []string {
 	return nil
 }
 
-// LintEnvFile reports quoting and CRLF problems in one env file. Findings are
-// returned in file order; a line can produce both kinds (the carriage return
-// is stripped before the quote check, so quotes are still seen as the first
-// and last characters).
+// LintEnvFile reports quote-wrapped values in one env file, in file order.
+// CRLF line endings are not a finding: the reader drops one trailing '\r' per
+// line as docker does, so a quoted value in a CRLF file is still seen with the
+// quotes as its first and last characters (CS-CASC-016/017).
 func LintEnvFile(path string) ([]EnvWarning, error) {
 	assigns, err := readEnvAssignments(path)
 	if err != nil {
@@ -75,12 +68,6 @@ func LintEnvFile(path string) ([]EnvWarning, error) {
 			continue // bare KEY: no value in the file to lint
 		}
 		value := a.Value
-		if strings.HasSuffix(value, "\r") {
-			warnings = append(warnings, EnvWarning{
-				File: path, Line: a.Line, Key: a.Key, Kind: EnvWarningCarriageReturn,
-			})
-			value = strings.TrimSuffix(value, "\r")
-		}
 		if len(value) < 2 {
 			continue // a lone quote cannot be a matching pair
 		}
@@ -93,8 +80,8 @@ func LintEnvFile(path string) ([]EnvWarning, error) {
 	return warnings, nil
 }
 
-// envAssignment is one KEY=VALUE or bare KEY line of an env file, value
-// verbatim (including any trailing '\r').
+// envAssignment is one KEY=VALUE or bare KEY line of an env file, value as
+// docker passes it (one trailing '\r' already dropped from the line).
 type envAssignment struct {
 	Line  int // 1-based, counting every line including comments and blanks
 	Key   string
@@ -111,20 +98,20 @@ const utf8BOM = "\xEF\xBB\xBF"
 // the override notice. It follows docker's --env-file parsing: a UTF-8 BOM
 // on the first line is dropped, leading whitespace is trimmed, blank and '#'
 // comment lines are skipped (but still counted), and the key runs to the
-// first '='. docker's line scanner drops one trailing '\r'. Unlike docker
-// this reader keeps it on an assignment's VALUE, because the linter reports
-// it (CS-CASC-016); a '\r' never reaches a key name: an assignment's key ends
-// at '=' before it, and a bare "KEY\r" line has it trimmed, as docker does,
-// so the key resolves against the launcher's environment (CS-CASC-027). It
-// does not reject keys docker would (empty, containing blanks); callers that
-// care filter with validEnvKey.
+// first '='. Before any of that, exactly ONE trailing '\r' is dropped from
+// every line, as docker's line scanner (bufio.ScanLines) does, so CRLF files
+// read like LF ones (CS-CASC-016): "KEY=x\r" is value x, and a bare "KEY\r"
+// is key KEY, resolved against the launcher's environment (CS-CASC-027). A
+// second '\r' survives, as in docker: "KEY\r\r" is key "KEY\r", which
+// docker cannot resolve (CS-CASC-028). It does not reject keys docker would
+// (empty, containing blanks); callers that care filter with validEnvKey.
 func readEnvAssignments(path string) ([]envAssignment, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	// Split manually rather than with bufio.Scanner: ScanLines strips a
-	// trailing '\r', which the linter needs to see.
+	// Split on '\n' and drop one '\r' per line below: the same result as
+	// bufio.ScanLines, without its 64 KiB line limit.
 	lines := strings.Split(string(raw), "\n")
 	// A trailing newline yields a final empty element that is not a real line.
 	if n := len(lines); n > 0 && lines[n-1] == "" {
@@ -132,6 +119,7 @@ func readEnvAssignments(path string) ([]envAssignment, error) {
 	}
 	var out []envAssignment
 	for i, line := range lines {
+		line = strings.TrimSuffix(line, "\r") // exactly one, as docker drops it
 		if i == 0 {
 			line = strings.TrimPrefix(line, utf8BOM)
 		}
@@ -140,9 +128,6 @@ func readEnvAssignments(path string) ([]envAssignment, error) {
 			continue
 		}
 		key, value, ok := strings.Cut(line, "=")
-		if !ok {
-			key = strings.TrimSuffix(key, "\r") // CRLF bare line: docker drops the '\r'
-		}
 		out = append(out, envAssignment{Line: i + 1, Key: key, Value: value, HasValue: ok})
 	}
 	return out, nil

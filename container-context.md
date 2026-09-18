@@ -100,4 +100,13 @@ one-time setup (idempotent). Use `setup-lsp-plugins --check` to verify status.
   (the scratchpad qualifies). `docker compose` files using `${HOME}` are
   subject to the same rule.
 - **Discord MCP server** — baked in at `/opt/claude-sandbox/mcp/discord-notify/dist/index.mjs`. Provides the `send_discord_notification` tool when `DISCORD_WEBHOOK_URL` is set in the env file (`.claude-sandbox/env`). Configured via `~/.mcp.json` — no per-project setup needed.
+- **Notification hooks are managed settings.** A `Notification` hook (posts to
+  `CLAUDE_NOTIFICATION_WEBHOOK_URL` on permission/idle prompts) is baked into
+  the image at `/etc/claude-code/managed-settings.d/10-claude-sandbox.json`. It
+  runs alongside your own hooks and cannot be edited from here.
+- **`settings.json` is the host file.** The config dir's `settings.json` is not
+  a copy: plugin installs and enable/disable, `/model`, `/effort` and
+  user-scope permission rules made here persist to the host and to every other
+  sandbox. That includes `hooks` and permission `allow` rules, which then also
+  run in the operator's host sessions, outside this sandbox.
 - You do NOT have sudo or root access.
