@@ -1,10 +1,12 @@
-// Package launch assembles the docker run invocation: mounts, shadow-file
-// injections, host-access resolution, and the container command.
+// Package launch assembles the container invocation: mounts, shadow-file
+// injections, host-access resolution, the container command, and the
+// create-then-start hand-off (CS-LNCH-057).
 // Spec: spec/launch.feature (CS-LNCH).
 package launch
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -18,7 +20,7 @@ import (
 	"github.com/kmacmcfarlane/claude-sandbox/internal/imagebuild"
 )
 
-// Inputs collects everything needed to assemble the docker run argv.
+// Inputs collects everything needed to assemble the docker create argv.
 type Inputs struct {
 	ProjectDir string
 	Home       string
@@ -56,6 +58,15 @@ type Inputs struct {
 	// emits neither. Like Instance it is excluded from the fingerprint.
 	PIDClass string
 
+	// Headless marks a launch for an SDK client (CS-LNCH-058..067): the
+	// container gets -i without -t, no detach keys, the mode=headless label and
+	// the HeadlessEnv allowlist.
+	Headless bool
+
+	// LookupEnv tells set-but-empty from unset for the headless env allowlist
+	// (CS-LNCH-063). Nil falls back to Getenv, where "" reads as unset.
+	LookupEnv func(string) (string, bool)
+
 	// ImageID is the resolved image's docker ID. It feeds the config hash so an
 	// out-of-band rebuild registers as drift (CS-SESS-023).
 	ImageID string
@@ -77,9 +88,28 @@ type Inputs struct {
 	shadowDigests []InputDigest
 }
 
+// ModeHeadless is the claude-sandbox.mode label value of a headless container
+// (CS-LNCH-064); discovery keeps such containers out of attach and join.
+const ModeHeadless = "headless"
+
+// HeadlessEnv is the exact list of variables a headless launch forwards from
+// its own environment (CS-LNCH-063): what the Claude Agent SDK and Paseo set
+// for the claude process they spawn. It is a list of names, never a prefix: a
+// Paseo daemon's environment can hold PASEO_PASSWORD.
+var HeadlessEnv = []string{
+	"CLAUDE_CODE_ENTRYPOINT",
+	"CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING",
+	"CLAUDE_AGENT_SDK_VERSION",
+	"CLAUDE_AGENT_SDK_CLIENT_APP",
+	"CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS",
+	"CLAUDE_AGENT_SDK_MCP_NO_PREFIX",
+	"PASEO_AGENT_ID",
+	"PASEO_AGENT_CWD",
+}
+
 // DefaultDetachKeys is the sequence that detaches a session without stopping
-// it. It must be applied to EVERY interactive docker invocation — `run`,
-// `attach` and `exec` alike — because docker's own default otherwise takes
+// it. It must be applied to EVERY interactive docker invocation — `start`
+// (the primary session), `attach` and `exec` alike — because docker's own default otherwise takes
 // over, and docker's default is `ctrl-p,ctrl-q` while the Claude Code TUI binds
 // ctrl+p. Requiring ctrl-q twice makes an accidental detach implausible;
 // `-it` puts the terminal in raw mode, so XON/XOFF flow control does not eat it.
@@ -105,13 +135,24 @@ type Plan struct {
 	MemoryLimit   string
 	Command       []string // command + args inside the container
 	Labels        []string // --label KEY=VAL specs
-	DetachKeys    string   // --detach-keys sequence
+	DetachKeys    string   // --detach-keys sequence, for docker start only
+	// Headless renders create with -i but no -t (CS-LNCH-059).
+	Headless bool
 
 	// ConfigHash identifies the effective configuration this container was
 	// launched with; ConfigInputs records the contributing files so drift can
 	// be explained rather than merely reported (CS-SESS-020, CS-SESS-021).
 	ConfigHash   string
 	ConfigInputs []InputDigest
+}
+
+// lookupEnv reports whether k is set in the launcher's environment.
+func (in *Inputs) lookupEnv(k string) bool {
+	if in.LookupEnv != nil {
+		_, ok := in.LookupEnv(k)
+		return ok
+	}
+	return in.getenv(k) != ""
 }
 
 func (in *Inputs) getenv(k string) string {
@@ -135,7 +176,7 @@ func Build(in Inputs) (*Plan, error) {
 	if in.Cfg == nil {
 		in.Cfg = &cascade.Config{}
 	}
-	p := &Plan{Image: in.ImageName}
+	p := &Plan{Image: in.ImageName, Headless: in.Headless}
 
 	// CS-LNCH-007: project at its real host path.
 	p.Volumes = append(p.Volumes, fmt.Sprintf("%s:%s", in.ProjectDir, in.ProjectDir))
@@ -219,8 +260,12 @@ func Build(in Inputs) (*Plan, error) {
 		p.MemoryLimit = "8g"
 	}
 
-	// CS-LNCH-033: detach keys for the primary session.
-	p.DetachKeys = ResolveDetachKeys(in.Cfg.DetachKeys)
+	// CS-LNCH-033: detach keys for the primary session. A headless session has
+	// no terminal, and detach keys would swallow bytes of its stream-json
+	// input (CS-LNCH-059).
+	if !in.Headless {
+		p.DetachKeys = ResolveDetachKeys(in.Cfg.DetachKeys)
+	}
 
 	// Env files (root-first; later wins).
 	p.EnvFiles = in.EnvFiles
@@ -276,6 +321,16 @@ func Build(in Inputs) (*Plan, error) {
 	if d := in.getenv("CLAUDE_CONFIG_DIR"); d != "" {
 		p.EnvFlags = append(p.EnvFlags, "CLAUDE_CONFIG_DIR="+d)
 	}
+	// CS-LNCH-063: the SDK client's own variables, by exact name and as bare
+	// "-e NAME" so their values never appear in argv (docker create reads
+	// them from the environment it inherits from the launcher).
+	if in.Headless {
+		for _, k := range HeadlessEnv {
+			if in.lookupEnv(k) {
+				p.EnvFlags = append(p.EnvFlags, k)
+			}
+		}
+	}
 
 	// CS-LNCH-034: durable scratchpad root. Claude Code roots its per-session
 	// scratchpad (and background-task output) at $CLAUDE_CODE_TMPDIR, falling
@@ -328,8 +383,11 @@ func Build(in Inputs) (*Plan, error) {
 	// CS-LNCH-032: identity labels. Discovery filters on these rather than
 	// parsing container names, which are lossy.
 	mode := "claude"
-	if in.RalphMode {
+	switch {
+	case in.RalphMode:
 		mode = "ralph"
+	case in.Headless:
+		mode = ModeHeadless // CS-LNCH-064
 	}
 	p.Labels = append(p.Labels,
 		"claude-sandbox.project="+in.ProjectDir,
@@ -355,14 +413,18 @@ func Build(in Inputs) (*Plan, error) {
 	return p, nil
 }
 
-// DockerArgs renders the plan as the docker run argv.
-func (p *Plan) DockerArgs(workdir string) []string {
-	args := []string{"run", "-it", "--rm", "--init"}
-	// The primary session needs this as much as attach does: without it the
-	// container runs with docker's ctrl-p,ctrl-q, which the TUI collides with.
-	if p.DetachKeys != "" {
-		args = append(args, "--detach-keys="+p.DetachKeys)
+// CreateArgs renders the plan as the "docker create" argv: every flag the old
+// single "docker run" carried — -it, --rm, --init, mounts, env, labels, the
+// name, the image and the command — minus the detach keys, which belong to
+// the client that attaches (StartArgs). CS-LNCH-057. A headless container gets
+// -i without -t: with a TTY docker merges stderr into stdout and writes CR
+// line endings, which corrupts a stream-json channel (CS-LNCH-059).
+func (p *Plan) CreateArgs(workdir string) []string {
+	tty := "-it"
+	if p.Headless {
+		tty = "-i"
 	}
+	args := []string{"create", tty, "--rm", "--init"}
 	for _, v := range p.Volumes {
 		args = append(args, "-v", v)
 	}
@@ -382,9 +444,81 @@ func (p *Plan) DockerArgs(workdir string) []string {
 	return args
 }
 
-// Exec hands the process over to docker run.
-func (p *Plan) Exec(r execx.Runner, workdir string) error {
-	return r.Exec(execx.Cmd{Name: "docker", Args: p.DockerArgs(workdir)})
+// StartArgs renders the "docker start" argv that attaches to the reserved
+// container. The primary session needs detach keys as much as attach does:
+// without them docker's ctrl-p,ctrl-q applies, which the TUI collides with.
+func (p *Plan) StartArgs() []string {
+	args := []string{"start", "-ai"}
+	if p.DetachKeys != "" {
+		args = append(args, "--detach-keys="+p.DetachKeys)
+	}
+	return append(args, p.ContainerName)
+}
+
+// ErrNameConflict marks a "docker create" refused because the container name
+// is taken (CS-SESS-053). Docker checks names atomically, so this is the one
+// failure a re-pick can fix.
+var ErrNameConflict = errors.New("container name already in use")
+
+// CreateError is a failed "docker create": docker's own message plus, when the
+// name was the problem, ErrNameConflict.
+type CreateError struct {
+	Name     string
+	Stderr   string
+	Code     int
+	conflict bool
+}
+
+func (e *CreateError) Error() string {
+	msg := strings.TrimSpace(e.Stderr)
+	if msg == "" {
+		msg = fmt.Sprintf("exit %d", e.Code)
+	}
+	return fmt.Sprintf("docker create %s failed: %s", e.Name, msg)
+}
+
+func (e *CreateError) Unwrap() error {
+	if e.conflict {
+		return ErrNameConflict
+	}
+	return nil
+}
+
+// Reserve creates the container without starting it (CS-LNCH-057). The name,
+// and with it the instance noun and pid class on its labels, is taken
+// atomically: docker refuses a second create with the same name. Anything
+// docker prints on success (kernel capability warnings) is forwarded to warn.
+func (p *Plan) Reserve(r execx.Runner, workdir string, warn io.Writer) error {
+	var stderr strings.Builder
+	err := r.Run(execx.Cmd{Name: "docker", Args: p.CreateArgs(workdir), Stderr: &stderr})
+	if err == nil {
+		if warn != nil && stderr.Len() > 0 {
+			io.WriteString(warn, stderr.String())
+		}
+		return nil
+	}
+	return &CreateError{
+		Name: p.ContainerName, Stderr: stderr.String(), Code: execx.ExitCode(err),
+		conflict: isNameConflict(stderr.String()),
+	}
+}
+
+// isNameConflict recognises docker's refusal of a taken name:
+//
+//	Error response from daemon: Conflict. The container name "/x" is already in use by container "…"
+//
+// and nothing else. A bare "Conflict" would also match docker's unrelated
+// "Conflicting options: …" flag errors, which a re-pick cannot fix; retrying
+// those would end in a false "name in use" report (CS-SESS-053).
+func isNameConflict(stderr string) bool {
+	return strings.Contains(stderr, "Conflict. The container name") ||
+		(strings.Contains(stderr, "The container name") && strings.Contains(stderr, "is already in use"))
+}
+
+// Start hands the process over to "docker start -ai" (CS-LNCH-057), whose exit
+// code is the container's. It returns only if the exec itself failed.
+func (p *Plan) Start(r execx.Runner) error {
+	return r.Exec(execx.Cmd{Name: "docker", Args: p.StartArgs()})
 }
 
 func (in *Inputs) tempFile(name string, content []byte) (string, error) {
@@ -564,7 +698,7 @@ var packageCaches = []struct{ dir, env string }{
 
 // assemblePackageCaches mounts the cache dirs writable at the same path and
 // points the toolchains at them. The dirs are created here, before docker
-// run, as the invoking user (CS-LNCH-036): docker creates a missing bind
+// create, as the invoking user (CS-LNCH-036): docker creates a missing bind
 // source as root, and the entrypoint deliberately never chowns a mount point.
 func (in *Inputs) assemblePackageCaches(p *Plan) error {
 	root := filepath.Join(in.Home, PackageCacheRoot)
@@ -646,7 +780,7 @@ const worstSocketSuffix = "/" + peerSocketsDir + "/1234567.sock"
 // against the real <config dir>/sessions, the host's own claude included,
 // neither see the bridged ones nor are seen by them.
 //
-// The host directories are created here, before docker run, as the invoking
+// The host directories are created here, before docker create, as the invoking
 // user (CS-LNCH-051): docker creates a missing bind source as root and the
 // entrypoint never chowns a mount point, and Claude Code refuses a socket
 // directory not owned by the user (or root). The registry DESTINATION is

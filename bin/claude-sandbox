@@ -51,11 +51,14 @@ if [ "$needs_build" = true ]; then
     mkdir -p "$BIN_DIR"
     if command -v go >/dev/null 2>&1; then
         echo "Building claude-sandbox binary (host go)..." >&2
-        (cd "$REPO_ROOT" && CGO_ENABLED=0 go build -o "$BIN" ./cmd/claude-sandbox)
+        # Build output goes to stderr: stdout belongs to claude in headless mode.
+        (cd "$REPO_ROOT" && CGO_ENABLED=0 go build -o "$BIN" ./cmd/claude-sandbox) >&2
     else
         echo "Building claude-sandbox binary (docker $GO_IMAGE)..." >&2
         # Persist the build AND module caches under bin/dist/ (gitignored), so a
         # throwaway build container downloads each dependency only once.
+        # stdout goes to stderr: in headless mode stdout is claude's stream-json
+        # (a first pull prints progress there).
         mkdir -p "$BIN_DIR/gocache" "$BIN_DIR/gomodcache"
         docker run --rm \
             -u "$(id -u):$(id -g)" \
@@ -63,7 +66,7 @@ if [ "$needs_build" = true ]; then
             -e GOCACHE=/src/bin/dist/gocache \
             -e GOMODCACHE=/src/bin/dist/gomodcache \
             -v "$REPO_ROOT:/src" -w /src \
-            "$GO_IMAGE" go build -o bin/dist/claude-sandbox ./cmd/claude-sandbox
+            "$GO_IMAGE" go build -o bin/dist/claude-sandbox ./cmd/claude-sandbox >&2
     fi
 fi
 

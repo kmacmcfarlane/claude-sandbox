@@ -82,7 +82,7 @@ The base Docker image is built automatically on first run. If a `.claude-sandbox
 
 ### `claude-sandbox` flags
 
-These flags are consumed by the launcher and control the container environment. They must come **before** any passthrough arguments. (To bootstrap a project, use the `init` / `init-ralph` **subcommands** instead — see [Bootstrapping a project](#bootstrapping-a-project-init--init-ralph).)
+These flags are consumed by the launcher and control the container environment. They must come **before** any passthrough arguments. (To bootstrap a project, use the `init` / `init-ralph` **subcommands** instead — see [Bootstrapping a project](#bootstrapping-a-project-init--init-ralph). For an SDK client such as Paseo, use the `headless` subcommand — see [Headless mode](#headless-mode-paseo-and-other-sdk-clients).)
 
 | Flag | Alias | Description |
 |---|---|---|
@@ -180,7 +180,7 @@ otter     claude-sandbox-kmacmcfarlane-myproj-1de77a-otter  claude  2h14m   1
 heron     claude-sandbox-kmacmcfarlane-myproj-1de77a-heron  claude  11m     2
 ```
 
-Each session gets a short **instance noun** (`otter`, `heron`) so it can be named by hand. `SESSIONS` counts the claude processes inside a container, so joined sessions are visible too.
+Each session gets a short **instance noun** (`otter`, `heron`) so it can be named by hand. `SESSIONS` counts the claude processes inside a container, so joined sessions are visible too. A container another launch has reserved but not yet started (see [Launch reservation](#launch-reservation)) is not listed: there is nothing in it to attach to yet. A container started by `claude-sandbox headless` is listed with `headless` in the `MODE` column, but it is never offered to `--attach`, `--join` or the launch-time prompt, and on its own it never triggers that prompt: its stdio is an SDK client's JSON stream ([Headless mode](#headless-mode-paseo-and-other-sdk-clients)).
 
 ### Launching when a session already exists
 
@@ -237,7 +237,7 @@ A single `ctrl-q` is not swallowed: docker buffers the partial sequence and forw
 
 Detach and reattach are repeatable — a reattached session can be detached again with the same keys, so this is normal operation rather than a one-shot escape.
 
-Docker's own default (`ctrl-p ctrl-q`) is deliberately not used, because the Claude Code TUI binds `ctrl+p`. Override with `detachKeys` in `config.yaml`; the override applies to all three session types together.
+Docker's own default (`ctrl-p ctrl-q`) is deliberately not used, because the Claude Code TUI binds `ctrl+p`. Override with `detachKeys` in `config.yaml`; the override applies to all three session types together. (For a new container the keys ride `docker start -ai`, the client that attaches — see [Launch reservation](#launch-reservation).)
 
 Docker cannot report whether another client is attached, so attaching to a session someone else is actively using silently shares the terminal — output is duplicated and keystrokes interleave.
 
@@ -343,6 +343,127 @@ enable it only between trees you would let talk to each other. Unlike the model 
 worktree, it counts as **config drift**: a container launched without the bridge cannot be
 talked to across trees, and `--attach`/`--join` report the difference.
 
+## Headless mode (Paseo and other SDK clients)
+
+`claude-sandbox headless` lets a program that drives Claude Code through the Claude Agent SDK
+run each session in a sandbox. Such a client (Paseo's daemon, for example) spawns the `claude`
+command with piped stdin, stdout and stderr and no terminal, and speaks stream-json in both
+directions. Give it this command in place of `claude`:
+
+```bash
+claude-sandbox headless [launcher flags] -- <claude args>
+```
+
+- **No TTY.** The container is created with `-i` and without `-t`, and started with
+  `docker start -ai` without detach keys. With a TTY docker would merge the container's stderr
+  into stdout and write CR line endings, which breaks a JSON stream.
+- **Stdout carries only claude's output.** Every launcher message goes to stderr: the config
+  cascade, banners, image build output and warnings.
+- **Never prompts.** `/dev/tty` is never opened, even when the client has a controlling
+  terminal. `--new` is implied, so running sessions never lead to a decision or to exit 3. The
+  Claude Code update check is off unless you pass `--update`, and the post-build cache-budget
+  check (`docker system df`, several seconds on some hosts) never runs. Do not put `--update` in a
+  client's command prefix: it would add an npm registry round trip, and sometimes a Claude Code
+  image rebuild, to every spawn and every probe (Paseo's probes time out after 5 seconds).
+- **Arguments.** Launcher flags go before `--` (`--docker-socket`, `--model`, `--dangerous`,
+  `--worktree`, …). Everything after `--` reaches claude verbatim, including `--version`,
+  `auth status`, `--resume=<id>` and inline JSON. After `headless`, `--version` and `--help`
+  are claude's. `--ralph`, `--limit`, `--attach`, `--join` and `--branch` are rejected.
+- **Environment.** Only these variables are forwarded from the client, each as a bare
+  `-e NAME` (so values stay out of `ps`) and only when set: `CLAUDE_CODE_ENTRYPOINT`,
+  `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING`, `CLAUDE_AGENT_SDK_VERSION`,
+  `CLAUDE_AGENT_SDK_CLIENT_APP`, `CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS`,
+  `CLAUDE_AGENT_SDK_MCP_NO_PREFIX`, `PASEO_AGENT_ID`, `PASEO_AGENT_CWD`. There is no wildcard:
+  a Paseo daemon's environment can hold `PASEO_PASSWORD`. Never list a daemon secret such as
+  `PASEO_PASSWORD` as a **bare key** (a line with no `=`) in any `.claude-sandbox/env` of the
+  cascade: `docker create --env-file` resolves a bare key from the launcher's own environment,
+  which here is the daemon's, and passes the value into the container.
+- **Working directory.** The session runs in the client's working directory, resolved to its
+  physical path, which is where Claude Code files the transcript the client reads back.
+- **No worktree unless the prefix asks for one.** `worktree: true` in the config cascade and
+  `CLAUDE_SANDBOX_WORKTREE=1` are ignored in headless mode. A worktree files the transcript
+  under another directory than the one the client reads, and each spawn would get a new
+  worktree, so resuming a session by id would fail. Only `--worktree` or `--worktree=NAME`
+  before `--` turns worktree mode on — and a bare `--worktree` in a client's prefix has that
+  same resume problem (each spawn gets a new noun, so a new worktree), while `--worktree=NAME`
+  avoids it but makes concurrent sessions share one worktree.
+- **Dangerous mode comes from the cascade.** When the cascade resolves `dangerous: true` (or
+  `--dangerous` is in the prefix, or `CLAUDE_SANDBOX_DANGEROUS=1` is set in the client's
+  environment), every headless session runs with `--dangerously-skip-permissions`. Claude Code
+  lets that flag win over `--permission-mode` in either order, even over
+  `--permission-mode plan`, so the client's permission picker, plan mode included, is
+  overridden. To let the client's picker apply in a project, set `dangerous: false` in that
+  project's own `.claude-sandbox/config.yaml`: the more-local scalar wins the cascade merge.
+  This also turns dangerous mode off for that project's interactive launches; there is no
+  headless-only opt-out.
+  `CLAUDE_SANDBOX_DANGEROUS=0` does **not** turn it off, because dangerous mode is on when any
+  of the flag, the variable or the config says so, and a falsy variable falls through to the
+  config.
+- The container is labelled `claude-sandbox.mode=headless`, listed by `claude-sandbox sessions`,
+  and never offered to `--attach` or `--join`.
+
+Everything else is an ordinary launch: the same cascade, mounts, host access, image builds and
+[launch reservation](#launch-reservation), so several sessions started at once get distinct
+names and pid classes. That includes a client's probes: Paseo's `--version` and `auth status`
+checks each run a full launch, so the first probe after a Claude Code update, or any other image
+rebuild, can exceed Paseo's 5-second timeout and mark the provider unavailable until the next
+probe succeeds.
+
+### Paseo
+
+In `~/.paseo/config.json` on the daemon host, give Paseo's **built-in** `claude` provider the
+sandboxed command, and add a separate provider for native Claude:
+
+```json
+{
+  "agents": {
+    "providers": {
+      "claude": {
+        "label": "Claude (sandbox)",
+        "command": ["claude-sandbox", "headless", "--"],
+        "paseoTools": { "enabled": false },
+        "order": 0
+      },
+      "claude-native": {
+        "extends": "claude",
+        "label": "Claude (native, unsandboxed)",
+        "command": ["claude"],
+        "order": 1
+      }
+    }
+  }
+}
+```
+
+Then run `paseo reload`.
+
+- **Why the built-in id is the sandboxed one.** Paseo documents no default-provider mechanism,
+  and which provider the app preselects is undocumented; left alone, the built-in `claude`
+  provider runs host `claude`, unsandboxed. Giving the built-in id the sandboxed command makes
+  it safe whichever provider is picked. `claude-native` sets `command` explicitly because
+  whether `extends` copies an overridden command is not documented.
+- **Keep Paseo's tool injection off for sandboxed sessions.** Paseo injects its MCP server only
+  when `daemon.mcp.injectIntoAgents` is enabled, which is off by default. Leave it off.
+  `paseoTools.enabled: false` keeps the sandboxed provider safe even if it is turned on: the
+  injected URL is unreachable from a container on the bridge network, and its terminals and
+  scripts would run on the daemon host, outside the sandbox. (`paseoTools` is not inherited
+  through `extends`.)
+- If `claude-sandbox` is not on the daemon's `PATH`, use its absolute path in `command`.
+- **Use Local workspaces** (existing directories). Paseo's Worktree workspaces live under
+  `~/.paseo/worktrees`, outside the repo, so the repo's `.claude-sandbox/` config is not found
+  and git would need the source `.git` mounted.
+- **Never mount `~/.paseo` into a sandbox.** A sandboxed `paseo daemon restart` can take the
+  host daemon's lock.
+- **One daemon per Claude config tree.** Paseo reads session transcripts from its own
+  `CLAUDE_CONFIG_DIR`, not the session's. A tree that exports a different `CLAUDE_CONFIG_DIR`
+  (the sussex tree, for example) needs a second Paseo daemon with its own `PASEO_HOME` and that
+  tree's `CLAUDE_CONFIG_DIR`.
+- Anyone who can reach the daemon can start a session with the sandbox's host access (the
+  Docker socket, where enabled, is root-equivalent). Keep the daemon on loopback and reach it
+  over SSH.
+
+Spec: `spec/launch.feature` CS-LNCH-058..067, `spec/sessions.feature` CS-SESS-055.
+
 ## Bootstrapping a project (`init` / `init-ralph`)
 
 `init` sets up the `.claude-sandbox/` directory in the current project and exits (it does **not** launch a container):
@@ -374,7 +495,7 @@ After `init-ralph`, fill in `agent/PRD.md` + the practice docs, groom the backlo
 
 At launch, **every** `.claude-sandbox/config.yaml` from the filesystem root down to the
 project is merged into one effective config, and every `.claude-sandbox/env` is stacked
-(as ordered `docker run --env-file` flags). The launcher prints the cascade so it's clear
+(as ordered `docker create --env-file` flags). The launcher prints the cascade so it's clear
 which files apply:
 
 ```
@@ -576,7 +697,7 @@ entries are written without a prompt, `--no-gitignore` does the same.
 
 ### `.claude-sandbox/env`
 
-Environment variables passed into the container (via `docker run --env-file`). This file provides secrets and webhook URLs that Claude or MCP servers need at runtime.
+Environment variables passed into the container (via `docker create --env-file`). This file provides secrets and webhook URLs that Claude or MCP servers need at runtime.
 
 ```bash
 # Discord webhook for MCP notification server
@@ -687,7 +808,7 @@ Both mounts must be writable because every session writes its own record and bin
 socket there (`bind()` under a read-only bind mount fails with `EROFS`).
 
 The launcher creates `peers/`, `peers/sessions/` and `peers/cc-socks/` on the host as you,
-before `docker run`, and forces them to `0700` even if they already exist with a wider mode: Docker would otherwise create a missing bind source as root, and
+before `docker create`, and forces them to `0700` even if they already exist with a wider mode: Docker would otherwise create a missing bind source as root, and
 Claude Code refuses a socket directory that is group- or world-writable or owned by someone
 else — it then silently falls back to a private `/tmp` inside the container that no other
 container can reach. The registry destination `<config dir>/sessions` is created the same way
@@ -876,7 +997,7 @@ Inside the container, `CLAUDE_SANDBOX_PROJECT_DIR` is always set to the project 
 
 ## Shell completion
 
-`claude-sandbox completion <shell>` prints a completion script for `bash`, `zsh`, `fish`, or `powershell`. It covers the launcher flags (with descriptions), the `init` / `init-ralph` / `ralph` subcommands and their flags, `--model` aliases, and the known `claude` passthrough flags. Once an argument crosses the passthrough boundary — a claude flag, a `--`, or a positional — the launcher stops suggesting its own flags, since everything past that point belongs to `claude`.
+`claude-sandbox completion <shell>` prints a completion script for `bash`, `zsh`, `fish`, or `powershell`. It covers the launcher flags (with descriptions), the `init` / `init-ralph` / `ralph` / `headless` subcommands, the flags of the first three, `--model` aliases, and the known `claude` passthrough flags. Once an argument crosses the passthrough boundary — a claude flag, a `--`, or a positional — the launcher stops suggesting its own flags, since everything past that point belongs to `claude`.
 
 ```bash
 # bash (needs bash-completion v2; see caveats below)
@@ -943,7 +1064,7 @@ SSH, git, Docker socket, AWS and package-cache mounts are all opt-in. Enable the
 
 **SSH** — mounts `~/.ssh/` read-only so Claude can access git remotes over SSH.
 
-**Package caches** — downloads a session makes (Go modules, the Go build cache, npm, pip) otherwise die with the container. When enabled, the launcher creates `~/.cache/claude-sandbox/{go-mod,go-build,npm,pip}` on the host (as you, before `docker run`, so the entrypoint's mount-point rule leaves them writable), mounts each **writable** at the same path, and sets `GOMODCACHE`, `GOCACHE`, `npm_config_cache` and `PIP_CACHE_DIR` to point at them. The tree is sandbox-only on purpose: it is never your own `~/go`, `~/.npm` or `~/.cache/pip`. Go verifies module zips on download but trusts extracted directories, so a shared cache would let a session plant a module your host toolchain then trusts; confined to its own tree, the blast radius is other sandbox sessions, which already share a trust level. The caches are content-addressed and lock-safe, so concurrent sessions are fine. Nothing evicts them — delete the directory to reset.
+**Package caches** — downloads a session makes (Go modules, the Go build cache, npm, pip) otherwise die with the container. When enabled, the launcher creates `~/.cache/claude-sandbox/{go-mod,go-build,npm,pip}` on the host (as you, before `docker create`, so the entrypoint's mount-point rule leaves them writable), mounts each **writable** at the same path, and sets `GOMODCACHE`, `GOCACHE`, `npm_config_cache` and `PIP_CACHE_DIR` to point at them. The tree is sandbox-only on purpose: it is never your own `~/go`, `~/.npm` or `~/.cache/pip`. Go verifies module zips on download but trusts extracted directories, so a shared cache would let a session plant a module your host toolchain then trusts; confined to its own tree, the blast radius is other sandbox sessions, which already share a trust level. The caches are content-addressed and lock-safe, so concurrent sessions are fine. Nothing evicts them — delete the directory to reset.
 
 ### UID/GID mapping
 
@@ -960,10 +1081,55 @@ sandbox's `claude-sandbox.pidclass` label and passes it as `CLAUDE_SANDBOX_PID_C
 entrypoint hands the command to `claude-sandbox pidslot`, which reads
 `/proc/sys/kernel/ns_last_pid` (one `read(2)` — a sysctl file returns EOF at any offset but
 zero), forks throwaway processes until the counter is `k−1 (mod 256)`, then execs
-`tini -s -- claude`. tini's **fork** lands `claude` on a pid `≡ k`. `docker run --init` is
+`tini -s -- claude`. tini's **fork** lands `claude` on a pid `≡ k`. `--init` is
 kept, so docker-init stays PID 1 and reaps orphans; `tini` is installed in the base image.
 The class is a per-session choice like the instance noun and is not part of the config-drift
 fingerprint. Spec: `spec/pidslot.feature`.
+
+### Launch reservation
+
+Every new container — interactive, ralph, `--branch`, the `[b]` fork — is launched in two
+steps: `docker create` with all of the launch's flags, mounts and labels, then
+`docker start -ai <name>`, which replaces the launcher process so the session's exit code is
+the container's. `--attach` (`docker attach`) and `--join` (`docker exec`) are unchanged. The
+detach keys go on `docker start`, the client that attaches, and never on `docker create`.
+
+The split exists to make the instance noun and the pid class race-free. Both are chosen from
+what discovery sees, and a container used to become visible only once `docker run` had it
+running — so two launches started together (two terminals, or a client that starts several
+sessions at once) could pick the same noun, and the second failed on the name, or the same pid
+class, and silently overwrote a peer-registry record. Now each launch takes an exclusive
+`flock` on `~/.cache/claude-sandbox/launch.lock` (created as you if missing), and while it
+holds it: discovers every sandbox container on the host **including `created` ones** (and
+`paused` ones, as plain `docker ps` always did; no per-container `docker top` runs here),
+re-checks the noun it picked earlier (for the worktree banner) and re-picks it if a concurrent
+launch took it meanwhile, picks the pid class, and runs `docker create`, which reserves the
+name atomically. The lock is released before `docker start` (the file is also opened
+close-on-exec, so an exec can never carry it into the session). It is **never** held across an
+image build: images are checked and built first, so a slow build does not serialize other
+launches. The critical section takes milliseconds.
+
+A created container older than 60 seconds is an orphan of a launcher that died between the two
+steps (`--rm` never fires for a container that never started); the next launch removes it
+with `docker rm` under the lock. If `docker create` still reports a name `Conflict` — something
+that does not take the lock got there first — the launcher re-picks and retries, up to three
+attempts, then fails with a clear error. A ralph launch, whose name is fixed, fails on the
+first conflict (the error says to stop the running one, or to retry in a few seconds when it is
+the never-started leftover of a ralph launch that just failed) — unless the container holding the name is itself a `created` reservation
+more than 10 seconds old that never started (its `docker start` failed after the launcher had exec'd it, e.g. no TTY or
+a mount error); that one is removed and the create retried once. Only docker's name conflict
+(`Conflict. The container name … is already in use`) counts; `Conflicting options` flag errors
+are reported as they are. If the lock cannot be taken within 30 seconds, the launcher warns and
+launches without it: names stay unique (docker refuses a duplicate), but pid classes are then
+unprotected, so a launch at the same moment may get the same class.
+
+The lock is host-wide only for launches run **on the host**. `~/.cache/claude-sandbox` itself
+is not mounted into sandboxes (only subdirectories of it are, such as the package caches and
+the shared peer registry), so a launcher run inside one sandbox and a launcher run inside
+another take two different lock files. Their container names still stay unique, through the
+create conflict retry above, but two concurrent launches from inside different containers can
+get the same pid class.
+Spec: `spec/sessions.feature` CS-SESS-048..054, `spec/launch.feature` CS-LNCH-057.
 
 ### Image layering
 
@@ -1126,7 +1292,7 @@ internal/
   layout/          Layout lifecycle: skeleton, gitignore, sidecar repo
   scaffold/        Embedded scaffold seeding
   imagebuild/      Base/CLI/child/cap image staleness + builds, update check, cache-budget warning
-  launch/          Mount assembly, shadow injections, docker run argv
+  launch/          Mount assembly, shadow injections, docker create/start argv, launch lock
   ralphloop/       Ralph loop: iterations, lock, quota handling, pipeline
   execx/, prompt/  Command-runner and prompt seams (injected in tests)
 spec/              Gherkin behavioral spec — scenario IDs referenced by the Ginkgo tests

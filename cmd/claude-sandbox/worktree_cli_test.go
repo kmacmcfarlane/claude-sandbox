@@ -40,15 +40,15 @@ var _ = Describe("worktree mode (CS-LNCH-041..047, CS-SESS-045..047)", func() {
 	It("CS-LNCH-041, CS-LNCH-026: off by default — a plain launch is plain claude, no banner", func() {
 		gitProject(f)
 		Expect(f.run("--dangerous", "--model", "opus", "--resume")).To(Equal(0), f.errw.String())
-		Expect(f.execLine()).To(HaveSuffix(" claude-sandbox:run claude --dangerously-skip-permissions --model opus --resume"))
-		Expect(f.execLine()).NotTo(ContainSubstring("--worktree"))
+		Expect(f.launchLine()).To(HaveSuffix(" claude-sandbox:run claude --dangerously-skip-permissions --model opus --resume"))
+		Expect(f.launchLine()).NotTo(ContainSubstring("--worktree"))
 		Expect(f.out.String()).NotTo(ContainSubstring("Worktree:"), "the shared-checkout default does not narrate itself")
 	})
 
 	It("CS-LNCH-041, CS-LNCH-026: --worktree — claude --worktree <instance> precedes --model and passthrough, and names the container", func() {
 		gitProject(f)
 		Expect(f.run("--worktree", "--dangerous", "--model", "opus", "--resume")).To(Equal(0), f.errw.String())
-		line := f.execLine()
+		line := f.launchLine()
 		re := regexp.MustCompile(`--name claude-sandbox-` + regexp.QuoteMeta(imagebuild.ProjectSlug(f.proj)) +
 			`-(` + nounRe + `) claude-sandbox:run claude --dangerously-skip-permissions --worktree (` + nounRe + `) --model opus --resume$`)
 		m := re.FindStringSubmatch(line)
@@ -61,14 +61,14 @@ var _ = Describe("worktree mode (CS-LNCH-041..047, CS-SESS-045..047)", func() {
 	It("CS-LNCH-041: --no-worktree is accepted and launches plain claude, silently", func() {
 		gitProject(f)
 		Expect(f.run("--no-worktree")).To(Equal(0))
-		Expect(f.execLine()).To(HaveSuffix(" claude-sandbox:run claude"))
+		Expect(f.launchLine()).To(HaveSuffix(" claude-sandbox:run claude"))
 		Expect(f.out.String()).NotTo(ContainSubstring("Worktree:"))
 	})
 
 	It("CS-LNCH-041: --worktree is launcher-owned, never a passthrough boundary", func() {
 		gitProject(f)
 		Expect(f.run("--worktree", "--dangerous")).To(Equal(0), "--dangerous after --worktree is still consumed")
-		Expect(f.execLine()).To(MatchRegexp(` claude --dangerously-skip-permissions --worktree ` + nounRe + `$`))
+		Expect(f.launchLine()).To(MatchRegexp(` claude --dangerously-skip-permissions --worktree ` + nounRe + `$`))
 	})
 
 	DescribeTable("CS-LNCH-042: precedence is tri-state — CLI > env (falsy is an explicit off) > merged config > default (off interactive, on ralph)",
@@ -89,9 +89,9 @@ var _ = Describe("worktree mode (CS-LNCH-041..047, CS-SESS-045..047)", func() {
 			}
 			Expect(f.run(args...)).To(Equal(0), f.errw.String())
 			if want {
-				Expect(f.execLine()).To(ContainSubstring(" --worktree "))
+				Expect(f.launchLine()).To(ContainSubstring(" --worktree "))
 			} else {
-				Expect(f.execLine()).NotTo(ContainSubstring("--worktree"))
+				Expect(f.launchLine()).NotTo(ContainSubstring("--worktree"))
 			}
 		},
 		Entry("unset/unset/absent interactive -> off", "", "", "", false, false),
@@ -112,21 +112,21 @@ var _ = Describe("worktree mode (CS-LNCH-041..047, CS-SESS-045..047)", func() {
 		writeFile(filepath.Join(filepath.Dir(f.proj), ".claude-sandbox", "config.yaml"), "worktree: false\n")
 		writeFile(filepath.Join(f.proj, ".claude-sandbox", "config.yaml"), "worktree: true\n")
 		Expect(f.run()).To(Equal(0))
-		Expect(f.execLine()).To(ContainSubstring(" claude --worktree "))
+		Expect(f.launchLine()).To(ContainSubstring(" claude --worktree "))
 
 		g := newCLIFixture()
 		gitProject(g)
 		writeFile(filepath.Join(filepath.Dir(g.proj), ".claude-sandbox", "config.yaml"), "worktree: true\n")
 		writeFile(filepath.Join(g.proj, ".claude-sandbox", "config.yaml"), "worktree: false\n")
 		Expect(g.run()).To(Equal(0))
-		Expect(g.execLine()).NotTo(ContainSubstring("--worktree"))
+		Expect(g.launchLine()).NotTo(ContainSubstring("--worktree"))
 	})
 
 	It("CS-LNCH-043: --worktree=NAME names the worktree while the noun still names the container", func() {
 		gitProject(f)
 		Expect(f.run("--worktree=feature-x")).To(Equal(0))
-		Expect(f.execLine()).To(MatchRegexp(`--name claude-sandbox-\S+-` + nounRe + ` claude-sandbox:run claude --worktree feature-x$`))
-		Expect(f.execLine()).NotTo(ContainSubstring("-feature-x claude-sandbox:run"))
+		Expect(f.launchLine()).To(MatchRegexp(`--name claude-sandbox-\S+-` + nounRe + ` claude-sandbox:run claude --worktree feature-x$`))
+		Expect(f.launchLine()).NotTo(ContainSubstring("-feature-x claude-sandbox:run"))
 		Expect(f.out.String()).To(ContainSubstring("Worktree: feature-x (.claude/worktrees/feature-x, branch worktree-feature-x)"))
 	})
 
@@ -143,11 +143,11 @@ var _ = Describe("worktree mode (CS-LNCH-041..047, CS-SESS-045..047)", func() {
 	It("CS-LNCH-044: the worktree label records the name, empty when off", func() {
 		gitProject(f)
 		Expect(f.run("--worktree=feature-x")).To(Equal(0))
-		Expect(f.fake.Execed.Args).To(ContainElement("claude-sandbox.worktree=feature-x"))
+		Expect(f.launched().Args).To(ContainElement("claude-sandbox.worktree=feature-x"))
 
 		g := newCLIFixture()
 		Expect(g.run()).To(Equal(0))
-		Expect(g.fake.Execed.Args).To(ContainElement("claude-sandbox.worktree="))
+		Expect(g.launched().Args).To(ContainElement("claude-sandbox.worktree="))
 	})
 
 	It("CS-LNCH-044: the key, flag, env var and name never register as drift", func() {
@@ -158,13 +158,13 @@ var _ = Describe("worktree mode (CS-LNCH-041..047, CS-SESS-045..047)", func() {
 		gitProject(f)
 		f.envmap["CLAUDE_SANDBOX_WORKTREE"] = "1"
 		Expect(f.run("--worktree=feature-x")).To(Equal(0))
-		Expect(f.fake.Execed.Args).To(ContainElement("claude-sandbox.confighash=" + bare))
+		Expect(f.launched().Args).To(ContainElement("claude-sandbox.confighash=" + bare))
 	})
 
 	It("CS-LNCH-045, CS-LNCH-027: ralph launches carry --worktree ralph by default, before passthrough", func() {
 		gitProject(f)
 		Expect(f.run("--ralph", "--limit", "5", "--dangerous", "--verbose")).To(Equal(0))
-		Expect(f.execLine()).To(HaveSuffix(
+		Expect(f.launchLine()).To(HaveSuffix(
 			"-ralph claude-sandbox:run /opt/claude-sandbox/bin/ralph --limit 5 --dangerously-skip-permissions --worktree ralph --verbose"))
 		Expect(f.out.String()).To(ContainSubstring("Worktree: ralph (.claude/worktrees/ralph, branch worktree-ralph)"))
 	})
@@ -172,12 +172,12 @@ var _ = Describe("worktree mode (CS-LNCH-041..047, CS-SESS-045..047)", func() {
 	It("CS-LNCH-045: ralph's worktree can be renamed or turned off", func() {
 		gitProject(f)
 		Expect(f.run("--ralph", "--worktree=nightly")).To(Equal(0))
-		Expect(f.execLine()).To(HaveSuffix("/opt/claude-sandbox/bin/ralph --worktree nightly"))
+		Expect(f.launchLine()).To(HaveSuffix("/opt/claude-sandbox/bin/ralph --worktree nightly"))
 
 		g := newCLIFixture()
 		gitProject(g)
 		Expect(g.run("--ralph", "--no-worktree")).To(Equal(0))
-		Expect(g.execLine()).To(HaveSuffix("/opt/claude-sandbox/bin/ralph"))
+		Expect(g.launchLine()).To(HaveSuffix("/opt/claude-sandbox/bin/ralph"))
 	})
 
 	It("CS-LNCH-046: outside a git work tree a requested worktree stands down with a banner, however it was requested", func() {
@@ -185,9 +185,9 @@ var _ = Describe("worktree mode (CS-LNCH-041..047, CS-SESS-045..047)", func() {
 			g := newCLIFixture() // no gitProject: rev-parse returns nothing
 			g.envmap["CLAUDE_SANDBOX_WORKTREE"] = "1"
 			Expect(g.run(args...)).To(Equal(0), "%v: %s", args, g.errw.String())
-			Expect(g.execLine()).NotTo(ContainSubstring("--worktree"), "%v", args)
+			Expect(g.launchLine()).NotTo(ContainSubstring("--worktree"), "%v", args)
 			Expect(g.out.String()).To(ContainSubstring("Worktree: off (not a git repository)"), "%v", args)
-			Expect(g.fake.Execed.Args).To(ContainElement("claude-sandbox.worktree="))
+			Expect(g.launched().Args).To(ContainElement("claude-sandbox.worktree="))
 		}
 		// --ralph asks by default; a plain interactive launch never asked.
 		g := newCLIFixture()
@@ -196,7 +196,7 @@ var _ = Describe("worktree mode (CS-LNCH-041..047, CS-SESS-045..047)", func() {
 
 		h := newCLIFixture()
 		Expect(h.run()).To(Equal(0))
-		Expect(h.execLine()).NotTo(ContainSubstring("--worktree"))
+		Expect(h.launchLine()).NotTo(ContainSubstring("--worktree"))
 		Expect(h.out.String()).NotTo(ContainSubstring("Worktree:"), "nothing was requested, nothing stood down")
 	})
 
@@ -207,7 +207,7 @@ var _ = Describe("worktree mode (CS-LNCH-041..047, CS-SESS-045..047)", func() {
 				gitProject(g)
 			}
 			Expect(g.run(args...)).To(Equal(0))
-			Expect(g.fake.Execed.Args).To(ContainElements("-e", "CLAUDE_SANDBOX_PROJECT_DIR="+g.proj), "%v", args)
+			Expect(g.launched().Args).To(ContainElements("-e", "CLAUDE_SANDBOX_PROJECT_DIR="+g.proj), "%v", args)
 		}
 	})
 
@@ -228,7 +228,7 @@ var _ = Describe("worktree mode (CS-LNCH-041..047, CS-SESS-045..047)", func() {
 			gitProject(f)
 			running()
 			Expect(f.run("--worktree", "--no-session-check")).To(Equal(0))
-			Expect(f.execLine()).To(ContainSubstring("-zenith claude-sandbox:run claude --worktree zenith"))
+			Expect(f.launchLine()).To(ContainSubstring("-zenith claude-sandbox:run claude --worktree zenith"))
 		})
 
 		It("CS-SESS-045: an explicit --worktree=NAME reopens an existing worktree on purpose", func() {
@@ -236,7 +236,7 @@ var _ = Describe("worktree mode (CS-LNCH-041..047, CS-SESS-045..047)", func() {
 			gitProject(f)
 			running()
 			Expect(f.run("--worktree=otter")).To(Equal(0))
-			Expect(f.execLine()).To(HaveSuffix(" claude --worktree otter"))
+			Expect(f.launchLine()).To(HaveSuffix(" claude --worktree otter"))
 		})
 
 		It("CS-SESS-046: join enters its own worktree with a bare --worktree before --model when the mode resolves on", func() {
@@ -318,7 +318,7 @@ var _ = Describe("worktree mode (CS-LNCH-041..047, CS-SESS-045..047)", func() {
 			running(psRowWorktree("cs-a", "Up 1 hour", f.proj, "otter", "otter"))
 			f.env.Prompter = &prompt.Scripted{IsTTY: true, Answers: []string{"b"}}
 			Expect(f.run("--worktree", "--verbose")).To(Equal(0))
-			line := f.execLine()
+			line := f.launchLine()
 			Expect(line).To(MatchRegexp(` claude --worktree (` + nounRe + `) --continue --fork-session --verbose$`))
 			Expect(line).NotTo(ContainSubstring("--worktree otter "), "the fork gets its own worktree")
 
@@ -328,21 +328,21 @@ var _ = Describe("worktree mode (CS-LNCH-041..047, CS-SESS-045..047)", func() {
 			g.fake.On("docker top", "PID  COMMAND\n1  claude\n", nil)
 			g.env.Prompter = &prompt.Scripted{IsTTY: true, Answers: []string{"b"}}
 			Expect(g.run("--verbose")).To(Equal(0))
-			Expect(g.execLine()).To(HaveSuffix(" claude --continue --fork-session --verbose"), "by default the fork shares the checkout")
+			Expect(g.launchLine()).To(HaveSuffix(" claude --continue --fork-session --verbose"), "by default the fork shares the checkout")
 		})
 
 		It("CS-SESS-040: --branch composes --worktree <new-noun> with --resume --fork-session when the mode resolves on", func() {
 			gitProject(f)
 			running()
 			Expect(f.run("--worktree", "--branch", "--name", "sidequest")).To(Equal(0))
-			Expect(f.execLine()).To(MatchRegexp(` claude --worktree ` + nounRe + ` --resume --fork-session --name sidequest$`))
+			Expect(f.launchLine()).To(MatchRegexp(` claude --worktree ` + nounRe + ` --resume --fork-session --name sidequest$`))
 
 			g := newCLIFixture()
 			gitProject(g)
 			g.fake.On("docker ps", "\n", nil)
 			g.fake.On("docker top", "PID  COMMAND\n1  claude\n", nil)
 			Expect(g.run("--branch", "--name", "sidequest")).To(Equal(0))
-			Expect(g.execLine()).To(HaveSuffix(" claude --resume --fork-session --name sidequest"), "by default the fork shares the checkout")
+			Expect(g.launchLine()).To(HaveSuffix(" claude --resume --fork-session --name sidequest"), "by default the fork shares the checkout")
 		})
 
 		It("CS-SESS-010, CS-SESS-012: the listing and JSON carry the worktree", func() {

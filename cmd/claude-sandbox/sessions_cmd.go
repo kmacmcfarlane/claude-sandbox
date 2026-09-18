@@ -7,7 +7,6 @@ package main
 import (
 	"fmt"
 	"io"
-	"strconv"
 	"strings"
 	"time"
 
@@ -52,6 +51,8 @@ func newSessionsCmd(env *Env) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// Reservations are launches in flight, not sessions (CS-SESS-051).
+			found = sessions.Live(found)
 			if asJSON {
 				b, merr := sessions.MarshalJSON(found)
 				if merr != nil {
@@ -192,8 +193,8 @@ func decideSessions(env *Env, projectDir string, f *launchFlags) (sessionDecisio
 	// still reports what is running, which is the discoverability half of the
 	// problem (CS-SESS-034).
 	if f.Ralph {
-		if len(found) > 0 {
-			reportRunning(env, found)
+		if live := sessions.Live(found); len(live) > 0 {
+			reportRunning(env, live)
 		}
 		return sessionDecision{Action: actionNew}, nil
 	}
@@ -402,6 +403,9 @@ func wouldBeFingerprint(env *Env, projectDir string, f *launchFlags, cfg *cascad
 
 // newInstance picks the instance noun for a container about to be launched.
 // Ralph gets none: it is single-instance, so there is nothing to disambiguate.
+// This is the EARLY pick, made before the image build because the noun names
+// the worktree in the banner; reserveContainer re-validates it under the launch
+// lock (CS-SESS-054). Discovery includes reservations (CS-SESS-050).
 //
 // The noun is chosen from those NOT already in use by this project, which is
 // why a short word list suffices — see sessions.PickNoun. Because the noun
@@ -421,19 +425,6 @@ func newInstance(env *Env, projectDir string, f *launchFlags, gitRoot string) st
 		return sessions.PickNoun(taken, nil)
 	}
 	return sessions.PickNoun(append(taken, sessions.Instances(found)...), nil)
-}
-
-// newPIDClass picks the pid class for a container about to be launched
-// (CS-PID-004, CS-LNCH-039). Unlike the noun it is chosen against every
-// sandbox on the host, not just this project's: the peer registry in
-// ~/.claude is shared by all of them. Ralph gets one too.
-func newPIDClass(env *Env) string {
-	found, err := sessions.DiscoverAll(env.Runner)
-	if err != nil {
-		// Same rule as nouns: discovery failing must not block a launch.
-		return strconv.Itoa(sessions.PickClass(nil, nil))
-	}
-	return strconv.Itoa(sessions.PickClass(sessions.Classes(found), nil))
 }
 
 // attachTo hands the process over to `docker attach` (CS-SESS-031).
@@ -461,7 +452,7 @@ func joinInto(env *Env, s sessions.Session, projectDir, hostUser, model, configu
 	fmt.Fprintf(env.Out, "Press %s to detach — but note that a detached joined session cannot be recovered.\n", detachKeys)
 
 	// -u is required: exec skips the entrypoint's gosu step, and the image ends
-	// USER root. -w is redundant (docker run's -w is inherited via
+	// USER root. -w is redundant (docker create's -w is inherited via
 	// Config.WorkingDir) but passed so the working directory never depends on
 	// how the container happened to be started.
 	// The helper lands this claude on the container's pid class (CS-SESS-044,

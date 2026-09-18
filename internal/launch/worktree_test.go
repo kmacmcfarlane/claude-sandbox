@@ -143,7 +143,7 @@ var _ = Describe("worktree mode", func() {
 					in.RalphMode, in.Worktree = ralph, wt
 					p := build()
 					Expect(p.EnvFlags).To(ContainElement("CLAUDE_SANDBOX_PROJECT_DIR=" + in.ProjectDir))
-					Expect(argPairs(p.DockerArgs(in.ProjectDir), "-e")).To(ContainElement("CLAUDE_SANDBOX_PROJECT_DIR=" + in.ProjectDir))
+					Expect(argPairs(p.CreateArgs(in.ProjectDir), "-e")).To(ContainElement("CLAUDE_SANDBOX_PROJECT_DIR=" + in.ProjectDir))
 				}
 			}
 		})

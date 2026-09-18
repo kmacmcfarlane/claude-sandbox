@@ -34,8 +34,8 @@ var _ = Describe("env file linting at launch", func() {
 		Expect(errOut).To(ContainSubstring(projEnv + ":1: value for LOCAL is wrapped in ' quotes."))
 
 		// Warn-only: both files still feed --env-file, and neither is rewritten.
-		Expect(f.fake.Execed.Args).To(ContainElements("--env-file", parentEnv))
-		Expect(f.fake.Execed.Args).To(ContainElements("--env-file", projEnv))
+		Expect(f.launched().Args).To(ContainElements("--env-file", parentEnv))
+		Expect(f.launched().Args).To(ContainElements("--env-file", projEnv))
 		Expect(readFile(projEnv)).To(Equal("LOCAL='quoted'\n"))
 	})
 
@@ -60,7 +60,7 @@ var _ = Describe("env file linting at launch", func() {
 		Expect(f.run()).To(Equal(0))
 
 		var envFiles []string
-		args := f.fake.Execed.Args
+		args := f.launched().Args
 		for i, a := range args {
 			if a == "--env-file" && i+1 < len(args) {
 				envFiles = append(envFiles, args[i+1])

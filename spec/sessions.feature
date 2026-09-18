@@ -11,7 +11,7 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
       `docker attach` and survives losing its terminal;
     - a session JOINED into an existing container (docker exec) is cheaper but
       its stdio dies with its client and cannot be recovered, and it dies when
-      that container's primary process exits (the container is `docker run --rm`).
+      that container's primary process exits (the container is created `--rm`).
 
   Discovery is by container label, never by parsing container names — names are
   lossy (normalized and hashed). See CS-LNCH-032 for the labels written.
@@ -23,7 +23,9 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
 
   Scenario: CS-SESS-001 Discovery filters containers by label
     When sessions are discovered for a project directory
-    Then one "docker ps" runs with --filter label=claude-sandbox.project=<dir>
+    Then one "docker ps -a" runs with --filter label=claude-sandbox.project=<dir>
+      and --filter status=created --filter status=running --filter status=paused
+      (see CS-SESS-050)
     And the container name, status, and each claude-sandbox.* label are read from
       the same --format output, with no per-container "docker inspect"
     And container names are never parsed to recover the project directory
@@ -385,7 +387,7 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
     # All three resolve through one helper so they cannot disagree.
     Then --detach-keys is passed to each of:
       | path         | session                                  |
-      | docker run   | the primary session of a new container    |
+      | docker start | the primary session of a new container (never docker create, CS-LNCH-057) |
       | docker attach| a reattached session                      |
       | docker exec  | a joined session                          |
     And all three use the same resolved sequence
@@ -411,7 +413,7 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
       <container> claude ..." replaces the current process
     And the output warns that a detached joined session cannot be recovered
     # -u is required: exec skips the entrypoint's gosu step and the image ends
-    # USER root. -w is redundant (docker run's -w is inherited via Config.WorkingDir)
+    # USER root. -w is redundant (docker create's -w is inherited via Config.WorkingDir)
     # but passed explicitly so the working directory never depends on that.
     # The detach keys matter most here: detaching an exec'd session orphans it
     # beyond recovery, so leaving docker's ctrl-p,ctrl-q default in place would
@@ -442,3 +444,128 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
       replaces the current process
     # See spec/pidslot.feature (CS-PID-005): the joined session inherits the
     # container's CLAUDE_SANDBOX_PID_CLASS and lands on the same residue class.
+
+  # ---- reservation: race-free names and pid classes ----
+  # Nouns and classes are chosen from what discovery sees, and discovery used to
+  # see RUNNING containers only, long before the container existed. Two
+  # concurrent launches (two terminals, a headless client starting several
+  # sessions) could pick the same noun — the second "docker run" failed on the
+  # name — or the same pid class, which silently overwrote a peer-registry
+  # record (~/.claude/sessions/<pid>.json). Every new container is therefore
+  # RESERVED with "docker create" inside a short host-wide critical section,
+  # then started (CS-LNCH-057).
+
+  Scenario: CS-SESS-048 Nouns and classes are reserved under a host launch lock
+    When a new container is launched (interactive, ralph, --branch or the [b] fork)
+    Then an exclusive flock is taken on ~/.cache/claude-sandbox/launch.lock,
+      the directory and file created as the invoking user when missing
+    And while it is held: sessions are discovered across the host (without the
+      per-container "docker top" session count, which the picks do not use, so
+      the critical section does not grow with the number of sandboxes), stale
+      reservations are removed (CS-SESS-052), the instance noun is re-validated
+      (CS-SESS-054), the pid class is picked, and "docker create" runs
+    And the lock is released after "docker create" returns and before
+      "docker start" is executed; the file is opened close-on-exec, so an exec
+      can never carry the lock into the session
+    And two concurrent launches therefore never receive the same noun or class
+    # Host-wide rather than per project because pid classes are host-wide.
+    Given the lock cannot be taken (unwritable directory, or held for 30 s)
+    Then a warning is printed and the launch proceeds without it
+    And the warning says container names stay unique (docker refuses a
+      duplicate, CS-SESS-053) but pid classes are NOT protected: a launch at the
+      same moment may get the same class
+
+  Scenario: CS-SESS-049 The launch lock is never held across image builds
+    When a launch has to build or check images
+    Then every image check and build runs before the lock is taken
+    # A build can take minutes; holding the lock across one would serialize
+    # every launch on the host behind it.
+
+  Scenario: CS-SESS-050 Discovery sees reserved containers
+    # A reservation is a container in the "created" state: invisible to plain
+    # "docker ps", which is exactly what let two launches pick the same noun.
+    When sessions are discovered
+    Then "docker ps -a --filter status=created --filter status=running
+      --filter status=paused" is used
+    And both the noun picker and the pid-class allocation (DiscoverAll) see
+      created containers as in use
+    And paused containers are listed as before: plain "docker ps" always
+      included them (their state is "paused", not "running"), so they stay
+      attachable and their pid class stays taken
+    And stopped or exited containers are still not listed
+
+  Scenario: CS-SESS-051 Reserved containers are never session candidates
+    Given a container in the "created" state for this project
+    Then it is not offered by the tier-1 decision, --attach, --join or the
+      --attach=/--join= completion
+    And "claude-sandbox sessions" does not list it
+    And no "docker top" runs for it
+    # There is nothing to attach to or exec into until it has started.
+
+  Scenario: CS-SESS-052 Stale reservations are removed under the lock
+    # Create-to-start takes milliseconds, so a created container older than
+    # that is an orphan from a launcher that died between the two steps. It
+    # would otherwise hold its noun and class forever: --rm never fires for a
+    # container that never started.
+    Given a sandbox-labelled container, in any project, in the "created" state
+      whose creation time is more than 60 seconds ago
+    When a new container is reserved
+    Then "docker rm <container>" runs while the lock is held
+    And its noun and class are free for this launch
+    And a created container younger than 60 seconds is left alone
+    And the age is read from the date, time and numeric offset of
+      {{.CreatedAt}}, never its zone abbreviation, which is numeric in zones
+      without a letter name ("2026-09-18 22:30:00 +1030 +1030" on Lord Howe)
+
+  Scenario: CS-SESS-053 A create name conflict re-picks and retries, bounded
+    # Only launchers that take the lock are serialized; an older launcher or a
+    # hand-run docker command can still take the name first.
+    Given "docker create" fails with docker's name conflict
+      ("Conflict. The container name ... is already in use")
+    Then the noun is marked taken, discovery re-runs, a new noun and class are
+      picked, and "docker create" is retried
+    And after 3 attempts the launch fails with exit 2 and an error naming the conflict
+    And a ralph launch, whose name is fixed, fails on the first conflict with an
+      error saying a ralph container already exists for this project; a
+      never-started one does not clear on its own: the next ralph launch
+      reclaims it once it is older than 10 seconds (below), and any launch's
+      stale sweep removes it after 60 seconds (CS-SESS-052)
+    But when the ralph container holding the name is in the "created" state (a
+      reservation whose "docker start" failed after the exec, which the launcher
+      can no longer clean up) AND was created more than 10 seconds ago, it is
+      removed and the create retried once
+    And a younger "created" holder is never removed: the lock is released
+      before the exec of "docker start", so it may be a concurrent launch about
+      to start. The launch attempting the reclaim fails with the "already
+      exists" error instead, and the holder is left untouched
+    # Read with "docker inspect --type container -f '{{.State.Status}} {{.Created}}'";
+    # {{.Created}} is RFC 3339 with nanoseconds, not the docker ps layout.
+    And a "Conflicting options" error is not a name conflict
+    And any other "docker create" failure is reported with docker's own message
+      and is not retried
+
+  Scenario: CS-SESS-054 The early noun is re-validated under the lock
+    # The noun is picked before the image build because it names the worktree
+    # shown in the banner (CS-SESS-045); a concurrent launch may take it while
+    # this one builds.
+    Given the noun picked before the image build is now used by another
+      container of this project, or its worktree directory now exists
+    When the container is reserved
+    Then a new noun is picked from those still free
+    And the container name, the instance label and the worktree name are
+      derived from the new noun, and the worktree banner is printed again
+    And a note says the noun was taken by a concurrent launch
+    And an explicit --worktree=NAME keeps its name; ralph keeps "ralph"
+
+  # ---- headless containers ----
+
+  Scenario: CS-SESS-055 Headless containers are never session candidates
+    # A headless container's stdio is an SDK client's stream-json channel;
+    # attaching a terminal to it, or typing into it, corrupts the stream.
+    Given a running container of this project labelled claude-sandbox.mode=headless
+      (CS-LNCH-064)
+    Then it is not offered by the tier-1 decision, --attach, --join or the
+      --attach=/--join= completion, and alone it never triggers the decision
+    And "claude-sandbox sessions" lists it, marked "headless" in the MODE column
+      (and "mode": "headless" in --json)
+    And its instance noun and pid class still count as taken for new launches
