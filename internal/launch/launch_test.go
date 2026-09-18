@@ -10,7 +10,9 @@ package launch_test
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -23,6 +25,7 @@ import (
 
 	assets "github.com/kmacmcfarlane/claude-sandbox"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/cascade"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/imagebuild"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/launch"
 )
@@ -92,7 +95,7 @@ var _ = Describe("launch.Build", func() {
 	It("CS-LNCH-007: mounts the project at its real host path and uses it as workdir", func() {
 		p := build()
 		Expect(p.Volumes).To(ContainElement(proj + ":" + proj))
-		args := p.DockerArgs(proj)
+		args := p.CreateArgs(proj)
 		Expect(args).To(ContainElements("-w", proj))
 	})
 
@@ -456,7 +459,7 @@ var _ = Describe("launch.Build", func() {
 		// envValues returns every value docker run receives for key via -e.
 		envValues := func(p *launch.Plan, key string) []string {
 			var vals []string
-			for _, e := range argPairs(p.DockerArgs(proj), "-e") {
+			for _, e := range argPairs(p.CreateArgs(proj), "-e") {
 				if k, v, ok := strings.Cut(e, "="); ok && k == key {
 					vals = append(vals, v)
 				}
@@ -466,7 +469,7 @@ var _ = Describe("launch.Build", func() {
 		// peerEntries is every -v / -e entry the bridge contributes.
 		peerEntries := func(p *launch.Plan) []string {
 			var got []string
-			args := p.DockerArgs(proj)
+			args := p.CreateArgs(proj)
 			for _, v := range argPairs(args, "-v") {
 				if strings.Contains(v, filepath.Join("claude-sandbox", "peers")) {
 					got = append(got, "-v "+v)
@@ -482,10 +485,10 @@ var _ = Describe("launch.Build", func() {
 		rootMount := func() string { return root + ":" + root }
 
 		It("CS-LNCH-049: adds nothing when the key is unset, and an explicit false is byte-identical", func() {
-			before := build().DockerArgs(proj)
+			before := build().CreateArgs(proj)
 			f := false
 			in.Cfg = &cascade.Config{SharedPeerRegistry: &f}
-			Expect(build().DockerArgs(proj)).To(Equal(before))
+			Expect(build().CreateArgs(proj)).To(Equal(before))
 			for _, v := range before {
 				Expect(v).NotTo(ContainSubstring("claude-sandbox/peers"))
 				Expect(v).NotTo(ContainSubstring("XDG_RUNTIME_DIR"))
@@ -494,9 +497,9 @@ var _ = Describe("launch.Build", func() {
 		})
 
 		It("CS-LNCH-049: with the key on, the argv is the key-off argv plus exactly the bridge entries", func() {
-			off := build().DockerArgs(proj)
+			off := build().CreateArgs(proj)
 			enable()
-			on := build().DockerArgs(proj)
+			on := build().CreateArgs(proj)
 			// Remove the three bridge pairs; what remains must be the off argv.
 			var rest []string
 			for i := 0; i < len(on); i++ {
@@ -714,7 +717,7 @@ var _ = Describe("launch.Build", func() {
 			p := build()
 			expectStoodDown(p, root, "an env file sets XDG_RUNTIME_DIR")
 			// Exactly a key-off launch, fingerprint included.
-			Expect(p.DockerArgs(proj)).To(Equal(off.DockerArgs(proj)))
+			Expect(p.CreateArgs(proj)).To(Equal(off.CreateArgs(proj)))
 			Expect(p.ConfigHash).To(Equal(off.ConfigHash))
 		})
 
@@ -844,12 +847,12 @@ var _ = Describe("launch.Build", func() {
 	It("CS-LNCH-022: sets --memory and --memory-swap to the configured memoryLimit, default 8g", func() {
 		p := build()
 		Expect(p.MemoryLimit).To(Equal("8g"))
-		args := p.DockerArgs(proj)
+		args := p.CreateArgs(proj)
 		Expect(args).To(ContainElements("--memory", "8g", "--memory-swap", "8g"))
 
 		in.Cfg = &cascade.Config{MemoryLimit: "16g"}
 		p = build()
-		Expect(p.DockerArgs(proj)).To(ContainElements("--memory", "16g", "--memory-swap", "16g"))
+		Expect(p.CreateArgs(proj)).To(ContainElements("--memory", "16g", "--memory-swap", "16g"))
 	})
 
 	It("CS-LNCH-023: model precedence CLI > YAML", func() {
@@ -928,7 +931,7 @@ var _ = Describe("launch.Build", func() {
 		))
 		Expect(p.Labels).To(ContainElement("claude-sandbox.confighash=" + p.ConfigHash))
 
-		args := p.DockerArgs(proj)
+		args := p.CreateArgs(proj)
 		for _, l := range p.Labels {
 			Expect(argPairs(args, "--label")).To(ContainElement(l))
 		}
@@ -941,7 +944,7 @@ var _ = Describe("launch.Build", func() {
 			p := build()
 			Expect(p.Labels).To(ContainElement("claude-sandbox.pidclass=17"))
 			Expect(p.EnvFlags).To(ContainElement("CLAUDE_SANDBOX_PID_CLASS=17"))
-			args := p.DockerArgs(proj)
+			args := p.CreateArgs(proj)
 			Expect(argPairs(args, "--label")).To(ContainElement("claude-sandbox.pidclass=17"))
 			Expect(argPairs(args, "-e")).To(ContainElement("CLAUDE_SANDBOX_PID_CLASS=17"))
 		}
@@ -959,20 +962,23 @@ var _ = Describe("launch.Build", func() {
 		Expect(a.ConfigHash).To(Equal(b.ConfigHash))
 	})
 
-	It("CS-LNCH-033: docker run carries the detach keys for the primary session", func() {
+	It("CS-LNCH-033: docker start carries the detach keys for the primary session, docker create does not", func() {
 		// Regression: these were originally passed only to `docker attach`, so a
 		// normally-launched session silently ran with docker's ctrl-p,ctrl-q —
 		// which the Claude Code TUI binds — and ctrl-q,ctrl-q did nothing.
 		p := build()
 		Expect(p.DetachKeys).To(Equal("ctrl-q,ctrl-q"))
-		Expect(p.DockerArgs(proj)).To(ContainElement("--detach-keys=ctrl-q,ctrl-q"))
+		Expect(p.StartArgs()).To(ContainElement("--detach-keys=ctrl-q,ctrl-q"))
+		for _, a := range p.CreateArgs(proj) {
+			Expect(a).NotTo(HavePrefix("--detach-keys"), "create attaches nothing; the keys belong to start")
+		}
 	})
 
 	It("CS-LNCH-033: the detachKeys config key overrides the default", func() {
 		in.Cfg = &cascade.Config{DetachKeys: "ctrl-^"}
 		p := build()
 		Expect(p.DetachKeys).To(Equal("ctrl-^"))
-		Expect(p.DockerArgs(proj)).To(ContainElement("--detach-keys=ctrl-^"))
+		Expect(p.StartArgs()).To(ContainElement("--detach-keys=ctrl-^"))
 	})
 
 	It("CS-LNCH-033: a whitespace-only override falls back to the default", func() {
@@ -980,9 +986,56 @@ var _ = Describe("launch.Build", func() {
 		Expect(build().DetachKeys).To(Equal(launch.DefaultDetachKeys))
 	})
 
-	It("CS-LNCH-029: the detach keys do not disturb the leading run flags", func() {
-		args := build().DockerArgs(proj)
-		Expect(args[0:4]).To(Equal([]string{"run", "-it", "--rm", "--init"}))
+	It("CS-LNCH-029, CS-LNCH-056: create leads with -it --rm --init; start is -ai with the keys and the name", func() {
+		p := build()
+		args := p.CreateArgs(proj)
+		Expect(args[0:4]).To(Equal([]string{"create", "-it", "--rm", "--init"}))
+		Expect(args).To(ContainElements("--name", p.ContainerName, p.Image))
+		Expect(p.StartArgs()).To(Equal([]string{"start", "-ai", "--detach-keys=ctrl-q,ctrl-q", p.ContainerName}))
+	})
+
+	Describe("CS-LNCH-056: reserve, then start", func() {
+		It("reserves with docker create and hands off to docker start -ai", func() {
+			fake := &execx.Fake{}
+			p := build()
+			Expect(p.Reserve(fake, proj, errw)).To(Succeed())
+			Expect(p.Start(fake)).To(Succeed())
+			Expect(fake.Calls).To(HaveLen(2))
+			Expect(fake.Calls[0].Args).To(Equal(p.CreateArgs(proj)))
+			Expect(fake.Execed).NotTo(BeNil())
+			Expect(fake.Execed.Args).To(Equal(p.StartArgs()))
+		})
+
+		It("forwards docker's warnings from a successful create", func() {
+			fake := &execx.Fake{}
+			fake.OnFunc("docker create", func(c execx.Cmd) (string, error) {
+				io.WriteString(c.Stderr, "WARNING: swap limit not supported\n")
+				return "abc123", nil
+			})
+			Expect(build().Reserve(fake, proj, errw)).To(Succeed())
+			Expect(errw.String()).To(ContainSubstring("swap limit"))
+		})
+
+		It("CS-SESS-053: a name Conflict is ErrNameConflict; any other failure is not", func() {
+			fake := &execx.Fake{}
+			fake.OnFunc("docker create", func(c execx.Cmd) (string, error) {
+				io.WriteString(c.Stderr, `Error response from daemon: Conflict. The container name "/x" is already in use`)
+				return "", execx.Fail(125)
+			})
+			err := build().Reserve(fake, proj, errw)
+			Expect(errors.Is(err, launch.ErrNameConflict)).To(BeTrue())
+			Expect(err.Error()).To(ContainSubstring("already in use"))
+
+			other := &execx.Fake{}
+			other.OnFunc("docker create", func(c execx.Cmd) (string, error) {
+				io.WriteString(c.Stderr, "Error response from daemon: No such image: x")
+				return "", execx.Fail(125)
+			})
+			err = build().Reserve(other, proj, errw)
+			Expect(err).To(HaveOccurred())
+			Expect(errors.Is(err, launch.ErrNameConflict)).To(BeFalse())
+			Expect(err.Error()).To(ContainSubstring("No such image"))
+		})
 	})
 
 	It("CS-SESS-035: a ralph container carries mode=ralph and no instance label", func() {
@@ -997,8 +1050,8 @@ var _ = Describe("launch.Build", func() {
 	It("CS-LNCH-029: container runtime environment flags", func() {
 		env["ANTHROPIC_API_KEY"] = ""
 		p := build()
-		args := p.DockerArgs(proj)
-		Expect(args[0:4]).To(Equal([]string{"run", "-it", "--rm", "--init"}))
+		args := p.CreateArgs(proj)
+		Expect(args[0:4]).To(Equal([]string{"create", "-it", "--rm", "--init"}))
 		Expect(p.EnvFlags).To(ContainElements(
 			"HOST_UID=1000",
 			"HOST_GID=1000",
@@ -1076,7 +1129,7 @@ var _ = Describe("launch.Build", func() {
 
 	It("renders env files as stacked --env-file flags in cascade order", func() {
 		in.EnvFiles = []string{"/root/env", "/proj/env"}
-		args := build().DockerArgs(proj)
+		args := build().CreateArgs(proj)
 		Expect(args).To(ContainElements("--env-file", "/root/env"))
 		i := indexOf(args, "/root/env")
 		j := indexOf(args, "/proj/env")

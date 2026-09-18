@@ -180,7 +180,7 @@ otter     claude-sandbox-kmacmcfarlane-myproj-1de77a-otter  claude  2h14m   1
 heron     claude-sandbox-kmacmcfarlane-myproj-1de77a-heron  claude  11m     2
 ```
 
-Each session gets a short **instance noun** (`otter`, `heron`) so it can be named by hand. `SESSIONS` counts the claude processes inside a container, so joined sessions are visible too.
+Each session gets a short **instance noun** (`otter`, `heron`) so it can be named by hand. `SESSIONS` counts the claude processes inside a container, so joined sessions are visible too. A container another launch has reserved but not yet started (see [Launch reservation](#launch-reservation)) is not listed: there is nothing in it to attach to yet.
 
 ### Launching when a session already exists
 
@@ -237,7 +237,7 @@ A single `ctrl-q` is not swallowed: docker buffers the partial sequence and forw
 
 Detach and reattach are repeatable — a reattached session can be detached again with the same keys, so this is normal operation rather than a one-shot escape.
 
-Docker's own default (`ctrl-p ctrl-q`) is deliberately not used, because the Claude Code TUI binds `ctrl+p`. Override with `detachKeys` in `config.yaml`; the override applies to all three session types together.
+Docker's own default (`ctrl-p ctrl-q`) is deliberately not used, because the Claude Code TUI binds `ctrl+p`. Override with `detachKeys` in `config.yaml`; the override applies to all three session types together. (For a new container the keys ride `docker start -ai`, the client that attaches — see [Launch reservation](#launch-reservation).)
 
 Docker cannot report whether another client is attached, so attaching to a session someone else is actively using silently shares the terminal — output is duplicated and keystrokes interleave.
 
@@ -374,7 +374,7 @@ After `init-ralph`, fill in `agent/PRD.md` + the practice docs, groom the backlo
 
 At launch, **every** `.claude-sandbox/config.yaml` from the filesystem root down to the
 project is merged into one effective config, and every `.claude-sandbox/env` is stacked
-(as ordered `docker run --env-file` flags). The launcher prints the cascade so it's clear
+(as ordered `docker create --env-file` flags). The launcher prints the cascade so it's clear
 which files apply:
 
 ```
@@ -556,7 +556,7 @@ entries are written without a prompt, `--no-gitignore` does the same.
 
 ### `.claude-sandbox/env`
 
-Environment variables passed into the container (via `docker run --env-file`). This file provides secrets and webhook URLs that Claude or MCP servers need at runtime.
+Environment variables passed into the container (via `docker create --env-file`). This file provides secrets and webhook URLs that Claude or MCP servers need at runtime.
 
 ```bash
 # Discord webhook for MCP notification server
@@ -639,7 +639,7 @@ Both mounts must be writable because every session writes its own record and bin
 socket there (`bind()` under a read-only bind mount fails with `EROFS`).
 
 The launcher creates `peers/`, `peers/sessions/` and `peers/cc-socks/` on the host as you,
-before `docker run`, and forces them to `0700` even if they already exist with a wider mode: Docker would otherwise create a missing bind source as root, and
+before `docker create`, and forces them to `0700` even if they already exist with a wider mode: Docker would otherwise create a missing bind source as root, and
 Claude Code refuses a socket directory that is group- or world-writable or owned by someone
 else — it then silently falls back to a private `/tmp` inside the container that no other
 container can reach. The registry destination `<config dir>/sessions` is created the same way
@@ -895,7 +895,7 @@ SSH, git, Docker socket, AWS and package-cache mounts are all opt-in. Enable the
 
 **SSH** — mounts `~/.ssh/` read-only so Claude can access git remotes over SSH.
 
-**Package caches** — downloads a session makes (Go modules, the Go build cache, npm, pip) otherwise die with the container. When enabled, the launcher creates `~/.cache/claude-sandbox/{go-mod,go-build,npm,pip}` on the host (as you, before `docker run`, so the entrypoint's mount-point rule leaves them writable), mounts each **writable** at the same path, and sets `GOMODCACHE`, `GOCACHE`, `npm_config_cache` and `PIP_CACHE_DIR` to point at them. The tree is sandbox-only on purpose: it is never your own `~/go`, `~/.npm` or `~/.cache/pip`. Go verifies module zips on download but trusts extracted directories, so a shared cache would let a session plant a module your host toolchain then trusts; confined to its own tree, the blast radius is other sandbox sessions, which already share a trust level. The caches are content-addressed and lock-safe, so concurrent sessions are fine. Nothing evicts them — delete the directory to reset.
+**Package caches** — downloads a session makes (Go modules, the Go build cache, npm, pip) otherwise die with the container. When enabled, the launcher creates `~/.cache/claude-sandbox/{go-mod,go-build,npm,pip}` on the host (as you, before `docker create`, so the entrypoint's mount-point rule leaves them writable), mounts each **writable** at the same path, and sets `GOMODCACHE`, `GOCACHE`, `npm_config_cache` and `PIP_CACHE_DIR` to point at them. The tree is sandbox-only on purpose: it is never your own `~/go`, `~/.npm` or `~/.cache/pip`. Go verifies module zips on download but trusts extracted directories, so a shared cache would let a session plant a module your host toolchain then trusts; confined to its own tree, the blast radius is other sandbox sessions, which already share a trust level. The caches are content-addressed and lock-safe, so concurrent sessions are fine. Nothing evicts them — delete the directory to reset.
 
 ### UID/GID mapping
 
@@ -912,10 +912,40 @@ sandbox's `claude-sandbox.pidclass` label and passes it as `CLAUDE_SANDBOX_PID_C
 entrypoint hands the command to `claude-sandbox pidslot`, which reads
 `/proc/sys/kernel/ns_last_pid` (one `read(2)` — a sysctl file returns EOF at any offset but
 zero), forks throwaway processes until the counter is `k−1 (mod 256)`, then execs
-`tini -s -- claude`. tini's **fork** lands `claude` on a pid `≡ k`. `docker run --init` is
+`tini -s -- claude`. tini's **fork** lands `claude` on a pid `≡ k`. `--init` is
 kept, so docker-init stays PID 1 and reaps orphans; `tini` is installed in the base image.
 The class is a per-session choice like the instance noun and is not part of the config-drift
 fingerprint. Spec: `spec/pidslot.feature`.
+
+### Launch reservation
+
+Every new container — interactive, ralph, `--branch`, the `[b]` fork — is launched in two
+steps: `docker create` with all of the launch's flags, mounts and labels, then
+`docker start -ai <name>`, which replaces the launcher process so the session's exit code is
+the container's. `--attach` (`docker attach`) and `--join` (`docker exec`) are unchanged. The
+detach keys go on `docker start`, the client that attaches, and never on `docker create`.
+
+The split exists to make the instance noun and the pid class race-free. Both are chosen from
+what discovery sees, and a container used to become visible only once `docker run` had it
+running — so two launches started together (two terminals, or a client that starts several
+sessions at once) could pick the same noun, and the second failed on the name, or the same pid
+class, and silently overwrote a peer-registry record. Now each launch takes an exclusive
+`flock` on `~/.cache/claude-sandbox/launch.lock` (created as you if missing), and while it
+holds it: discovers every sandbox container on the host **including `created` ones**,
+re-checks the noun it picked earlier (for the worktree banner) and re-picks it if a concurrent
+launch took it meanwhile, picks the pid class, and runs `docker create`, which reserves the
+name atomically. The lock is released before `docker start` (the file is also opened
+close-on-exec, so an exec can never carry it into the session). It is **never** held across an
+image build: images are checked and built first, so a slow build does not serialize other
+launches. The critical section takes milliseconds.
+
+A created container older than 60 seconds is an orphan of a launcher that died between the two
+steps (`--rm` never fires for a container that never started); the next launch removes it
+with `docker rm` under the lock. If `docker create` still reports a name `Conflict` — something
+that does not take the lock got there first — the launcher re-picks and retries, up to three
+attempts, then fails with a clear error (a ralph launch, whose name is fixed, fails on the first).
+If the lock cannot be taken within 30 seconds, the launcher warns and launches without it.
+Spec: `spec/sessions.feature` CS-SESS-048..054, `spec/launch.feature` CS-LNCH-056.
 
 ### Image layering
 
@@ -1078,7 +1108,7 @@ internal/
   layout/          Layout lifecycle: skeleton, gitignore, sidecar repo
   scaffold/        Embedded scaffold seeding
   imagebuild/      Base/CLI/child/cap image staleness + builds, update check, cache-budget warning
-  launch/          Mount assembly, shadow injections, docker run argv
+  launch/          Mount assembly, shadow injections, docker create/start argv, launch lock
   ralphloop/       Ralph loop: iterations, lock, quota handling, pipeline
   execx/, prompt/  Command-runner and prompt seams (injected in tests)
 spec/              Gherkin behavioral spec — scenario IDs referenced by the Ginkgo tests

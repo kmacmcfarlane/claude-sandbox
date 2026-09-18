@@ -1,7 +1,9 @@
 Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
   The default (no-subcommand) invocation builds images as needed, assembles
-  the docker run invocation, and execs it. Tests assert on the constructed
-  docker argv via the injected command runner.
+  the container invocation, reserves the container with "docker create" under
+  the host launch lock, and execs "docker start -ai" on it (CS-LNCH-056,
+  CS-SESS-048). Tests assert on the constructed docker argv via the injected
+  command runner.
   Go home: internal/launch, cmd/claude-sandbox.
 
   # ---- argument parsing ----
@@ -90,11 +92,11 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
   # ---- core mounts ----
 
   Scenario: CS-LNCH-007 Project mounted at its real host path, used as workdir
-    Then docker run receives "-v $PROJECT_DIR:$PROJECT_DIR" and "-w $PROJECT_DIR"
+    Then docker create receives "-v $PROJECT_DIR:$PROJECT_DIR" and "-w $PROJECT_DIR"
 
   Scenario: CS-LNCH-008 Claude config dir mounted at its real path when present
     Given ~/.claude exists
-    Then docker run receives "-v ~/.claude:~/.claude"
+    Then docker create receives "-v ~/.claude:~/.claude"
     Given CLAUDE_CONFIG_DIR=/alt/cfg is set and /alt/cfg exists
     Then the mount uses /alt/cfg on both sides
     And "-e CLAUDE_CONFIG_DIR=/alt/cfg" is passed to the container
@@ -199,7 +201,7 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     Given package-cache access is enabled
     Then for each of go-mod, go-build, npm, pip:
       "-v ~/.cache/claude-sandbox/<name>:~/.cache/claude-sandbox/<name>" is added without :ro
-    And docker run receives -e GOMODCACHE=~/.cache/claude-sandbox/go-mod,
+    And docker create receives -e GOMODCACHE=~/.cache/claude-sandbox/go-mod,
       -e GOCACHE=~/.cache/claude-sandbox/go-build,
       -e npm_config_cache=~/.cache/claude-sandbox/npm,
       -e PIP_CACHE_DIR=~/.cache/claude-sandbox/pip
@@ -207,7 +209,7 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     # The env overrides are what redirect the toolchains; the same-path mount
     # keeps host and container paths interchangeable like every other mount.
 
-  Scenario: CS-LNCH-036 Package cache directories are created on the host before docker run
+  Scenario: CS-LNCH-036 Package cache directories are created on the host before docker create
     Given package-cache access is enabled and ~/.cache/claude-sandbox/<name> does not exist
     Then the launcher creates it (as the invoking user) before assembling the mount
     # Docker creates a missing bind source as root, and the entrypoint deliberately
@@ -301,7 +303,7 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     And both containers can run concurrently
 
   Scenario: CS-LNCH-032 Container labels record session identity
-    Then docker run receives labels:
+    Then docker create receives labels:
       | label                         | value                                  |
       | claude-sandbox.project        | the absolute project directory          |
       | claude-sandbox.mode           | "claude" or "ralph"                     |
@@ -315,7 +317,7 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     # which are lossy (normalized and hashed). See CS-SESS-001.
 
   Scenario: CS-LNCH-029 Container runtime environment
-    Then docker run receives: -it --rm --init,
+    Then docker create receives: -it --rm --init,
       -e HOST_UID/HOST_GID/HOST_USER/HOST_HOME of the calling user,
       -e HOME=$HOME, -e DOCKER_GID, -e ANTHROPIC_API_KEY (empty when unset),
       -e CLAUDE_SANDBOX_PROJECT_DIR (CS-LNCH-047)
@@ -323,7 +325,10 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
   Scenario: CS-LNCH-033 The primary session gets the configured detach keys
     # Omitting the flag does not mean "no detach keys" — it means docker's own
     # ctrl-p,ctrl-q, which the Claude Code TUI collides with. See CS-SESS-036.
-    Then docker run receives --detach-keys with the resolved sequence
+    Then docker start receives --detach-keys with the resolved sequence
+    And docker create does not
+    # The keys belong to the client that attaches, and that is "docker start
+    # -ai" now; "docker create" attaches nothing (CS-LNCH-056).
     And the sequence defaults to "ctrl-q,ctrl-q"
     And the detachKeys config key overrides it
 
@@ -333,7 +338,7 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     # by --rm. Rooting it inside the config-dir mount (CS-LNCH-008) makes
     # scratch state survive the container, so `claude --resume` finds it. The
     # CLI partitions beneath the root by uid, project slug and session id.
-    Then docker run receives -e CLAUDE_CODE_TMPDIR=<config dir>/tmp when the config dir exists
+    Then docker create receives -e CLAUDE_CODE_TMPDIR=<config dir>/tmp when the config dir exists
     And no flag is set when the config dir does not exist
     And a host-env CLAUDE_CODE_TMPDIR is forwarded verbatim instead,
       with a warning when its path is outside every container mount
@@ -353,7 +358,7 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     # See spec/pidslot.feature (CS-PID-004). Interactive and ralph launches
     # alike, and --no-session-check skips the session decision, not the
     # class lookup — a container without a class would collide again.
-    Then docker run receives "--label claude-sandbox.pidclass=<k>" and "-e CLAUDE_SANDBOX_PID_CLASS=<k>"
+    Then docker create receives "--label claude-sandbox.pidclass=<k>" and "-e CLAUDE_SANDBOX_PID_CLASS=<k>"
     And <k> is not in use by any running sandbox container on the host
     And ralph launches receive the same pair
 
@@ -437,7 +442,7 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     # the merged-config digest too.
     Then the config-drift fingerprint (CS-SESS-020) does not change with the
       worktree key, flag, env var or name
-    And docker run receives "--label claude-sandbox.worktree=<name>",
+    And docker create receives "--label claude-sandbox.worktree=<name>",
       with an empty value when the mode is off
 
   Scenario: CS-LNCH-045 Ralph launches carry a worktree named ralph by default
@@ -461,7 +466,7 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       no banner at all
 
   Scenario: CS-LNCH-047 The container knows the project root
-    Then docker run receives -e CLAUDE_SANDBOX_PROJECT_DIR=<project dir>
+    Then docker create receives -e CLAUDE_SANDBOX_PROJECT_DIR=<project dir>
       for interactive and ralph launches, in and out of worktree mode
     # The one fact a session inside .claude/worktrees/<name> cannot otherwise
     # get without `git rev-parse --git-common-dir`: where .claude-sandbox/
@@ -514,7 +519,7 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
 
   Scenario: CS-LNCH-049 The shared peer registry is off by default
     Given no config sets sharedPeerRegistry and CLAUDE_SANDBOX_SHARED_PEER_REGISTRY is unset
-    Then the assembled docker run argv is identical to what it would be without the feature
+    Then the assembled docker create argv is identical to what it would be without the feature
     And no XDG_RUNTIME_DIR is passed
     And nothing under ~/.cache/claude-sandbox/peers is mounted or created
 
@@ -540,7 +545,7 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     And CLAUDE_CODE_TMPDIR is resolved exactly as without the bridge (CS-LNCH-034):
       scratchpads do not move
 
-  Scenario: CS-LNCH-051 The shared directories are created on the host before docker run
+  Scenario: CS-LNCH-051 The shared directories are created on the host before docker create
     Given the shared peer registry is enabled and ~/.cache/claude-sandbox/peers does not exist
     Then the launcher creates peers/, peers/sessions/ and peers/cc-socks/ (as the
       invoking user) before assembling the mounts
@@ -636,7 +641,7 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     And cc-socks/ is not created and no banner is printed
     And exactly one warning says the bridge is off for this session because an
       env file sets XDG_RUNTIME_DIR
-    And the docker run argv and the drift fingerprint are those of a key-off launch
+    And the docker create argv and the drift fingerprint are those of a key-off launch
 
   Scenario: CS-LNCH-055 A socket path Claude Code would reject stands the bridge down
     # Claude Code binds only when Buffer.byteLength(path) <= 103 (the sun_path
@@ -651,3 +656,22 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       peers-root mount is added
     And cc-socks/ is not created and no banner is printed
     And exactly one warning names the length and says the bridge is off for this session
+
+  # ---- reserve, then attach ----
+
+  Scenario: CS-LNCH-056 Every new container is created, then started attached
+    # Interactive, ralph, --branch and the tier-1 [b] fork alike. The single
+    # "docker run" is split so the container NAME (and with it the instance
+    # noun and pid class) is reserved atomically by "docker create" while the
+    # host launch lock is held (CS-SESS-048); docker refuses a second create
+    # with the same name with "Conflict". Measured on docker 29: stdio, the
+    # exit code (7 -> 7), SIGTERM cleanup and --rm behave as with "docker run".
+    When a new container is launched
+    Then "docker create -it --rm --init ... --name <container> <image> <command...>"
+      runs first, with every flag, mount, env var and label "docker run" had
+    And then "docker start -ai --detach-keys=<seq> <container>" replaces the
+      current process, so its exit code is the container's
+    And --detach-keys is on "docker start" and never on "docker create"
+    And join ("docker exec") and attach ("docker attach") are unchanged
+    Given "docker start" cannot be executed
+    Then the reserved container is removed before the error is reported

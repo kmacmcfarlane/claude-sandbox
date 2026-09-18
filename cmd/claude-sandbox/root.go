@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -35,6 +36,13 @@ type Env struct {
 
 	// PidslotOps overrides the pidslot helper's process seams under test.
 	PidslotOps *pidslot.Ops
+
+	// Lock is the host launch lock (CS-SESS-048); nil means the real flock on
+	// ~/.cache/claude-sandbox/launch.lock. Tests inject a recording fake.
+	Lock launch.HostLock
+	// Now is the clock stale reservations are judged by (CS-SESS-052); nil
+	// means time.Now.
+	Now func() time.Time
 }
 
 func defaultEnv() *Env {
@@ -758,7 +766,8 @@ func runLaunch(env *Env, args []string) error {
 		imagebuild.WarnCacheBudget(imgOpts)
 	}
 
-	// Launch plan (CS-LNCH).
+	// Launch plan (CS-LNCH). Everything but the per-session picks is settled
+	// here, outside the lock.
 	uid, gid, uname, home := hostIdentity(env.Getenv)
 	in := launch.Inputs{
 		ProjectDir: projectDir, Home: home,
@@ -772,15 +781,16 @@ func runLaunch(env *Env, args []string) error {
 		ImageID:  imagebuild.ImageID(env.Runner, image),
 		Instance: instance,
 		Worktree: worktree,
-		PIDClass: newPIDClass(env),
 		Version:  version,
 		Out:      env.Out, Err: env.Err,
 	}
-	plan, err := launch.Build(in)
+	// Reserve under the host lock: re-validate the noun, pick the pid class,
+	// docker create (CS-SESS-048). The lock is released before the exec.
+	plan, err := reserveContainer(env, in, wt, f.Ralph)
 	if err != nil {
 		return err
 	}
-	return plan.Exec(env.Runner, projectDir)
+	return startReserved(env, plan)
 }
 
 func hostIdentity(getenv func(string) string) (uid, gid int, username, home string) {

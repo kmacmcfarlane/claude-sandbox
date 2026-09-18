@@ -38,7 +38,7 @@ type Runner interface {
 	Output(c Cmd) (string, error)
 	// Start launches c without waiting.
 	Start(c Cmd) (Process, error)
-	// Exec replaces the current process with c (docker run hand-off).
+	// Exec replaces the current process with c (the docker start hand-off).
 	Exec(c Cmd) error
 }
 

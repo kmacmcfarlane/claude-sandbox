@@ -3,6 +3,7 @@ package sessions_test
 import (
 	"strconv"
 	"strings"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -249,5 +250,79 @@ var _ = Describe("pid classes (CS-PID-004)", func() {
 		got := sessions.PickClass(inUse, func(int) int { return 7 })
 		Expect(got).To(Equal(7))
 		Expect(sessions.PickClass(nil, nil)).To(SatisfyAll(BeNumerically(">=", 0), BeNumerically("<", 256)))
+	})
+})
+
+// stateRow is a docker ps line carrying the optional State and CreatedAt fields.
+func stateRow(name, project, instance, class, state, createdAt string) string {
+	status := "Up 1 minute"
+	if state == sessions.StateCreated {
+		status = "Created"
+	}
+	return strings.Join([]string{name, status, project, "claude", instance, "v1", "", "", "", class, "", state, createdAt}, sep)
+}
+
+var _ = Describe("reservations (CS-SESS-050..052)", func() {
+	var fake *execx.Fake
+	now := time.Date(2026, 9, 18, 12, 0, 0, 0, time.UTC)
+	stamp := func(ago time.Duration) string { return now.Add(-ago).Format("2006-01-02 15:04:05 -0700 MST") }
+
+	BeforeEach(func() { fake = &execx.Fake{} })
+
+	It("CS-SESS-050: discovery lists created as well as running containers, and nothing else", func() {
+		fake.On("docker ps", stateRow("a", "/p", "otter", "3", "running", stamp(time.Hour))+"\n"+
+			stateRow("b", "/p", "heron", "9", sessions.StateCreated, stamp(time.Second))+"\n", nil)
+		fake.On("docker top", "PID COMMAND\n1 claude\n", nil)
+
+		got, err := sessions.DiscoverAll(fake)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(sessions.Instances(got)).To(ConsistOf("otter", "heron"), "a reservation's noun is in use")
+		Expect(sessions.Classes(got)).To(ConsistOf("3", "9"), "a reservation's class is in use")
+		Expect(fake.CommandLines()[0]).To(ContainSubstring(
+			"docker ps -a --filter label=claude-sandbox.project --filter status=created --filter status=running --format "))
+		Expect(got[1].Reserved()).To(BeTrue())
+		Expect(got[1].CreatedAt.Equal(now.Add(-time.Second))).To(BeTrue())
+		Expect(got[0].Reserved()).To(BeFalse())
+	})
+
+	It("CS-SESS-050: rows from an older format without State still parse, falling back to Status", func() {
+		s := sessions.Session{Status: "Created"}
+		Expect(s.Reserved()).To(BeTrue())
+		s = sessions.Session{Status: "Up 2 hours"}
+		Expect(s.Reserved()).To(BeFalse())
+	})
+
+	It("CS-SESS-051: reservations are never candidates, never listed, and never docker-top'd", func() {
+		fake.On("docker ps", stateRow("a", "/p", "otter", "", "running", stamp(time.Hour))+"\n"+
+			stateRow("b", "/p", "heron", "", sessions.StateCreated, stamp(time.Second))+"\n", nil)
+		got, err := sessions.Discover(fake, "/p")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(sessions.Instances(sessions.Interactive(got))).To(Equal([]string{"otter"}))
+		Expect(sessions.Instances(sessions.Live(got))).To(Equal([]string{"otter"}))
+		for _, l := range fake.CommandLines() {
+			Expect(l).NotTo(Equal("docker top b -o pid,args"))
+		}
+	})
+
+	It("CS-SESS-052: only reservations older than the limit are stale", func() {
+		all := []sessions.Session{
+			{Name: "old", State: sessions.StateCreated, CreatedAt: now.Add(-61 * time.Second)},
+			{Name: "young", State: sessions.StateCreated, CreatedAt: now.Add(-59 * time.Second)},
+			{Name: "unknown-age", State: sessions.StateCreated},
+			{Name: "running-old", State: "running", CreatedAt: now.Add(-time.Hour)},
+		}
+		stale := sessions.Stale(all, now, 60*time.Second)
+		Expect(stale).To(HaveLen(1))
+		Expect(stale[0].Name).To(Equal("old"))
+	})
+
+	It("CS-SESS-052: a reservation is removed with plain docker rm, never forced", func() {
+		Expect(sessions.RemoveReservation(fake, "old")).To(Succeed())
+		Expect(fake.CommandLines()).To(Equal([]string{"docker rm old"}))
+	})
+
+	It("CS-SESS-048: ForProject narrows one host-wide discovery to a project", func() {
+		all := []sessions.Session{{Name: "a", Project: "/p"}, {Name: "b", Project: "/q"}}
+		Expect(sessions.ForProject(all, "/p")).To(Equal([]sessions.Session{{Name: "a", Project: "/p"}}))
 	})
 })

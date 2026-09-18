@@ -86,7 +86,7 @@ one-time setup (idempotent). Use `setup-lsp-plugins --check` to verify status.
   exits — if asked to put something Docker must read under `/tmp`, flag that
   conflict rather than complying literally.
 - **Only bind-mounted paths persist to the host.** The container's filesystem is
-  discarded at session exit (`docker run --rm`); only the project tree, the
+  discarded at session exit (`--rm`); only the project tree, the
   Claude config dir, and the configured extra mounts survive. `mkdir` anywhere
   else (e.g. under `$HOME` outside a mount) succeeds but the files die with the
   container. When the config dir is relocated via `CLAUDE_CONFIG_DIR`,

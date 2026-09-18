@@ -96,7 +96,7 @@ var _ = Describe("sessions (CS-SESS)", func() {
 			running()
 			Expect(f.run()).To(Equal(0))
 			Expect(f.fake.Execed).NotTo(BeNil())
-			Expect(f.execLine()).To(ContainSubstring("docker run"))
+			Expect(f.launchLine()).To(HavePrefix("docker create "))
 		})
 
 		It("CS-SESS-015: discovery runs before any image build", func() {
@@ -150,8 +150,8 @@ var _ = Describe("sessions (CS-SESS)", func() {
 			running(psRow("cs-a", "Up 1 hour", f.proj, "otter"))
 			tty("n")
 			Expect(f.run()).To(Equal(0))
-			line := f.execLine()
-			Expect(line).To(ContainSubstring("docker run"))
+			line := f.launchLine()
+			Expect(line).To(HavePrefix("docker create "))
 			// A different instance noun than the one already in use.
 			Expect(line).NotTo(ContainSubstring("-otter claude-sandbox"))
 		})
@@ -182,7 +182,9 @@ var _ = Describe("sessions (CS-SESS)", func() {
 
 			running()
 			Expect(f.run()).To(Equal(0))
-			byPath["run"] = f.execLine()
+			byPath["start"] = f.execLine()
+			// CS-LNCH-056: the keys belong to the attaching client, never to create.
+			Expect(f.launchLine()).NotTo(ContainSubstring("--detach-keys"))
 
 			for _, choice := range []string{"a", "j"} {
 				g := newCLIFixture()
@@ -197,7 +199,7 @@ var _ = Describe("sessions (CS-SESS)", func() {
 				Expect(line).To(ContainSubstring("--detach-keys=ctrl-q,ctrl-q"),
 					"the %s path omits detach keys, so docker's ctrl-p,ctrl-q applies", path)
 			}
-			Expect(byPath["run"]).To(ContainSubstring("docker run"))
+			Expect(byPath["start"]).To(HavePrefix("docker start -ai "))
 			Expect(byPath["a"]).To(ContainSubstring("docker attach"))
 			Expect(byPath["j"]).To(ContainSubstring("docker exec"))
 		})
@@ -248,7 +250,7 @@ var _ = Describe("sessions (CS-SESS)", func() {
 
 		It("--new launches without prompting and without a terminal", func() {
 			Expect(f.run("--new")).To(Equal(0))
-			Expect(f.execLine()).To(ContainSubstring("docker run"))
+			Expect(f.launchLine()).To(HavePrefix("docker create "))
 		})
 
 		It("--no-session-check skips the decision but still names the container safely", func() {
@@ -256,9 +258,9 @@ var _ = Describe("sessions (CS-SESS)", func() {
 			// in-use nouns are still looked up. Skipping that would reintroduce
 			// the container-name collisions this feature exists to fix.
 			Expect(f.run("--no-session-check")).To(Equal(0))
-			Expect(f.execLine()).To(ContainSubstring("docker run"))
+			Expect(f.launchLine()).To(HavePrefix("docker create "))
 			Expect(f.errw.String()).NotTo(ContainSubstring("Found 1 running session"))
-			Expect(f.execLine()).NotTo(ContainSubstring("-otter claude-sandbox"))
+			Expect(f.launchLine()).NotTo(ContainSubstring("-otter claude-sandbox"))
 		})
 
 		It("--attach=INSTANCE attaches with no terminal", func() {
@@ -338,7 +340,7 @@ var _ = Describe("sessions (CS-SESS)", func() {
 			running(psRowFull("cs-a", "Up 1 hour", f.proj, "otter", "", "stalehash1234", "[]"))
 			f.env.Prompter = &prompt.Scripted{IsTTY: true, Answers: []string{"n"}}
 			Expect(f.run("--attach=otter")).To(Equal(0))
-			Expect(f.execLine()).To(ContainSubstring("docker run"))
+			Expect(f.launchLine()).To(HavePrefix("docker create "))
 		})
 
 		It("CS-SESS-025: [q] quits", func() {
@@ -404,26 +406,26 @@ var _ = Describe("sessions (CS-SESS)", func() {
 	Describe("ralph (CS-SESS-034/035)", func() {
 		It("CS-SESS-034: reports running sessions but never prompts", func() {
 			running(psRow("cs-a", "Up 1 hour", f.proj, "otter"))
-			// No TTY: a prompt here would exit 3, so reaching docker run proves
+			// No TTY: a prompt here would exit 3, so reaching docker create proves
 			// ralph does not treat this as a decision.
 			f.env.Prompter = &prompt.Scripted{IsTTY: false}
 			Expect(f.run("--ralph")).To(Equal(0))
 			Expect(f.errw.String()).To(ContainSubstring("otter"))
-			Expect(f.execLine()).To(ContainSubstring("/opt/claude-sandbox/bin/ralph"))
+			Expect(f.launchLine()).To(ContainSubstring("/opt/claude-sandbox/bin/ralph"))
 		})
 
 		It("CS-SESS-035: a ralph container carries no instance noun", func() {
 			running()
 			Expect(f.run("--ralph")).To(Equal(0))
-			line := f.execLine()
+			line := f.launchLine()
 			Expect(line).To(ContainSubstring("-ralph claude-sandbox"))
 			Expect(line).NotTo(ContainSubstring("claude-sandbox.instance="))
 		})
 
-		It("CS-LNCH-032: labels reach docker run", func() {
+		It("CS-LNCH-032: labels reach docker create", func() {
 			running()
 			Expect(f.run()).To(Equal(0))
-			line := f.execLine()
+			line := f.launchLine()
 			Expect(line).To(ContainSubstring("--label claude-sandbox.project=" + f.proj))
 			Expect(line).To(ContainSubstring("--label claude-sandbox.mode=claude"))
 			Expect(line).To(ContainSubstring("--label claude-sandbox.instance="))
@@ -444,7 +446,7 @@ var _ = Describe("sessions (CS-SESS)", func() {
 			// Only a ralph container is running, so there is no decision to make
 			// and an interactive launch proceeds without exiting 3.
 			Expect(f.run()).To(Equal(0))
-			Expect(f.execLine()).To(ContainSubstring("docker run"))
+			Expect(f.launchLine()).To(HavePrefix("docker create "))
 		})
 	})
 
@@ -453,8 +455,8 @@ var _ = Describe("sessions (CS-SESS)", func() {
 			running(psRow("cs-a", "Up 1 hour", f.proj, "otter"))
 			tty("b")
 			Expect(f.run()).To(Equal(0))
-			line := f.execLine()
-			Expect(line).To(ContainSubstring("docker run"))
+			line := f.launchLine()
+			Expect(line).To(HavePrefix("docker create "))
 			Expect(line).To(HaveSuffix(" claude --continue --fork-session"))
 			// A fresh container with its own instance noun; the running one is untouched.
 			Expect(line).NotTo(ContainSubstring("-otter claude-sandbox"))
@@ -464,17 +466,17 @@ var _ = Describe("sessions (CS-SESS)", func() {
 			running(psRow("cs-a", "Up 1 hour", f.proj, "otter"))
 			tty("b")
 			Expect(f.run("--verbose")).To(Equal(0))
-			Expect(f.execLine()).To(HaveSuffix(" claude --continue --fork-session --verbose"))
+			Expect(f.launchLine()).To(HaveSuffix(" claude --continue --fork-session --verbose"))
 		})
 
 		It("CS-SESS-040, CS-SESS-041: --branch bypasses the session prompt and uses claude's picker", func() {
 			running(psRow("cs-a", "Up 1 hour", f.proj, "otter"))
-			// No terminal: reaching docker run proves the decision was removed
+			// No terminal: reaching docker create proves the decision was removed
 			// rather than exiting 3 (CS-SESS-028/041).
 			f.env.Prompter = &prompt.Scripted{IsTTY: false}
 			Expect(f.run("--branch")).To(Equal(0))
-			line := f.execLine()
-			Expect(line).To(ContainSubstring("docker run"))
+			line := f.launchLine()
+			Expect(line).To(HavePrefix("docker create "))
 			Expect(line).To(HaveSuffix(" claude --resume --fork-session"))
 			Expect(f.errw.String()).NotTo(ContainSubstring("Choice ["))
 		})
@@ -482,19 +484,19 @@ var _ = Describe("sessions (CS-SESS)", func() {
 		It("CS-SESS-040: --branch needs no running session — a past conversation can be branched", func() {
 			running()
 			Expect(f.run("--branch")).To(Equal(0))
-			Expect(f.execLine()).To(HaveSuffix(" claude --resume --fork-session"))
+			Expect(f.launchLine()).To(HaveSuffix(" claude --resume --fork-session"))
 		})
 
 		It("CS-SESS-040: --branch keeps the fork flags ahead of passthrough args", func() {
 			running()
 			Expect(f.run("--branch", "--verbose")).To(Equal(0))
-			Expect(f.execLine()).To(HaveSuffix(" claude --resume --fork-session --verbose"))
+			Expect(f.launchLine()).To(HaveSuffix(" claude --resume --fork-session --verbose"))
 		})
 
 		It("CS-SESS-040: --branch with --no-session-check still forks", func() {
 			running()
 			Expect(f.run("--branch", "--no-session-check")).To(Equal(0))
-			Expect(f.execLine()).To(HaveSuffix(" claude --resume --fork-session"))
+			Expect(f.launchLine()).To(HaveSuffix(" claude --resume --fork-session"))
 		})
 
 		DescribeTable("CS-SESS-042: contradictory flags are rejected",
@@ -513,14 +515,14 @@ var _ = Describe("sessions (CS-SESS)", func() {
 		It("CS-SESS-043: --branch composes with claude's own --name to name the fork", func() {
 			running()
 			Expect(f.run("--branch", "--name", "sidequest")).To(Equal(0))
-			Expect(f.execLine()).To(HaveSuffix(" claude --resume --fork-session --name sidequest"))
+			Expect(f.launchLine()).To(HaveSuffix(" claude --resume --fork-session --name sidequest"))
 		})
 
 		It("CS-SESS-043, CS-LNCH-002: --name alone passes through to name any new session", func() {
 			running()
 			Expect(f.run("--name", "something sidequest")).To(Equal(0))
-			Expect(f.fake.Execed.Args).To(ContainElement("something sidequest"), "the name stays one argument")
-			Expect(f.execLine()).To(HaveSuffix(" claude --name something sidequest"))
+			Expect(f.launched().Args).To(ContainElement("something sidequest"), "the name stays one argument")
+			Expect(f.launchLine()).To(HaveSuffix(" claude --name something sidequest"))
 		})
 
 		It("CS-SESS-043: there is no --branch=NAME form — the '=' value would name the result while --attach=/--join= pick a target", func() {

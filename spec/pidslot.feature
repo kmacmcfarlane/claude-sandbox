@@ -41,7 +41,7 @@ Feature: PID classes — unique session pids across sandboxes (CS-PID)
     When a container is launched (interactive or ralph, with or without --no-session-check)
     Then its class is chosen from [0,256) excluding every class in use on the host,
       across ALL projects — the registry in ~/.claude is shared by every project
-    And docker run receives "--label claude-sandbox.pidclass=<k>" and "-e CLAUDE_SANDBOX_PID_CLASS=<k>"
+    And docker create receives "--label claude-sandbox.pidclass=<k>" and "-e CLAUDE_SANDBOX_PID_CLASS=<k>"
     And the class is excluded from the config-drift fingerprint (a per-session choice, like the instance noun)
     Given discovery fails
     Then a random class is used and the launch proceeds
@@ -63,7 +63,7 @@ Feature: PID classes — unique session pids across sandboxes (CS-PID)
   Scenario: CS-PID-007 The entrypoint hands the command to the helper
     Then entrypoint.sh ends with "exec gosu <user> /opt/claude-sandbox/bin/claude-sandbox pidslot -- <cmd...>"
     And the base image installs tini
-    And docker run keeps --init, so docker-init remains PID 1 and reaps orphans
+    And docker create keeps --init, so docker-init remains PID 1 and reaps orphans
     # Sessions claude spawns itself inside a container (claude --bg, /bg,
     # daemon workers) are not slotted; their pids are whatever the counter
     # gives. Low-probability collisions there self-heal on relaunch.

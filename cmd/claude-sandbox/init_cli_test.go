@@ -3,7 +3,8 @@ package main
 // Spec: spec/init.feature (CS-INIT-001..003), spec/init-ralph.feature
 // (CS-INITR-001), spec/layout.feature (CS-LAY-015/016) — CLI-level behavior
 // through MainWithEnv. All external commands (git, docker) go through
-// execx.Fake; the final docker run is recorded via Fake.Execed.
+// execx.Fake; the reserving docker create is a recorded call and the final
+// docker start hand-off is recorded via Fake.Execed.
 
 import (
 	"bytes"
@@ -35,8 +36,16 @@ func newInitCLI(vars map[string]string) *initCLI {
 	c.env = &Env{
 		Runner: c.fake, Prompter: c.prompter, Out: &c.out, Err: &c.err,
 		Getenv: func(k string) string { return c.vars[k] },
+		// Never the real ~/.cache/claude-sandbox/launch.lock from a test.
+		Lock: &fakeLock{fake: c.fake},
 	}
 	return c
+}
+
+// launched returns the reserving docker create (CS-LNCH-056).
+func (c *initCLI) launched() *execx.Cmd {
+	f := &cliFixture{fake: c.fake, errw: &bytes.Buffer{}}
+	return f.launched()
 }
 
 // launchVars builds the env-var map for a full launch-path run: everything
@@ -141,7 +150,7 @@ var _ = Describe("layout adoption at launch", func() {
 		Expect(c.fake.Execed).NotTo(BeNil())
 		Expect(c.fake.Execed.Name).To(Equal("docker"))
 
-		By("default (foreign-safe) value: sidecar init runs before the docker run")
+		By("default (foreign-safe) value: sidecar init runs before the docker create")
 		proj2 := mkProject()
 		sb2 := filepath.Join(proj2, ".claude-sandbox")
 		writeCLI(filepath.Join(sb2, "config.yaml"), "# sparse\n")
@@ -155,7 +164,7 @@ var _ = Describe("layout adoption at launch", func() {
 			if strings.Contains(l, "git -C "+sb2+" init -q") {
 				initIdx = i
 			}
-			if strings.HasPrefix(l, "docker run ") {
+			if strings.HasPrefix(l, "docker create ") {
 				runIdx = i
 			}
 		}
@@ -173,7 +182,7 @@ var _ = Describe("layout adoption at launch", func() {
 		_, err := os.Stat(filepath.Join(sb, "CLAUDE.md"))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(c.fake.Execed).NotTo(BeNil())
-		Expect(strings.Join(c.fake.Execed.Args, " ")).To(ContainSubstring("/opt/claude-sandbox/bin/ralph"))
+		Expect(strings.Join(c.launched().Args, " ")).To(ContainSubstring("/opt/claude-sandbox/bin/ralph"))
 
 		By(`interactive "claude-sandbox" leaves the project untouched`)
 		proj2 := mkProject()
@@ -183,6 +192,6 @@ var _ = Describe("layout adoption at launch", func() {
 		_, err = os.Stat(filepath.Join(proj2, ".claude-sandbox"))
 		Expect(os.IsNotExist(err)).To(BeTrue(), ".claude-sandbox/ must not be created")
 		Expect(c2.fake.Execed).NotTo(BeNil())
-		Expect(c2.fake.Execed.Args).To(ContainElement("claude"))
+		Expect(c2.launched().Args).To(ContainElement("claude"))
 	})
 })

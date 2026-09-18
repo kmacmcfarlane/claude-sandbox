@@ -1,4 +1,5 @@
-// Package sessions discovers running sandbox containers and names new ones.
+// Package sessions discovers sandbox containers — running ones, and the
+// "created" reservations of launches in flight — and names new ones.
 // Spec: spec/sessions.feature (CS-SESS).
 //
 // Discovery is by container label, never by parsing container names. Names are
@@ -13,6 +14,7 @@ import (
 	"io"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/launch"
@@ -60,6 +62,27 @@ type Session struct {
 	// Count is the number of live claude processes, so joined sessions are
 	// visible and not just the container that hosts them.
 	Count int `json:"sessions"`
+
+	// State is docker's container state: "running", or "created" for a
+	// reservation made by a launch between "docker create" and "docker start"
+	// (CS-SESS-050). Empty when docker did not report it.
+	State string `json:"-"`
+	// CreatedAt is when the container was created; zero when unparsable. Only
+	// reservations need it, to recognise orphans (CS-SESS-052).
+	CreatedAt time.Time `json:"-"`
+}
+
+// StateCreated is docker's state for a container that exists but has never
+// started — the reservation a launch holds between create and start.
+const StateCreated = "created"
+
+// Reserved reports whether the container is a reservation (created, never
+// started) rather than a live session.
+func (s Session) Reserved() bool {
+	if s.State != "" {
+		return s.State == StateCreated
+	}
+	return strings.HasPrefix(s.Status, "Created")
 }
 
 // fieldSep separates --format fields. Label values are arbitrary text (the
@@ -79,9 +102,17 @@ var psFormat = strings.Join([]string{
 	`{{.Label "` + LabelInputs + `"}}`,
 	`{{.Label "` + LabelPIDClass + `"}}`,
 	`{{.Label "` + LabelWorktree + `"}}`,
+	// Optional trailing fields (CS-SESS-050/052): rows without them still parse.
+	"{{.State}}",
+	"{{.CreatedAt}}",
 }, fieldSep)
 
+// psFieldCount is the minimum a row must carry; State and CreatedAt follow.
 const psFieldCount = 11
+
+// createdAtLayout is docker ps's {{.CreatedAt}} rendering,
+// e.g. "2026-09-18 12:34:56 -0700 PDT".
+const createdAtLayout = "2006-01-02 15:04:05 -0700 MST"
 
 // Discover lists sessions for one project directory (CS-SESS-001).
 func Discover(r execx.Runner, projectDir string) ([]Session, error) {
@@ -96,10 +127,19 @@ func DiscoverAll(r execx.Runner) ([]Session, error) {
 
 // list runs one docker ps and reads names, status and every label from the same
 // --format output; no per-container inspect is needed.
+//
+// -a with two status filters (docker ORs values of one filter key) returns the
+// running containers AND the created ones, i.e. the reservations of launches
+// between "docker create" and "docker start" (CS-SESS-050). Without them a
+// concurrent launch could pick a noun or pid class that is already reserved.
+// Exited containers stay out.
 func list(r execx.Runner, filter string) ([]Session, error) {
 	out, err := r.Output(execx.Cmd{
-		Name:   "docker",
-		Args:   []string{"ps", "--filter", "label=" + filter, "--format", psFormat},
+		Name: "docker",
+		Args: []string{"ps", "-a",
+			"--filter", "label=" + filter,
+			"--filter", "status=" + StateCreated, "--filter", "status=running",
+			"--format", psFormat},
 		Stderr: io.Discard,
 	})
 	if err != nil {
@@ -120,7 +160,19 @@ func list(r execx.Runner, filter string) ([]Session, error) {
 			Instance: f[4], Version: f[5], Model: f[6], ConfigHash: f[7],
 			Inputs: launch.DecodeInputs(f[8]), PIDClass: f[9], Worktree: f[10],
 		}
-		s.Count = countSessions(r, s.Name)
+		if len(f) > 11 {
+			s.State = strings.TrimSpace(f[11])
+		}
+		if len(f) > 12 {
+			if t, perr := time.Parse(createdAtLayout, strings.TrimSpace(f[12])); perr == nil {
+				s.CreatedAt = t
+			}
+		}
+		// A reservation has no processes to count, and docker top fails on a
+		// container that is not running (CS-SESS-051).
+		if !s.Reserved() {
+			s.Count = countSessions(r, s.Name)
+		}
 		out2 = append(out2, s)
 	}
 	return out2, nil
@@ -218,14 +270,62 @@ func Classes(all []Session) []string {
 
 // Interactive returns only the sessions a user can attach to or join. Ralph
 // containers are excluded: concurrency there is owned by the ralph PID lock.
+// Reservations are excluded too (CS-SESS-051): until "docker start" runs there
+// is nothing to attach to or exec into.
 func Interactive(all []Session) []Session {
 	out := make([]Session, 0, len(all))
 	for _, s := range all {
-		if s.Mode != ModeRalph {
+		if s.Mode != ModeRalph && !s.Reserved() {
 			out = append(out, s)
 		}
 	}
 	return out
+}
+
+// Live drops reservations, keeping running containers: what a person listing
+// sessions means by "running" (CS-SESS-051).
+func Live(all []Session) []Session {
+	out := make([]Session, 0, len(all))
+	for _, s := range all {
+		if !s.Reserved() {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// ForProject keeps the sessions of one project directory, so one host-wide
+// discovery can serve both the noun picker and the pid-class allocation.
+func ForProject(all []Session, projectDir string) []Session {
+	out := make([]Session, 0, len(all))
+	for _, s := range all {
+		if s.Project == projectDir {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// Stale returns the reservations created more than maxAge before now
+// (CS-SESS-052). Create-to-start takes milliseconds, so an older reservation
+// is an orphan of a launcher that died between the two. A reservation whose
+// creation time is unknown is never stale: removing a live launch's container
+// would be worse than leaving an orphan.
+func Stale(all []Session, now time.Time, maxAge time.Duration) []Session {
+	var out []Session
+	for _, s := range all {
+		if s.Reserved() && !s.CreatedAt.IsZero() && now.Sub(s.CreatedAt) > maxAge {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// RemoveReservation removes a created container. Plain "docker rm", never -f:
+// if the container has started after all, the removal fails and the session
+// is left alone.
+func RemoveReservation(r execx.Runner, name string) error {
+	return r.Run(execx.Cmd{Name: "docker", Args: []string{"rm", name}, Stderr: io.Discard})
 }
 
 // MarshalJSON output for `sessions --json` (CS-SESS-012).

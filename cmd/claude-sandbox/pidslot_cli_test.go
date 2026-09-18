@@ -30,7 +30,7 @@ var _ = Describe("pid classes (CS-PID, CS-LNCH-039)", func() {
 		for _, args := range [][]string{{}, {"--ralph"}} {
 			g := newCLIFixture()
 			Expect(g.run(args...)).To(Equal(0), g.errw.String())
-			line := g.execLine()
+			line := g.launchLine()
 			Expect(line).To(MatchRegexp(`--label claude-sandbox\.pidclass=(\d+)`))
 			m := regexpFind(line, `--label claude-sandbox\.pidclass=(\d+)`)
 			Expect(line).To(ContainSubstring("-e CLAUDE_SANDBOX_PID_CLASS=" + m + " "))
@@ -47,9 +47,12 @@ var _ = Describe("pid classes (CS-PID, CS-LNCH-039)", func() {
 		}
 		f.fake.On("docker ps", strings.Join(rows, "\n")+"\n", nil)
 		f.fake.On("docker top", "PID  COMMAND\n1  claude\n", nil)
-		Expect(newPIDClass(f.env)).To(Equal("255"))
-		// The ps call must not be filtered to this project.
-		for _, l := range f.fake.CommandLines() {
+		// The fake answers every ps alike, so skip the decision it would feed.
+		Expect(f.run("--no-session-check")).To(Equal(0), f.errw.String())
+		Expect(f.launched().Args).To(ContainElement("claude-sandbox.pidclass=255"))
+		// The ps call the class is picked from — the one under the launch lock
+		// (CS-SESS-048) — must not be filtered to this project.
+		for _, l := range f.lock.held() {
 			if strings.HasPrefix(l, "docker ps") {
 				Expect(l).To(ContainSubstring("label=" + sessions.LabelProject + " "))
 				Expect(l).NotTo(ContainSubstring("label=" + sessions.LabelProject + "="))
@@ -59,7 +62,10 @@ var _ = Describe("pid classes (CS-PID, CS-LNCH-039)", func() {
 
 	It("CS-PID-004: discovery failing still yields a class and never blocks the launch", func() {
 		f.fake.On("docker ps", "", execx.Fail(1))
-		k, err := strconv.Atoi(newPIDClass(f.env))
+		// --no-session-check: the session decision surfaces a ps failure by
+		// design; the class lookup must not.
+		Expect(f.run("--no-session-check")).To(Equal(0), f.errw.String())
+		k, err := strconv.Atoi(regexpFind(f.launchLine(), `--label claude-sandbox\.pidclass=(\d+)`))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(k).To(SatisfyAll(BeNumerically(">=", 0), BeNumerically("<", pidslot.Modulus)))
 	})

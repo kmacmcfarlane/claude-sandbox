@@ -2,8 +2,9 @@ package main
 
 // Spec: spec/launch.feature + spec/image-build.feature — end-to-end launcher
 // scenarios through MainWithEnv with a fully scripted execx.Fake: docker
-// inspect/build/npm/git are all faked and the final docker run hand-off is
-// recorded in Fake.Execed. HOME/PROJECT_DIR/repo root come from a Getenv map
+// inspect/build/npm/git are all faked, the reserving "docker create" is a
+// recorded call (launched) and the final "docker start" hand-off is recorded
+// in Fake.Execed. HOME/PROJECT_DIR/repo root come from a Getenv map
 // pointed at temp dirs.
 
 import (
@@ -24,10 +25,37 @@ import (
 	"github.com/kmacmcfarlane/claude-sandbox/internal/prompt"
 )
 
+// fakeLock is the launch-lock seam under test (CS-SESS-048). It records where
+// in the fake runner's call log the lock was taken and released, so tests can
+// assert which docker calls ran inside the critical section.
+type fakeLock struct {
+	fake       *execx.Fake
+	acquiredAt []int
+	releasedAt []int
+	err        error
+}
+
+func (l *fakeLock) Acquire() (func(), error) {
+	if l.err != nil {
+		return nil, l.err
+	}
+	l.acquiredAt = append(l.acquiredAt, len(l.fake.CommandLines()))
+	return func() { l.releasedAt = append(l.releasedAt, len(l.fake.CommandLines())) }, nil
+}
+
+// held returns the command lines recorded while the lock was held (the first
+// acquisition), failing when it was never taken or never released.
+func (l *fakeLock) held() []string {
+	Expect(l.acquiredAt).To(HaveLen(1), "the launch lock is taken exactly once")
+	Expect(l.releasedAt).To(HaveLen(1), "the launch lock is released exactly once")
+	return l.fake.CommandLines()[l.acquiredAt[0]:l.releasedAt[0]]
+}
+
 // cliFixture wires MainWithEnv to temp dirs and a recording fake.
 type cliFixture struct {
 	env       *Env
 	fake      *execx.Fake
+	lock      *fakeLock
 	out, errw *bytes.Buffer
 	envmap    map[string]string
 	home      string
@@ -55,12 +83,14 @@ func newCLIFixture() *cliFixture {
 		"CLAUDE_SANDBOX_REPO_ROOT": f.repo,
 		"CLAUDE_SANDBOX_BASE_ONLY": "1",
 	}
+	f.lock = &fakeLock{fake: f.fake}
 	f.env = &Env{
 		Runner:   f.fake,
 		Prompter: &prompt.Scripted{},
 		Out:      f.out,
 		Err:      f.errw,
 		Getenv:   func(k string) string { return f.envmap[k] },
+		Lock:     f.lock,
 	}
 	return f
 }
@@ -69,10 +99,30 @@ func (f *cliFixture) run(args ...string) int {
 	return MainWithEnv(args, f.env)
 }
 
-// execLine renders the recorded docker run hand-off as one string.
+// execLine renders the recorded exec hand-off (docker start, attach or exec)
+// as one string.
 func (f *cliFixture) execLine() string {
-	Expect(f.fake.Execed).NotTo(BeNil(), "expected a docker run hand-off; stderr:\n%s", f.errw.String())
+	Expect(f.fake.Execed).NotTo(BeNil(), "expected a docker hand-off; stderr:\n%s", f.errw.String())
 	return f.fake.Execed.Name + " " + strings.Join(f.fake.Execed.Args, " ")
+}
+
+// launched returns the last "docker create" — the reserved container, carrying
+// every flag, mount, env var and label of the launch (CS-LNCH-056).
+func (f *cliFixture) launched() *execx.Cmd {
+	for i := len(f.fake.Calls) - 1; i >= 0; i-- {
+		c := f.fake.Calls[i]
+		if c.Name == "docker" && len(c.Args) > 0 && c.Args[0] == "create" {
+			return &c
+		}
+	}
+	Fail("expected a docker create; stderr:\n" + f.errw.String())
+	return nil
+}
+
+// launchLine renders the reserving docker create as one string.
+func (f *cliFixture) launchLine() string {
+	c := f.launched()
+	return c.Name + " " + strings.Join(c.Args, " ")
 }
 
 func writeFile(p, content string) {
@@ -95,13 +145,13 @@ var _ = Describe("launcher CLI (end-to-end argv)", func() {
 
 	It("CS-LNCH-002: appends a known claude flag and subsequent args to the container command", func() {
 		Expect(f.run("--resume")).To(Equal(0))
-		Expect(f.execLine()).To(HaveSuffix(" claude-sandbox:run claude --resume"))
+		Expect(f.launchLine()).To(HaveSuffix(" claude-sandbox:run claude --resume"))
 	})
 
 	It("CS-IMG-024: the container runs the cap over the base, not the base itself", func() {
 		Expect(f.run()).To(Equal(0))
-		Expect(f.fake.Execed.Args).To(ContainElement("claude-sandbox:run"))
-		Expect(f.fake.Execed.Args).NotTo(ContainElement("claude-sandbox"))
+		Expect(f.launched().Args).To(ContainElement("claude-sandbox:run"))
+		Expect(f.launched().Args).NotTo(ContainElement("claude-sandbox"))
 		Expect(f.fake.CommandLines()).To(ContainElement("docker build -t claude-sandbox:run -"))
 	})
 
@@ -133,7 +183,7 @@ var _ = Describe("launcher CLI (end-to-end argv)", func() {
 
 	It("CS-LNCH-006: PROJECT_DIR overrides the working directory (mount + workdir)", func() {
 		Expect(f.run()).To(Equal(0))
-		args := f.fake.Execed.Args
+		args := f.launched().Args
 		Expect(args).To(ContainElements("-w", f.proj))
 		Expect(args).To(ContainElement(f.proj + ":" + f.proj))
 	})
@@ -159,11 +209,11 @@ var _ = Describe("launcher CLI (end-to-end argv)", func() {
 		}
 
 		expectPhysical := func() {
-			args := f.fake.Execed.Args
+			args := f.launched().Args
 			Expect(args).To(ContainElements("-w", f.proj))
 			Expect(args).To(ContainElement(f.proj + ":" + f.proj))
 			Expect(args).To(ContainElement("claude-sandbox.project=" + f.proj))
-			Expect(f.execLine()).To(MatchRegexp(
+			Expect(f.launchLine()).To(MatchRegexp(
 				`--name claude-sandbox-` + regexp.QuoteMeta(imagebuild.ProjectSlug(f.proj)) + `-[a-z]+ `))
 			Expect(strings.Join(args, " ")).NotTo(ContainSubstring(link))
 		}
@@ -194,23 +244,23 @@ var _ = Describe("launcher CLI (end-to-end argv)", func() {
 		Expect(f.run("--dangerous", "--model", "opus", "--resume")).To(Equal(0))
 		// The instance noun is chosen at random, so match its shape rather than
 		// a fixed value; the project slug is derived from the fixture's temp dir.
-		Expect(f.execLine()).To(MatchRegexp(
+		Expect(f.launchLine()).To(MatchRegexp(
 			`--name claude-sandbox-` + regexp.QuoteMeta(imagebuild.ProjectSlug(f.proj)) +
 				`-[a-z]+ claude-sandbox:run claude --dangerously-skip-permissions --model opus --resume$`))
 	})
 
 	It("CS-LNCH-027: ralph command shape, passthrough tail, and -ralph container name", func() {
 		Expect(f.run("--ralph", "--limit", "5", "--dangerous", "--verbose")).To(Equal(0))
-		Expect(f.execLine()).To(HaveSuffix(
+		Expect(f.launchLine()).To(HaveSuffix(
 			"--name claude-sandbox-" + imagebuild.ProjectSlug(f.proj) +
 				"-ralph claude-sandbox:run /opt/claude-sandbox/bin/ralph --limit 5 --dangerously-skip-permissions --verbose"))
 	})
 
 	It("CS-LNCH-029: container runtime environment", func() {
 		Expect(f.run()).To(Equal(0))
-		line := f.execLine()
-		Expect(line).To(HavePrefix("docker run -it --rm --init "))
-		args := f.fake.Execed.Args
+		line := f.launchLine()
+		Expect(line).To(HavePrefix("docker create -it --rm --init "))
+		args := f.launched().Args
 		uname := ""
 		if u, err := user.Current(); err == nil {
 			uname = u.Username
@@ -240,14 +290,14 @@ var _ = Describe("launcher CLI (end-to-end argv)", func() {
 		Expect(strings.Index(out, parent+"/.claude-sandbox/")).To(BeNumerically("<",
 			strings.Index(out, f.proj+"/.claude-sandbox/")))
 		// The env file feeds an --env-file flag.
-		Expect(f.fake.Execed.Args).To(ContainElements("--env-file", filepath.Join(f.proj, ".claude-sandbox", "env")))
+		Expect(f.launched().Args).To(ContainElements("--env-file", filepath.Join(f.proj, ".claude-sandbox", "env")))
 	})
 
 	It("CS-LNCH-025: warns and suggests init when no env cascade exists, launching without --env-file", func() {
 		Expect(f.run()).To(Equal(0))
 		Expect(f.errw.String()).To(ContainSubstring("env file not found"))
 		Expect(f.errw.String()).To(ContainSubstring("claude-sandbox init"))
-		Expect(f.fake.Execed.Args).NotTo(ContainElement("--env-file"))
+		Expect(f.launched().Args).NotTo(ContainElement("--env-file"))
 	})
 
 	It("CS-LNCH-030: --version reports host and baked-image versions with a mismatch note", func() {
@@ -324,19 +374,19 @@ var _ = Describe("launcher CLI (end-to-end argv)", func() {
 		It("CS-LNCH-038: config dangerous: true adds --dangerously-skip-permissions", func() {
 			writeFile(filepath.Join(f.proj, ".claude-sandbox", "config.yaml"), "dangerous: true\n")
 			Expect(f.run()).To(Equal(0))
-			Expect(f.execLine()).To(HaveSuffix(" claude-sandbox:run claude --dangerously-skip-permissions"))
+			Expect(f.launchLine()).To(HaveSuffix(" claude-sandbox:run claude --dangerously-skip-permissions"))
 		})
 
 		It("CS-LNCH-038: CLAUDE_SANDBOX_DANGEROUS=1 adds --dangerously-skip-permissions", func() {
 			f.envmap["CLAUDE_SANDBOX_DANGEROUS"] = "1"
 			Expect(f.run()).To(Equal(0))
-			Expect(f.execLine()).To(HaveSuffix(" claude-sandbox:run claude --dangerously-skip-permissions"))
+			Expect(f.launchLine()).To(HaveSuffix(" claude-sandbox:run claude --dangerously-skip-permissions"))
 		})
 
 		It("CS-LNCH-038: ralph mode forwards the config-enabled flag the same way", func() {
 			writeFile(filepath.Join(f.proj, ".claude-sandbox", "config.yaml"), "dangerous: true\n")
 			Expect(f.run("--ralph")).To(Equal(0))
-			Expect(f.execLine()).To(HaveSuffix(
+			Expect(f.launchLine()).To(HaveSuffix(
 				" claude-sandbox:run /opt/claude-sandbox/bin/ralph --dangerously-skip-permissions"))
 		})
 
@@ -344,7 +394,7 @@ var _ = Describe("launcher CLI (end-to-end argv)", func() {
 			writeFile(filepath.Join(filepath.Dir(f.proj), ".claude-sandbox", "config.yaml"), "dangerous: true\n")
 			writeFile(filepath.Join(f.proj, ".claude-sandbox", "config.yaml"), "dangerous: false\n")
 			Expect(f.run()).To(Equal(0))
-			Expect(f.execLine()).NotTo(ContainSubstring("--dangerously-skip-permissions"))
+			Expect(f.launchLine()).NotTo(ContainSubstring("--dangerously-skip-permissions"))
 		})
 	})
 
