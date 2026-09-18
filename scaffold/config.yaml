@@ -111,7 +111,11 @@
 # this on uses one shared folder, ~/.cache/claude-sandbox/peers, mounted at the
 # same path in every opted-in container with XDG_RUNTIME_DIR pointed at it, so
 # every session's advertised socket address is valid everywhere; its sessions/
-# becomes the registry. Scratchpads do not move. Enable it only between trees
+# becomes the registry. Scratchpads do not move, but XDG_RUNTIME_DIR applies to
+# the whole container: other tools that use it (dbus, gpg, podman) also put
+# their runtime files in that shared, host-persistent folder. If an env file
+# sets XDG_RUNTIME_DIR, or the socket path would be too long, the bridge is off
+# for that session, with a warning. Enable it only between trees
 # you would let talk to each other — it crosses that boundary on purpose.
 # The bridge REPLACES the container's registry, it does not union it: every
 # session you want to see must have the key on and be RELAUNCHED. Sessions

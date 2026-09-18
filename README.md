@@ -315,7 +315,9 @@ With the key on, every opted-in container uses one shared folder,
 preference to `CLAUDE_CODE_TMPDIR`), so every session's advertised socket address,
 `~/.cache/claude-sandbox/peers/cc-socks/<pid>.sock`, is valid in every bridged container. Its
 `sessions/` is mounted over the container's `<config dir>/sessions`, so they share one registry
-too. Scratchpads stay under `CLAUDE_CODE_TMPDIR` and do not move. Set it in each tree you want
+too. Scratchpads stay under `CLAUDE_CODE_TMPDIR` and do not move, but `XDG_RUNTIME_DIR` applies
+to the whole container, so other tools that use it also leave their runtime files in the shared
+folder. Set it in each tree you want
 bridged (through the cascade if you want a whole workspace), or via
 `CLAUDE_SANDBOX_SHARED_PEER_REGISTRY=1`.
 
@@ -628,12 +630,16 @@ in every bridged container, and `XDG_RUNTIME_DIR` is set to it, so every session
 advertises its inbox socket at `~/.cache/claude-sandbox/peers/cc-socks/<pid>.sock` — an
 address that works from every other bridged container, whatever its config dir. Its `sessions/`
 is mounted read-write over the container's `<config dir>/sessions`, so all of them share one
-registry. `XDG_RUNTIME_DIR` only moves the socket: scratchpads stay under `CLAUDE_CODE_TMPDIR`.
+registry. Claude Code's scratchpads stay under `CLAUDE_CODE_TMPDIR` and do not move. But
+`XDG_RUNTIME_DIR` is set for the whole container, not just for Claude Code: any other tool that
+honours it (dbus, gpg, podman, pulse, Claude Code's own language-server `vscode-ipc-*.sock`)
+puts its runtime files in this shared folder, which persists on the host and is visible to every
+other bridged container.
 Both mounts must be writable because every session writes its own record and binds its own
 socket there (`bind()` under a read-only bind mount fails with `EROFS`).
 
-The launcher creates `peers/`, `peers/sessions/` and `peers/cc-socks/` on the host `0700`, as
-you, before `docker run`: Docker would otherwise create a missing bind source as root, and
+The launcher creates `peers/`, `peers/sessions/` and `peers/cc-socks/` on the host as you,
+before `docker run`, and forces them to `0700` even if they already exist with a wider mode: Docker would otherwise create a missing bind source as root, and
 Claude Code refuses a socket directory that is group- or world-writable or owned by someone
 else — it then silently falls back to a private `/tmp` inside the container that no other
 container can reach. The registry destination `<config dir>/sessions` is created the same way
@@ -643,10 +649,12 @@ configurable, for the same reason as the package caches: a free-form path could 
 own `<config dir>/sessions`, putting other trees' sandboxes into a registry your host's own
 `claude` also writes.
 
-Messaging stands down for one session — the registry stays bridged, and one warning says so —
-when an env file in the cascade sets `XDG_RUNTIME_DIR` (the launcher will not override it), or
-when your home directory is so long that the socket path would exceed Claude Code's 103-byte
-limit.
+The bridge is switched **off for one session**, with one warning and no banner, when an env file
+in the cascade sets `XDG_RUNTIME_DIR` (the launcher will not override it), or when your home
+directory is so long that the socket path would exceed Claude Code's 103-byte limit. It is all
+or nothing: sharing the registry without a shared socket would leave the session listing
+nobody and listed by nobody, while hiding its own tree's registry, which is worse than the key
+being off. That session launches exactly as if the key were off.
 
 Resolution is **tri-state**, like [worktree mode](#worktree-mode):
 `CLAUDE_SANDBOX_SHARED_PEER_REGISTRY` of `1`/`true`/`yes` enables it over an unset or false

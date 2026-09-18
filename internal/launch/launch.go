@@ -305,8 +305,12 @@ func Build(in Inputs) (*Plan, error) {
 	// fall-through there would silently cross the boundary they just opted out
 	// of. Same argument as worktree mode (CS-LNCH-042).
 	sharedPeers := ResolveTristate(nil, in.getenv("CLAUDE_SANDBOX_SHARED_PEER_REGISTRY"), in.Cfg.SharedPeerRegistry, false)
+	// bridged is what was APPLIED: a session that stands down (CS-LNCH-054/055)
+	// launches exactly as with the key off, so it hashes like one.
+	bridged := false
 	if sharedPeers {
-		if err := in.assembleSharedPeerRegistry(p, configDir); err != nil {
+		var err error
+		if bridged, err = in.assembleSharedPeerRegistry(p, configDir); err != nil {
 			return nil, err
 		}
 	}
@@ -316,7 +320,7 @@ func Build(in Inputs) (*Plan, error) {
 	// is joining a container built from the config now on disk.
 	p.ConfigHash, p.ConfigInputs = in.configFingerprint(p, hostAccess{
 		SSH: ssh, Git: git, DockerSocket: dockerSocket, AWS: aws, PackageCaches: packageCaches,
-	}, sharedPeers)
+	}, bridged)
 
 	// CS-LNCH-032: identity labels. Discovery filters on these rather than
 	// parsing container names, which are lossy.
@@ -621,6 +625,9 @@ const worstSocketSuffix = "/" + peerSocketsDir + "/1234567.sock"
 // path only, so scratchpads stay where CS-LNCH-034 put them. It names the ROOT,
 // not cc-socks: Claude Code appends /cc-socks itself, and a bundled
 // language-server library drops vscode-ipc-*.sock directly under it.
+// XDG_RUNTIME_DIR applies to the WHOLE container, not only to Claude Code:
+// anything else that honours it (dbus, gpg, podman, pulse) puts its runtime
+// files in this shared, host-persistent folder too.
 //
 // Both mounts are READ-WRITE on purpose: every session writes its own
 // <pid>.json into the registry and bind()s its own <pid>.sock under the socket
@@ -643,53 +650,65 @@ const worstSocketSuffix = "/" + peerSocketsDir + "/1234567.sock"
 // <config dir>/sessions that every later un-bridged sandbox — and the host's
 // own claude — could not write. That holds only for a destination behind a
 // same-path bind, hence mkPeerDest's guard.
-func (in *Inputs) assembleSharedPeerRegistry(p *Plan, configDir string) error {
+//
+// It reports whether the bridge was applied; false means it stood down for
+// this session (CS-LNCH-054/055) and the plan is exactly the key-off plan.
+func (in *Inputs) assembleSharedPeerRegistry(p *Plan, configDir string) (bool, error) {
 	root := filepath.Join(in.Home, PeerRegistryRoot)
 
+	// CS-LNCH-054/055: when the socket cannot be bridged, the WHOLE bridge
+	// stands down for this session. A registry-only bridge is strictly worse
+	// than the key off: Claude Code drops every peer whose advertised socket
+	// it cannot connect() to, so the session would list nobody and nobody
+	// would list it — while the overmount hid its own tree's real registry
+	// and with it the same-tree peers it can reach today. Checked before
+	// anything is created or mounted, so a stood-down launch touches nothing.
+	//
+	// 054: docker -e silently beats --env-file, so an env file that sets
+	// XDG_RUNTIME_DIR keeps it — the CLAUDE_CODE_TMPDIR precedent. The
+	// launcher never forwards the host's own XDG_RUNTIME_DIR, so an env file
+	// is the only source that can collide.
+	if envFilesDefine(in.EnvFiles, "XDG_RUNTIME_DIR") {
+		fmt.Fprintln(in.Out, "Warning: sharedPeerRegistry is off for this session: an env file sets XDG_RUNTIME_DIR, and the bridge needs to set it to share message sockets. Without that, bridged peers could not reach this session nor it them.")
+		return false, nil
+	}
+	// 055: past maxSocketPath Claude Code would silently bind in a
+	// container-private /tmp instead, advertising an address no other
+	// container can reach.
+	if n := len(root) + len(worstSocketSuffix); n > maxSocketPath {
+		fmt.Fprintf(in.Out, "Warning: sharedPeerRegistry is off for this session: the message socket path %s would be %d bytes, over Claude Code's %d-byte limit. Without a shared socket, bridged peers could not reach this session nor it them.\n", root+worstSocketSuffix, n, maxSocketPath)
+		return false, nil
+	}
+
+	// Every launcher-owned directory is created, and TIGHTENED, before any
+	// mount is assembled: MkdirAll leaves an existing wider mode alone, and
+	// Claude Code silently falls back to a container-private /tmp when the
+	// socket directory's ancestry is group- or world-writable.
 	sessions := filepath.Join(root, peerSessionsDir)
-	if err := in.mkPeerDir(sessions); err != nil {
-		return err
+	for _, d := range []string{root, sessions, filepath.Join(root, peerSocketsDir)} {
+		if err := in.mkOwnedPeerDir(d); err != nil {
+			return false, err
+		}
 	}
 	// Guarded BEFORE the mount is appended: afterwards the destination would
-	// be under a mount by definition — its own.
+	// be under a mount by definition — its own. Not chmod'ed: it lives under
+	// the user's config dir and is not the launcher's to tighten.
 	dstSessions := filepath.Join(configDir, peerSessionsDir)
 	if err := in.mkPeerDest(p, dstSessions); err != nil {
-		return err
+		return false, err
 	}
-	p.Volumes = append(p.Volumes, fmt.Sprintf("%s:%s", sessions, dstSessions))
+	p.Volumes = append(p.Volumes,
+		fmt.Sprintf("%s:%s", sessions, dstSessions),
+		fmt.Sprintf("%s:%s", root, root),
+	)
+	p.EnvFlags = append(p.EnvFlags, "XDG_RUNTIME_DIR="+root)
 
 	// CS-LNCH-053: the bridge crosses a boundary the operator drew on purpose,
 	// and a workspace-level config key can switch it on for a session that
 	// never asked. Like the Worktree banner, it prints only when the mode is
-	// actually in use — including when messaging stands down below, which is
-	// still a bridged launch and still names the shared root.
+	// actually in use.
 	fmt.Fprintf(in.Out, "Peer registry: shared (%s) - /peers and SendMessage reach every other opted-in sandbox on this host, and only those.\n", root)
-
-	// CS-LNCH-054: docker -e silently beats --env-file, so an env file that
-	// sets XDG_RUNTIME_DIR keeps it — the CLAUDE_CODE_TMPDIR precedent. The
-	// launcher never forwards the host's own XDG_RUNTIME_DIR, so an env file
-	// is the only source that can collide.
-	if envFilesDefine(in.EnvFiles, "XDG_RUNTIME_DIR") {
-		fmt.Fprintln(in.Out, "Warning: sharedPeerRegistry: an env file sets XDG_RUNTIME_DIR, so messaging is not bridged for this session; peers will be listed but not reachable.")
-		return nil
-	}
-	// CS-LNCH-055: past maxSocketPath Claude Code would silently bind in a
-	// container-private /tmp instead, advertising an address no other
-	// container can reach.
-	if n := len(root) + len(worstSocketSuffix); n > maxSocketPath {
-		fmt.Fprintf(in.Out, "Warning: sharedPeerRegistry: the message socket path %s would be %d bytes, over Claude Code's %d-byte limit, so messaging is not bridged for this session; peers will be listed but not reachable.\n", root+worstSocketSuffix, n, maxSocketPath)
-		return nil
-	}
-
-	// peers/ already exists (sessions/ is beneath it); cc-socks/ is created
-	// here rather than left to Claude Code so the whole ancestry is known to
-	// be ours and 0700 before any container starts.
-	if err := in.mkPeerDir(filepath.Join(root, peerSocketsDir)); err != nil {
-		return err
-	}
-	p.Volumes = append(p.Volumes, fmt.Sprintf("%s:%s", root, root))
-	p.EnvFlags = append(p.EnvFlags, "XDG_RUNTIME_DIR="+root)
-	return nil
+	return true, nil
 }
 
 // mkPeerDest creates a mount DESTINATION, but only when it is a host path
@@ -716,6 +735,19 @@ func (in *Inputs) mkPeerDest(p *Plan, dst string) error {
 func (in *Inputs) mkPeerDir(dir string) error {
 	if err := os.MkdirAll(dir, peerDirMode); err != nil {
 		return fmt.Errorf("shared peer registry: creating %s: %w", dir, err)
+	}
+	return nil
+}
+
+// mkOwnedPeerDir creates a directory under PeerRegistryRoot and enforces
+// peerDirMode even when it already existed wider (CS-LNCH-051). These are
+// sandbox-only directories the launcher owns, so tightening them is safe.
+func (in *Inputs) mkOwnedPeerDir(dir string) error {
+	if err := in.mkPeerDir(dir); err != nil {
+		return err
+	}
+	if err := os.Chmod(dir, peerDirMode); err != nil {
+		return fmt.Errorf("shared peer registry: restricting %s to 0700: %w", dir, err)
 	}
 	return nil
 }

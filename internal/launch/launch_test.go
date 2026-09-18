@@ -687,42 +687,74 @@ var _ = Describe("launch.Build", func() {
 			Expect(out.String()).NotTo(ContainSubstring("Warning: sharedPeerRegistry"))
 		})
 
-		It("CS-LNCH-054: an env file that sets XDG_RUNTIME_DIR keeps it; the registry is still bridged", func() {
-			enable()
+		// expectStoodDown pins a whole-bridge stand-down: nothing of the
+		// bridge in the argv, nothing created, no banner, exactly one warning.
+		expectStoodDown := func(p *launch.Plan, peersRoot, reason string) {
+			Expect(peerEntries(p)).To(BeEmpty())
+			for _, v := range p.Volumes {
+				Expect(v).NotTo(HaveSuffix("/sessions"), "no registry overmount")
+			}
+			Expect(envValues(p, "XDG_RUNTIME_DIR")).To(BeEmpty())
+			Expect(filepath.Join(peersRoot, "cc-socks")).NotTo(BeADirectory())
+			Expect(peersRoot).NotTo(BeADirectory())
+			Expect(out.String()).NotTo(ContainSubstring("Peer registry:"))
+			Expect(strings.Count(out.String(), "Warning: sharedPeerRegistry")).To(Equal(1))
+			Expect(out.String()).To(ContainSubstring("Warning: sharedPeerRegistry is off for this session"))
+			Expect(out.String()).To(ContainSubstring(reason))
+			Expect(out.String()).NotTo(ContainSubstring("listed"))
+		}
+
+		It("CS-LNCH-054: an env file that sets XDG_RUNTIME_DIR keeps it, and the whole bridge stands down", func() {
 			ef := filepath.Join(proj, "env")
 			touch(ef, "# comment\nXDG_RUNTIME_DIR=/run/user/1000\n")
 			in.EnvFiles = []string{ef}
+			off := build()
+			out.Reset()
+			enable()
 			p := build()
-			Expect(envValues(p, "XDG_RUNTIME_DIR")).To(BeEmpty())
-			Expect(p.Volumes).NotTo(ContainElement(rootMount()))
-			Expect(p.Volumes).To(ContainElement(
-				filepath.Join(root, "sessions") + ":" + filepath.Join(cfgDir, "sessions")))
-			Expect(strings.Count(out.String(), "Peer registry: shared (")).To(Equal(1))
-			Expect(strings.Count(out.String(), "Warning: sharedPeerRegistry")).To(Equal(1))
-			Expect(out.String()).To(ContainSubstring("env file sets XDG_RUNTIME_DIR"))
-			Expect(out.String()).To(ContainSubstring("messaging is not bridged"))
-			// The banner comes first; the warning qualifies it.
-			Expect(strings.Index(out.String(), "Warning: sharedPeerRegistry")).To(
-				BeNumerically(">", strings.Index(out.String(), "Peer registry: shared (")))
+			expectStoodDown(p, root, "an env file sets XDG_RUNTIME_DIR")
+			// Exactly a key-off launch, fingerprint included.
+			Expect(p.DockerArgs(proj)).To(Equal(off.DockerArgs(proj)))
+			Expect(p.ConfigHash).To(Equal(off.ConfigHash))
 		})
 
-		It("CS-LNCH-055: a socket path over 103 bytes stands messaging down with a warning naming the length", func() {
+		It("CS-LNCH-055: a socket path over 103 bytes stands the whole bridge down with a warning naming the length", func() {
 			// Pad the home so root + /cc-socks/1234567.sock exceeds 103 bytes.
 			longHome := filepath.Join(home, strings.Repeat("h", 110-len(home)))
 			mkdir(longHome)
+			mkdir(filepath.Join(longHome, ".claude"))
 			in.Home = longHome
 			longRoot := filepath.Join(longHome, ".cache", "claude-sandbox", "peers")
 			n := len(longRoot) + len("/cc-socks/1234567.sock")
 			Expect(n).To(BeNumerically(">", 103))
 			enable()
 			p := build()
-			Expect(envValues(p, "XDG_RUNTIME_DIR")).To(BeEmpty())
-			Expect(p.Volumes).NotTo(ContainElement(longRoot + ":" + longRoot))
-			Expect(p.Volumes).To(ContainElement(
-				filepath.Join(longRoot, "sessions") + ":" + filepath.Join(longHome, ".claude", "sessions")))
-			Expect(strings.Count(out.String(), "Warning: sharedPeerRegistry")).To(Equal(1))
-			Expect(out.String()).To(ContainSubstring(fmt.Sprintf("would be %d bytes", n)))
-			Expect(out.String()).To(ContainSubstring("messaging is not bridged"))
+			expectStoodDown(p, longRoot, fmt.Sprintf("would be %d bytes", n))
+		})
+
+		It("CS-LNCH-051: tightens an existing wider peers/, sessions/ and cc-socks/ to 0700", func() {
+			for _, d := range []string{root, filepath.Join(root, "sessions"), filepath.Join(root, "cc-socks")} {
+				Expect(os.MkdirAll(d, 0o777)).To(Succeed())
+				Expect(os.Chmod(d, 0o777)).To(Succeed())
+			}
+			enable()
+			build()
+			for _, d := range []string{root, filepath.Join(root, "sessions"), filepath.Join(root, "cc-socks")} {
+				fi, err := os.Stat(d)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(fi.Mode().Perm()).To(Equal(os.FileMode(0o700)), d)
+			}
+		})
+
+		It("CS-LNCH-051: does not re-mode an existing registry destination under the user's config dir", func() {
+			dst := filepath.Join(cfgDir, "sessions")
+			Expect(os.MkdirAll(dst, 0o755)).To(Succeed())
+			Expect(os.Chmod(dst, 0o755)).To(Succeed())
+			enable()
+			build()
+			fi, err := os.Stat(dst)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(fi.Mode().Perm()).To(Equal(os.FileMode(0o755)))
 		})
 
 		It("CS-LNCH-055: a path of exactly 103 bytes is still bridged", func() {

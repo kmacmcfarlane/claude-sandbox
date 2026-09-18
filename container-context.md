@@ -49,7 +49,12 @@ one-time setup (idempotent). Use `setup-lsp-plugins --check` to verify status.
   its `sessions/` as the registry and has `XDG_RUNTIME_DIR` pointed at it, so
   every session's advertised socket address (`…/peers/cc-socks/<pid>.sock`)
   is valid in every bridged container. Scratchpads stay under
-  `CLAUDE_CODE_TMPDIR` and do not move. The launcher prints a
+  `CLAUDE_CODE_TMPDIR` and do not move. `XDG_RUNTIME_DIR` is set for the
+  whole container, though: other tools that use it (dbus, gpg, podman,
+  pulse) also write their runtime files into that shared folder, which
+  persists on the host and is visible to every other bridged container, so
+  do not point runtime state you want private there, and expect name
+  collisions for fixed-name sockets. The launcher prints a
   `Peer registry: shared (…)` line when it is on. That bridge REPLACES the
   per-tree registry rather than adding to it, so a bridged session sees only
   the other sessions launched (or relaunched) with the key on.

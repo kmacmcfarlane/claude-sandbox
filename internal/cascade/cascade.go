@@ -109,8 +109,8 @@ type Config struct {
 	// resolution is tri-state (CS-LNCH-052) — a falsy
 	// CLAUDE_SANDBOX_SHARED_PEER_REGISTRY must be able to turn an upstream
 	// "true" off for one session, which an OR shape cannot express.
-	// json:"-" like Worktree, but for the opposite reason: the RESOLVED
-	// value is hashed explicitly by the drift fingerprint, so hashing the
+	// json:"-" like Worktree, but for the opposite reason: the APPLIED
+	// value (CS-LNCH-054/055) is hashed explicitly by the drift fingerprint, so hashing the
 	// key here as well would only make an unset key and an explicit
 	// "false" — which launch identically — look like drift against each other.
 	SharedPeerRegistry *bool      `yaml:"sharedPeerRegistry" json:"-"`

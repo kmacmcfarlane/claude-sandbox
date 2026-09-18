@@ -489,7 +489,11 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
   # advertises ~/.cache/claude-sandbox/peers/cc-socks/<pid>.sock — an address
   # valid in every bridged container whatever its config dir. XDG_RUNTIME_DIR
   # outranks CLAUDE_CODE_TMPDIR for the socket path ONLY: scratchpads stay
-  # under CLAUDE_CODE_TMPDIR and do not move.
+  # under CLAUDE_CODE_TMPDIR and do not move. The variable itself applies to
+  # the WHOLE container, though: anything else that honours XDG_RUNTIME_DIR
+  # (dbus, gpg, podman, pulse, Claude Code's own LSP vscode-ipc-*.sock) puts
+  # its runtime files in that shared, host-persistent folder, visible to every
+  # other bridged container.
   #
   # It is OPT-IN and default OFF everywhere: the config-dir split is usually a
   # deliberate work/personal boundary, and only the operator knows which trees
@@ -556,6 +560,14 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     And all of them are created 0700, the mode Claude Code itself uses
     # 0755 would let any other local user on a multi-user host enumerate every
     # sandbox session's <pid>.json and <pid>.<hash>.key in the shared root.
+    And peers/, peers/sessions/ and peers/cc-socks/ are forced to 0700 even when
+      they already exist with a wider mode
+    # MkdirAll leaves an existing mode alone, and a group- or world-writable
+    # socket ancestry makes Claude Code silently fall back to a container-private
+    # /tmp — the silent failure the bridge exists to end. These directories are
+    # sandbox-only and launcher-owned, so tightening them is safe. The registry
+    # DESTINATION under the user's config dir is not the launcher's, and is not
+    # re-moded.
     But the registry destination is created only when it lies under a SAME-PATH
       mount, the only case in which a container path is also a meaningful host
       path and so the one docker would otherwise create as root on the host
@@ -600,30 +612,42 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     Then stdout carries exactly one line naming the shared host root and that /peers and
       SendMessage now reach every other opted-in sandbox on this host, and only those
     And nothing is printed when the bridge is off
-    And the line is printed when messaging stands down too (CS-LNCH-054/055) — that
-      launch is still bridged for discovery, and the warning that follows qualifies
-      the banner rather than replacing it
+    And the line is not printed when the bridge stands down for the session
+      (CS-LNCH-054/055) — that launch is not bridged at all, and its one warning
+      says so instead
 
-  Scenario: CS-LNCH-054 An env file that owns XDG_RUNTIME_DIR keeps it
+  # A bridge that shares the registry but not the socket address is strictly
+  # worse than no bridge: Claude Code drops every peer whose advertised socket
+  # it cannot connect() to, so such a session would list nobody and nobody
+  # would list it — while the registry overmount hid its own tree's real
+  # registry, and with it the same-tree peers it can reach with the key off.
+  # A partial bridge only takes connectivity away, so when the socket cannot
+  # be bridged the whole bridge stands down for that session.
+
+  Scenario: CS-LNCH-054 An env file that owns XDG_RUNTIME_DIR keeps it, and the bridge stands down
     Given the shared peer registry is enabled
     And an env file in the cascade defines XDG_RUNTIME_DIR
-    Then no "-e XDG_RUNTIME_DIR" is added and the peers root is not mounted
+    Then no "-e XDG_RUNTIME_DIR" is added
     # docker -e silently beats --env-file, so adding it would override the
     # consumer's own choice — the CLAUDE_CODE_TMPDIR precedent (CS-LNCH-034).
     # The launcher never forwards the host's own XDG_RUNTIME_DIR, so an env
     # file is the only source that can collide.
-    And the registry is still bridged
-    And one warning says messaging is not bridged for this session because the
-      env file owns XDG_RUNTIME_DIR
+    And neither the registry sessions/ overmount nor the peers-root mount is added
+    And cc-socks/ is not created and no banner is printed
+    And exactly one warning says the bridge is off for this session because an
+      env file sets XDG_RUNTIME_DIR
+    And the docker run argv and the drift fingerprint are those of a key-off launch
 
-  Scenario: CS-LNCH-055 A socket path Claude Code would reject stands messaging down
-    # Claude Code silently falls back to /tmp/cc-socks-<uid> — container-private,
-    # unreachable from any other container — when the socket path exceeds 103
-    # bytes (the sun_path limit). ~/.cache/claude-sandbox/peers is ~54 bytes for
-    # an ordinary home, so this guards only unusual home directories.
+  Scenario: CS-LNCH-055 A socket path Claude Code would reject stands the bridge down
+    # Claude Code binds only when Buffer.byteLength(path) <= 103 (the sun_path
+    # limit); past it, it silently falls back to /tmp/cc-socks-<uid> —
+    # container-private, unreachable from any other container. For a home of
+    # /home/rt the root is 36 bytes and the worst-case socket path 58, so this
+    # guards only unusual home directories.
     Given the shared peer registry is enabled
     And the worst-case socket path — the peers root + "/cc-socks/" + a 7-digit
       pid + ".sock" — would exceed 103 bytes
-    Then no "-e XDG_RUNTIME_DIR" is added and the peers root is not mounted
-    And the registry is still bridged
-    And one warning names the length and says messaging is not bridged
+    Then no "-e XDG_RUNTIME_DIR", no registry sessions/ overmount and no
+      peers-root mount is added
+    And cc-socks/ is not created and no banner is printed
+    And exactly one warning names the length and says the bridge is off for this session
