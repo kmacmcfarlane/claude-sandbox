@@ -14,7 +14,7 @@ import (
 	assets "github.com/kmacmcfarlane/claude-sandbox"
 )
 
-// ReadBase returns an embedded base-scaffold file (config.yaml, env,
+// ReadBase returns an embedded base-scaffold file (config.yaml, env.example,
 // Dockerfile.example).
 func ReadBase(name string) ([]byte, error) {
 	return assets.Scaffold.ReadFile("scaffold/" + name)

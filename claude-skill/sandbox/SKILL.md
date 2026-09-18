@@ -95,8 +95,9 @@ These are **positional subcommands** (must be the first argument) and reject lau
 | `--yes` | accept the `trackInHost` prompt's default, non-interactively (scripted bootstraps, CI) |
 
 - Both are **idempotent**: existing files are never overwritten, so template-provided docs win and re-running fills only gaps.
-- The seeded `config.yaml`/`env` are **sparse (fully commented)** — they override nothing in the cascade; uncomment a key to set it for this project.
-- `init` prints the **config cascade** when parent directories contribute files, and notes inherited `env` files (which layer under the project's — they are never copied).
+- The seeded `config.yaml` is **sparse (fully commented)** — it overrides nothing in the cascade; uncomment a key to set it for this project.
+- `init` **never creates a real `.claude-sandbox/env`**. It seeds `.claude-sandbox/env.example`, a commented template the launcher never reads, lints or lists. Put shared secrets in an upstream (workspace) `.claude-sandbox/env`; copy `env.example` to `env` only for a genuine per-project override — a project env's keys override the same keys upstream, so a stale token there silently hides a refreshed upstream one. An existing project `env` is kept untouched and reported as `kept     env (exists; its keys override upstream env)`.
+- `init` prints the **config cascade** when parent directories contribute files, and notes each inherited upstream `env` file (never copied) — saying the project env overrides its keys when one exists.
 - **Inherited `trackInHost`:** when an upstream config already sets it, the prompt shows the inherited value as the default. Press Enter to inherit (nothing is written locally; the seeded file's commented hint records the inherited value and its source path), or answer `y`/`n` to write a local override.
 - **Parent `Dockerfile`:** if an ancestor `.claude-sandbox/Dockerfile` exists, `init` seeds `Dockerfile.example` as a copy of it (no prompt; the report names the source) instead of the generic template — a useful starting point for divergence, since Dockerfiles are nearest-wins and never merged. `--no-copy-parent-dockerfile` forces the generic example.
 - **Host `.gitignore`:** the entries implied by the `trackInHost` answer are written without a further prompt (`--no-gitignore` skips them). The launch-time "Add them?" prompt, which guards a hand-edited `.gitignore` outside a bootstrap, is unchanged.
@@ -166,7 +167,7 @@ Work spec-first:
 
 Tests never touch Docker, git, or the network — external commands go through the `execx.Runner` seam (`execx.Fake` records and scripts them) and prompts through `prompt.Prompter` (`prompt.Scripted` / `prompt.Fixed`). If a change needs a real subprocess or a tty, that scenario belongs in the manual smoke checklist instead; say so in a spec comment.
 
-Docs to keep in sync with any behavior change: the repo `README.md`, `CLAUDE.md`, `scaffold/config.yaml` and `scaffold/env` (their comments are user-facing docs), and this skill.
+Docs to keep in sync with any behavior change: the repo `README.md`, `CLAUDE.md`, `scaffold/config.yaml` and `scaffold/env.example` (their comments are user-facing docs), and this skill.
 
 ## Troubleshooting
 

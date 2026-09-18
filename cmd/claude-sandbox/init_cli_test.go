@@ -111,10 +111,12 @@ var _ = Describe("init CLI invocation shape", func() {
 		Expect(code).To(Equal(0))
 
 		sb := filepath.Join(proj, ".claude-sandbox")
-		for _, rel := range []string{"config.yaml", "env", "Dockerfile.example", "agent/PROMPT.md", "scripts/backlog/backlog.py"} {
+		for _, rel := range []string{"config.yaml", "env.example", "Dockerfile.example", "agent/PROMPT.md", "scripts/backlog/backlog.py"} {
 			_, err := os.Stat(filepath.Join(sb, rel))
 			Expect(err).NotTo(HaveOccurred(), rel)
 		}
+		_, err := os.Stat(filepath.Join(sb, "env"))
+		Expect(os.IsNotExist(err)).To(BeTrue(), "init-ralph must not create a real env (CS-INIT-030)")
 		Expect(c.prompter.Asked).To(BeEmpty())
 	})
 })

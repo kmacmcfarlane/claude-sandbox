@@ -1,6 +1,8 @@
 // Package initcmd implements the `init` / `init-ralph` bootstrap subcommands.
-// Idempotent: existing files are never overwritten. Seeded config/env are
-// sparse (fully commented) so they override nothing in the cascade.
+// Idempotent: existing files are never overwritten. The seeded config is
+// sparse (fully commented) so it overrides nothing in the cascade, and init
+// never creates a real env — it seeds env.example, which the launcher never
+// reads (CS-INIT-004, CS-INIT-030).
 // Spec: spec/init.feature (CS-INIT), spec/init-ralph.feature (CS-INITR).
 package initcmd
 
@@ -49,7 +51,7 @@ func Run(project string, f Flags, d Deps) error {
 	}
 	sb := paths.SandboxDir(project)
 	cfgPath := filepath.Join(sb, "config.yaml")
-	envPath := filepath.Join(sb, "env")
+	envExamplePath := filepath.Join(sb, paths.EnvExampleName)
 	if err := os.MkdirAll(sb, 0o755); err != nil {
 		return err
 	}
@@ -122,23 +124,35 @@ func Run(project string, f Flags, d Deps) error {
 		}
 	}
 
-	// --- env (sparse seed; env files layer, later wins) ---
-	if fileExists(envPath) {
-		fmt.Fprintln(d.Out, "  skipped  env (exists)")
+	// --- env.example (template only; a real env is never created, so
+	// nothing project-level shadows an upstream env — CS-INIT-004/030). An
+	// existing real env is kept untouched, but named: its keys shadow the
+	// upstream env's, which is exactly what an operator re-running init
+	// needs to see (CS-INIT-030).
+	projectEnv := fileExists(filepath.Join(sb, "env"))
+	if projectEnv {
+		fmt.Fprintln(d.Out, "  kept     env (exists; its keys override upstream env)")
+	}
+	if fileExists(envExamplePath) {
+		fmt.Fprintf(d.Out, "  skipped  %s (exists)\n", paths.EnvExampleName)
 	} else {
-		seed, err := scaffold.ReadBase("env")
+		seed, err := scaffold.ReadBase(paths.EnvExampleName)
 		if err != nil {
 			return err
 		}
-		if _, err := scaffold.SeedFile(envPath, seed); err != nil {
+		if _, err := scaffold.SeedFile(envExamplePath, seed); err != nil {
 			return err
 		}
-		fmt.Fprintln(d.Out, "  created  env")
+		fmt.Fprintf(d.Out, "  created  %s (template; copy to env only for a project-only override)\n", paths.EnvExampleName)
 	}
 	// CS-INIT-020: inherited env files are reported, never copied.
 	if upstreamEnvs, _ := paths.CollectUp(filepath.Dir(project), paths.Env); len(upstreamEnvs) > 0 {
 		for _, e := range upstreamEnvs {
-			fmt.Fprintf(d.Out, "  note: %s layers under this project's env (later wins)\n", e)
+			if projectEnv {
+				fmt.Fprintf(d.Out, "  note: %s is inherited by this project; the project env overrides its keys\n", e)
+			} else {
+				fmt.Fprintf(d.Out, "  note: %s is inherited by this project (a project env would override its keys)\n", e)
+			}
 		}
 	}
 
@@ -233,7 +247,9 @@ func seedDockerfileExample(project, sb string, f Flags, d Deps) error {
 func printNextSteps(w io.Writer, ralph bool) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Done. Next steps:")
-	fmt.Fprintln(w, "  1. Add secrets / env vars to .claude-sandbox/env (e.g. DISCORD_WEBHOOK_URL, API keys)")
+	fmt.Fprintln(w, "  1. Put secrets / env vars (e.g. DISCORD_WEBHOOK_URL, API keys) in an upstream .claude-sandbox/env")
+	fmt.Fprintln(w, "     (a parent/workspace dir, shared by every project below it), or copy")
+	fmt.Fprintln(w, "     .claude-sandbox/env.example → .claude-sandbox/env for a project-only override")
 	fmt.Fprintln(w, "  2. Review .claude-sandbox/config.yaml — host access, mounts, model, memoryLimit")
 	fmt.Fprintln(w, "  3. (optional) Rename .claude-sandbox/Dockerfile.example → Dockerfile and add project tools (FROM claude-sandbox)")
 	if ralph {

@@ -2,6 +2,7 @@ package main
 
 // Spec: spec/config-cascade.feature CS-CASC-020 — every env file in the
 // cascade is linted at launch, warnings go to stderr, and the launch proceeds.
+// CS-CASC-030 — env.example is a template, never part of the env cascade.
 
 import (
 	"os"
@@ -45,5 +46,31 @@ var _ = Describe("env file linting at launch", func() {
 		Expect(f.run()).To(Equal(0))
 		Expect(f.errw.String()).NotTo(ContainSubstring("wrapped in"))
 		Expect(f.errw.String()).NotTo(ContainSubstring("carriage return"))
+	})
+
+	It("CS-CASC-030: env.example is a template, never an env file", func() {
+		f := newCLIFixture()
+		parent := filepath.Dir(f.proj)
+		upstream := filepath.Join(parent, ".claude-sandbox", "env")
+		example := filepath.Join(f.proj, ".claude-sandbox", "env.example")
+		writeFile(upstream, "TOKEN=upstream\n")
+		// Quoted so linting it would be visible.
+		writeFile(example, "TOKEN=\"example\"\n")
+
+		Expect(f.run()).To(Equal(0))
+
+		var envFiles []string
+		args := f.fake.Execed.Args
+		for i, a := range args {
+			if a == "--env-file" && i+1 < len(args) {
+				envFiles = append(envFiles, args[i+1])
+			}
+		}
+		Expect(envFiles).To(Equal([]string{upstream}))
+		Expect(f.errw.String()).NotTo(ContainSubstring(example))
+		Expect(f.out.String()).NotTo(ContainSubstring("env.example"))
+		// With an upstream env present, no missing-env message at all.
+		Expect(f.errw.String()).NotTo(ContainSubstring("env file not found"))
+		Expect(f.errw.String()).NotTo(ContainSubstring("Note: no .claude-sandbox/env"))
 	})
 })

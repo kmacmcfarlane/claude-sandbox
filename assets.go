@@ -4,7 +4,7 @@ package assets
 
 import "embed"
 
-// Scaffold is the base bootstrap seed for `init` (config.yaml, env,
+// Scaffold is the base bootstrap seed for `init` (config.yaml, env.example,
 // Dockerfile.example).
 //
 //go:embed scaffold
