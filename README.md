@@ -535,7 +535,19 @@ Set in `.claude-sandbox/config.yaml`. Controls how the directory is version-cont
 - **`false` (default, foreign-safe):** the launcher adds `/.claude-sandbox/` to the
   host `.gitignore` (prompting first) and initializes a **sidecar git repo** inside
   `.claude-sandbox/` for independent history. Nothing leaks into the host project's
-  git history. Use for working on others' repos.
+  git history. Use for working on others' repos. If the host repo already tracks files
+  under `.claude-sandbox/` (`git ls-files -- .claude-sandbox` lists any), the launcher
+  never proposes `/.claude-sandbox/` — the rule would silently keep every new file there
+  out of `git add` — and skips the sidecar init and the seeded `CLAUDE.md`; it warns
+  instead, naming the count and the remedies: set `trackInHost: true` in
+  `.claude-sandbox/config.yaml` (and remove any `.claude-sandbox/.git`), or adopt the
+  sidecar layout — copy `.claude-sandbox/` aside (or into the sidecar) first, then
+  `git rm -r --cached .claude-sandbox` and commit. That commit deletes `.claude-sandbox/`
+  from every other clone and worktree that pulls or merges it. If an ignore rule already
+  covers the directory, new files there are being hidden now, and the warning says to
+  remove the rule (`git check-ignore -v .claude-sandbox/ignore-probe` names it) whichever
+  remedy you pick. `.claude/worktrees/` is still proposed. If the `ls-files` probe fails,
+  the ignore is proposed as before.
 - **`true` (your own projects):** the directory is tracked by the host repo; no
   sidecar. The launcher gitignores `.claude-sandbox/env` (secrets),
   `.claude-sandbox/temp/` (scratch), and `.claude-sandbox/ralph/` (ephemeral loop
@@ -546,7 +558,8 @@ Set in `.claude-sandbox/config.yaml`. Controls how the directory is version-cont
   they would only dirty the tree — and warns instead: either set `trackInHost: false` in the
   local `.claude-sandbox/config.yaml` (and delete any of those five lines an earlier launch
   already appended — they are dead), or drop the ignore rule (`git check-ignore -v
-  .claude-sandbox` names it, wherever it lives) and the sidecar `.git` to track the
+  .claude-sandbox/ignore-probe` names it, wherever it lives — a directory holding tracked
+  files is itself never reported ignored, so the launcher asks about a child path) and the sidecar `.git` to track the
   directory in the host. Modes are never switched silently.
 
 ```yaml
