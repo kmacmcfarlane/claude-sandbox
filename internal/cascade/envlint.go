@@ -1,6 +1,8 @@
 package cascade
 
 // Env file linting. Spec: spec/config-cascade.feature (CS-CASC-013..020).
+// readEnvAssignments is also the reader behind the override notice
+// (envoverride.go, CS-CASC-021..029).
 //
 // `docker run --env-file` performs NO quote stripping and no variable
 // expansion: every character after '=' is part of the value. Most other
@@ -17,6 +19,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"unicode"
 )
 
 // EnvWarningKind identifies what the linter found.
@@ -62,33 +65,19 @@ func (w EnvWarning) Lines() []string {
 // is stripped before the quote check, so quotes are still seen as the first
 // and last characters).
 func LintEnvFile(path string) ([]EnvWarning, error) {
-	raw, err := os.ReadFile(path)
+	assigns, err := readEnvAssignments(path)
 	if err != nil {
 		return nil, err
 	}
-	// Split manually rather than with bufio.Scanner: ScanLines strips a
-	// trailing '\r', which is exactly what this linter needs to see.
-	lines := strings.Split(string(raw), "\n")
-	// A trailing newline yields a final empty element that is not a real line.
-	if n := len(lines); n > 0 && lines[n-1] == "" {
-		lines = lines[:n-1]
-	}
-
 	var warnings []EnvWarning
-	for i, line := range lines {
-		lineno := i + 1
-		// Only KEY=VALUE assignments are linted; blanks, comments and
-		// non-assignment lines are skipped (but still counted).
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
+	for _, a := range assigns {
+		if !a.HasValue {
+			continue // bare KEY: no value in the file to lint
 		}
-		key, value, ok := strings.Cut(line, "=")
-		if !ok {
-			continue
-		}
+		value := a.Value
 		if strings.HasSuffix(value, "\r") {
 			warnings = append(warnings, EnvWarning{
-				File: path, Line: lineno, Key: key, Kind: EnvWarningCarriageReturn,
+				File: path, Line: a.Line, Key: a.Key, Kind: EnvWarningCarriageReturn,
 			})
 			value = strings.TrimSuffix(value, "\r")
 		}
@@ -97,11 +86,72 @@ func LintEnvFile(path string) ([]EnvWarning, error) {
 		}
 		if first, last := value[0], value[len(value)-1]; first == last && (first == '"' || first == '\'') {
 			warnings = append(warnings, EnvWarning{
-				File: path, Line: lineno, Key: key, Kind: EnvWarningQuoted, Quote: first,
+				File: path, Line: a.Line, Key: a.Key, Kind: EnvWarningQuoted, Quote: first,
 			})
 		}
 	}
 	return warnings, nil
+}
+
+// envAssignment is one KEY=VALUE or bare KEY line of an env file, value
+// verbatim (including any trailing '\r').
+type envAssignment struct {
+	Line  int // 1-based, counting every line including comments and blanks
+	Key   string
+	Value string
+	// HasValue is false for a bare KEY line: docker's pass-through of the
+	// launcher's own environment (set only when that environment has KEY).
+	HasValue bool
+}
+
+// utf8BOM is dropped from the first line, as docker does.
+const utf8BOM = "\xEF\xBB\xBF"
+
+// readEnvAssignments is the single env-file reader shared by the linter and
+// the override notice. It follows docker's --env-file parsing: a UTF-8 BOM
+// on the first line is dropped, leading whitespace is trimmed, blank and '#'
+// comment lines are skipped (but still counted), and the key runs to the
+// first '='. docker's line scanner drops one trailing '\r'. Unlike docker
+// this reader keeps it on an assignment's VALUE, because the linter reports
+// it (CS-CASC-016); a '\r' never reaches a key name: an assignment's key ends
+// at '=' before it, and a bare "KEY\r" line has it trimmed, as docker does,
+// so the key resolves against the launcher's environment (CS-CASC-027). It
+// does not reject keys docker would (empty, containing blanks); callers that
+// care filter with validEnvKey.
+func readEnvAssignments(path string) ([]envAssignment, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	// Split manually rather than with bufio.Scanner: ScanLines strips a
+	// trailing '\r', which the linter needs to see.
+	lines := strings.Split(string(raw), "\n")
+	// A trailing newline yields a final empty element that is not a real line.
+	if n := len(lines); n > 0 && lines[n-1] == "" {
+		lines = lines[:n-1]
+	}
+	var out []envAssignment
+	for i, line := range lines {
+		if i == 0 {
+			line = strings.TrimPrefix(line, utf8BOM)
+		}
+		line = strings.TrimLeftFunc(line, unicode.IsSpace)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			key = strings.TrimSuffix(key, "\r") // CRLF bare line: docker drops the '\r'
+		}
+		out = append(out, envAssignment{Line: i + 1, Key: key, Value: value, HasValue: ok})
+	}
+	return out, nil
+}
+
+// validEnvKey reports whether docker accepts key as a variable name: non-empty
+// and free of blanks (docker fails the whole run otherwise).
+func validEnvKey(key string) bool {
+	return key != "" && !strings.ContainsAny(key, " \t")
 }
 
 // LintEnvFiles lints every file in the cascade and prints the findings.

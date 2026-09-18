@@ -32,18 +32,33 @@ type Env struct {
 	Out      io.Writer
 	Err      io.Writer
 	Getenv   func(string) string
+	// LookupEnv tells set-but-empty from unset (the env override notice
+	// resolves bare env-file keys with it, CS-CASC-027). defaultEnv wires
+	// os.LookupEnv. Nil falls back to Getenv, which cannot see set-but-empty
+	// (it reads as unset); only test Envs that never launch leave it nil.
+	LookupEnv func(string) (string, bool)
 
 	// PidslotOps overrides the pidslot helper's process seams under test.
 	PidslotOps *pidslot.Ops
 }
 
+// lookupEnv is Env.LookupEnv with the Getenv fallback.
+func (e *Env) lookupEnv(k string) (string, bool) {
+	if e.LookupEnv != nil {
+		return e.LookupEnv(k)
+	}
+	v := e.Getenv(k)
+	return v, v != ""
+}
+
 func defaultEnv() *Env {
 	return &Env{
-		Runner:   execx.System{},
-		Prompter: &prompt.TTY{},
-		Out:      os.Stdout,
-		Err:      os.Stderr,
-		Getenv:   os.Getenv,
+		Runner:    execx.System{},
+		Prompter:  &prompt.TTY{},
+		Out:       os.Stdout,
+		Err:       os.Stderr,
+		Getenv:    os.Getenv,
+		LookupEnv: os.LookupEnv,
 	}
 }
 
@@ -620,6 +635,8 @@ func runLaunch(env *Env, args []string) error {
 		return err
 	}
 	cascade.PrintReport(env.Out, projectDir)
+	// Name env keys a more-local file shadows — names only (CS-CASC-021..029).
+	cascade.PrintEnvOverrides(env.Out, envFiles, env.lookupEnv)
 	cfg, err := cascade.Load(configFiles)
 	if err != nil {
 		return err

@@ -74,3 +74,55 @@ var _ = Describe("env file linting at launch", func() {
 		Expect(f.errw.String()).NotTo(ContainSubstring("Note: no .claude-sandbox/env"))
 	})
 })
+
+// Spec: spec/config-cascade.feature CS-CASC-021/025 — the launch names env
+// keys a more-local file overrides, names only.
+var _ = Describe("env override notice at launch", func() {
+	It("CS-CASC-021: prints one line naming the shadowed key, never its value", func() {
+		f := newCLIFixture()
+		parentEnv := filepath.Join(filepath.Dir(f.proj), ".claude-sandbox", "env")
+		projEnv := filepath.Join(f.proj, ".claude-sandbox", "env")
+		writeFile(parentEnv, "GITLAB_TOKEN=fresh-secret\n")
+		writeFile(projEnv, "GITLAB_TOKEN=stale-secret\n")
+
+		Expect(f.run()).To(Equal(0))
+
+		out := f.out.String()
+		Expect(out).To(ContainSubstring("Env override: GITLAB_TOKEN in " + projEnv + " overrides " + parentEnv + "\n"))
+		Expect(out + f.errw.String()).NotTo(ContainSubstring("secret"))
+	})
+
+	It("CS-CASC-024: prints no notice when env files share no key", func() {
+		f := newCLIFixture()
+		writeFile(filepath.Join(filepath.Dir(f.proj), ".claude-sandbox", "env"), "UP=1\n")
+		writeFile(filepath.Join(f.proj, ".claude-sandbox", "env"), "LOCAL=1\n")
+
+		Expect(f.run()).To(Equal(0))
+		Expect(f.out.String()).NotTo(ContainSubstring("Env override"))
+	})
+
+	It("CS-CASC-027: a bare key overrides when the launcher's environment sets it", func() {
+		f := newCLIFixture()
+		f.envmap["GITLAB_TOKEN"] = "host-secret"
+		parentEnv := filepath.Join(filepath.Dir(f.proj), ".claude-sandbox", "env")
+		projEnv := filepath.Join(f.proj, ".claude-sandbox", "env")
+		writeFile(parentEnv, "GITLAB_TOKEN=fresh-value\n")
+		writeFile(projEnv, "GITLAB_TOKEN\n")
+
+		Expect(f.run()).To(Equal(0))
+		Expect(f.out.String()).To(ContainSubstring("Env override: GITLAB_TOKEN in " + projEnv + " overrides " + parentEnv + "\n"))
+		Expect(f.out.String()).NotTo(ContainSubstring("host-secret"))
+	})
+
+	It("CS-CASC-027: a CRLF bare key set-but-empty in the launcher's environment overrides", func() {
+		f := newCLIFixture()
+		f.envmap["GITLAB_TOKEN"] = ""
+		parentEnv := filepath.Join(filepath.Dir(f.proj), ".claude-sandbox", "env")
+		projEnv := filepath.Join(f.proj, ".claude-sandbox", "env")
+		writeFile(parentEnv, "GITLAB_TOKEN=fresh-value\r\n")
+		writeFile(projEnv, "GITLAB_TOKEN\r\n")
+
+		Expect(f.run()).To(Equal(0))
+		Expect(f.out.String()).To(ContainSubstring("Env override: GITLAB_TOKEN in " + projEnv + " overrides " + parentEnv + "\n"))
+	})
+})

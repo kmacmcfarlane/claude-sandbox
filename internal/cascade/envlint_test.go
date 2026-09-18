@@ -148,4 +148,25 @@ var _ = Describe("env file linting", func() {
 		Expect(err).To(HaveOccurred())
 		Expect(ws).To(BeEmpty())
 	})
+
+	It("CS-CASC-026: the shared reader trims leading whitespace, so an indented quoted value is reported under its key", func() {
+		ws, err := cascade.LintEnvFile(writeEnv(tmp, "  KEY=\"x\"\n"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(ws).To(HaveLen(1))
+		Expect(ws[0].Key).To(Equal("KEY"))
+		Expect(ws[0].Line).To(Equal(1))
+	})
+
+	It("CS-CASC-026: an indented comment is skipped", func() {
+		ws, err := cascade.LintEnvFile(writeEnv(tmp, "  # KEY=\"x\"\n"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(ws).To(BeEmpty())
+	})
+
+	It("CS-CASC-026: a UTF-8 BOM on line 1 is not part of the key", func() {
+		ws, err := cascade.LintEnvFile(writeEnv(tmp, "\xEF\xBB\xBFKEY=\"x\"\n"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(ws).To(HaveLen(1))
+		Expect(ws[0].Key).To(Equal("KEY"))
+	})
 })
