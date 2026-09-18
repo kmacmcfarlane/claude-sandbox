@@ -152,6 +152,9 @@ Feature: init subcommand (CS-INIT)
     Then stdout notes that /ws/.claude-sandbox/env is inherited by this project
     And no .claude-sandbox/env is created in /ws/p
     And the seeded env.example does not contain the parent's variables
+    When /ws/p/.claude-sandbox/env already exists and init runs again
+    Then the note says the project env overrides the inherited file's keys —
+      stated as a fact, never "would override"
 
   @changed
   Scenario: CS-INIT-021 Parent Dockerfile found: the example is a copy of it, no prompt
@@ -262,3 +265,11 @@ Feature: init subcommand (CS-INIT)
       and keys in a project env override the same keys upstream
     And a token set only in an upstream .claude-sandbox/env reaches the
       container unshadowed (the launch cascade has no project-level env file)
+    Given a project whose .claude-sandbox/env already exists
+    When init or init-ralph runs
+    Then the file is kept byte-for-byte, and stdout reports it in the file list as
+      "kept     env (exists; its keys override upstream env)"
+    # The incident this guards: a stale token in a project env shadowed four
+    # upstream refreshes. Re-running init is when an operator is looking, so
+    # it names the file rather than staying silent about it. The launch-time
+    # per-key override notice is a separate change.

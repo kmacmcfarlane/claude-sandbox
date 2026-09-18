@@ -259,16 +259,36 @@ var _ = Describe("launcher CLI (end-to-end argv)", func() {
 		writeFile(example, "# TOKEN=x\n")
 		Expect(f.run()).To(Equal(0))
 		errOut := f.errw.String()
-		Expect(errOut).NotTo(ContainSubstring("WARNING: env file not found"))
-		var notes []string
-		for _, l := range strings.Split(errOut, "\n") {
-			if strings.Contains(l, "env") && strings.Contains(l, "cascade") {
-				notes = append(notes, l)
-			}
-		}
-		Expect(notes).To(ConsistOf("Note: no .claude-sandbox/env in the cascade; " + example + " is a template and is not read."))
+		Expect(errOut).NotTo(ContainSubstring("WARNING"))
+		note := "Note: no .claude-sandbox/env in the cascade; " + example + " is a template and is not read."
+		Expect(strings.Count(errOut, note)).To(Equal(1))
 		Expect(f.fake.Execed.Args).NotTo(ContainElement("--env-file"))
 		Expect(f.fake.Execed.Args).NotTo(ContainElement(example))
+
+		By("exactly one stderr line more than a launch with a clean project env")
+		base := newCLIFixture()
+		writeFile(filepath.Join(base.proj, ".claude-sandbox", "env"), "CLEAN=value\n")
+		Expect(base.run()).To(Equal(0))
+		lines := func(s string) []string {
+			var out []string
+			for _, l := range strings.Split(s, "\n") {
+				if strings.TrimSpace(l) != "" {
+					out = append(out, strings.ReplaceAll(l, base.proj, f.proj))
+				}
+			}
+			return out
+		}
+		got, want := lines(errOut), lines(base.errw.String())
+		Expect(got).To(HaveLen(len(want) + 1))
+		Expect(got).To(ContainElements(want))
+		Expect(got).To(ContainElement(note))
+
+		By("an env.example only in a parent directory does not count")
+		g := newCLIFixture()
+		writeFile(filepath.Join(filepath.Dir(g.proj), ".claude-sandbox", "env.example"), "# TOKEN=x\n")
+		Expect(g.run()).To(Equal(0))
+		Expect(g.errw.String()).To(ContainSubstring("WARNING: env file not found"))
+		Expect(g.errw.String()).NotTo(ContainSubstring("Note: no .claude-sandbox/env"))
 	})
 
 	It("CS-LNCH-030: --version reports host and baked-image versions with a mismatch note", func() {

@@ -126,7 +126,13 @@ func Run(project string, f Flags, d Deps) error {
 
 	// --- env.example (template only; a real env is never created, so
 	// nothing project-level shadows an upstream env — CS-INIT-004/030). An
-	// existing real env is left alone: not read, moved or reported here.
+	// existing real env is kept untouched, but named: its keys shadow the
+	// upstream env's, which is exactly what an operator re-running init
+	// needs to see (CS-INIT-030).
+	projectEnv := fileExists(filepath.Join(sb, "env"))
+	if projectEnv {
+		fmt.Fprintln(d.Out, "  kept     env (exists; its keys override upstream env)")
+	}
 	if fileExists(envExamplePath) {
 		fmt.Fprintf(d.Out, "  skipped  %s (exists)\n", paths.EnvExampleName)
 	} else {
@@ -142,7 +148,11 @@ func Run(project string, f Flags, d Deps) error {
 	// CS-INIT-020: inherited env files are reported, never copied.
 	if upstreamEnvs, _ := paths.CollectUp(filepath.Dir(project), paths.Env); len(upstreamEnvs) > 0 {
 		for _, e := range upstreamEnvs {
-			fmt.Fprintf(d.Out, "  note: %s is inherited by this project (a project env would override its keys)\n", e)
+			if projectEnv {
+				fmt.Fprintf(d.Out, "  note: %s is inherited by this project; the project env overrides its keys\n", e)
+			} else {
+				fmt.Fprintf(d.Out, "  note: %s is inherited by this project (a project env would override its keys)\n", e)
+			}
 		}
 	}
 

@@ -261,7 +261,7 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     # Earlier wording: suggested "claude-sandbox init" as the way to create
     # .claude-sandbox/env. init now seeds only env.example (CS-INIT-004).
     Given no .claude-sandbox/env exists in the project or any parent
-    And no .claude-sandbox/env.example exists in the project or any parent
+    And the project has no .claude-sandbox/env.example
     Then a warning explains the file's purpose
     And it says to create .claude-sandbox/env in a parent (workspace) directory for
       shared values or in the project for a project-only override, and names
@@ -274,9 +274,13 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     # no env anywhere. Warning on every launch would nag about the state init
     # itself produced.
     Given no .claude-sandbox/env exists in the project or any parent
-    And .claude-sandbox/env.example exists in the project or a parent
-    Then stderr carries exactly one line, a "Note:" (no "WARNING"), saying no env
-      file is in the cascade and env.example is a template that is not read
+    And the project's own .claude-sandbox/env.example exists
+    Then stderr carries exactly one line more than a launch with a clean project env:
+      a "Note:" (no "WARNING") saying no env file is in the cascade and
+      env.example is a template that is not read
+    And an env.example in a parent directory only does not count — a stray
+      ~/.claude-sandbox/env.example must not turn the warning into a note for
+      every project under $HOME
     And the launch proceeds with no --env-file flags — env.example is never passed
 
   # ---- container command & runtime env ----

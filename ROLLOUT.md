@@ -114,7 +114,8 @@ scaffolding + backlog/worktree tooling are canonical in **claude-sandbox**
 (`scaffold/`, `scaffold-ralph/`), not claude-templates.
 
 Key behaviors (see claude-sandbox README):
-- `init` seeds SPARSE (fully-commented) `config.yaml`/`env` + `Dockerfile.example`;
+- `init` seeds SPARSE (fully-commented) `config.yaml` + `env.example` (never a real
+  `env`) + `Dockerfile.example`;
   `init-ralph` adds generic `agent/` docs + `scripts/{backlog,worktree}`. Idempotent.
 - **Config cascade:** every `.claude-sandbox/config.yaml` root→project merges
   (more-local wins; mounts append, same host+container overrides); env files layer

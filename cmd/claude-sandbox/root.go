@@ -871,11 +871,13 @@ func newRalphCmd(env *Env) *cobra.Command {
 }
 
 // warnNoEnv reports an env cascade with no .claude-sandbox/env at any level.
-// When an env.example exists (what init seeds) it is one Note line, since the
-// state is the one init produced (CS-LNCH-056); otherwise the full warning
-// (CS-LNCH-025). env.example itself is never read (CS-CASC-030).
+// When the project's own env.example exists (what init seeds) it is one Note
+// line, since the state is the one init produced (CS-LNCH-056); otherwise the
+// full warning (CS-LNCH-025). Only the project level counts: a stray
+// ~/.claude-sandbox/env.example must not soften the warning for every project
+// under $HOME. env.example itself is never read (CS-CASC-030).
 func warnNoEnv(w io.Writer, projectDir string) {
-	if ex := paths.FindUpFile(projectDir, filepath.Join(".claude-sandbox", paths.EnvExampleName)); ex != "" {
+	if ex := filepath.Join(paths.SandboxDir(projectDir), paths.EnvExampleName); isRegularFile(ex) {
 		fmt.Fprintf(w, "Note: no .claude-sandbox/env in the cascade; %s is a template and is not read.\n", ex)
 		return
 	}
@@ -885,4 +887,9 @@ func warnNoEnv(w io.Writer, projectDir string) {
 	fmt.Fprintf(w, "Create .claude-sandbox/env in a parent (workspace) directory for values shared\n")
 	fmt.Fprintf(w, "by every project below it, or in this project for a project-only override.\n")
 	fmt.Fprintf(w, "  claude-sandbox init   # seeds .claude-sandbox/env.example to copy from\n")
+}
+
+func isRegularFile(p string) bool {
+	fi, err := os.Stat(p)
+	return err == nil && fi.Mode().IsRegular()
 }

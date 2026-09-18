@@ -581,9 +581,14 @@ secrets and is not gitignored (commit it with the rest of `.claude-sandbox/`); a
 `env` is gitignored in both `trackInHost` modes — do not commit it. Existing project `env`
 files keep working unchanged.
 
+Re-running `init` in a project that already has an `env` keeps it untouched and says so
+(`kept     env (exists; its keys override upstream env)`), so a stale project override is
+visible.
+
 With no `env` at any level, the launcher warns at startup and says where one belongs —
-unless an `env.example` exists (a freshly-inited project), in which case it prints a
-single `Note:` line instead.
+unless the project's own `.claude-sandbox/env.example` exists (a freshly-inited project),
+in which case it prints a single `Note:` line instead. An `env.example` in a parent
+directory does not count.
 
 **Do not quote values.** `KEY=value`, one per line; blank lines and `#` comments are the only special syntax. Unlike Docker Compose's `env_file`, direnv, or shell `source`, `docker run --env-file` performs **no quote stripping and no variable expansion** — every character after `=` is part of the value. So `JIRA_API_TOKEN="ATATT…"` arrives with the quotes attached: the variable is present, non-empty, and two characters too long, and the only symptom is an auth failure from the consuming service (often a misleading 403/404 rather than a 401). The launcher warns at startup for any value wrapped in matching quotes, and for values carrying a CRLF carriage return; it does not rewrite them, so literal quotes remain possible if you actually want them.
 

@@ -316,6 +316,14 @@ var _ = Describe("init subcommand", func() {
 			Expect(r.out.String()).To(ContainSubstring("is inherited by this project"))
 			Expect(exists(env)).To(BeFalse())
 			Expect(read(envExample)).NotTo(ContainSubstring("PARENT_VAR"))
+			Expect(r.out.String()).To(ContainSubstring("(a project env would override its keys)"))
+
+			By("with a project env present, the override is stated as a fact")
+			write(env, "TOKEN=stale\n")
+			r2 := &run{}
+			Expect(r2.init(proj, initcmd.Flags{TrackInHost: ptr(false)})).To(Succeed())
+			Expect(r2.out.String()).To(ContainSubstring(parentEnv + " is inherited by this project; the project env overrides its keys"))
+			Expect(r2.out.String()).NotTo(ContainSubstring("would override"))
 		})
 
 		Context("with a parent Dockerfile", func() {
@@ -554,6 +562,21 @@ var _ = Describe("init subcommand", func() {
 		envs, err := paths.CollectUp(p, paths.Env)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(envs).To(Equal([]string{upstream}))
+
+		By("an existing project env is kept byte-for-byte and named in the report")
+		for _, ralph := range []bool{false, true} {
+			q := filepath.Join(GinkgoT().TempDir(), "q")
+			qEnv := filepath.Join(q, ".claude-sandbox", "env")
+			write(qEnv, "TOKEN=stale\n")
+			rq := &run{}
+			Expect(rq.init(q, initcmd.Flags{Ralph: ralph, TrackInHost: ptr(false)})).To(Succeed())
+			Expect(read(qEnv)).To(Equal("TOKEN=stale\n"))
+			Expect(rq.out.String()).To(ContainSubstring("  kept     env (exists; its keys override upstream env)\n"))
+		}
+		By("no kept line when there is no project env")
+		rn := &run{}
+		Expect(rn.init(filepath.Join(GinkgoT().TempDir(), "n"), initcmd.Flags{TrackInHost: ptr(false)})).To(Succeed())
+		Expect(rn.out.String()).NotTo(ContainSubstring("kept     env"))
 	})
 })
 
