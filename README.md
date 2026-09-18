@@ -361,7 +361,9 @@ claude-sandbox headless [launcher flags] -- <claude args>
   cascade, banners, image build output and warnings.
 - **Never prompts.** `/dev/tty` is never opened, even when the client has a controlling
   terminal. `--new` is implied, so running sessions never lead to a decision or to exit 3. The
-  Claude Code update check is off unless you pass `--update`.
+  Claude Code update check is off unless you pass `--update`. Do not put `--update` in a
+  client's command prefix: it would add an npm registry round trip, and sometimes a Claude Code
+  image rebuild, to every spawn and every probe (Paseo's probes time out after 5 seconds).
 - **Arguments.** Launcher flags go before `--` (`--docker-socket`, `--model`, `--dangerous`,
   `--worktree`, …). Everything after `--` reaches claude verbatim, including `--version`,
   `auth status`, `--resume=<id>` and inline JSON. After `headless`, `--version` and `--help`
@@ -371,9 +373,27 @@ claude-sandbox headless [launcher flags] -- <claude args>
   `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING`, `CLAUDE_AGENT_SDK_VERSION`,
   `CLAUDE_AGENT_SDK_CLIENT_APP`, `CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS`,
   `CLAUDE_AGENT_SDK_MCP_NO_PREFIX`, `PASEO_AGENT_ID`, `PASEO_AGENT_CWD`. There is no wildcard:
-  a Paseo daemon's environment can hold `PASEO_PASSWORD`.
+  a Paseo daemon's environment can hold `PASEO_PASSWORD`. Never list a daemon secret such as
+  `PASEO_PASSWORD` as a **bare key** (a line with no `=`) in any `.claude-sandbox/env` of the
+  cascade: `docker create --env-file` resolves a bare key from the launcher's own environment,
+  which here is the daemon's, and passes the value into the container.
 - **Working directory.** The session runs in the client's working directory, resolved to its
   physical path, which is where Claude Code files the transcript the client reads back.
+- **No worktree unless the prefix asks for one.** `worktree: true` in the config cascade and
+  `CLAUDE_SANDBOX_WORKTREE=1` are ignored in headless mode. A worktree files the transcript
+  under another directory than the one the client reads, and each spawn would get a new
+  worktree, so resuming a session by id would fail. Only `--worktree` or `--worktree=NAME`
+  before `--` turns worktree mode on.
+- **Dangerous mode comes from the cascade.** When the cascade resolves `dangerous: true` (or
+  `--dangerous` is in the prefix, or `CLAUDE_SANDBOX_DANGEROUS=1` is set in the client's
+  environment), every headless session runs with `--dangerously-skip-permissions`. Claude Code
+  lets that flag win over `--permission-mode` in either order, even over
+  `--permission-mode plan`, so the client's permission picker, plan mode included, is
+  overridden. To let the client's picker apply in a project, set `dangerous: false` in that
+  project's own `.claude-sandbox/config.yaml`: the more-local scalar wins the cascade merge.
+  `CLAUDE_SANDBOX_DANGEROUS=0` does **not** turn it off, because dangerous mode is on when any
+  of the flag, the variable or the config says so, and a falsy variable falls through to the
+  config.
 - The container is labelled `claude-sandbox.mode=headless`, listed by `claude-sandbox sessions`,
   and never offered to `--attach` or `--join`.
 
@@ -409,11 +429,11 @@ sandboxed command, and add a separate provider for native Claude:
 
 Then run `paseo reload`.
 
-- **Why the built-in id is the sandboxed one.** Paseo has no default-provider setting, and with the
-  built-in provider left alone its "new agent" path runs host `claude`, unsandboxed. A separate
-  sandboxed provider beside it would leave the native one as the default, a quiet sandbox
-  escape; overriding the built-in id makes the default safe by construction. `claude-native` sets
-  `command` explicitly because whether `extends` copies an overridden command is not documented.
+- **Why the built-in id is the sandboxed one.** Paseo documents no default-provider mechanism,
+  and which provider the app preselects is undocumented; left alone, the built-in `claude`
+  provider runs host `claude`, unsandboxed. Giving the built-in id the sandboxed command makes
+  it safe whichever provider is picked. `claude-native` sets `command` explicitly because
+  whether `extends` copies an overridden command is not documented.
 - **Keep Paseo's tool injection off for sandboxed sessions.** Paseo injects its MCP server only
   when `daemon.mcp.injectIntoAgents` is enabled, which is off by default. Leave it off.
   `paseoTools.enabled: false` keeps the sandboxed provider safe even if it is turned on: the
@@ -434,7 +454,7 @@ Then run `paseo reload`.
   Docker socket, where enabled, is root-equivalent). Keep the daemon on loopback and reach it
   over SSH.
 
-Spec: `spec/launch.feature` CS-LNCH-058..065, `spec/sessions.feature` CS-SESS-055.
+Spec: `spec/launch.feature` CS-LNCH-058..067, `spec/sessions.feature` CS-SESS-055.
 
 ## Bootstrapping a project (`init` / `init-ralph`)
 

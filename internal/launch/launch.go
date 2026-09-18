@@ -58,7 +58,7 @@ type Inputs struct {
 	// emits neither. Like Instance it is excluded from the fingerprint.
 	PIDClass string
 
-	// Headless marks a launch for an SDK client (CS-LNCH-058..065): the
+	// Headless marks a launch for an SDK client (CS-LNCH-058..067): the
 	// container gets -i without -t, no detach keys, the mode=headless label and
 	// the HeadlessEnv allowlist.
 	Headless bool

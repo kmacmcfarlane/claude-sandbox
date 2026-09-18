@@ -780,3 +780,31 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     When a headless launch runs without PROJECT_DIR
     Then the project directory is the process's working directory resolved to
       its physical path (CS-LNCH-048), used for the same-path mount and -w
+
+  Scenario: CS-LNCH-066 A headless launch uses a worktree only when its prefix asks for one
+    # A worktree files the transcript under a different projects slug than the
+    # cwd the client reads from, and every spawn would get a fresh noun and a
+    # fresh worktree, so "--resume=<id>" would find nothing. A workspace
+    # "worktree: true" or a daemon-wide CLAUDE_SANDBOX_WORKTREE=1 must not do
+    # that silently (CS-LNCH-065).
+    Given the merged config sets "worktree: true", or CLAUDE_SANDBOX_WORKTREE=1 is set
+    When a headless launch runs without --worktree before "--"
+    Then claude gets no --worktree and no worktree banner is printed
+    Given --worktree or --worktree=NAME is passed before "--"
+    Then worktree mode applies as for an interactive launch (CS-LNCH-041)
+
+  Scenario: CS-LNCH-067 A cascade "dangerous: true" bypasses the client's permission mode
+    # Deliberate (operator decision): headless keeps the cascade's dangerous
+    # mode (CS-LNCH-038). Measured on Claude Code 2.1.277:
+    # --dangerously-skip-permissions WINS over --permission-mode in either
+    # order, even over "--permission-mode plan" (the init event reports
+    # permissionMode=bypassPermissions). So Paseo's permission picker, plan
+    # mode included, is overridden for every headless session of such a tree.
+    Given the merged config resolves "dangerous: true"
+    When a headless launch runs, whatever --permission-mode follows "--"
+    Then claude gets --dangerously-skip-permissions
+    Given the project's more-local .claude-sandbox/config.yaml sets "dangerous: false"
+    Then the scalar merge (more-local wins) turns it off and claude gets no
+      --dangerously-skip-permissions, so the client's permission mode applies
+    But CLAUDE_SANDBOX_DANGEROUS=0 does NOT turn it off: dangerous is an OR of the
+      flag, the env var and the config, and a falsy env value falls through

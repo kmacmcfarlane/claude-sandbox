@@ -1,6 +1,6 @@
 package main
 
-// Spec: spec/launch.feature CS-LNCH-058..065 (headless mode for SDK clients)
+// Spec: spec/launch.feature CS-LNCH-058..067 (headless mode for SDK clients)
 // and spec/sessions.feature CS-SESS-055 (headless containers are never
 // session candidates), end to end through MainWithEnv with the fake runner
 // and the recording launch lock.
@@ -55,7 +55,7 @@ func createTail(args []string) []string {
 	return nil
 }
 
-var _ = Describe("headless mode (CS-LNCH-058..065)", func() {
+var _ = Describe("headless mode (CS-LNCH-058..067)", func() {
 	var f *cliFixture
 	BeforeEach(func() { f = newCLIFixture() })
 
@@ -253,6 +253,68 @@ var _ = Describe("headless mode (CS-LNCH-058..065)", func() {
 			g := newCLIFixture()
 			Expect(g.run("help", "headless")).To(Equal(0))
 			Expect(g.out.String()).To(ContainSubstring("claude-sandbox headless"))
+		})
+	})
+
+	Describe("CS-LNCH-066: worktree only on an explicit flag", func() {
+		gitRepo := func(g *cliFixture) { g.fake.On("rev-parse --show-toplevel", g.proj+"\n", nil) }
+		hasWorktree := func(g *cliFixture) bool {
+			return strings.Contains(" "+strings.Join(createTail(g.launched().Args), " ")+" ", " --worktree ")
+		}
+
+		It("ignores worktree: true in the cascade", func() {
+			gitRepo(f)
+			writeFile(filepath.Join(f.proj, ".claude-sandbox", "config.yaml"), "worktree: true\n")
+			Expect(f.run("headless", "--", "--resume=abc")).To(Equal(0), f.errw.String())
+			Expect(hasWorktree(f)).To(BeFalse())
+			Expect(createTail(f.launched().Args)).To(Equal([]string{"claude", "--resume=abc"}))
+			Expect(f.errw.String()).NotTo(ContainSubstring("Worktree:"))
+		})
+
+		It("ignores CLAUDE_SANDBOX_WORKTREE=1", func() {
+			gitRepo(f)
+			f.envmap["CLAUDE_SANDBOX_WORKTREE"] = "1"
+			Expect(f.run("headless", "--")).To(Equal(0), f.errw.String())
+			Expect(hasWorktree(f)).To(BeFalse())
+		})
+
+		It("uses one when --worktree or --worktree=NAME precedes --", func() {
+			gitRepo(f)
+			Expect(f.run("headless", "--worktree", "--")).To(Equal(0), f.errw.String())
+			Expect(hasWorktree(f)).To(BeTrue())
+			g := newCLIFixture()
+			gitRepo(g)
+			Expect(g.run("headless", "--worktree=paseo", "--")).To(Equal(0), g.errw.String())
+			Expect(createTail(g.launched().Args)).To(Equal([]string{"claude", "--worktree", "paseo"}))
+		})
+
+		It("an interactive launch still honours the cascade key", func() {
+			gitRepo(f)
+			writeFile(filepath.Join(f.proj, ".claude-sandbox", "config.yaml"), "worktree: true\n")
+			Expect(f.run()).To(Equal(0), f.errw.String())
+			Expect(hasWorktree(f)).To(BeTrue())
+		})
+	})
+
+	Describe("CS-LNCH-067: the cascade's dangerous mode applies to headless", func() {
+		It("dangerous: true adds --dangerously-skip-permissions ahead of the client's --permission-mode", func() {
+			writeFile(filepath.Join(f.proj, ".claude-sandbox", "config.yaml"), "dangerous: true\n")
+			Expect(f.run("headless", "--", "--permission-mode", "plan")).To(Equal(0), f.errw.String())
+			Expect(createTail(f.launched().Args)).To(Equal([]string{"claude", "--dangerously-skip-permissions", "--permission-mode", "plan"}))
+		})
+
+		It("a more-local dangerous: false turns it off", func() {
+			writeFile(filepath.Join(filepath.Dir(f.proj), ".claude-sandbox", "config.yaml"), "dangerous: true\n")
+			writeFile(filepath.Join(f.proj, ".claude-sandbox", "config.yaml"), "dangerous: false\n")
+			Expect(f.run("headless", "--", "--permission-mode", "plan")).To(Equal(0), f.errw.String())
+			Expect(createTail(f.launched().Args)).To(Equal([]string{"claude", "--permission-mode", "plan"}))
+		})
+
+		It("CLAUDE_SANDBOX_DANGEROUS=0 does not turn it off", func() {
+			writeFile(filepath.Join(f.proj, ".claude-sandbox", "config.yaml"), "dangerous: true\n")
+			f.envmap["CLAUDE_SANDBOX_DANGEROUS"] = "0"
+			Expect(f.run("headless", "--")).To(Equal(0), f.errw.String())
+			Expect(createTail(f.launched().Args)).To(ContainElement("--dangerously-skip-permissions"))
 		})
 	})
 

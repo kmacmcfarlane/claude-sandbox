@@ -560,10 +560,18 @@ type worktreeChoice struct {
 // interactive launch must be transparent, an unattended ralph run should be
 // isolated (CS-LNCH-041/045). The tri-state shape is required rather than
 // the OR of CS-LNCH-038: with a true default an OR could never express "off".
-func resolveWorktree(env *Env, projectDir string, f *launchFlags, cfg *cascade.Config) worktreeChoice {
-	wt := worktreeChoice{
-		Enabled: launch.ResolveTristate(f.Worktree, env.Getenv("CLAUDE_SANDBOX_WORKTREE"), cfg.Worktree, f.Ralph),
-		Name:    f.WorktreeName,
+//
+// A headless launch ignores CLAUDE_SANDBOX_WORKTREE and the config key: only
+// an explicit --worktree in its command prefix turns the mode on (CS-LNCH-066).
+// An SDK client reads the transcript from the slug of the cwd it spawned in,
+// and resumes by session id; a worktree files the transcript under another
+// slug, and a fresh noun per spawn would put every resume in a new worktree.
+func resolveWorktree(env *Env, projectDir string, f *launchFlags, cfg *cascade.Config, headless bool) worktreeChoice {
+	wt := worktreeChoice{Name: f.WorktreeName}
+	if headless {
+		wt.Enabled = f.Worktree != nil && *f.Worktree
+	} else {
+		wt.Enabled = launch.ResolveTristate(f.Worktree, env.Getenv("CLAUDE_SANDBOX_WORKTREE"), cfg.Worktree, f.Ralph)
 	}
 	wt.Root = launch.GitRoot(env.Runner, projectDir)
 	if wt.Enabled && wt.Root == "" {
@@ -646,7 +654,7 @@ func runLaunch(env *Env, args []string) error {
 	return launchWith(env, f, rr, version, false)
 }
 
-// runHeadless is "claude-sandbox headless" (CS-LNCH-058..065): a launch for an
+// runHeadless is "claude-sandbox headless" (CS-LNCH-058..067): a launch for an
 // SDK client such as Paseo's daemon, which pipes stdin/stdout/stderr, speaks
 // stream-json on them and has nobody to answer a prompt.
 func runHeadless(env *Env, args []string) error {
@@ -749,7 +757,7 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 	// Worktree mode (CS-LNCH-041/042/046), resolved once for every path: a new
 	// container names its worktree after itself, a join enters a fresh one,
 	// and attach can only report what the running session has.
-	wt := resolveWorktree(env, projectDir, f, cfg)
+	wt := resolveWorktree(env, projectDir, f, cfg, headless)
 
 	// Multi-session decision (CS-SESS-014..019). Deliberately before any image
 	// work: building an image the user is about to bypass by attaching is waste.
