@@ -160,6 +160,34 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       so interactive, joined, branched and ralph sessions all get the hooks
       with no per-launch file and no claude argv
 
+  @new
+  Scenario: CS-LNCH-069 A symlinked settings.json keeps working: its target is mounted at its own path
+    # The removed shadow read the host file with os.ReadFile, which follows
+    # links, so a settings.json symlinked into a dotfiles repo reached the
+    # sandbox. The config-dir bind carries the LINK, and a link pointing
+    # outside every mount is dangling in the container — Claude Code logs it at
+    # debug level only and runs with no user settings: no hooks, permission
+    # rules or enabled plugins.
+    Given $CONFIG_DIR/settings.json is a symlink
+    When its fully resolved target (filepath.EvalSymlinks: relative links and
+      chains resolved) is not under any existing same-path mount
+    Then the target file is bind-mounted read-write at its own host path
+      ("<target>:<target>"), so the link resolves identically in the container
+      and sandbox writes land in the target, as on the host
+    And the mount is added after the cascade mounts (CS-LNCH-021), so a
+      target a same-path cascade mount already covers adds nothing
+    When the resolved target is already under a same-path mount — the config
+      dir itself, the project, or a same-path cascade mount
+    Then no mount is added
+    When the link is dangling
+    Then exactly one warning names the link and says the sandbox runs without
+      user settings, and no mount is added
+    When settings.json is a regular file or absent
+    Then nothing is added and nothing is printed
+    And the extra mount is part of the drift fingerprint through the
+      normalized mount set, like every other volume: a container started
+      without it cannot see the user settings, and attach cannot add a mount
+
   Scenario: CS-LNCH-012 .claude.json sibling mounted read-write when present
     Given $CONFIG_PARENT/.claude.json exists
     Then it is mounted at the same path without :ro

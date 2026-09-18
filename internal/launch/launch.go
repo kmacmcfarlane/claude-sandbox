@@ -209,6 +209,10 @@ func Build(in Inputs) (*Plan, error) {
 		}
 	}
 
+	// CS-LNCH-069: a symlinked settings.json keeps working. After the cascade
+	// mounts, so a same-path cascade mount that already covers the target wins.
+	in.mountSettingsTarget(p, configDir)
+
 	// CS-LNCH-022: memory limit.
 	p.MemoryLimit = in.Cfg.MemoryLimit
 	if p.MemoryLimit == "" {
@@ -418,6 +422,30 @@ func (in *Inputs) shadowClaudeMD(p *Plan, configDir string) error {
 	}
 	p.Volumes = append(p.Volumes, fmt.Sprintf("%s:%s:ro", tmp, filepath.Join(configDir, "CLAUDE.md")))
 	return nil
+}
+
+// mountSettingsTarget handles a settings.json that is a symlink (CS-LNCH-069).
+// The config-dir bind carries the link itself, so a link pointing outside
+// every mount would dangle in the container and Claude Code would run with no
+// user settings, logging that only at debug level. The fully resolved target
+// is bind-mounted read-write at its own path so the link resolves identically
+// inside; a target already under a same-path mount needs nothing.
+func (in *Inputs) mountSettingsTarget(p *Plan, configDir string) {
+	link := filepath.Join(configDir, "settings.json")
+	fi, err := os.Lstat(link)
+	if err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		return
+	}
+	target, err := filepath.EvalSymlinks(link)
+	if err != nil {
+		dest, _ := os.Readlink(link)
+		fmt.Fprintf(in.Err, "WARNING: %s is a symlink to %s, which does not resolve; the sandbox runs without user settings\n", link, dest)
+		return
+	}
+	if underSamePathMount(p.Volumes, target) {
+		return
+	}
+	p.Volumes = append(p.Volumes, fmt.Sprintf("%s:%s", target, target))
 }
 
 func (in *Inputs) shadowSiblings(p *Plan, configDir string) error {

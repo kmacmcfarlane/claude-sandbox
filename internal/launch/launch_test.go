@@ -174,6 +174,108 @@ var _ = Describe("launch.Build", func() {
 		}
 	})
 
+	Describe("CS-LNCH-069: symlinked settings.json", func() {
+		var cfgDir, link, dotfiles string
+
+		BeforeEach(func() {
+			cfgDir = filepath.Join(home, ".claude")
+			mkdir(cfgDir)
+			link = filepath.Join(cfgDir, "settings.json")
+			dotfiles = filepath.Join(filepath.Dir(home), "dotfiles")
+			mkdir(dotfiles)
+		})
+
+		// mountsFor returns the volumes whose host side is target.
+		mountsFor := func(p *launch.Plan, target string) []string {
+			var got []string
+			for _, v := range p.Volumes {
+				if strings.HasPrefix(v, target+":") {
+					got = append(got, v)
+				}
+			}
+			return got
+		}
+
+		It("CS-LNCH-069: mounts an absolute link's target read-write at its own path", func() {
+			target := filepath.Join(dotfiles, "claude-settings.json")
+			touch(target, `{"theme":"dark"}`)
+			Expect(os.Symlink(target, link)).To(Succeed())
+			p := build()
+			Expect(mountsFor(p, target)).To(Equal([]string{target + ":" + target}))
+			Expect(errw.String()).To(BeEmpty())
+		})
+
+		It("CS-LNCH-069: resolves a relative link and a chain to the final target", func() {
+			final := filepath.Join(dotfiles, "real.json")
+			touch(final, `{}`)
+			hop := filepath.Join(dotfiles, "hop.json")
+			Expect(os.Symlink("real.json", hop)).To(Succeed())
+			rel, err := filepath.Rel(cfgDir, hop)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(os.Symlink(rel, link)).To(Succeed())
+			p := build()
+			Expect(mountsFor(p, final)).To(Equal([]string{final + ":" + final}))
+			Expect(mountsFor(p, hop)).To(BeEmpty())
+		})
+
+		It("CS-LNCH-069: adds nothing when the target is inside the config dir", func() {
+			touch(filepath.Join(cfgDir, "settings.real.json"), `{}`)
+			Expect(os.Symlink("settings.real.json", link)).To(Succeed())
+			before := len(build().Volumes)
+			Expect(os.Remove(link)).To(Succeed())
+			touch(link, `{}`)
+			Expect(len(build().Volumes)).To(Equal(before))
+		})
+
+		It("CS-LNCH-069: adds nothing when the target is under the project mount", func() {
+			target := filepath.Join(proj, "settings.json")
+			touch(target, `{}`)
+			Expect(os.Symlink(target, link)).To(Succeed())
+			Expect(mountsFor(build(), target)).To(BeEmpty())
+		})
+
+		It("CS-LNCH-069: adds nothing when a same-path cascade mount already covers the target", func() {
+			target := filepath.Join(dotfiles, "claude-settings.json")
+			touch(target, `{}`)
+			Expect(os.Symlink(target, link)).To(Succeed())
+			in.Cfg = &cascade.Config{Mounts: []cascade.Mount{{Host: dotfiles, Container: dotfiles}}}
+			p := build()
+			Expect(mountsFor(p, target)).To(BeEmpty())
+			Expect(p.Volumes).To(ContainElement(dotfiles + ":" + dotfiles + ":ro"))
+		})
+
+		It("CS-LNCH-069: warns once and mounts nothing for a dangling link", func() {
+			missing := filepath.Join(dotfiles, "gone.json")
+			Expect(os.Symlink(missing, link)).To(Succeed())
+			p := build()
+			Expect(mountsFor(p, missing)).To(BeEmpty())
+			Expect(strings.Count(errw.String(), "\n")).To(Equal(1))
+			Expect(errw.String()).To(ContainSubstring(link))
+			Expect(errw.String()).To(ContainSubstring("without user settings"))
+		})
+
+		It("CS-LNCH-069: prints nothing and adds nothing for a regular file", func() {
+			touch(link, `{}`)
+			p := build()
+			for _, v := range p.Volumes {
+				Expect(v).NotTo(HavePrefix(dotfiles))
+			}
+			Expect(errw.String()).To(BeEmpty())
+		})
+
+		It("CS-LNCH-069: the target mount is in the drift fingerprint", func() {
+			target := filepath.Join(dotfiles, "claude-settings.json")
+			touch(target, `{}`)
+			in.TempDir = filepath.Join(filepath.Dir(home), "shadow1")
+			mkdir(in.TempDir)
+			plain := build().ConfigHash
+			Expect(os.Symlink(target, link)).To(Succeed())
+			in.TempDir = filepath.Join(filepath.Dir(home), "shadow2")
+			mkdir(in.TempDir)
+			Expect(build().ConfigHash).NotTo(Equal(plain))
+		})
+	})
+
 	It("CS-LNCH-012: mounts the .claude.json sibling read-write when present", func() {
 		cj := filepath.Join(home, ".claude.json")
 		touch(cj, "{}")

@@ -107,5 +107,6 @@ one-time setup (idempotent). Use `setup-lsp-plugins --check` to verify status.
 - **`settings.json` is the host file.** The config dir's `settings.json` is not
   a copy: plugin installs and enable/disable, `/model`, `/effort` and
   user-scope permission rules made here persist to the host and to every other
-  sandbox.
+  sandbox. That includes `hooks` and permission `allow` rules, which then also
+  run in the operator's host sessions, outside this sandbox.
 - You do NOT have sudo or root access.
