@@ -2,7 +2,7 @@ package cascade
 
 // Env file linting. Spec: spec/config-cascade.feature (CS-CASC-013..020).
 // readEnvAssignments is also the reader behind the override notice
-// (envoverride.go, CS-CASC-021..025).
+// (envoverride.go, CS-CASC-021..029).
 //
 // `docker run --env-file` performs NO quote stripping and no variable
 // expansion: every character after '=' is part of the value. Most other
@@ -19,6 +19,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"unicode"
 )
 
 // EnvWarningKind identifies what the linter found.
@@ -70,6 +71,9 @@ func LintEnvFile(path string) ([]EnvWarning, error) {
 	}
 	var warnings []EnvWarning
 	for _, a := range assigns {
+		if !a.HasValue {
+			continue // bare KEY: no value in the file to lint
+		}
 		value := a.Value
 		if strings.HasSuffix(value, "\r") {
 			warnings = append(warnings, EnvWarning{
@@ -89,17 +93,27 @@ func LintEnvFile(path string) ([]EnvWarning, error) {
 	return warnings, nil
 }
 
-// envAssignment is one KEY=VALUE line of an env file, value verbatim
-// (including any trailing '\r').
+// envAssignment is one KEY=VALUE or bare KEY line of an env file, value
+// verbatim (including any trailing '\r').
 type envAssignment struct {
 	Line  int // 1-based, counting every line including comments and blanks
 	Key   string
 	Value string
+	// HasValue is false for a bare KEY line: docker's pass-through of the
+	// launcher's own environment (set only when that environment has KEY).
+	HasValue bool
 }
 
+// utf8BOM is dropped from the first line, as docker does.
+const utf8BOM = "\xEF\xBB\xBF"
+
 // readEnvAssignments is the single env-file reader shared by the linter and
-// the override notice: KEY=VALUE per line, key up to the first '='; blank,
-// '#' comment and non-assignment lines are skipped but still counted.
+// the override notice. It follows docker's --env-file parsing: a UTF-8 BOM
+// on the first line is dropped, leading whitespace is trimmed, blank and '#'
+// comment lines are skipped (but still counted), and the key runs to the
+// first '='. Unlike docker it keeps a trailing '\r' on the value, because
+// the linter reports it (CS-CASC-016). It does not reject keys docker would
+// (empty, containing blanks); callers that care filter with validEnvKey.
 func readEnvAssignments(path string) ([]envAssignment, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -114,16 +128,23 @@ func readEnvAssignments(path string) ([]envAssignment, error) {
 	}
 	var out []envAssignment
 	for i, line := range lines {
+		if i == 0 {
+			line = strings.TrimPrefix(line, utf8BOM)
+		}
+		line = strings.TrimLeftFunc(line, unicode.IsSpace)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
 		key, value, ok := strings.Cut(line, "=")
-		if !ok {
-			continue
-		}
-		out = append(out, envAssignment{Line: i + 1, Key: key, Value: value})
+		out = append(out, envAssignment{Line: i + 1, Key: key, Value: value, HasValue: ok})
 	}
 	return out, nil
+}
+
+// validEnvKey reports whether docker accepts key as a variable name: non-empty
+// and free of blanks (docker fails the whole run otherwise).
+func validEnvKey(key string) bool {
+	return key != "" && !strings.ContainsAny(key, " \t")
 }
 
 // LintEnvFiles lints every file in the cascade and prints the findings.

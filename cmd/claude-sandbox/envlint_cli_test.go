@@ -73,4 +73,17 @@ var _ = Describe("env override notice at launch", func() {
 		Expect(f.run()).To(Equal(0))
 		Expect(f.out.String()).NotTo(ContainSubstring("Env override"))
 	})
+
+	It("CS-CASC-027: a bare key overrides when the launcher's environment sets it", func() {
+		f := newCLIFixture()
+		f.envmap["GITLAB_TOKEN"] = "host-secret"
+		parentEnv := filepath.Join(filepath.Dir(f.proj), ".claude-sandbox", "env")
+		projEnv := filepath.Join(f.proj, ".claude-sandbox", "env")
+		writeFile(parentEnv, "GITLAB_TOKEN=fresh-value\n")
+		writeFile(projEnv, "GITLAB_TOKEN\n")
+
+		Expect(f.run()).To(Equal(0))
+		Expect(f.out.String()).To(ContainSubstring("Env override: GITLAB_TOKEN in " + projEnv + " overrides " + parentEnv + "\n"))
+		Expect(f.out.String()).NotTo(ContainSubstring("host-secret"))
+	})
 })
