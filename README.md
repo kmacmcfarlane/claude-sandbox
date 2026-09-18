@@ -931,7 +931,8 @@ running — so two launches started together (two terminals, or a client that st
 sessions at once) could pick the same noun, and the second failed on the name, or the same pid
 class, and silently overwrote a peer-registry record. Now each launch takes an exclusive
 `flock` on `~/.cache/claude-sandbox/launch.lock` (created as you if missing), and while it
-holds it: discovers every sandbox container on the host **including `created` ones**,
+holds it: discovers every sandbox container on the host **including `created` ones** (and
+`paused` ones, as plain `docker ps` always did; no per-container `docker top` runs here),
 re-checks the noun it picked earlier (for the worktree banner) and re-picks it if a concurrent
 launch took it meanwhile, picks the pid class, and runs `docker create`, which reserves the
 name atomically. The lock is released before `docker start` (the file is also opened
@@ -943,8 +944,14 @@ A created container older than 60 seconds is an orphan of a launcher that died b
 steps (`--rm` never fires for a container that never started); the next launch removes it
 with `docker rm` under the lock. If `docker create` still reports a name `Conflict` — something
 that does not take the lock got there first — the launcher re-picks and retries, up to three
-attempts, then fails with a clear error (a ralph launch, whose name is fixed, fails on the first).
-If the lock cannot be taken within 30 seconds, the launcher warns and launches without it.
+attempts, then fails with a clear error. A ralph launch, whose name is fixed, fails on the
+first conflict — unless the container holding the name is itself a `created` reservation
+that never started (its `docker start` failed after the launcher had exec'd it, e.g. no TTY or
+a mount error); that one is removed and the create retried once. Only docker's name conflict
+(`Conflict. The container name … is already in use`) counts; `Conflicting options` flag errors
+are reported as they are. If the lock cannot be taken within 30 seconds, the launcher warns and
+launches without it: names stay unique (docker refuses a duplicate), but pid classes are then
+unprotected, so a launch at the same moment may get the same class.
 Spec: `spec/sessions.feature` CS-SESS-048..054, `spec/launch.feature` CS-LNCH-056.
 
 ### Image layering

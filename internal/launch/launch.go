@@ -434,8 +434,20 @@ func (p *Plan) Reserve(r execx.Runner, workdir string, warn io.Writer) error {
 	}
 	return &CreateError{
 		Name: p.ContainerName, Stderr: stderr.String(), Code: execx.ExitCode(err),
-		conflict: strings.Contains(stderr.String(), "Conflict"),
+		conflict: isNameConflict(stderr.String()),
 	}
+}
+
+// isNameConflict recognises docker's refusal of a taken name:
+//
+//	Error response from daemon: Conflict. The container name "/x" is already in use by container "…"
+//
+// and nothing else. A bare "Conflict" would also match docker's unrelated
+// "Conflicting options: …" flag errors, which a re-pick cannot fix; retrying
+// those would end in a false "name in use" report (CS-SESS-053).
+func isNameConflict(stderr string) bool {
+	return strings.Contains(stderr, "Conflict. The container name") ||
+		(strings.Contains(stderr, "The container name") && strings.Contains(stderr, "is already in use"))
 }
 
 // Start hands the process over to "docker start -ai" (CS-LNCH-056), whose exit

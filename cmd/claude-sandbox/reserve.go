@@ -31,23 +31,30 @@ const staleReservationAge = 60 * time.Second
 // keeps taking names, and failing loudly beats looping.
 const maxCreateAttempts = 3
 
+// unlockedWarning is printed when the launch proceeds without the lock. It is
+// explicit about the gap: docker refuses a duplicate NAME, so the create
+// conflict retry still keeps nouns unique, but nothing refuses a duplicate
+// pid class, so a concurrent launch can pick the same one.
+const unlockedWarning = "Warning: could not take the launch lock (%s); launching without it. " +
+	"Container names stay unique (docker refuses a duplicate), but a launch running at the same moment " +
+	"may get the same pid class, and one of the two sessions would then be missing from /peers.\n"
+
 // acquireLaunchLock takes the host launch lock and returns its release. A lock
 // that cannot be taken warns and degrades to an unserialized launch rather
-// than blocking one (the discovery-failure precedent); the create conflict
-// retry still keeps names unique.
+// than blocking one (the discovery-failure precedent).
 func acquireLaunchLock(env *Env, home string) func() {
 	lock := env.Lock
 	if lock == nil {
 		if home == "" {
 			// A relative lock path would lock per working directory, i.e. not at all.
-			fmt.Fprintln(env.Err, "Warning: could not take the launch lock (no home directory); launching without it.")
+			fmt.Fprintf(env.Err, unlockedWarning, "no home directory")
 			return func() {}
 		}
 		lock = launch.FileLock{Path: launch.LaunchLockPath(home)}
 	}
 	release, err := lock.Acquire()
 	if err != nil {
-		fmt.Fprintf(env.Err, "Warning: could not take the launch lock (%v); launching without it.\n", err)
+		fmt.Fprintf(env.Err, unlockedWarning, err)
 		return func() {}
 	}
 	return release
@@ -79,6 +86,7 @@ func reserveContainer(env *Env, in launch.Inputs, wt worktreeChoice, ralph bool)
 
 	instance := in.Instance
 	var lost []string // nouns a create conflict proved taken
+	reclaimed := false
 	for attempt := 1; ; attempt++ {
 		found := discoverForReservation(env)
 		project := sessions.ForProject(found, in.ProjectDir)
@@ -118,6 +126,17 @@ func reserveContainer(env *Env, in launch.Inputs, wt worktreeChoice, ralph bool)
 			return nil, exitErr(2, "Error: %v", err)
 		}
 		if ralph {
+			// A fixed name cannot be re-picked. If the holder never started — a
+			// reservation whose "docker start" failed (no TTY, a mount or OCI
+			// error), which the launcher cannot clean up after exec'ing — it is
+			// reclaimed at once rather than blocking ralph until the 60 s stale
+			// cleanup. Once only: a second conflict is a real concurrent owner.
+			if !reclaimed && sessions.State(env.Runner, plan.ContainerName) == sessions.StateCreated &&
+				sessions.RemoveReservation(env.Runner, plan.ContainerName) == nil {
+				reclaimed = true
+				fmt.Fprintf(env.Err, "Removed %s: an earlier launch created it but it never started.\n", plan.ContainerName)
+				continue
+			}
 			return nil, exitErr(2, "Error: a ralph container (%s) already exists for this project; stop it or wait for it to finish.", plan.ContainerName)
 		}
 		if attempt >= maxCreateAttempts {
@@ -133,7 +152,9 @@ func reserveContainer(env *Env, in launch.Inputs, wt worktreeChoice, ralph bool)
 // among them (CS-SESS-052). Discovery failing must not block a launch: the
 // picks then fall back to random, as they always have.
 func discoverForReservation(env *Env) []sessions.Session {
-	found, err := sessions.DiscoverAll(env.Runner)
+	// Uncounted: session counts are not needed to pick, and counting would run
+	// one docker top per running sandbox inside the critical section.
+	found, err := sessions.DiscoverAllUncounted(env.Runner)
 	if err != nil {
 		return nil
 	}

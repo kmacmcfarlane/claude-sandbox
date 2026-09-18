@@ -1035,6 +1035,17 @@ var _ = Describe("launch.Build", func() {
 			Expect(err).To(HaveOccurred())
 			Expect(errors.Is(err, launch.ErrNameConflict)).To(BeFalse())
 			Expect(err.Error()).To(ContainSubstring("No such image"))
+
+			// "Conflicting options" is a flag error a re-pick cannot fix.
+			flags := &execx.Fake{}
+			flags.OnFunc("docker create", func(c execx.Cmd) (string, error) {
+				io.WriteString(c.Stderr, "docker: Conflicting options: --rm and --restart.")
+				return "", execx.Fail(125)
+			})
+			err = build().Reserve(flags, proj, errw)
+			Expect(err).To(HaveOccurred())
+			Expect(errors.Is(err, launch.ErrNameConflict)).To(BeFalse())
+			Expect(err.Error()).To(ContainSubstring("Conflicting options"))
 		})
 	})
 

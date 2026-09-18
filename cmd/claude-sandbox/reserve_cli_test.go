@@ -120,7 +120,14 @@ var _ = Describe("launch reservation (CS-SESS-048..054, CS-LNCH-056)", func() {
 	It("CS-SESS-049: the lock is never held across image checks or builds", func() {
 		// Force every image to be missing, so the base, CLI and cap all build.
 		f.fake.On("image inspect", "", execx.Fail(1))
-		Expect(f.run()).To(Equal(0), f.errw.String())
+		// Running sandboxes on the host, so a per-container docker top under
+		// the lock (CS-SESS-048: discovery there is uncounted) would show up.
+		f.fake.On("docker ps", strings.Join([]string{
+			reservedRow("cs-a", f.proj, "otter", "1", "running", time.Now()),
+			reservedRow("cs-b", "/elsewhere", "heron", "2", "running", time.Now()),
+		}, "\n")+"\n", nil)
+		f.fake.On("docker top", "PID  COMMAND\n1  claude\n", nil)
+		Expect(f.run("--new")).To(Equal(0), f.errw.String())
 		lines := f.fake.CommandLines()
 		sawBuild := false
 		for i, l := range lines {
@@ -233,6 +240,46 @@ var _ = Describe("launch reservation (CS-SESS-048..054, CS-LNCH-056)", func() {
 		Expect(f.errw.String()).To(ContainSubstring("already exists for this project"))
 	})
 
+	It("CS-SESS-053: ralph reclaims its name from a reservation that never started, once", func() {
+		calls := conflictOn(f, 1)
+		f.fake.On("docker inspect -f {{.State.Status}}", "created\n", nil)
+		Expect(f.run("--ralph")).To(Equal(0), f.errw.String())
+		Expect(*calls).To(Equal(2))
+		name := nameOf(f.launched().Args)
+		held := f.lock.held()
+		Expect(held).To(ContainElement("docker inspect -f {{.State.Status}} " + name))
+		Expect(held).To(ContainElement("docker rm " + name))
+		Expect(f.errw.String()).To(ContainSubstring("it never started"))
+		Expect(f.execLine()).To(HaveSuffix(" " + name))
+
+		// A holder that is really running is never removed.
+		g := newCLIFixture()
+		conflictOn(g, -1)
+		g.fake.On("docker inspect -f {{.State.Status}}", "running\n", nil)
+		Expect(g.run("--ralph")).To(Equal(2))
+		Expect(createCount(g)).To(Equal(1))
+		Expect(g.fake.CommandLines()).NotTo(ContainElement(HavePrefix("docker rm ")))
+
+		// Reclaiming happens once: a second conflict is a real owner.
+		h := newCLIFixture()
+		conflictOn(h, -1)
+		h.fake.On("docker inspect -f {{.State.Status}}", "created\n", nil)
+		Expect(h.run("--ralph")).To(Equal(2))
+		Expect(createCount(h)).To(Equal(2))
+		Expect(h.errw.String()).To(ContainSubstring("a ralph container"))
+	})
+
+	It("CS-SESS-053: a Conflicting options error is not a name conflict and is not retried", func() {
+		f.fake.OnFunc("docker create", func(c execx.Cmd) (string, error) {
+			c.Stderr.Write([]byte("docker: Conflicting options: --rm and --restart."))
+			return "", execx.Fail(125)
+		})
+		Expect(f.run()).To(Equal(2))
+		Expect(createCount(f)).To(Equal(1))
+		Expect(f.errw.String()).To(ContainSubstring("Conflicting options"))
+		Expect(f.errw.String()).NotTo(ContainSubstring("already in use"))
+	})
+
 	It("CS-SESS-053: any other create failure is reported, not retried", func() {
 		f.fake.OnFunc("docker create", func(c execx.Cmd) (string, error) {
 			c.Stderr.Write([]byte("docker: Error response from daemon: invalid mount config"))
@@ -247,6 +294,9 @@ var _ = Describe("launch reservation (CS-SESS-048..054, CS-LNCH-056)", func() {
 		f.lock.err = errors.New("permission denied")
 		Expect(f.run()).To(Equal(0))
 		Expect(f.errw.String()).To(ContainSubstring("could not take the launch lock (permission denied)"))
+		// CS-SESS-048: the fallback covers names only, and says so.
+		Expect(f.errw.String()).To(ContainSubstring("Container names stay unique"))
+		Expect(f.errw.String()).To(ContainSubstring("may get the same pid class"))
 		Expect(f.fake.Execed).NotTo(BeNil())
 	})
 

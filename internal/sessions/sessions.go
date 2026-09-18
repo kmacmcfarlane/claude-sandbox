@@ -110,35 +110,66 @@ var psFormat = strings.Join([]string{
 // psFieldCount is the minimum a row must carry; State and CreatedAt follow.
 const psFieldCount = 11
 
-// createdAtLayout is docker ps's {{.CreatedAt}} rendering,
-// e.g. "2026-09-18 12:34:56 -0700 PDT".
-const createdAtLayout = "2006-01-02 15:04:05 -0700 MST"
+// createdAtLayout parses the first three fields of docker ps's {{.CreatedAt}},
+// e.g. "2026-09-18 12:34:56 -0700" of "2026-09-18 12:34:56 -0700 PDT". The
+// trailing zone abbreviation is deliberately NOT parsed: in zones without a
+// letter abbreviation Go renders it as the numeric offset ("+1030 +1030" on
+// Lord Howe, "+0545 +0545" in Kathmandu), which an "MST" layout rejects, and a
+// failed parse would make every orphan look ageless (CS-SESS-052). The
+// numeric offset alone fixes the instant.
+const createdAtLayout = "2006-01-02 15:04:05 -0700"
+
+// parseCreatedAt reads a {{.CreatedAt}} value; zero when unparsable.
+func parseCreatedAt(v string) time.Time {
+	f := strings.Fields(v)
+	if len(f) < 3 {
+		return time.Time{}
+	}
+	t, err := time.Parse(createdAtLayout, strings.Join(f[:3], " "))
+	if err != nil {
+		return time.Time{}
+	}
+	return t
+}
 
 // Discover lists sessions for one project directory (CS-SESS-001).
 func Discover(r execx.Runner, projectDir string) ([]Session, error) {
-	return list(r, LabelProject+"="+projectDir)
+	return list(r, LabelProject+"="+projectDir, true)
 }
 
 // DiscoverAll lists sessions across every project (CS-SESS-002). Filtering on
 // the bare label key matches any container carrying it.
 func DiscoverAll(r execx.Runner) ([]Session, error) {
-	return list(r, LabelProject)
+	return list(r, LabelProject, true)
+}
+
+// DiscoverAllUncounted is DiscoverAll without the per-container "docker top"
+// (Count stays 0). The launch reservation runs discovery under the host lock
+// and needs only nouns, classes, states and ages; counting would add one
+// docker call per running sandbox on the host to the critical section
+// (CS-SESS-048).
+func DiscoverAllUncounted(r execx.Runner) ([]Session, error) {
+	return list(r, LabelProject, false)
 }
 
 // list runs one docker ps and reads names, status and every label from the same
 // --format output; no per-container inspect is needed.
 //
-// -a with two status filters (docker ORs values of one filter key) returns the
-// running containers AND the created ones, i.e. the reservations of launches
-// between "docker create" and "docker start" (CS-SESS-050). Without them a
-// concurrent launch could pick a noun or pid class that is already reserved.
-// Exited containers stay out.
-func list(r execx.Runner, filter string) ([]Session, error) {
+// -a with three status filters (docker ORs values of one filter key) returns
+// the running containers, the paused ones, AND the created ones, i.e. the
+// reservations of launches between "docker create" and "docker start"
+// (CS-SESS-050). Without the reservations a concurrent launch could pick a
+// noun or pid class that is already reserved. Paused containers are listed
+// because plain "docker ps" always listed them (their state is "paused", not
+// "running"): dropping them would hide a paused session from attach and hand
+// its pid class to the next launch, overwriting its peer-registry record once
+// it is unpaused. Exited containers stay out.
+func list(r execx.Runner, filter string, count bool) ([]Session, error) {
 	out, err := r.Output(execx.Cmd{
 		Name: "docker",
 		Args: []string{"ps", "-a",
 			"--filter", "label=" + filter,
-			"--filter", "status=" + StateCreated, "--filter", "status=running",
+			"--filter", "status=" + StateCreated, "--filter", "status=running", "--filter", "status=paused",
 			"--format", psFormat},
 		Stderr: io.Discard,
 	})
@@ -164,13 +195,11 @@ func list(r execx.Runner, filter string) ([]Session, error) {
 			s.State = strings.TrimSpace(f[11])
 		}
 		if len(f) > 12 {
-			if t, perr := time.Parse(createdAtLayout, strings.TrimSpace(f[12])); perr == nil {
-				s.CreatedAt = t
-			}
+			s.CreatedAt = parseCreatedAt(f[12])
 		}
 		// A reservation has no processes to count, and docker top fails on a
 		// container that is not running (CS-SESS-051).
-		if !s.Reserved() {
+		if count && !s.Reserved() {
 			s.Count = countSessions(r, s.Name)
 		}
 		out2 = append(out2, s)
@@ -319,6 +348,20 @@ func Stale(all []Session, now time.Time, maxAge time.Duration) []Session {
 		}
 	}
 	return out
+}
+
+// State reports a container's docker state ("created", "running", ...), or ""
+// when it cannot be inspected (for instance, it no longer exists).
+func State(r execx.Runner, name string) string {
+	out, err := r.Output(execx.Cmd{
+		Name:   "docker",
+		Args:   []string{"inspect", "-f", "{{.State.Status}}", name},
+		Stderr: io.Discard,
+	})
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(out)
 }
 
 // RemoveReservation removes a created container. Plain "docker rm", never -f:
