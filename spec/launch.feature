@@ -748,11 +748,18 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       to the session decision or to exit 3 (CS-SESS-019)
     And the .gitignore prompt of a new layout is skipped, as with no terminal
 
-  Scenario: CS-LNCH-062 The update check is off in headless mode by default
-    # It costs an npm registry round trip and would print into a 5 s probe.
+  Scenario: CS-LNCH-062 The update check and the cache-budget check are off in headless mode
+    # Both are advisory and slow, and an SDK client's probes ("--version",
+    # "auth status") are full launches with a 5 s timeout. The update check
+    # costs an npm registry round trip; the post-build cache-budget warning
+    # (CS-IMG-028) runs "docker system df", measured at 5.7-6.3 s on the
+    # operator's host, and its output would only go to stderr anyway.
     When a headless launch runs without --update
     Then no Claude Code update check runs
     And with --update it runs and, when an update exists, rebuilds without asking
+    When a headless launch builds an image
+    Then no build-cache budget check runs ("docker system df" is never called)
+    And an interactive launch that builds still runs it (CS-IMG-028)
 
   Scenario: CS-LNCH-063 Headless forwards an exact env allowlist, never a wildcard
     # The daemon's env can hold secrets such as PASEO_PASSWORD, so no prefix

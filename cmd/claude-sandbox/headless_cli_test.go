@@ -167,6 +167,19 @@ var _ = Describe("headless mode (CS-LNCH-058..067)", func() {
 			return false
 		}
 
+		It("the post-build cache-budget check never runs; an interactive build still runs it", func() {
+			f.fake.On("image inspect claude-sandbox:run", "", execx.Fail(1))
+			Expect(f.run("headless", "--", "--version")).To(Equal(0), f.errw.String())
+			lines := strings.Join(f.fake.CommandLines(), "\n")
+			Expect(lines).To(ContainSubstring("docker build "), "the test must exercise a build")
+			Expect(lines).NotTo(ContainSubstring("system df"))
+
+			g := newCLIFixture()
+			g.fake.On("image inspect claude-sandbox:run", "", execx.Fail(1))
+			Expect(g.run()).To(Equal(0), g.errw.String())
+			Expect(g.fake.CommandLines()).To(ContainElement("docker system df --format {{json .}}"))
+		})
+
 		It("is off by default", func() {
 			stub(f)
 			Expect(f.run("headless", "--")).To(Equal(0), f.errw.String())

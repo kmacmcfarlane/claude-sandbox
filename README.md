@@ -361,7 +361,8 @@ claude-sandbox headless [launcher flags] -- <claude args>
   cascade, banners, image build output and warnings.
 - **Never prompts.** `/dev/tty` is never opened, even when the client has a controlling
   terminal. `--new` is implied, so running sessions never lead to a decision or to exit 3. The
-  Claude Code update check is off unless you pass `--update`. Do not put `--update` in a
+  Claude Code update check is off unless you pass `--update`, and the post-build cache-budget
+  check (`docker system df`, several seconds on some hosts) never runs. Do not put `--update` in a
   client's command prefix: it would add an npm registry round trip, and sometimes a Claude Code
   image rebuild, to every spawn and every probe (Paseo's probes time out after 5 seconds).
 - **Arguments.** Launcher flags go before `--` (`--docker-socket`, `--model`, `--dangerous`,
@@ -383,7 +384,9 @@ claude-sandbox headless [launcher flags] -- <claude args>
   `CLAUDE_SANDBOX_WORKTREE=1` are ignored in headless mode. A worktree files the transcript
   under another directory than the one the client reads, and each spawn would get a new
   worktree, so resuming a session by id would fail. Only `--worktree` or `--worktree=NAME`
-  before `--` turns worktree mode on.
+  before `--` turns worktree mode on — and a bare `--worktree` in a client's prefix has that
+  same resume problem (each spawn gets a new noun, so a new worktree), while `--worktree=NAME`
+  avoids it but makes concurrent sessions share one worktree.
 - **Dangerous mode comes from the cascade.** When the cascade resolves `dangerous: true` (or
   `--dangerous` is in the prefix, or `CLAUDE_SANDBOX_DANGEROUS=1` is set in the client's
   environment), every headless session runs with `--dangerously-skip-permissions`. Claude Code
@@ -391,6 +394,8 @@ claude-sandbox headless [launcher flags] -- <claude args>
   `--permission-mode plan`, so the client's permission picker, plan mode included, is
   overridden. To let the client's picker apply in a project, set `dangerous: false` in that
   project's own `.claude-sandbox/config.yaml`: the more-local scalar wins the cascade merge.
+  This also turns dangerous mode off for that project's interactive launches; there is no
+  headless-only opt-out.
   `CLAUDE_SANDBOX_DANGEROUS=0` does **not** turn it off, because dangerous mode is on when any
   of the flag, the variable or the config says so, and a falsy variable falls through to the
   config.
@@ -399,7 +404,10 @@ claude-sandbox headless [launcher flags] -- <claude args>
 
 Everything else is an ordinary launch: the same cascade, mounts, host access, image builds and
 [launch reservation](#launch-reservation), so several sessions started at once get distinct
-names and pid classes.
+names and pid classes. That includes a client's probes: Paseo's `--version` and `auth status`
+checks each run a full launch, so the first probe after a Claude Code update, or any other image
+rebuild, can exceed Paseo's 5-second timeout and mark the provider unavailable until the next
+probe succeeds.
 
 ### Paseo
 

@@ -875,7 +875,9 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 	if err != nil {
 		return err
 	}
-	if baseRebuilt || cliBuilt || childBuilt || capBuilt {
+	// CS-LNCH-062: never in headless mode. The check is advisory, and its
+	// "docker system df" alone can take longer than an SDK client's 5 s probe.
+	if (baseRebuilt || cliBuilt || childBuilt || capBuilt) && !headless {
 		imagebuild.WarnCacheBudget(imgOpts)
 	}
 
