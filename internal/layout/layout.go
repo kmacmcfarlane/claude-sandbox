@@ -111,8 +111,24 @@ func Setup(project string, trackInHost bool, opts Options) error {
 	}
 
 	// Foreign-safe: whole dir ignored in host; sidecar repo holds history.
+	// CS-LAY-020: over files the host already tracks, the whole-dir ignore
+	// would silently drop every new file from `git add`. Warn, never switch
+	// modes, still propose the worktrees line, and skip the sidecar init.
+	hostTracked := 0
 	if hostIsGit {
-		gitignoreAdd(hostGI, opts, withWorktreesLine(hostGI, "/.claude-sandbox/")...)
+		hostTracked = hostTrackedCount(opts.Runner, project)
+		if hostTracked > 0 {
+			noun := "files"
+			if hostTracked == 1 {
+				noun = "file"
+			}
+			fmt.Fprintf(opts.errw(), "WARNING: trackInHost is false but the host repo already tracks %d %s under .claude-sandbox/; skipping the /.claude-sandbox/ .gitignore entry, which would silently hide them.\n", hostTracked, noun)
+			fmt.Fprintln(opts.errw(), "  Either set trackInHost: true in .claude-sandbox/config.yaml to keep tracking the directory in the host,")
+			fmt.Fprintln(opts.errw(), "  or run `git rm -r --cached .claude-sandbox` (and commit) to adopt the sidecar layout; the next launch then proposes the ignore.")
+			gitignoreAdd(hostGI, opts, withWorktreesLine(hostGI)...)
+		} else {
+			gitignoreAdd(hostGI, opts, withWorktreesLine(hostGI, "/.claude-sandbox/")...)
+		}
 	}
 	// CS-LAY-004: sidecar's own .gitignore — append-only, no prompt.
 	if err := ensureLines(filepath.Join(sb, ".gitignore"), "temp/", "env", "ralph/"); err != nil {
@@ -120,6 +136,11 @@ func Setup(project string, trackInHost bool, opts Options) error {
 	}
 	// CS-LAY-005..008: sidecar git init.
 	if _, err := os.Stat(filepath.Join(sb, ".git")); err == nil {
+		return nil
+	}
+	if hostTracked > 0 {
+		// CS-LAY-020: a nested repo over host-tracked files would split their
+		// history; the warning above already names the remedies.
 		return nil
 	}
 	if !hostIsGit || gitIgnores(opts.Runner, project, sb) {
@@ -184,6 +205,23 @@ func hostTrackConflict(r execx.Runner, project, sb string) string {
 		return ".claude-sandbox/.git exists"
 	}
 	return ""
+}
+
+// hostTrackedCount returns how many files the host repo tracks under
+// .claude-sandbox/ (CS-LAY-020). A failed probe returns 0, so behaviour is
+// exactly as before: a probe failure never counts as "tracked".
+func hostTrackedCount(r execx.Runner, project string) int {
+	out, err := r.Output(execx.Cmd{Name: "git", Args: []string{"-C", project, "ls-files", "-z", "--", ".claude-sandbox"}, Stderr: io.Discard})
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, f := range strings.Split(out, "\x00") {
+		if f != "" {
+			n++
+		}
+	}
+	return n
 }
 
 func gitIgnores(r execx.Runner, project, path string) bool {

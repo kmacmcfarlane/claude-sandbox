@@ -69,7 +69,7 @@ This supports a catch-all `.claude-sandbox/` at a workspace root that provides d
 
 ### `trackInHost` — how `.claude-sandbox/` is version-controlled
 Set in `.claude-sandbox/config.yaml`:
-- **`false` (default, foreign-safe):** the launcher adds `/.claude-sandbox/` to the host `.gitignore` and creates an internal **sidecar git repo** inside `.claude-sandbox/` for history. Use when working in someone else's repo — nothing leaks into their history.
+- **`false` (default, foreign-safe):** the launcher adds `/.claude-sandbox/` to the host `.gitignore` and creates an internal **sidecar git repo** inside `.claude-sandbox/` for history. Use when working in someone else's repo — nothing leaks into their history. If the host already tracks files under `.claude-sandbox/`, the launcher skips that ignore line and the sidecar init and warns instead (fix: `trackInHost: true`, or `git rm -r --cached .claude-sandbox` to adopt the sidecar).
 - **`true` (your own projects):** the dir is tracked by the host repo; no sidecar. Only `.claude-sandbox/env`, `.claude-sandbox/temp/`, and `.claude-sandbox/ralph/` are gitignored.
 
 **Sidecar commit SOP (when `trackInHost: false`):** after grooming the backlog or changing the agent flow, PROMPT the user to commit in the sidecar — do not auto-commit:

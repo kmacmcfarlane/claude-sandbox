@@ -535,7 +535,14 @@ Set in `.claude-sandbox/config.yaml`. Controls how the directory is version-cont
 - **`false` (default, foreign-safe):** the launcher adds `/.claude-sandbox/` to the
   host `.gitignore` (prompting first) and initializes a **sidecar git repo** inside
   `.claude-sandbox/` for independent history. Nothing leaks into the host project's
-  git history. Use for working on others' repos.
+  git history. Use for working on others' repos. If the host repo already tracks files
+  under `.claude-sandbox/` (`git ls-files -- .claude-sandbox` lists any), the launcher
+  never proposes `/.claude-sandbox/` — the rule would silently keep every new file there
+  out of `git add` — and skips the sidecar init; it warns instead, naming the count and
+  the remedies: set `trackInHost: true` in `.claude-sandbox/config.yaml`, or run
+  `git rm -r --cached .claude-sandbox` (and commit) to adopt the sidecar layout.
+  `.claude/worktrees/` is still proposed. If the `ls-files` probe fails, the ignore is
+  proposed as before.
 - **`true` (your own projects):** the directory is tracked by the host repo; no
   sidecar. The launcher gitignores `.claude-sandbox/env` (secrets),
   `.claude-sandbox/temp/` (scratch), and `.claude-sandbox/ralph/` (ephemeral loop

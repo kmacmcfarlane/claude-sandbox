@@ -1,11 +1,13 @@
 package layout_test
 
-// Spec: spec/layout.feature (CS-LAY-001..014, 017..019). CS-LAY-015/016
+// Spec: spec/layout.feature (CS-LAY-001..014, 017..020). CS-LAY-015/016
 // (launcher adoption) live in cmd/claude-sandbox. Git behavior is scripted
 // through execx.Fake: unmatched commands succeed, so by default the project IS
 // a git work tree and check-ignore reports the path as ignored. Host-tracked
 // (trackInHost true) tests call hostTracks() so the host does NOT ignore the
 // directory — otherwise they would land in the CS-LAY-018 conflict path.
+// Unmatched `git ls-files` returns empty output, so by default the host tracks
+// nothing under .claude-sandbox/ (the CS-LAY-020 path is opt-in via On).
 
 import (
 	"bytes"
@@ -381,6 +383,106 @@ var _ = Describe("layout lifecycle", func() {
 			for _, l := range trueLines {
 				Expect(errOut.String()).To(ContainSubstring("  "+l+"\n"), l)
 			}
+		})
+	})
+
+	Describe("mode conflict: sidecar config over host-tracked content", func() {
+		const wt = ".claude/worktrees/"
+		const warn = "WARNING: trackInHost is false but the host repo already tracks"
+		// tracked scripts `git ls-files -z -- .claude-sandbox` to list files.
+		tracked := func(files ...string) {
+			fake.On("ls-files -z -- .claude-sandbox", strings.Join(files, "\x00")+"\x00", nil)
+		}
+		expectWarned := func(errText, count string) {
+			Expect(strings.Count(errText, warn)).To(Equal(1), "one warning")
+			Expect(errText).To(ContainSubstring(warn + " " + count + " under .claude-sandbox/; skipping the /.claude-sandbox/ .gitignore entry, which would silently hide them."))
+			Expect(errText).To(ContainSubstring("set trackInHost: true in .claude-sandbox/config.yaml"))
+			Expect(errText).To(ContainSubstring("run `git rm -r --cached .claude-sandbox` (and commit) to adopt the sidecar layout"))
+			Expect(errText).NotTo(ContainSubstring("  /.claude-sandbox/\n"), "the whole-dir line is never proposed")
+		}
+
+		It("CS-LAY-020: host-tracked files refuse the whole-dir ignore and warn", func() {
+			tracked(".claude-sandbox/work/a.md", ".claude-sandbox/work/b.md")
+			fake.On("check-ignore", "", execx.Fail(1)) // the coherent state: not ignored
+			Expect(setup(false, ptr(true))).To(Succeed())
+
+			Expect(fake.CommandLines()).To(ContainElement("git -C " + proj + " ls-files -z -- .claude-sandbox"))
+			content := read(hostGI)
+			Expect(countLine(content, "/.claude-sandbox/")).To(BeZero())
+			expectWarned(errOut.String(), "2 files")
+
+			By("the worktrees line is still proposed and added (CS-LAY-017)")
+			Expect(errOut.String()).To(ContainSubstring("  " + wt + "\n"))
+			Expect(countLine(content, wt)).To(Equal(1))
+
+			By("no sidecar init, and the CS-LAY-006 note is replaced by the warning")
+			Expect(fake.CommandLines()).NotTo(ContainElement(ContainSubstring(" init -q")))
+			Expect(errOut.String()).NotTo(ContainSubstring("skipping sidecar git init"))
+			Expect(errOut.String()).NotTo(ContainSubstring("Add /.claude-sandbox/ to .gitignore"))
+
+			By("the sidecar's own .gitignore is still written (CS-LAY-004)")
+			Expect(countLine(read(filepath.Join(sb, ".gitignore")), "env")).To(Equal(1))
+
+			By("a second run proposes nothing and warns again")
+			errOut.Reset()
+			Expect(setup(false, ptr(true))).To(Succeed())
+			Expect(read(hostGI)).To(Equal(content))
+			Expect(errOut.String()).NotTo(ContainSubstring("These entries are missing"))
+			expectWarned(errOut.String(), "2 files")
+		})
+
+		It("CS-LAY-020: an interactive launch never sees the whole-dir line in its prompt", func() {
+			tracked(".claude-sandbox/work/a.md")
+			fake.On("check-ignore", "", execx.Fail(1))
+			sp.IsTTY = true
+			sp.Answers = []string{""}
+			Expect(setup(false, nil)).To(Succeed())
+			expectWarned(errOut.String(), "1 file")
+			Expect(countLine(read(hostGI), "/.claude-sandbox/")).To(BeZero())
+			Expect(countLine(read(hostGI), wt)).To(Equal(1))
+		})
+
+		It("CS-LAY-020: an existing whole-dir rule does not re-enable the sidecar init", func() {
+			// Default fake: check-ignore succeeds => the host already ignores the dir.
+			tracked(".claude-sandbox/work/a.md")
+			write(hostGI, "/.claude-sandbox/\n")
+			Expect(setup(false, ptr(true))).To(Succeed())
+			expectWarned(errOut.String(), "1 file")
+			Expect(fake.CommandLines()).NotTo(ContainElement(ContainSubstring(" init -q")))
+			Expect(countLine(read(hostGI), "/.claude-sandbox/")).To(Equal(1), "the existing rule is left alone")
+		})
+
+		It("CS-LAY-020: a covering rule means not even the worktrees line is proposed", func() {
+			tracked(".claude-sandbox/work/a.md")
+			fake.On("check-ignore", "", execx.Fail(1))
+			write(hostGI, ".claude/\n")
+			Expect(setup(false, ptr(true))).To(Succeed())
+			Expect(read(hostGI)).To(Equal(".claude/\n"))
+			Expect(errOut.String()).NotTo(ContainSubstring("These entries are missing"))
+			expectWarned(errOut.String(), "1 file")
+		})
+
+		It("CS-LAY-020: a failed ls-files probe keeps today's behaviour", func() {
+			fake.On("ls-files", "", execx.Fail(128))
+			Expect(setup(false, ptr(true))).To(Succeed())
+			Expect(errOut.String()).NotTo(ContainSubstring(warn))
+			Expect(countLine(read(hostGI), "/.claude-sandbox/")).To(Equal(1))
+			Expect(fake.CommandLines()).To(ContainElement("git -C " + sb + " init -q"))
+		})
+
+		It("CS-LAY-020: nothing tracked proposes the whole-dir ignore as in CS-LAY-003", func() {
+			fake.On("ls-files", "", nil)
+			Expect(setup(false, ptr(false))).To(Succeed())
+			Expect(errOut.String()).NotTo(ContainSubstring(warn))
+			Expect(errOut.String()).To(ContainSubstring("  /.claude-sandbox/\n"))
+		})
+
+		It("CS-LAY-020: the probe does not run outside a git work tree", func() {
+			fake.On("rev-parse --is-inside-work-tree", "", execx.Fail(1))
+			tracked(".claude-sandbox/work/a.md")
+			Expect(setup(false, nil)).To(Succeed())
+			Expect(fake.CommandLines()).NotTo(ContainElement(ContainSubstring("ls-files")))
+			Expect(fake.CommandLines()).To(ContainElement("git -C " + sb + " init -q"))
 		})
 	})
 
