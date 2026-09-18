@@ -946,7 +946,7 @@ with `docker rm` under the lock. If `docker create` still reports a name `Confli
 that does not take the lock got there first — the launcher re-picks and retries, up to three
 attempts, then fails with a clear error. A ralph launch, whose name is fixed, fails on the
 first conflict — unless the container holding the name is itself a `created` reservation
-that never started (its `docker start` failed after the launcher had exec'd it, e.g. no TTY or
+more than 10 seconds old that never started (its `docker start` failed after the launcher had exec'd it, e.g. no TTY or
 a mount error); that one is removed and the create retried once. Only docker's name conflict
 (`Conflict. The container name … is already in use`) counts; `Conflicting options` flag errors
 are reported as they are. If the lock cannot be taken within 30 seconds, the launcher warns and

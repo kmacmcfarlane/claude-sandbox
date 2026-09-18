@@ -321,11 +321,25 @@ var _ = Describe("reservations (CS-SESS-050..052)", func() {
 		Expect(fake.CommandLines()[0]).To(HavePrefix("docker ps -a "))
 	})
 
-	It("CS-SESS-053: State inspects a container's docker state", func() {
-		fake.On("docker inspect -f {{.State.Status}} x", "created\n", nil)
-		Expect(sessions.State(fake, "x")).To(Equal(sessions.StateCreated))
-		fake.On("docker inspect -f {{.State.Status}} gone", "", execx.Fail(1))
-		Expect(sessions.State(fake, "gone")).To(Equal(""))
+	It("CS-SESS-053: Inspect reads a container's state and RFC 3339 creation time", func() {
+		// The exact docker inspect {{.Created}} format: RFC 3339 with nanoseconds.
+		fake.On("docker inspect --type container -f {{.State.Status}} {{.Created}} x",
+			"created 2026-09-18T18:03:16.123456789Z\n", nil)
+		state, created := sessions.Inspect(fake, "x")
+		Expect(state).To(Equal(sessions.StateCreated))
+		Expect(created.Equal(time.Date(2026, 9, 18, 18, 3, 16, 123456789, time.UTC))).To(BeTrue(), "%s", created)
+
+		fake.On("docker inspect --type container -f {{.State.Status}} {{.Created}} gone", "", execx.Fail(1))
+		state, created = sessions.Inspect(fake, "gone")
+		Expect(state).To(Equal(""))
+		Expect(created.IsZero()).To(BeTrue())
+
+		// The docker ps layout is NOT accepted here: an unparsable time is zero.
+		fake.On("docker inspect --type container -f {{.State.Status}} {{.Created}} ps-shaped",
+			"created 2026-09-18 18:03:16 +0000 UTC\n", nil)
+		state, created = sessions.Inspect(fake, "ps-shaped")
+		Expect(state).To(Equal(sessions.StateCreated))
+		Expect(created.IsZero()).To(BeTrue())
 	})
 
 	It("CS-SESS-050: rows from an older format without State still parse, falling back to Status", func() {

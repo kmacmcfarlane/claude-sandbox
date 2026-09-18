@@ -241,13 +241,17 @@ var _ = Describe("launch reservation (CS-SESS-048..054, CS-LNCH-056)", func() {
 	})
 
 	It("CS-SESS-053: ralph reclaims its name from a reservation that never started, once", func() {
+		now := time.Date(2026, 9, 18, 18, 3, 30, 0, time.UTC)
+		inspect := "docker inspect --type container -f {{.State.Status}} {{.Created}}"
+		oldCreated := func(state string) string { return state + " 2026-09-18T18:03:16.123456789Z\n" } // 14 s before now
 		calls := conflictOn(f, 1)
-		f.fake.On("docker inspect -f {{.State.Status}}", "created\n", nil)
+		f.env.Now = func() time.Time { return now }
+		f.fake.On(inspect, oldCreated("created"), nil)
 		Expect(f.run("--ralph")).To(Equal(0), f.errw.String())
 		Expect(*calls).To(Equal(2))
 		name := nameOf(f.launched().Args)
 		held := f.lock.held()
-		Expect(held).To(ContainElement("docker inspect -f {{.State.Status}} " + name))
+		Expect(held).To(ContainElement(inspect + " " + name))
 		Expect(held).To(ContainElement("docker rm " + name))
 		Expect(f.errw.String()).To(ContainSubstring("it never started"))
 		Expect(f.execLine()).To(HaveSuffix(" " + name))
@@ -255,7 +259,8 @@ var _ = Describe("launch reservation (CS-SESS-048..054, CS-LNCH-056)", func() {
 		// A holder that is really running is never removed.
 		g := newCLIFixture()
 		conflictOn(g, -1)
-		g.fake.On("docker inspect -f {{.State.Status}}", "running\n", nil)
+		g.env.Now = func() time.Time { return now }
+		g.fake.On(inspect, oldCreated("running"), nil)
 		Expect(g.run("--ralph")).To(Equal(2))
 		Expect(createCount(g)).To(Equal(1))
 		Expect(g.fake.CommandLines()).NotTo(ContainElement(HavePrefix("docker rm ")))
@@ -263,10 +268,32 @@ var _ = Describe("launch reservation (CS-SESS-048..054, CS-LNCH-056)", func() {
 		// Reclaiming happens once: a second conflict is a real owner.
 		h := newCLIFixture()
 		conflictOn(h, -1)
-		h.fake.On("docker inspect -f {{.State.Status}}", "created\n", nil)
+		h.env.Now = func() time.Time { return now }
+		h.fake.On(inspect, oldCreated("created"), nil)
 		Expect(h.run("--ralph")).To(Equal(2))
 		Expect(createCount(h)).To(Equal(2))
 		Expect(h.errw.String()).To(ContainSubstring("a ralph container"))
+	})
+
+	It("CS-SESS-053: a young created ralph holder is never reclaimed — it may be a launch about to start", func() {
+		now := time.Date(2026, 9, 18, 18, 3, 20, 0, time.UTC)
+		conflictOn(f, -1)
+		f.env.Now = func() time.Time { return now }
+		// 3.9 s old: the other launcher released the lock and is exec'ing docker start.
+		f.fake.On("docker inspect --type container -f {{.State.Status}} {{.Created}}",
+			"created 2026-09-18T18:03:16.123456789Z\n", nil)
+		Expect(f.run("--ralph")).To(Equal(2))
+		Expect(createCount(f)).To(Equal(1))
+		Expect(f.fake.CommandLines()).NotTo(ContainElement(HavePrefix("docker rm ")))
+		Expect(f.errw.String()).To(ContainSubstring("a ralph container"))
+		Expect(f.errw.String()).To(ContainSubstring("already exists for this project"))
+
+		// An unreadable creation time is treated as young, never as old.
+		g := newCLIFixture()
+		conflictOn(g, -1)
+		g.fake.On("docker inspect --type container -f {{.State.Status}} {{.Created}}", "created\n", nil)
+		Expect(g.run("--ralph")).To(Equal(2))
+		Expect(g.fake.CommandLines()).NotTo(ContainElement(HavePrefix("docker rm ")))
 	})
 
 	It("CS-SESS-053: a Conflicting options error is not a name conflict and is not retried", func() {

@@ -529,7 +529,13 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
       error saying a ralph container already exists for this project
     But when the ralph container holding the name is in the "created" state (a
       reservation whose "docker start" failed after the exec, which the launcher
-      can no longer clean up), it is removed and the create retried once
+      can no longer clean up) AND was created more than 10 seconds ago, it is
+      removed and the create retried once
+    And a younger "created" holder is never removed: the lock is released
+      before the exec of "docker start", so it may be a concurrent launch about
+      to start; that launch fails with the "already exists" error instead
+    # Read with "docker inspect --type container -f '{{.State.Status}} {{.Created}}'";
+    # {{.Created}} is RFC 3339 with nanoseconds, not the docker ps layout.
     And a "Conflicting options" error is not a name conflict
     And any other "docker create" failure is reported with docker's own message
       and is not retried

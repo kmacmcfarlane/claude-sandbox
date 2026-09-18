@@ -31,6 +31,13 @@ const staleReservationAge = 60 * time.Second
 // keeps taking names, and failing loudly beats looping.
 const maxCreateAttempts = 3
 
+// minReclaimAge is how old a never-started ralph container must be before a
+// launch reclaims its fixed name (CS-SESS-053). The lock does not cover the
+// gap between a launcher's create and its exec of docker start, so a younger
+// holder may be a live launch about to start; removing it would be worse than
+// failing. Ten seconds still covers a person retrying after a failed start.
+const minReclaimAge = 10 * time.Second
+
 // unlockedWarning is printed when the launch proceeds without the lock. It is
 // explicit about the gap: docker refuses a duplicate NAME, so the create
 // conflict retry still keeps nouns unique, but nothing refuses a duplicate
@@ -131,7 +138,11 @@ func reserveContainer(env *Env, in launch.Inputs, wt worktreeChoice, ralph bool)
 			// error), which the launcher cannot clean up after exec'ing — it is
 			// reclaimed at once rather than blocking ralph until the 60 s stale
 			// cleanup. Once only: a second conflict is a real concurrent owner.
-			if !reclaimed && sessions.State(env.Runner, plan.ContainerName) == sessions.StateCreated &&
+			// Only a holder old enough not to be a concurrent launch still
+			// between its create and its start (see minReclaimAge).
+			state, created := sessions.Inspect(env.Runner, plan.ContainerName)
+			old := !created.IsZero() && env.now().Sub(created) > minReclaimAge
+			if !reclaimed && state == sessions.StateCreated && old &&
 				sessions.RemoveReservation(env.Runner, plan.ContainerName) == nil {
 				reclaimed = true
 				fmt.Fprintf(env.Err, "Removed %s: an earlier launch created it but it never started.\n", plan.ContainerName)

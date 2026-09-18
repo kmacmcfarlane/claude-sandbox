@@ -350,18 +350,30 @@ func Stale(all []Session, now time.Time, maxAge time.Duration) []Session {
 	return out
 }
 
-// State reports a container's docker state ("created", "running", ...), or ""
-// when it cannot be inspected (for instance, it no longer exists).
-func State(r execx.Runner, name string) string {
+// Inspect reports a container's docker state ("created", "running", ...) and
+// creation time. state is "" when it cannot be inspected (for instance, it no
+// longer exists); created is zero when unparsable. docker inspect renders
+// {{.Created}} as RFC 3339 with nanoseconds ("2026-09-18T18:03:16.123456789Z"),
+// unlike docker ps's {{.CreatedAt}}, so it is not parsed with parseCreatedAt.
+func Inspect(r execx.Runner, name string) (state string, created time.Time) {
 	out, err := r.Output(execx.Cmd{
 		Name:   "docker",
-		Args:   []string{"inspect", "-f", "{{.State.Status}}", name},
+		Args:   []string{"inspect", "--type", "container", "-f", "{{.State.Status}} {{.Created}}", name},
 		Stderr: io.Discard,
 	})
 	if err != nil {
-		return ""
+		return "", time.Time{}
 	}
-	return strings.TrimSpace(out)
+	f := strings.Fields(out)
+	if len(f) == 0 {
+		return "", time.Time{}
+	}
+	if len(f) > 1 {
+		if t, perr := time.Parse(time.RFC3339Nano, f[1]); perr == nil {
+			created = t
+		}
+	}
+	return f[0], created
 }
 
 // RemoveReservation removes a created container. Plain "docker rm", never -f:
