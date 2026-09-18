@@ -86,29 +86,57 @@ var _ = Describe("env file linting", func() {
 		Expect(ws[0].Kind).To(Equal(cascade.EnvWarningQuoted))
 	})
 
-	It("CS-CASC-016: reports carriage returns from CRLF line endings", func() {
-		f := writeEnv(tmp, "KEY=value\r\n")
+	DescribeTable("CS-CASC-016: CRLF line endings produce no carriage-return warning",
+		func(content string) {
+			// docker drops one trailing '\r' per line, so CRLF is harmless.
+			ws, err := cascade.LintEnvFile(writeEnv(tmp, content))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(ws).To(BeEmpty())
+			Expect(text(ws)).NotTo(ContainSubstring("carriage return"))
+		},
+		Entry("one CRLF assignment", "KEY=value\r\n"),
+		Entry("a whole CRLF file", "# comment\r\n\r\nA=1\r\nB=2\r\n"),
+		Entry("a trailing '\\r' with no final newline", "KEY=value\r"),
+		Entry("a bare CRLF key", "KEY\r\n"),
+		// Only ONE '\r' goes: docker passes "\"x\"\r" on, which is not
+		// quote-wrapped, so no quote warning either.
+		Entry("'\\r\\r': the second '\\r' stays on the value", "KEY=\"x\"\r\r\n"),
+	)
 
+	It("CS-CASC-016: the reader drops exactly one trailing '\\r' per line, as docker does", func() {
+		// Docker 29.8.0: CR=x\r\n is the one-byte value x; RR=y\r\r\n keeps
+		// one '\r'; a bare KEY\r is key KEY.
+		as, err := cascade.ReadEnvAssignments(writeEnv(tmp, "CR=x\r\nRR=y\r\r\nB\r\nBB\r\r\nLAST=z\r"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(as).To(HaveLen(5))
+		type kv struct {
+			Key, Value string
+			HasValue   bool
+		}
+		var got []kv
+		for _, a := range as {
+			got = append(got, kv{a.Key, a.Value, a.HasValue})
+		}
+		Expect(got).To(Equal([]kv{
+			{"CR", "x", true},
+			{"RR", "y\r", true},
+			{"B", "", false},
+			{"BB\r", "", false},
+			{"LAST", "z", true},
+		}))
+	})
+
+	It("CS-CASC-017: a quoted value in a CRLF file still gets the quote warning", func() {
+		// docker strips the '\r' but not the quotes.
+		f := writeEnv(tmp, "A=1\r\nKEY=\"secret\"\r\n")
 		ws, err := cascade.LintEnvFile(f)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(ws).To(HaveLen(1))
-		Expect(ws[0].Kind).To(Equal(cascade.EnvWarningCarriageReturn))
+		Expect(ws[0].Kind).To(Equal(cascade.EnvWarningQuoted))
 		Expect(ws[0].Key).To(Equal("KEY"))
-
-		out := text(ws)
-		Expect(out).To(ContainSubstring(f + ":1: value for KEY ends with a carriage return (CRLF line endings)."))
-		Expect(out).To(ContainSubstring("docker --env-file keeps it as part of the value. Convert the file to LF."))
-	})
-
-	It("CS-CASC-017: reports both warnings for a quoted value with a trailing carriage return", func() {
-		// The CR is stripped before the quote check, so the quotes are still
-		// seen as the first and last characters.
-		ws, err := cascade.LintEnvFile(writeEnv(tmp, "KEY=\"secret\"\r\n"))
-		Expect(err).NotTo(HaveOccurred())
-		Expect(ws).To(HaveLen(2))
-		Expect(ws[0].Kind).To(Equal(cascade.EnvWarningCarriageReturn))
-		Expect(ws[1].Kind).To(Equal(cascade.EnvWarningQuoted))
-		Expect(ws[1].Line).To(Equal(1))
+		Expect(ws[0].Line).To(Equal(2))
+		Expect(ws[0].Quote).To(Equal(byte('"')))
+		Expect(text(ws)).To(ContainSubstring(f + ":2: value for KEY is wrapped in \" quotes."))
 	})
 
 	DescribeTable("CS-CASC-018: skips non-assignment lines",

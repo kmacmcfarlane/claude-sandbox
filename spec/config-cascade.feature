@@ -167,18 +167,22 @@ Feature: Config cascade and env stacking (CS-CASC)
     Then a quote warning is reported
     # Two characters, first == last == '"' — a quoted empty string, still wrong.
 
-  Scenario: CS-CASC-016 Carriage returns from CRLF line endings are reported
+  Scenario: CS-CASC-016 An env file with CRLF line endings produces no carriage-return warning (docker strips one trailing \r)
     Given an env file saved with CRLF line endings
     When the env file is linted
-    Then a warning names the file, line, and key, states that docker keeps the
-      carriage return as part of the value, and advises converting the file to LF
+    Then no warning is reported
+    # Verified on Docker 29.8.0: docker's --env-file line scanner drops exactly
+    # ONE trailing '\r' per line, so "CR=x\r\n" yields the one-byte value x
+    # and CRLF line endings are harmless. The shared env-file reader strips
+    # the same single '\r' from every line before any other processing, so
+    # "RR=x\r\r\n" keeps one '\r' on its value, exactly as docker does.
 
-  Scenario: CS-CASC-017 A quoted value with a trailing carriage return reports both
+  Scenario: CS-CASC-017 A quoted value in a CRLF file still gets the quote warning
     Given an env file with CRLF line endings whose value is wrapped in quotes
     When the env file is linted
-    Then both the carriage-return and the quote warning are reported for that line
-    # The CR is stripped before the quote check so the quotes are still seen as
-    # the first and last characters.
+    Then only the quote warning is reported for that line
+    # docker strips the '\r' but not the quotes, so the quotes are the first
+    # and last characters of the value docker passes on.
 
   Scenario Outline: CS-CASC-018 Non-assignment lines are skipped
     Given an env file whose content is <line>
@@ -211,10 +215,11 @@ Feature: Config cascade and env stacking (CS-CASC)
   # Keys are read by the env-file reader the linter shares, which follows
   # docker's --env-file parsing: a UTF-8 BOM on the first line is dropped,
   # leading whitespace is trimmed, blank and '#' comment lines are skipped,
-  # and the key runs to the first '='. A line ending in CRLF never carries
-  # the '\r' into a key name: docker's line scanner drops it, so a bare
-  # "KEY\r" is key KEY (an assignment's '\r' stays on the VALUE, where the
-  # CS-CASC-016 linter reports it). A bare KEY line (no '=') is docker's
+  # and the key runs to the first '='. Like docker's line scanner, the reader
+  # drops exactly one trailing '\r' from every line first (CS-CASC-016), so a
+  # CRLF line never carries it into a key: a bare "KEY\r" is key KEY, while a
+  # bare "KEY\r\r" keeps one '\r' and is key "KEY\r", which docker cannot
+  # resolve (CS-CASC-028). A bare KEY line (no '=') is docker's
   # pass-through of the launcher's own environment, so it defines KEY exactly
   # when the launcher's environment has KEY set (CS-CASC-027/028). Lines
   # docker rejects (an empty key, a key containing a blank) are never named.
@@ -329,6 +334,10 @@ Feature: Config cascade and env stacking (CS-CASC)
     When the launcher prints the cascade
     Then no env override line is printed
     # docker drops a bare key it cannot resolve; the upstream value applies.
+    # The same holds for a bare "GITLAB_TOKEN\r\r" line even when the
+    # launcher's environment sets GITLAB_TOKEN: docker drops only one '\r',
+    # looks up "GITLAB_TOKEN\r", finds nothing, and the upstream value wins
+    # (verified on Docker 29.8.0).
 
   Scenario: CS-CASC-029 Keys docker rejects are never named
     Given env files, root-first:
