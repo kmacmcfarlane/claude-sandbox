@@ -80,7 +80,7 @@ func Main(args []string) int {
 // path so "claude-sandbox --rebuild init" errors instead of routing to init.
 func isSubcommand(a string) bool {
 	switch a {
-	case "init", "init-ralph", "ralph", "help", "completion", "sessions", "pidslot":
+	case "init", "init-ralph", "ralph", "help", "completion", "sessions", "pidslot", "headless":
 		return true
 	// CS-COMP-002/003: the hidden commands the generated completion scripts
 	// call on every keystroke. Without these they fall through to runLaunch,
@@ -93,7 +93,12 @@ func isSubcommand(a string) bool {
 
 func MainWithEnv(args []string, env *Env) int {
 	var err error
-	if len(args) > 0 && isSubcommand(args[0]) {
+	if len(args) > 0 && args[0] == "headless" {
+		// Straight to the headless launch, not through cobra: everything after
+		// "headless" is the launcher grammar plus claude's args, verbatim
+		// (CS-LNCH-058). The cobra command exists for help and completion.
+		err = runHeadless(env, args[1:])
+	} else if len(args) > 0 && isSubcommand(args[0]) {
 		root := newRootCmd(env)
 		root.SetArgs(args)
 		root.SetOut(env.Out)
@@ -151,7 +156,7 @@ func newRootCmd(env *Env) *cobra.Command {
 	}
 	ralphCmd := newRalphCmd(env)
 	registerRalphCompletions(ralphCmd)
-	root.AddCommand(newInitCmd(env, false), newInitCmd(env, true), ralphCmd, newSessionsCmd(env), newPidslotCmd(env))
+	root.AddCommand(newInitCmd(env, false), newInitCmd(env, true), ralphCmd, newSessionsCmd(env), newPidslotCmd(env), newHeadlessCmd(env))
 	// CS-INIT-002: a rejected flag names itself and lists the command's valid
 	// options (inherited by init/init-ralph/ralph).
 	root.SetFlagErrorFunc(func(c *cobra.Command, err error) error {
@@ -161,6 +166,12 @@ func newRootCmd(env *Env) *cobra.Command {
 	root.SetHelpFunc(func(cmd *cobra.Command, args []string) {
 		if cmd.Name() == "claude-sandbox" {
 			fmt.Fprint(cmd.OutOrStdout(), launchUsage)
+			return
+		}
+		if cmd.Name() == "headless" {
+			// Its flags are the launcher's, scanned by scanArgs; cobra's
+			// usage would list only a "-h" that belongs to claude here.
+			fmt.Fprintln(cmd.OutOrStdout(), cmd.Long)
 			return
 		}
 		fmt.Fprintln(cmd.OutOrStdout(), cmd.UsageString())
@@ -192,6 +203,9 @@ Commands (bootstrap the project, then exit — launcher flags do not apply):
   init                      Bootstrap .claude-sandbox/ in the project (config, env, gitignore, sidecar)
   init-ralph                Like init, plus seed ralph agent/ + scripts/ scaffolding
   sessions [--all] [--json] List running sandbox sessions (this project by default)
+  headless [flags] -- ARGS  Launch claude for an SDK client such as Paseo: no TTY, stdout
+                            carries only claude's output, never prompts, always a new
+                            container; everything after -- goes to claude verbatim
   completion SHELL          Print a shell completion script (bash, zsh, fish, powershell)
                             e.g. source <(claude-sandbox completion zsh)
      --track-in-host / --no-track-in-host              set trackInHost (skip the prompt)
@@ -308,17 +322,29 @@ var knownPassthrough = map[string]bool{
 // launcher flags are consumed; a known claude flag or "--" or a positional
 // argument ends parsing (the rest passes through); an unknown flag errors.
 func scanLaunchArgs(args []string) (*launchFlags, error) {
+	return scanArgs(args, false)
+}
+
+// scanArgs is the launcher grammar; headless is the grammar after
+// "claude-sandbox headless", where --help, -h and --version belong to claude
+// and start the passthrough (CS-LNCH-058).
+func scanArgs(args []string, headless bool) (*launchFlags, error) {
 	f := &launchFlags{}
 	boolTrue := func() *bool { t := true; return &t }
 	i := 0
 	for i < len(args) {
 		a := args[i]
 		switch a {
-		case "--help", "-h":
-			f.Help = true
-			i++
-		case "--version":
-			f.Version = true
+		case "--help", "-h", "--version":
+			if headless {
+				f.Passthrough = args[i:]
+				return f, nil
+			}
+			if a == "--version" {
+				f.Version = true
+			} else {
+				f.Help = true
+			}
 			i++
 		case "--ralph":
 			f.Ralph = true
@@ -443,7 +469,7 @@ func scanTail(f *launchFlags, args []string, i int) (*launchFlags, error) {
 		}
 		return nil, exitErr(2, "Error: unknown flag '%s'", a)
 	}
-	if a == "init" || a == "init-ralph" {
+	if a == "init" || a == "init-ralph" || a == "headless" {
 		return nil, exitErr(2, "Error: '%s' must be the first argument (claude-sandbox %s [options])", a, a)
 	}
 	f.Passthrough = args[i:]
@@ -617,6 +643,67 @@ func runLaunch(env *Env, args []string) error {
 		imagebuild.PrintVersion(imagebuild.Options{Runner: env.Runner, Out: env.Out, RepoRoot: rr, Version: version})
 		return nil
 	}
+	return launchWith(env, f, rr, version, false)
+}
+
+// runHeadless is "claude-sandbox headless" (CS-LNCH-058..065): a launch for an
+// SDK client such as Paseo's daemon, which pipes stdin/stdout/stderr, speaks
+// stream-json on them and has nobody to answer a prompt.
+func runHeadless(env *Env, args []string) error {
+	f, err := scanArgs(args, true)
+	if err != nil {
+		return err
+	}
+	switch {
+	case f.Ralph:
+		return exitErr(2, "Error: --ralph is not valid with headless")
+	case f.Limit != "":
+		return exitErr(2, "Error: --limit is not valid with headless")
+	case f.Attach:
+		return exitErr(2, "Error: --attach is not valid with headless: a headless launch is always a new container")
+	case f.Join:
+		return exitErr(2, "Error: --join is not valid with headless: a headless launch is always a new container")
+	case f.Branch:
+		return exitErr(2, "Error: --branch is not valid with headless; pass claude's own --resume/--fork-session after --")
+	}
+	// CS-LNCH-061: a decision would need a person, so there is none.
+	f.NewSession = true
+
+	h := *env
+	// CS-LNCH-060: stdout is claude's stream-json. Every launcher message —
+	// cascade, banners, build output, warnings — goes to stderr.
+	h.Out = env.Err
+	// CS-LNCH-061: never open /dev/tty, even when the process has a
+	// controlling terminal; every question takes its default.
+	h.Prompter = &prompt.Fixed{Out: env.Err}
+	rr := repoRoot(h.Getenv)
+	return launchWith(&h, f, rr, imagebuild.Version(h.Runner, rr), true)
+}
+
+func newHeadlessCmd(env *Env) *cobra.Command {
+	return &cobra.Command{
+		Use:   "headless [launcher flags] [--] [claude args]",
+		Short: "Launch claude for an SDK client (Paseo): no TTY, clean stdout, never prompts",
+		Long: "Usage:\n  claude-sandbox headless [launcher flags] [--] [claude args]\n\n" +
+			"Launch claude in a new sandbox container for an SDK client such as Paseo.\n" +
+			"The container has no TTY and no detach keys, every launcher message goes to\n" +
+			"stderr, nothing prompts, and everything after -- reaches claude verbatim\n" +
+			"(after headless, --version and --help are claude's). Launcher flags are those\n" +
+			"of 'claude-sandbox --help', except --ralph, --limit, --attach, --join, --branch.\n\n" +
+			"Paseo command: [\"claude-sandbox\", \"headless\", \"--\"]",
+		SilenceUsage:       true,
+		SilenceErrors:      true,
+		DisableFlagParsing: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runHeadless(env, args)
+		},
+	}
+}
+
+// launchWith runs a launch from scanned flags. headless selects the SDK-client
+// container shape (CS-LNCH-059..064); runHeadless has already routed output
+// and prompts for it.
+func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) error {
 	if f.Limit != "" && !f.Ralph {
 		return exitErr(2, "Error: --limit is only valid with --ralph")
 	}
@@ -694,6 +781,11 @@ func runLaunch(env *Env, args []string) error {
 	}
 
 	noUpdate := f.NoUpdateCheck || envTrue(env.Getenv("CLAUDE_SANDBOX_NO_UPDATE_CHECK")) || cfg.DisableUpdateCheck
+	if headless && !f.Update {
+		// CS-LNCH-062: off unless asked for; it would add a registry round
+		// trip to every SDK probe.
+		noUpdate = true
+	}
 
 	// CS-LNCH-038: dangerous mode is durable via env var or config, not just
 	// the flag. A more-local "dangerous: false" overrides an upstream true
@@ -795,7 +887,8 @@ func runLaunch(env *Env, args []string) error {
 		Instance: instance,
 		Worktree: worktree,
 		Version:  version,
-		Out:      env.Out, Err: env.Err,
+		Headless: headless, LookupEnv: env.lookupEnv,
+		Out: env.Out, Err: env.Err,
 	}
 	// Reserve under the host lock: re-validate the noun, pick the pid class,
 	// docker create (CS-SESS-048). The lock is released before the exec.

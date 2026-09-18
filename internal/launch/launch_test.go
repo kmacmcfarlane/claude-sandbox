@@ -994,6 +994,81 @@ var _ = Describe("launch.Build", func() {
 		Expect(p.StartArgs()).To(Equal([]string{"start", "-ai", "--detach-keys=ctrl-q,ctrl-q", p.ContainerName}))
 	})
 
+	Describe("headless (CS-LNCH-059, CS-LNCH-063, CS-LNCH-064)", func() {
+		BeforeEach(func() { in.Headless = true })
+
+		It("CS-LNCH-059: create has -i without -t; start has no detach keys, even when configured", func() {
+			in.Cfg = &cascade.Config{DetachKeys: "ctrl-^"}
+			p := build()
+			args := p.CreateArgs(proj)
+			Expect(args[0:4]).To(Equal([]string{"create", "-i", "--rm", "--init"}))
+			Expect(args).NotTo(ContainElement("-it"))
+			Expect(args).NotTo(ContainElement("-t"))
+			Expect(p.StartArgs()).To(Equal([]string{"start", "-ai", p.ContainerName}))
+		})
+
+		It("CS-LNCH-064: labels the container mode=headless, with its noun and class", func() {
+			in.Instance, in.PIDClass = "otter", "12"
+			p := build()
+			Expect(p.Labels).To(ContainElement("claude-sandbox.mode=headless"))
+			Expect(p.Labels).NotTo(ContainElement("claude-sandbox.mode=claude"))
+			Expect(p.Labels).To(ContainElements("claude-sandbox.instance=otter", "claude-sandbox.pidclass=12"))
+		})
+
+		It("CS-LNCH-063: forwards exactly the allowlisted names that are set, as bare -e NAME", func() {
+			set := map[string]string{
+				"CLAUDE_CODE_ENTRYPOINT":                      "sdk-ts",
+				"CLAUDE_AGENT_SDK_MCP_NO_PREFIX":              "", // set but empty still counts as set
+				"PASEO_AGENT_ID":                              "x",
+				"PASEO_PASSWORD":                              "hunter2", // never forwarded
+				"PASEO_HOME":                                  "/p",
+				"CLAUDE_AGENT_SDK_SOMETHING_UNLISTED":         "1",
+				"CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING_X": "1",
+			}
+			in.LookupEnv = func(k string) (string, bool) { v, ok := set[k]; return v, ok }
+			args := build().CreateArgs(proj)
+			es := argPairs(args, "-e")
+			Expect(es).To(ContainElements("CLAUDE_CODE_ENTRYPOINT", "CLAUDE_AGENT_SDK_MCP_NO_PREFIX", "PASEO_AGENT_ID"))
+			for _, e := range es {
+				Expect(e).NotTo(ContainSubstring("PASEO_PASSWORD"))
+				Expect(e).NotTo(ContainSubstring("hunter2"))
+				Expect(e).NotTo(HavePrefix("PASEO_HOME"))
+				Expect(e).NotTo(HavePrefix("CLAUDE_AGENT_SDK_SOMETHING_UNLISTED"))
+				Expect(e).NotTo(HavePrefix("CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING"))
+				Expect(e).NotTo(Equal("CLAUDE_AGENT_SDK_VERSION"), "unset names are not forwarded")
+				Expect(e).NotTo(Equal("PASEO_AGENT_CWD"), "unset names are not forwarded")
+				Expect(e).NotTo(Equal("CLAUDE_CODE_ENTRYPOINT=sdk-ts"), "values stay out of argv")
+			}
+		})
+
+		It("CS-LNCH-063: every allowlisted name is forwarded when set, and the list is exact", func() {
+			Expect(launch.HeadlessEnv).To(ConsistOf(
+				"CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING",
+				"CLAUDE_AGENT_SDK_VERSION", "CLAUDE_AGENT_SDK_CLIENT_APP",
+				"CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS", "CLAUDE_AGENT_SDK_MCP_NO_PREFIX",
+				"PASEO_AGENT_ID", "PASEO_AGENT_CWD"))
+			in.LookupEnv = func(k string) (string, bool) { return "v", true }
+			es := argPairs(build().CreateArgs(proj), "-e")
+			Expect(es).To(ContainElements(launch.HeadlessEnv))
+		})
+
+		It("CS-LNCH-063: without LookupEnv, a name counts as set when Getenv is non-empty", func() {
+			env["PASEO_AGENT_CWD"] = proj
+			es := argPairs(build().CreateArgs(proj), "-e")
+			Expect(es).To(ContainElement("PASEO_AGENT_CWD"))
+			Expect(es).NotTo(ContainElement("PASEO_AGENT_ID"))
+		})
+
+		It("CS-LNCH-063: an interactive launch forwards none of them", func() {
+			in.Headless = false
+			in.LookupEnv = func(k string) (string, bool) { return "v", true }
+			es := argPairs(build().CreateArgs(proj), "-e")
+			for _, k := range launch.HeadlessEnv {
+				Expect(es).NotTo(ContainElement(k))
+			}
+		})
+	})
+
 	Describe("CS-LNCH-057: reserve, then start", func() {
 		It("reserves with docker create and hands off to docker start -ai", func() {
 			fake := &execx.Fake{}

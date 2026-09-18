@@ -383,3 +383,21 @@ var _ = Describe("reservations (CS-SESS-050..052)", func() {
 		Expect(sessions.ForProject(all, "/p")).To(Equal([]sessions.Session{{Name: "a", Project: "/p"}}))
 	})
 })
+
+var _ = Describe("headless containers (CS-SESS-055)", func() {
+	It("CS-SESS-055: are never candidates, but are live and hold their noun and class", func() {
+		fake := &execx.Fake{}
+		row := func(name, mode, instance, class string) string {
+			return strings.Join([]string{name, "Up 1 minute", "/p", mode, instance, "v1", "", "", "", class, "", "running", ""}, sep)
+		}
+		fake.On("docker ps", row("a", "claude", "otter", "1")+"\n"+row("b", sessions.ModeHeadless, "heron", "2")+"\n", nil)
+		fake.On("docker top", "PID COMMAND\n1 claude\n", nil)
+		got, err := sessions.Discover(fake, "/p")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(sessions.Instances(sessions.Interactive(got))).To(Equal([]string{"otter"}))
+		Expect(sessions.Instances(sessions.Live(got))).To(ConsistOf("otter", "heron"))
+		Expect(sessions.Instances(got)).To(ConsistOf("otter", "heron"))
+		Expect(sessions.Classes(got)).To(ConsistOf("1", "2"))
+		Expect(sessions.ModeHeadless).To(Equal("headless"))
+	})
+})

@@ -40,6 +40,10 @@ const (
 // ModeRalph marks a ralph loop container.
 const ModeRalph = "ralph"
 
+// ModeHeadless marks a container an SDK client drives over stream-json
+// (CS-LNCH-064).
+const ModeHeadless = launch.ModeHeadless
+
 // Session is one running sandbox container.
 type Session struct {
 	Name       string               `json:"name"`
@@ -300,11 +304,13 @@ func Classes(all []Session) []string {
 // Interactive returns only the sessions a user can attach to or join. Ralph
 // containers are excluded: concurrency there is owned by the ralph PID lock.
 // Reservations are excluded too (CS-SESS-051): until "docker start" runs there
-// is nothing to attach to or exec into.
+// is nothing to attach to or exec into. So are headless containers
+// (CS-SESS-055): their stdio is an SDK client's stream-json channel, and a
+// terminal attached to it would corrupt the stream.
 func Interactive(all []Session) []Session {
 	out := make([]Session, 0, len(all))
 	for _, s := range all {
-		if s.Mode != ModeRalph && !s.Reserved() {
+		if s.Mode != ModeRalph && s.Mode != ModeHeadless && !s.Reserved() {
 			out = append(out, s)
 		}
 	}

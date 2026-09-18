@@ -58,6 +58,15 @@ type Inputs struct {
 	// emits neither. Like Instance it is excluded from the fingerprint.
 	PIDClass string
 
+	// Headless marks a launch for an SDK client (CS-LNCH-058..065): the
+	// container gets -i without -t, no detach keys, the mode=headless label and
+	// the HeadlessEnv allowlist.
+	Headless bool
+
+	// LookupEnv tells set-but-empty from unset for the headless env allowlist
+	// (CS-LNCH-063). Nil falls back to Getenv, where "" reads as unset.
+	LookupEnv func(string) (string, bool)
+
 	// ImageID is the resolved image's docker ID. It feeds the config hash so an
 	// out-of-band rebuild registers as drift (CS-SESS-023).
 	ImageID string
@@ -77,6 +86,25 @@ type Inputs struct {
 	// the config hash tracks what was actually mounted rather than the temp
 	// paths those files happen to live at (which differ every launch).
 	shadowDigests []InputDigest
+}
+
+// ModeHeadless is the claude-sandbox.mode label value of a headless container
+// (CS-LNCH-064); discovery keeps such containers out of attach and join.
+const ModeHeadless = "headless"
+
+// HeadlessEnv is the exact list of variables a headless launch forwards from
+// its own environment (CS-LNCH-063): what the Claude Agent SDK and Paseo set
+// for the claude process they spawn. It is a list of names, never a prefix: a
+// Paseo daemon's environment can hold PASEO_PASSWORD.
+var HeadlessEnv = []string{
+	"CLAUDE_CODE_ENTRYPOINT",
+	"CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING",
+	"CLAUDE_AGENT_SDK_VERSION",
+	"CLAUDE_AGENT_SDK_CLIENT_APP",
+	"CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS",
+	"CLAUDE_AGENT_SDK_MCP_NO_PREFIX",
+	"PASEO_AGENT_ID",
+	"PASEO_AGENT_CWD",
 }
 
 // DefaultDetachKeys is the sequence that detaches a session without stopping
@@ -108,12 +136,23 @@ type Plan struct {
 	Command       []string // command + args inside the container
 	Labels        []string // --label KEY=VAL specs
 	DetachKeys    string   // --detach-keys sequence, for docker start only
+	// Headless renders create with -i but no -t (CS-LNCH-059).
+	Headless bool
 
 	// ConfigHash identifies the effective configuration this container was
 	// launched with; ConfigInputs records the contributing files so drift can
 	// be explained rather than merely reported (CS-SESS-020, CS-SESS-021).
 	ConfigHash   string
 	ConfigInputs []InputDigest
+}
+
+// lookupEnv reports whether k is set in the launcher's environment.
+func (in *Inputs) lookupEnv(k string) bool {
+	if in.LookupEnv != nil {
+		_, ok := in.LookupEnv(k)
+		return ok
+	}
+	return in.getenv(k) != ""
 }
 
 func (in *Inputs) getenv(k string) string {
@@ -137,7 +176,7 @@ func Build(in Inputs) (*Plan, error) {
 	if in.Cfg == nil {
 		in.Cfg = &cascade.Config{}
 	}
-	p := &Plan{Image: in.ImageName}
+	p := &Plan{Image: in.ImageName, Headless: in.Headless}
 
 	// CS-LNCH-007: project at its real host path.
 	p.Volumes = append(p.Volumes, fmt.Sprintf("%s:%s", in.ProjectDir, in.ProjectDir))
@@ -218,8 +257,12 @@ func Build(in Inputs) (*Plan, error) {
 		p.MemoryLimit = "8g"
 	}
 
-	// CS-LNCH-033: detach keys for the primary session.
-	p.DetachKeys = ResolveDetachKeys(in.Cfg.DetachKeys)
+	// CS-LNCH-033: detach keys for the primary session. A headless session has
+	// no terminal, and detach keys would swallow bytes of its stream-json
+	// input (CS-LNCH-059).
+	if !in.Headless {
+		p.DetachKeys = ResolveDetachKeys(in.Cfg.DetachKeys)
+	}
 
 	// Env files (root-first; later wins).
 	p.EnvFiles = in.EnvFiles
@@ -275,6 +318,16 @@ func Build(in Inputs) (*Plan, error) {
 	if d := in.getenv("CLAUDE_CONFIG_DIR"); d != "" {
 		p.EnvFlags = append(p.EnvFlags, "CLAUDE_CONFIG_DIR="+d)
 	}
+	// CS-LNCH-063: the SDK client's own variables, by exact name and as bare
+	// "-e NAME" so their values never appear in argv (docker create reads
+	// them from the environment it inherits from the launcher).
+	if in.Headless {
+		for _, k := range HeadlessEnv {
+			if in.lookupEnv(k) {
+				p.EnvFlags = append(p.EnvFlags, k)
+			}
+		}
+	}
 
 	// CS-LNCH-034: durable scratchpad root. Claude Code roots its per-session
 	// scratchpad (and background-task output) at $CLAUDE_CODE_TMPDIR, falling
@@ -327,8 +380,11 @@ func Build(in Inputs) (*Plan, error) {
 	// CS-LNCH-032: identity labels. Discovery filters on these rather than
 	// parsing container names, which are lossy.
 	mode := "claude"
-	if in.RalphMode {
+	switch {
+	case in.RalphMode:
 		mode = "ralph"
+	case in.Headless:
+		mode = ModeHeadless // CS-LNCH-064
 	}
 	p.Labels = append(p.Labels,
 		"claude-sandbox.project="+in.ProjectDir,
@@ -357,9 +413,15 @@ func Build(in Inputs) (*Plan, error) {
 // CreateArgs renders the plan as the "docker create" argv: every flag the old
 // single "docker run" carried — -it, --rm, --init, mounts, env, labels, the
 // name, the image and the command — minus the detach keys, which belong to
-// the client that attaches (StartArgs). CS-LNCH-057.
+// the client that attaches (StartArgs). CS-LNCH-057. A headless container gets
+// -i without -t: with a TTY docker merges stderr into stdout and writes CR
+// line endings, which corrupts a stream-json channel (CS-LNCH-059).
 func (p *Plan) CreateArgs(workdir string) []string {
-	args := []string{"create", "-it", "--rm", "--init"}
+	tty := "-it"
+	if p.Headless {
+		tty = "-i"
+	}
+	args := []string{"create", tty, "--rm", "--init"}
 	for _, v := range p.Volumes {
 		args = append(args, "-v", v)
 	}

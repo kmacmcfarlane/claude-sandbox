@@ -526,8 +526,10 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
       picked, and "docker create" is retried
     And after 3 attempts the launch fails with exit 2 and an error naming the conflict
     And a ralph launch, whose name is fixed, fails on the first conflict with an
-      error saying a ralph container already exists for this project, and that
-      one which never started clears on its own after 10 seconds
+      error saying a ralph container already exists for this project; a
+      never-started one does not clear on its own: the next ralph launch
+      reclaims it once it is older than 10 seconds (below), and any launch's
+      stale sweep removes it after 60 seconds (CS-SESS-052)
     But when the ralph container holding the name is in the "created" state (a
       reservation whose "docker start" failed after the exec, which the launcher
       can no longer clean up) AND was created more than 10 seconds ago, it is
@@ -554,3 +556,16 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
       derived from the new noun, and the worktree banner is printed again
     And a note says the noun was taken by a concurrent launch
     And an explicit --worktree=NAME keeps its name; ralph keeps "ralph"
+
+  # ---- headless containers ----
+
+  Scenario: CS-SESS-055 Headless containers are never session candidates
+    # A headless container's stdio is an SDK client's stream-json channel;
+    # attaching a terminal to it, or typing into it, corrupts the stream.
+    Given a running container of this project labelled claude-sandbox.mode=headless
+      (CS-LNCH-064)
+    Then it is not offered by the tier-1 decision, --attach, --join or the
+      --attach=/--join= completion, and alone it never triggers the decision
+    And "claude-sandbox sessions" lists it, marked "headless" in the MODE column
+      (and "mode": "headless" in --json)
+    And its instance noun and pid class still count as taken for new launches

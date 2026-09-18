@@ -118,7 +118,7 @@ var _ = Describe("shell completion", func() {
 
 	It("CS-COMP-004: an empty first word completes the subcommand names", func() {
 		r := f.complete("")
-		for _, name := range []string{"init", "init-ralph", "ralph", "completion"} {
+		for _, name := range []string{"init", "init-ralph", "ralph", "headless", "completion"} {
 			Expect(r.has(name)).To(BeTrue(), "missing subcommand %q in %v", name, r.names)
 		}
 	})
@@ -296,7 +296,8 @@ var _ = Describe("shell completion", func() {
 	})
 })
 
-// scannerFlagNames extracts the flag names scanLaunchArgs recognizes by reading
+// scannerFlagNames extracts the flag names scanArgs (the grammar behind
+// scanLaunchArgs and headless) recognizes by reading
 // its case labels out of the source. Reflection cannot see into a switch, and a
 // hand-maintained second list would be the very drift this guard exists to
 // catch.
@@ -304,7 +305,7 @@ func scannerFlagNames() []string {
 	src, err := os.ReadFile("root.go")
 	Expect(err).NotTo(HaveOccurred())
 	body := string(src)
-	start := strings.Index(body, "func scanLaunchArgs(")
+	start := strings.Index(body, "func scanArgs(")
 	Expect(start).To(BeNumerically(">", 0))
 	body = body[start:]
 	end := strings.Index(body, "\n}\n")

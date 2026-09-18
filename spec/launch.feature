@@ -697,3 +697,86 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     And join ("docker exec") and attach ("docker attach") are unchanged
     Given "docker start" cannot be executed
     Then the reserved container is removed before the error is reported
+
+  # ---- headless mode: SDK clients (Paseo) ----
+  # An SDK client (the Claude Agent SDK, as Paseo's daemon uses it) spawns the
+  # claude command with piped stdin/stdout/stderr and no TTY, speaks
+  # stream-json both ways, appends its own args after a configured prefix, and
+  # runs "<cmd> <prefix> --version" and "<cmd> <prefix> auth status" as 5 s
+  # probes. Paseo's command is ["claude-sandbox", "headless", "--"].
+
+  Scenario: CS-LNCH-058 headless is a positional subcommand with a verbatim passthrough
+    When "claude-sandbox headless [launcher flags] [--] <claude args>" is run
+    Then "headless" is recognized only as the first argument, like init
+      (CS-INIT-001), and a later "headless" before "--" is an error
+    And launcher flags before "--" keep their meaning
+    And every argument after "--" reaches claude verbatim and in order,
+      including "--version", "auth status", "--resume=<id>", "--session-id=<id>",
+      "--setting-sources=<list>" and inline JSON in "--mcp-config" and "--settings"
+    And the launcher's own --version and --help apply only BEFORE "headless";
+      after it they are claude's
+    And --ralph, --limit, --attach[=N], --join[=N] and --branch exit 2: a
+      headless launch is always one new, non-ralph container
+    And "headless" is registered as a cobra command, so help and completion
+      list it (CS-COMP-004)
+
+  Scenario: CS-LNCH-059 A headless container has no TTY and no detach keys
+    # With -t docker merges the container's stderr into its stdout and emits
+    # CR line endings, which corrupts a stream-json channel; detach keys are a
+    # terminal feature and would eat bytes of the stream.
+    When a headless launch reserves and starts its container (CS-LNCH-057)
+    Then "docker create -i --rm --init ..." runs, with -i and without -t
+    And "docker start -ai <container>" is executed with no --detach-keys,
+      whatever detachKeys the config sets
+
+  Scenario: CS-LNCH-060 A headless launch writes nothing to stdout
+    # stdout belongs to claude's stream-json. The container side is already
+    # clean: entrypoint.sh and pidslot write only to stderr.
+    When a headless launch runs
+    Then every launcher message (the config cascade, the env override notice,
+      banners, image build output, warnings) goes to stderr
+    And the launcher writes nothing to stdout; only the exec'd "docker start"
+      does, with claude's stdout
+
+  Scenario: CS-LNCH-061 A headless launch never prompts and never needs a decision
+    # The TTY prompter opens /dev/tty, which a daemon with a controlling
+    # terminal has: a session-decision prompt would block it for 2 minutes.
+    When a headless launch runs, even from a process with a controlling terminal
+    Then no prompt is shown and /dev/tty is never opened: a non-interactive
+      prompter answers every question with its default
+    And --new is implied: sessions already running for the project never lead
+      to the session decision or to exit 3 (CS-SESS-019)
+    And the .gitignore prompt of a new layout is skipped, as with no terminal
+
+  Scenario: CS-LNCH-062 The update check is off in headless mode by default
+    # It costs an npm registry round trip and would print into a 5 s probe.
+    When a headless launch runs without --update
+    Then no Claude Code update check runs
+    And with --update it runs and, when an update exists, rebuilds without asking
+
+  Scenario: CS-LNCH-063 Headless forwards an exact env allowlist, never a wildcard
+    # The daemon's env can hold secrets such as PASEO_PASSWORD, so no prefix
+    # (PASEO_*, CLAUDE_*) is ever forwarded. Bare "-e NAME" keeps values out
+    # of argv; docker reads them from the launcher's environment.
+    When a headless launch runs
+    Then each of CLAUDE_CODE_ENTRYPOINT, CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING,
+      CLAUDE_AGENT_SDK_VERSION, CLAUDE_AGENT_SDK_CLIENT_APP,
+      CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS, CLAUDE_AGENT_SDK_MCP_NO_PREFIX,
+      PASEO_AGENT_ID and PASEO_AGENT_CWD is passed as a bare "-e NAME" when,
+      and only when, it is set in the launcher's environment
+    And no other variable is forwarded by name, whatever the environment holds
+    And an interactive or ralph launch forwards none of them
+
+  Scenario: CS-LNCH-064 A headless container is labelled as such
+    When a headless launch reserves its container
+    Then it carries "claude-sandbox.mode=headless" instead of mode=claude
+    And, like any interactive container, an instance noun and a pid class,
+      picked under the launch lock (CS-SESS-048)
+    # Discovery uses the label to keep it out of attach/join (CS-SESS-055).
+
+  Scenario: CS-LNCH-065 A headless session works in the caller's physical cwd
+    # An SDK client spawns the command in the session's cwd and reads the
+    # transcript from <CLAUDE_CONFIG_DIR>/projects/<encoded realpath(cwd)>.
+    When a headless launch runs without PROJECT_DIR
+    Then the project directory is the process's working directory resolved to
+      its physical path (CS-LNCH-048), used for the same-path mount and -w

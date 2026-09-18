@@ -39,7 +39,7 @@ Feature: Shell completion (CS-COMP)
 
   Scenario: CS-COMP-004 an empty first word completes the subcommand names
     When "claude-sandbox ''" is completed
-    Then the completions include init, init-ralph, ralph, and completion
+    Then the completions include init, init-ralph, ralph, headless, and completion
 
   Scenario: CS-COMP-005 a leading dash completes the launcher flags with descriptions
     When "claude-sandbox --" is completed
