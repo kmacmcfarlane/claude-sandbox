@@ -390,7 +390,10 @@ Merge rules:
 - **`mounts`**: entries append down the cascade; an entry with the **same `host` +
   `container`** as an upstream one overrides it (e.g. flip `writable: true` locally).
 - **`env` files**: layered in cascade order — a variable set in a more-local `env`
-  overrides the upstream value; upstream-only variables still apply.
+  overrides the upstream value; upstream-only variables still apply. So an edit to an
+  upstream key has no effect while a more-local `env` still defines it; the launcher
+  names every such key at startup (names only, never values), one line per winning file:
+  `Env override: GITLAB_TOKEN in /ws/p/.claude-sandbox/env overrides /ws/.claude-sandbox/env`.
 - **`Dockerfile`**: NOT merged — the nearest one up the tree wins wholesale.
 
 `init` seeds a **sparse, fully-commented** `config.yaml` and `env`, so a freshly-inited

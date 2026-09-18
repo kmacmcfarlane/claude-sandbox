@@ -620,6 +620,8 @@ func runLaunch(env *Env, args []string) error {
 		return err
 	}
 	cascade.PrintReport(env.Out, projectDir)
+	// Name env keys a more-local file shadows — names only (CS-CASC-021..025).
+	cascade.PrintEnvOverrides(env.Out, envFiles)
 	cfg, err := cascade.Load(configFiles)
 	if err != nil {
 		return err

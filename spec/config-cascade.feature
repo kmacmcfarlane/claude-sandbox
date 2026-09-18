@@ -190,3 +190,73 @@ Feature: Config cascade and env stacking (CS-CASC)
     When the launcher assembles docker arguments
     Then warnings are printed to stderr for both files
     And the launch proceeds — linting never blocks or rewrites the files
+
+  # ---- env override notice ----
+  # Env files stack root-first and the later file wins (CS-CASC-010). That
+  # precedence is correct but was silent: a stale project env that defines a
+  # key shadows every upstream edit to it, and a refreshed upstream token
+  # "never takes effect". The launcher names the overridden keys at startup.
+  # Env files hold secrets, so the notice carries key NAMES only, never values.
+  # Keys are parsed exactly as the linter parses them (KEY=VALUE lines; blank,
+  # '#' comment and non-assignment lines never count). A key assigned twice
+  # in the SAME file is not a cross-file override and is not reported.
+  # Informational, printed to stdout beside the cascade report; never blocks.
+
+  Scenario: CS-CASC-021 A key defined upstream and in the project env is named once
+    Given env files, root-first:
+      | level | content          |
+      | /ws   | GITLAB_TOKEN=new |
+      | /ws/p | GITLAB_TOKEN=old |
+    When the launcher prints the cascade
+    Then exactly one line is printed:
+      """
+      Env override: GITLAB_TOKEN in /ws/p/.claude-sandbox/env overrides /ws/.claude-sandbox/env
+      """
+
+  Scenario: CS-CASC-022 Several overridden keys share one line per winning file
+    Given env files, root-first:
+      | level | content                 |
+      | /ws   | FOO=1, BAR=2, ONLY_UP=3 |
+      | /ws/p | BAR=4, FOO=5, ONLY_P=6  |
+    When the launcher prints the cascade
+    Then exactly one line is printed:
+      """
+      Env override: BAR, FOO in /ws/p/.claude-sandbox/env overrides /ws/.claude-sandbox/env
+      """
+    # Keys are listed in the winning file's order; keys defined in only one
+    # file are not named.
+
+  Scenario: CS-CASC-023 Three or more levels: one line per winning file
+    Given env files, root-first:
+      | level   | content  |
+      | /ws     | A=1, B=1 |
+      | /ws/p   | A=2, C=2 |
+      | /ws/p/q | A=3, C=3 |
+    When the launcher prints the cascade
+    Then exactly one line is printed:
+      """
+      Env override: A, C in /ws/p/q/.claude-sandbox/env overrides /ws/p/.claude-sandbox/env, /ws/.claude-sandbox/env
+      """
+    # A key is attributed to the MOST-LOCAL file that defines it (the one
+    # docker uses); the files it overrides are listed nearest-first, as the
+    # union over that line's keys. Each file that wins at least one key gets
+    # its own line, most-local first — e.g. if /ws/p alone also overrode B,
+    # a second line "Env override: B in /ws/p/... overrides /ws/..." follows.
+
+  Scenario: CS-CASC-024 Nothing is printed when no key is defined in two files
+    Given env files, root-first:
+      | level | content                       |
+      | /ws   | FOO=1                         |
+      | /ws/p | BAR=2, # FOO=3, NOEQUALS_FOO  |
+    When the launcher prints the cascade
+    Then no env override line is printed
+    # Commented-out and non-assignment lines never count as definitions.
+
+  Scenario: CS-CASC-025 The notice never contains a value
+    Given env files, root-first:
+      | level | content              |
+      | /ws   | SECRET=upstream-val  |
+      | /ws/p | SECRET=local-val     |
+    When the launcher prints the cascade
+    Then the output names SECRET
+    And the output contains neither "upstream-val" nor "local-val"
