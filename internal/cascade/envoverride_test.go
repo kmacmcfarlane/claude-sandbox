@@ -149,6 +149,15 @@ var _ = Describe("env override notice", func() {
 		Expect(print(ws, p)).To(BeEmpty())
 	})
 
+	It("CS-CASC-028: a bare key ending in '\\r\\r' keeps one '\\r' and does not resolve", func() {
+		// docker drops only ONE trailing '\r': the key is "GITLAB_TOKEN\r",
+		// which the launcher's environment does not set (Docker 29.8.0).
+		host["GITLAB_TOKEN"] = "host-secret"
+		ws := level("/ws", "GITLAB_TOKEN=new\r\n")
+		p := level("/ws/p", "GITLAB_TOKEN\r\r\n")
+		Expect(print(ws, p)).To(BeEmpty())
+	})
+
 	It("CS-CASC-027: set-but-empty in the launcher's environment counts as set", func() {
 		host["GITLAB_TOKEN"] = ""
 		ws := level("/ws", "GITLAB_TOKEN=new\n")
