@@ -33,8 +33,9 @@ type Env struct {
 	Err      io.Writer
 	Getenv   func(string) string
 	// LookupEnv tells set-but-empty from unset (the env override notice
-	// resolves bare env-file keys with it, CS-CASC-027). Nil falls back to
-	// Getenv, treating a non-empty value as set.
+	// resolves bare env-file keys with it, CS-CASC-027). defaultEnv wires
+	// os.LookupEnv. Nil falls back to Getenv, which cannot see set-but-empty
+	// (it reads as unset); only test Envs that never launch leave it nil.
 	LookupEnv func(string) (string, bool)
 
 	// PidslotOps overrides the pidslot helper's process seams under test.

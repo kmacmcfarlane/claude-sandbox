@@ -394,7 +394,7 @@ Merge rules:
   upstream key has no effect while a more-local `env` still defines it; the launcher
   names every such key at startup (names only, never values), one line per winning file:
   `Env override: GITLAB_TOKEN in /ws/p/.claude-sandbox/env overrides /ws/.claude-sandbox/env`.
-  Keys are read the way docker reads them: an indented or BOM-prefixed line counts, and so
+  Keys are read the way docker reads them: an indented, BOM-prefixed or CRLF-terminated line counts, and so
   does a bare `KEY` line when your shell exports `KEY` (docker passes the shell's value).
 - **`Dockerfile`**: NOT merged — the nearest one up the tree wins wholesale.
 

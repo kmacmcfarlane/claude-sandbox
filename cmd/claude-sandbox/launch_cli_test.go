@@ -61,6 +61,9 @@ func newCLIFixture() *cliFixture {
 		Out:      f.out,
 		Err:      f.errw,
 		Getenv:   func(k string) string { return f.envmap[k] },
+		// LookupEnv mirrors os.LookupEnv over envmap, so a key mapped to ""
+		// is set-but-empty rather than unset (CS-CASC-027).
+		LookupEnv: func(k string) (string, bool) { v, ok := f.envmap[k]; return v, ok },
 	}
 	return f
 }

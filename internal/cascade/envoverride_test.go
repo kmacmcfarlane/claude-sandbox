@@ -111,6 +111,7 @@ var _ = Describe("env override notice", func() {
 		Entry("leading blanks", "  GITLAB_TOKEN=stale"),
 		Entry("leading tab", "\tGITLAB_TOKEN=stale"),
 		Entry("UTF-8 BOM on line 1", "\xEF\xBB\xBFGITLAB_TOKEN=stale"),
+		Entry("CRLF assignment: the '\\r' stays out of the key", "GITLAB_TOKEN=stale\r"),
 	)
 
 	It("CS-CASC-026: an indented comment is still a comment", func() {
@@ -119,13 +120,33 @@ var _ = Describe("env override notice", func() {
 		Expect(print(ws, p)).To(BeEmpty())
 	})
 
-	It("CS-CASC-027: a bare key overrides when the launcher's environment sets it", func() {
-		host["GITLAB_TOKEN"] = "host-secret"
-		ws := level("/ws", "GITLAB_TOKEN=new\n")
-		p := level("/ws/p", "GITLAB_TOKEN\n")
+	DescribeTable("CS-CASC-027: a bare key overrides when the launcher's environment sets it",
+		func(content string) {
+			host["GITLAB_TOKEN"] = "host-secret"
+			ws := level("/ws", "GITLAB_TOKEN=new\n")
+			p := level("/ws/p", content)
+			out := print(ws, p)
+			Expect(out).To(Equal("Env override: GITLAB_TOKEN in " + p + " overrides " + ws + "\n"))
+			Expect(out).NotTo(ContainSubstring("host-secret"))
+		},
+		Entry("LF line ending", "GITLAB_TOKEN\n"),
+		Entry("CRLF line ending: the '\\r' is not in the key", "GITLAB_TOKEN\r\n"),
+		Entry("trailing '\\r' with no final newline", "GITLAB_TOKEN\r"),
+	)
+
+	It("CS-CASC-027: whole CRLF files name each key without a '\\r'", func() {
+		host["CRB"] = "hostcrb"
+		ws := level("/ws", "CRA=up\r\nCRB=up\r\n")
+		p := level("/ws/p", "CRA=loc\r\nCRB\r\n")
 		out := print(ws, p)
-		Expect(out).To(Equal("Env override: GITLAB_TOKEN in " + p + " overrides " + ws + "\n"))
-		Expect(out).NotTo(ContainSubstring("host-secret"))
+		Expect(out).To(Equal("Env override: CRA, CRB in " + p + " overrides " + ws + "\n"))
+		Expect(out).NotTo(ContainSubstring("\r"))
+	})
+
+	It("CS-CASC-028: a CRLF bare key the launcher's environment lacks is not a definition", func() {
+		ws := level("/ws", "GITLAB_TOKEN=new\r\n")
+		p := level("/ws/p", "GITLAB_TOKEN\r\n")
+		Expect(print(ws, p)).To(BeEmpty())
 	})
 
 	It("CS-CASC-027: set-but-empty in the launcher's environment counts as set", func() {

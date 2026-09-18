@@ -111,9 +111,13 @@ const utf8BOM = "\xEF\xBB\xBF"
 // the override notice. It follows docker's --env-file parsing: a UTF-8 BOM
 // on the first line is dropped, leading whitespace is trimmed, blank and '#'
 // comment lines are skipped (but still counted), and the key runs to the
-// first '='. Unlike docker it keeps a trailing '\r' on the value, because
-// the linter reports it (CS-CASC-016). It does not reject keys docker would
-// (empty, containing blanks); callers that care filter with validEnvKey.
+// first '='. docker's line scanner drops one trailing '\r'. Unlike docker
+// this reader keeps it on an assignment's VALUE, because the linter reports
+// it (CS-CASC-016); a '\r' never reaches a key name: an assignment's key ends
+// at '=' before it, and a bare "KEY\r" line has it trimmed, as docker does,
+// so the key resolves against the launcher's environment (CS-CASC-027). It
+// does not reject keys docker would (empty, containing blanks); callers that
+// care filter with validEnvKey.
 func readEnvAssignments(path string) ([]envAssignment, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -136,6 +140,9 @@ func readEnvAssignments(path string) ([]envAssignment, error) {
 			continue
 		}
 		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			key = strings.TrimSuffix(key, "\r") // CRLF bare line: docker drops the '\r'
+		}
 		out = append(out, envAssignment{Line: i + 1, Key: key, Value: value, HasValue: ok})
 	}
 	return out, nil

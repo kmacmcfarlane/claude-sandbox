@@ -86,4 +86,16 @@ var _ = Describe("env override notice at launch", func() {
 		Expect(f.out.String()).To(ContainSubstring("Env override: GITLAB_TOKEN in " + projEnv + " overrides " + parentEnv + "\n"))
 		Expect(f.out.String()).NotTo(ContainSubstring("host-secret"))
 	})
+
+	It("CS-CASC-027: a CRLF bare key set-but-empty in the launcher's environment overrides", func() {
+		f := newCLIFixture()
+		f.envmap["GITLAB_TOKEN"] = ""
+		parentEnv := filepath.Join(filepath.Dir(f.proj), ".claude-sandbox", "env")
+		projEnv := filepath.Join(f.proj, ".claude-sandbox", "env")
+		writeFile(parentEnv, "GITLAB_TOKEN=fresh-value\r\n")
+		writeFile(projEnv, "GITLAB_TOKEN\r\n")
+
+		Expect(f.run()).To(Equal(0))
+		Expect(f.out.String()).To(ContainSubstring("Env override: GITLAB_TOKEN in " + projEnv + " overrides " + parentEnv + "\n"))
+	})
 })

@@ -200,7 +200,10 @@ Feature: Config cascade and env stacking (CS-CASC)
   # Keys are read by the env-file reader the linter shares, which follows
   # docker's --env-file parsing: a UTF-8 BOM on the first line is dropped,
   # leading whitespace is trimmed, blank and '#' comment lines are skipped,
-  # and the key runs to the first '='. A bare KEY line (no '=') is docker's
+  # and the key runs to the first '='. A line ending in CRLF never carries
+  # the '\r' into a key name: docker's line scanner drops it, so a bare
+  # "KEY\r" is key KEY (an assignment's '\r' stays on the VALUE, where the
+  # CS-CASC-016 linter reports it). A bare KEY line (no '=') is docker's
   # pass-through of the launcher's own environment, so it defines KEY exactly
   # when the launcher's environment has KEY set (CS-CASC-027/028). Lines
   # docker rejects (an empty key, a key containing a blank) are never named.
@@ -281,24 +284,30 @@ Feature: Config cascade and env stacking (CS-CASC)
       | "  GITLAB_TOKEN=stale"              | leading blanks are trimmed            |
       | "\tGITLAB_TOKEN=stale"              | a leading tab is trimmed              |
       | "\xEF\xBB\xBFGITLAB_TOKEN=stale"     | a UTF-8 BOM on line 1 is dropped      |
+      | "GITLAB_TOKEN=stale\r"              | a CRLF ending stays out of the key    |
     # The linter shares the reader: an indented quoted value
     # ("  KEY=\"x\"") is reported under key KEY, and an indented
     # "  # KEY=\"x\"" is a comment, as docker treats it.
 
-  Scenario: CS-CASC-027 A bare key overrides when the launcher's environment sets it
-    Given env files, root-first:
-      | level | content          |
-      | /ws   | GITLAB_TOKEN=new |
-      | /ws/p | GITLAB_TOKEN     |
+  Scenario Outline: CS-CASC-027 A bare key overrides when the launcher's environment sets it
+    Given an upstream env file containing "GITLAB_TOKEN=new"
+    And a project env file whose only line is <line>
     And the launcher's environment sets GITLAB_TOKEN
     When the launcher prints the cascade
     Then exactly one line is printed:
       """
       Env override: GITLAB_TOKEN in /ws/p/.claude-sandbox/env overrides /ws/.claude-sandbox/env
       """
+    Examples:
+      | line                | why                                          |
+      | "GITLAB_TOKEN\n"    | LF line ending                               |
+      | "GITLAB_TOKEN\r\n"  | CRLF line ending: the '\r' is not in the key |
+      | "GITLAB_TOKEN\r"    | a trailing '\r' with no final newline        |
     # docker substitutes the launcher's value for the bare line, which beats
     # the upstream assignment. Set-but-empty counts as set (docker passes
-    # GITLAB_TOKEN= through). The host value is never printed.
+    # GITLAB_TOKEN= through). The host value is never printed. Verified on
+    # Docker 29.8.0: a bare "CRB\r" line resolved CRB from the launcher's
+    # environment and won over an upstream CRB=up.
 
   Scenario: CS-CASC-028 A bare key is not a definition when the launcher's environment lacks it
     Given env files, root-first:
