@@ -76,10 +76,18 @@ func Setup(project string, trackInHost bool, opts Options) error {
 		}
 	}
 	hostIsGit := isGitWorkTree(opts.Runner, project)
+	// CS-LAY-020: files the host already tracks under .claude-sandbox/ while
+	// trackInHost is false. Probed only in that mode; a failed probe is 0.
+	hostTracked := 0
+	if !trackInHost && hostIsGit {
+		hostTracked = hostTrackedCount(opts.Runner, project)
+	}
 
-	// CS-LAY-002: seed once, never overwrite.
+	// CS-LAY-002: seed once, never overwrite. Not in the CS-LAY-020 conflict
+	// state: the seed describes a host-ignored directory, which it is not,
+	// and would only add a wrong, untracked host file.
 	claudeMD := filepath.Join(sb, "CLAUDE.md")
-	if _, err := os.Stat(claudeMD); os.IsNotExist(err) {
+	if _, err := os.Stat(claudeMD); os.IsNotExist(err) && hostTracked == 0 {
 		if err := os.WriteFile(claudeMD, []byte(claudeMDSeed), 0o644); err != nil {
 			return err
 		}
@@ -99,7 +107,7 @@ func Setup(project string, trackInHost bool, opts Options) error {
 			if conflict := hostTrackConflict(opts.Runner, project, sb); conflict != "" {
 				fmt.Fprintf(opts.errw(), "WARNING: trackInHost is true but %s; skipping the host-tracked .gitignore entries, which would be dead there.\n", conflict)
 				fmt.Fprintln(opts.errw(), "  Either set trackInHost: false in .claude-sandbox/config.yaml (and delete any .claude-sandbox/env, temp/, ralph/, !config.yaml or !Dockerfile lines already in .gitignore — they are dead),")
-				fmt.Fprintln(opts.errw(), "  or drop the ignore rule (`git check-ignore -v .claude-sandbox` names it) and .claude-sandbox/.git to track the directory in the host.")
+				fmt.Fprintln(opts.errw(), "  or drop the ignore rule (`git check-ignore -v "+ignoreProbe+"` names it) and .claude-sandbox/.git to track the directory in the host.")
 				gitignoreAdd(hostGI, opts, withWorktreesLine(hostGI)...)
 				return nil
 			}
@@ -114,17 +122,9 @@ func Setup(project string, trackInHost bool, opts Options) error {
 	// CS-LAY-020: over files the host already tracks, the whole-dir ignore
 	// would silently drop every new file from `git add`. Warn, never switch
 	// modes, still propose the worktrees line, and skip the sidecar init.
-	hostTracked := 0
 	if hostIsGit {
-		hostTracked = hostTrackedCount(opts.Runner, project)
 		if hostTracked > 0 {
-			noun := "files"
-			if hostTracked == 1 {
-				noun = "file"
-			}
-			fmt.Fprintf(opts.errw(), "WARNING: trackInHost is false but the host repo already tracks %d %s under .claude-sandbox/; skipping the /.claude-sandbox/ .gitignore entry, which would silently hide them.\n", hostTracked, noun)
-			fmt.Fprintln(opts.errw(), "  Either set trackInHost: true in .claude-sandbox/config.yaml to keep tracking the directory in the host,")
-			fmt.Fprintln(opts.errw(), "  or run `git rm -r --cached .claude-sandbox` (and commit) to adopt the sidecar layout; the next launch then proposes the ignore.")
+			warnHostTracked(opts.errw(), hostTracked, dirIgnored(opts.Runner, project), dirExists(filepath.Join(sb, ".git")))
 			gitignoreAdd(hostGI, opts, withWorktreesLine(hostGI)...)
 		} else {
 			gitignoreAdd(hostGI, opts, withWorktreesLine(hostGI, "/.claude-sandbox/")...)
@@ -143,7 +143,7 @@ func Setup(project string, trackInHost bool, opts Options) error {
 		// history; the warning above already names the remedies.
 		return nil
 	}
-	if !hostIsGit || gitIgnores(opts.Runner, project, sb) {
+	if !hostIsGit || dirIgnored(opts.Runner, project) {
 		if err := opts.Runner.Run(execx.Cmd{Name: "git", Args: []string{"-C", sb, "init", "-q"}}); err == nil {
 			fmt.Fprintf(opts.out(), "Initialized sidecar git repo at %s\n", sb)
 		}
@@ -193,9 +193,8 @@ func isGitWorkTree(r execx.Runner, dir string) bool {
 // .claude-sandbox/ directory, a sidecar .git exists inside it, or both.
 // Returns "" when neither condition holds.
 func hostTrackConflict(r execx.Runner, project, sb string) string {
-	ignored := gitIgnores(r, project, sb)
-	_, err := os.Stat(filepath.Join(sb, ".git"))
-	sidecar := err == nil
+	ignored := dirIgnored(r, project)
+	sidecar := dirExists(filepath.Join(sb, ".git"))
 	switch {
 	case ignored && sidecar:
 		return "the host repo already ignores .claude-sandbox/ and .claude-sandbox/.git exists"
@@ -224,9 +223,49 @@ func hostTrackedCount(r execx.Runner, project string) int {
 	return n
 }
 
-func gitIgnores(r execx.Runner, project, path string) bool {
-	err := r.Run(execx.Cmd{Name: "git", Args: []string{"-C", project, "check-ignore", "-q", path}, Stdout: io.Discard, Stderr: io.Discard})
+// ignoreProbe is a path under .claude-sandbox/ that never exists. Whether
+// the host ignores the directory is asked of this child, never of the
+// directory itself: git reports a directory holding tracked files as NOT
+// ignored even beneath a "/.claude-sandbox/" rule, while every new file in it
+// is ignored (CS-LAY-018, CS-LAY-020). The question that matters is whether a
+// new file there would be hidden, which is what the child answers.
+const ignoreProbe = ".claude-sandbox/ignore-probe"
+
+// dirIgnored reports whether the host repo ignores new files under
+// .claude-sandbox/, via ignoreProbe.
+func dirIgnored(r execx.Runner, project string) bool {
+	err := r.Run(execx.Cmd{Name: "git", Args: []string{"-C", project, "check-ignore", "-q", "--", ignoreProbe}, Stdout: io.Discard, Stderr: io.Discard})
 	return err == nil
+}
+
+func dirExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
+}
+
+// warnHostTracked prints the one CS-LAY-020 warning: trackInHost is false
+// but the host tracks n files under .claude-sandbox/. When a rule already
+// ignores the directory, new files are being hidden now and the rule must go
+// whichever remedy is chosen; an existing sidecar .git gets one more clause.
+func warnHostTracked(w io.Writer, n int, ruleExists, sidecar bool) {
+	noun := "files"
+	if n == 1 {
+		noun = "file"
+	}
+	if ruleExists {
+		fmt.Fprintf(w, "WARNING: trackInHost is false and the host repo tracks %d %s under .claude-sandbox/, but a host ignore rule already covers the directory: new files there are being hidden from git NOW.\n", n, noun)
+		fmt.Fprintf(w, "  Remove that rule whichever remedy you choose (`git check-ignore -v %s` names it). Then either:\n", ignoreProbe)
+	} else {
+		fmt.Fprintf(w, "WARNING: trackInHost is false but the host repo already tracks %d %s under .claude-sandbox/; skipping the /.claude-sandbox/ .gitignore entry, which would silently hide new files there.\n", n, noun)
+		fmt.Fprintln(w, "  Either:")
+	}
+	fmt.Fprint(w, "  - set trackInHost: true in .claude-sandbox/config.yaml to keep tracking the directory in the host")
+	if sidecar {
+		fmt.Fprint(w, " (and remove .claude-sandbox/.git, which CS-LAY-018 refuses in that mode)")
+	}
+	fmt.Fprintln(w, ", or")
+	fmt.Fprintln(w, "  - adopt the sidecar layout: copy .claude-sandbox/ aside (or into the sidecar) first, then `git rm -r --cached .claude-sandbox` and commit.")
+	fmt.Fprintln(w, "    That commit deletes .claude-sandbox/ from every other clone and worktree that pulls or merges it.")
 }
 
 // gitignoreAdd appends missing lines to a .gitignore-style file, prompting
