@@ -17,8 +17,8 @@ import (
 //
 // Two things this deliberately does NOT do:
 //
-//   - It does not hash the docker argv. Four shadow files (CLAUDE.md,
-//     settings.json, .mcp.json, gitconfig) are bind-mounted from a temp
+//   - It does not hash the docker argv. The shadow files (CLAUDE.md,
+//     .mcp.json, gitconfig) are bind-mounted from a temp
 //     directory that is recreated every launch, so an argv hash would report
 //     drift every single time.
 //   - It does not hash the config files as found on disk. Hashing the *merged*

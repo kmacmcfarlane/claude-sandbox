@@ -156,10 +156,9 @@ func Build(in Inputs) (*Plan, error) {
 	if err := in.shadowClaudeMD(p, configDir); err != nil {
 		return nil, err
 	}
-	// CS-LNCH-011: settings.json shadow (notification hooks merged).
-	if err := in.shadowSettings(p, configDir); err != nil {
-		return nil, err
-	}
+	// CS-LNCH-011: settings.json is NOT shadowed — it reaches the container
+	// live through the config-dir bind above. The notification hooks ship as
+	// managed settings baked into the base image (CS-LNCH-068).
 	// CS-LNCH-012/013: siblings of the config dir.
 	if err := in.shadowSiblings(p, configDir); err != nil {
 		return nil, err
@@ -418,27 +417,6 @@ func (in *Inputs) shadowClaudeMD(p *Plan, configDir string) error {
 		return err
 	}
 	p.Volumes = append(p.Volumes, fmt.Sprintf("%s:%s:ro", tmp, filepath.Join(configDir, "CLAUDE.md")))
-	return nil
-}
-
-func (in *Inputs) shadowSettings(p *Plan, configDir string) error {
-	hostSettings := filepath.Join(configDir, "settings.json")
-	var merged []byte
-	if raw, err := os.ReadFile(hostSettings); err == nil {
-		m, merr := mergeTopLevel(raw, assets.NotificationHooks)
-		if merr != nil {
-			return fmt.Errorf("merging settings.json: %w", merr)
-		}
-		merged = m
-	} else {
-		merged = assets.NotificationHooks
-	}
-	tmp, err := in.tempFile("settings.json", merged)
-	if err != nil {
-		return err
-	}
-	// Read-write shadow (sessions may write); the host file is never touched.
-	p.Volumes = append(p.Volumes, fmt.Sprintf("%s:%s", tmp, hostSettings))
 	return nil
 }
 
@@ -783,24 +761,6 @@ func resolveFlag(cli *bool, envVal string, yaml *bool) bool {
 		return true
 	}
 	return yaml != nil && *yaml
-}
-
-// mergeTopLevel merges b's top-level keys over a's ({...a, ...b}).
-func mergeTopLevel(a, b []byte) ([]byte, error) {
-	var am, bm map[string]json.RawMessage
-	if err := json.Unmarshal(a, &am); err != nil {
-		return nil, err
-	}
-	if err := json.Unmarshal(b, &bm); err != nil {
-		return nil, err
-	}
-	if am == nil {
-		am = map[string]json.RawMessage{}
-	}
-	for k, v := range bm {
-		am[k] = v
-	}
-	return json.MarshalIndent(am, "", "  ")
 }
 
 // mergeMCP merges mcpServers key-by-key, fragment servers winning.

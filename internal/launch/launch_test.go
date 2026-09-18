@@ -148,28 +148,30 @@ var _ = Describe("launch.Build", func() {
 		Expect(raw).To(Equal(assets.ContainerContext))
 	})
 
-	It("CS-LNCH-011: shadows settings.json with the notification-hooks fragment merged over the host file", func() {
+	It("CS-LNCH-011: does not shadow settings.json; the host file stays live through the config-dir bind", func() {
 		cfgDir := filepath.Join(home, ".claude")
-		touch(filepath.Join(cfgDir, "settings.json"), `{"theme":"dark","hooks":{"Old":[]}}`)
+		settings := filepath.Join(cfgDir, "settings.json")
+		touch(settings, `{"theme":"dark","hooks":{"SessionStart":[]}}`)
 		p := build()
-		tmp := filepath.Join(in.TempDir, "settings.json")
-		raw, err := os.ReadFile(tmp)
+		for _, v := range p.Volumes {
+			Expect(strings.Split(v, ":")[1]).NotTo(Equal(settings), "volume %q shadows settings.json", v)
+		}
+		// Read-write config-dir bind (CS-LNCH-008) is what carries the file.
+		Expect(p.Volumes).To(ContainElement(cfgDir + ":" + cfgDir))
+		_, err := os.Stat(filepath.Join(in.TempDir, "settings.json"))
+		Expect(os.IsNotExist(err)).To(BeTrue(), "no settings.json temp file may be written")
+		// The host file is untouched.
+		raw, err := os.ReadFile(settings)
 		Expect(err).NotTo(HaveOccurred())
-		var merged, fragment map[string]any
-		Expect(json.Unmarshal(raw, &merged)).To(Succeed())
-		Expect(json.Unmarshal(assets.NotificationHooks, &fragment)).To(Succeed())
-		Expect(merged["theme"]).To(Equal("dark"))
-		// Top-level keys from the fragment win wholesale.
-		Expect(reflect.DeepEqual(merged["hooks"], fragment["hooks"])).To(BeTrue())
-		// Read-write path shadow: no :ro suffix.
-		Expect(p.Volumes).To(ContainElement(tmp + ":" + filepath.Join(cfgDir, "settings.json")))
+		Expect(string(raw)).To(Equal(`{"theme":"dark","hooks":{"SessionStart":[]}}`))
 	})
 
-	It("CS-LNCH-011: shadows settings.json with the fragment alone when no host file exists", func() {
-		build()
-		raw, err := os.ReadFile(filepath.Join(in.TempDir, "settings.json"))
-		Expect(err).NotTo(HaveOccurred())
-		Expect(raw).To(Equal(assets.NotificationHooks))
+	It("CS-LNCH-011: carries no settings.json digest in the drift fingerprint", func() {
+		touch(filepath.Join(home, ".claude", "settings.json"), `{"theme":"dark"}`)
+		p := build()
+		for _, d := range p.ConfigInputs {
+			Expect(d.Path).NotTo(Equal("settings.json"))
+		}
 	})
 
 	It("CS-LNCH-012: mounts the .claude.json sibling read-write when present", func() {
