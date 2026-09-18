@@ -466,82 +466,118 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     # The one fact a session inside .claude/worktrees/<name> cannot otherwise
     # get without `git rev-parse --git-common-dir`: where .claude-sandbox/
     # lives.
-
   # ---- shared peer registry ----
-  # Claude Code keys peer discovery on <config dir>/sessions/<pid>.json and
-  # puts each session's inbox socket at $CLAUDE_CODE_TMPDIR/cc-socks/<pid>.sock
-  # (CS-LNCH-034 derives that root from the config dir). Both therefore live
-  # under CLAUDE_CONFIG_DIR — so two trees that export different config dirs
-  # (e.g. a work tree with its own .envrc and a personal one) hold disjoint
-  # registries and disjoint socket roots: their sessions can neither enumerate
-  # nor message each other.
+  # Claude Code keys peer discovery on <config dir>/sessions/<pid>.json. Each
+  # session listens for messages on <socket root>/cc-socks/<pid>.sock, where
+  # the socket root is XDG_RUNTIME_DIR || CLAUDE_CODE_TMPDIR || os.tmpdir(),
+  # and it writes that ABSOLUTE path into its registry record as
+  # messagingSocketPath. A reader lists a peer only if connect() to that
+  # recorded path succeeds from the reader's own container.
   #
-  # The bridge mounts ONE shared host directory over each of those two paths,
-  # whatever CLAUDE_CONFIG_DIR resolves to, so every opted-in container on the
-  # host shares one registry and one socket root. It is OPT-IN and default OFF
-  # everywhere: the config-dir split is usually a deliberate work/personal
-  # boundary, and only the operator knows which trees should be bridged.
+  # Unbridged, XDG_RUNTIME_DIR is unset in every container, so the socket root
+  # is CLAUDE_CODE_TMPDIR, which CS-LNCH-034 derives from the config dir. Two
+  # trees that export different config dirs (e.g. a work tree with its own
+  # .envrc and a personal one) therefore hold disjoint registries AND advertise
+  # socket paths that exist only inside their own containers: their sessions
+  # can neither enumerate nor message each other.
   #
-  # The bridge REPLACES the container's registry and socket root; a bind mount
-  # hides whatever the destination held, so it does not union the two. Every
-  # session that is to be visible must be opted in and (re)launched: sessions
-  # still running against the real <config dir>/sessions — the host's own
-  # claude included — neither see the bridged ones nor are seen by them.
+  # The bridge fixes both halves with one fixed host folder,
+  # ~/.cache/claude-sandbox/peers. Its sessions/ is mounted over each
+  # container's <config dir>/sessions, so every opted-in container shares one
+  # registry. The folder itself is mounted at the SAME path in every opted-in
+  # container and XDG_RUNTIME_DIR points at it, so every session binds and
+  # advertises ~/.cache/claude-sandbox/peers/cc-socks/<pid>.sock — an address
+  # valid in every bridged container whatever its config dir. XDG_RUNTIME_DIR
+  # outranks CLAUDE_CODE_TMPDIR for the socket path ONLY: scratchpads stay
+  # under CLAUDE_CODE_TMPDIR and do not move. The variable itself applies to
+  # the WHOLE container, though: anything else that honours XDG_RUNTIME_DIR
+  # (dbus, gpg, podman, pulse, Claude Code's own LSP vscode-ipc-*.sock) puts
+  # its runtime files in that shared, host-persistent folder, visible to every
+  # other bridged container.
+  #
+  # It is OPT-IN and default OFF everywhere: the config-dir split is usually a
+  # deliberate work/personal boundary, and only the operator knows which trees
+  # should be bridged.
+  #
+  # The bridge REPLACES the container's registry; a bind mount hides whatever
+  # the destination held, so it does not union the two. Every session that is
+  # to be visible must be opted in and (re)launched: sessions still running
+  # against the real <config dir>/sessions — the host's own claude included —
+  # neither see the bridged ones nor are seen by them. A relaunch also rewrites
+  # each session's record, so stale advertised paths need no repair.
   #
   # No collision handling is needed or wanted: internal/pidslot already
   # allocates pid classes without replacement across ALL running sandboxes on
   # the host (CS-PID-004), so two containers can never write the same
-  # <pid>.json. Cross-PID-namespace messaging already works between sandboxes
-  # that share one config dir.
+  # <pid>.json or bind the same <pid>.sock. Cross-PID-namespace messaging
+  # already works between sandboxes that share one config dir.
 
   Scenario: CS-LNCH-049 The shared peer registry is off by default
     Given no config sets sharedPeerRegistry and CLAUDE_SANDBOX_SHARED_PEER_REGISTRY is unset
     Then the assembled docker run argv is identical to what it would be without the feature
+    And no XDG_RUNTIME_DIR is passed
     And nothing under ~/.cache/claude-sandbox/peers is mounted or created
 
-  Scenario: CS-LNCH-050 The shared peer registry bridges registry and sockets
+  Scenario: CS-LNCH-050 The shared peer registry bridges the registry and the socket address
     Given the merged config sets "sharedPeerRegistry: true"
     Then "-v ~/.cache/claude-sandbox/peers/sessions:<config dir>/sessions" is added
-    And "-v ~/.cache/claude-sandbox/peers/cc-socks:<resolved CLAUDE_CODE_TMPDIR>/cc-socks" is added
-    And both are read-write — neither carries ":ro"
-    # connect() on a unix socket under a read-only bind mount fails with
-    # EROFS, so a :ro socket root would break exactly the messaging this
-    # exists to enable. The registry side is written by every session too.
-    And this holds whether the config dir is $HOME/.claude or a CLAUDE_CONFIG_DIR
-      pointing anywhere else — the host side is the same directory either way
-    And when the socket root cannot be resolved (no config dir, or an env file
-      in the cascade defines CLAUDE_CODE_TMPDIR) only the registry is mounted,
-      with a warning that messaging is not bridged
+    And "-v ~/.cache/claude-sandbox/peers:~/.cache/claude-sandbox/peers" is added —
+      the peers root at the SAME path inside the container
+    And "-e XDG_RUNTIME_DIR=~/.cache/claude-sandbox/peers" is added
+    # The ROOT, not cc-socks: Claude Code appends /cc-socks itself, and a
+    # bundled language-server library drops vscode-ipc-*.sock files directly
+    # under XDG_RUNTIME_DIR.
+    And both mounts are read-write — neither carries ":ro"
+    # Every session writes its own <pid>.json into the registry and bind()s
+    # its own <pid>.sock under the socket root; bind() under a read-only bind
+    # mount fails with EROFS. (connect() through a :ro bind succeeds — it is
+    # the bind that needs the write.)
+    And the XDG_RUNTIME_DIR value and the peers-root mount are identical whether
+      the config dir is $HOME/.claude or a CLAUDE_CONFIG_DIR pointing anywhere
+      else — so the socket address one session advertises is valid in every
+      other bridged container
+    And nothing is mounted over <config dir>/cc-socks or <CLAUDE_CODE_TMPDIR>/cc-socks
+    And CLAUDE_CODE_TMPDIR is resolved exactly as without the bridge (CS-LNCH-034):
+      scratchpads do not move
 
-  Scenario: CS-LNCH-051 Both sides of each mount are created on the host before docker run
+  Scenario: CS-LNCH-051 The shared directories are created on the host before docker run
     Given the shared peer registry is enabled and ~/.cache/claude-sandbox/peers does not exist
-    Then the launcher creates sessions/ and cc-socks/ (as the invoking user) before assembling the mounts
+    Then the launcher creates peers/, peers/sessions/ and peers/cc-socks/ (as the
+      invoking user) before assembling the mounts
     # Docker creates a missing bind source as root and the entrypoint deliberately
-    # never chowns a mount point — an uncreated dir would be unwritable for the session.
-    And it creates the DESTINATION paths too — <config dir>/sessions and
-      <CLAUDE_CODE_TMPDIR>/cc-socks — when they do not exist
-    # The mirror image of the same argument: the destination's parent is the
-    # read-write same-path bind of the config dir, so a mountpoint docker
-    # creates as root materialises on the HOST and outlives the container. A
-    # root-owned ~/.claude/tmp/cc-socks would then break every later
-    # un-bridged sandbox, and the host's own claude, for good.
-    And all four are created 0700, the mode Claude Code itself uses for them
+    # never chowns a mount point — an uncreated dir would be unwritable for the
+    # session. And Claude Code refuses a socket directory whose ancestry is
+    # group- or world-writable or owned by someone other than the user or root;
+    # when it refuses it silently falls back to a container-private
+    # /tmp/cc-socks-<uid>, which no other container can reach.
+    And it creates the registry DESTINATION <config dir>/sessions too when it does not exist
+    # Its parent is the read-write same-path bind of the config dir, so a
+    # mountpoint docker creates as root materialises on the HOST and outlives
+    # the container. A root-owned ~/.claude/sessions would then break every later
+    # un-bridged sandbox, and the host's own claude, for good. The peers-root
+    # mount needs no destination creation: it is a same-path mount of a
+    # directory the launcher just created.
+    And all of them are created 0700, the mode Claude Code itself uses
     # 0755 would let any other local user on a multi-user host enumerate every
     # sandbox session's <pid>.json and <pid>.<hash>.key in the shared root.
-    But a DESTINATION is created only when it lies under a SAME-PATH mount, the
-      only case in which a container path is also a meaningful host path and so
-      the one docker would otherwise create as root on the host
+    And peers/, peers/sessions/ and peers/cc-socks/ are forced to 0700 even when
+      they already exist with a wider mode
+    # MkdirAll leaves an existing mode alone, and a group- or world-writable
+    # socket ancestry makes Claude Code silently fall back to a container-private
+    # /tmp — the silent failure the bridge exists to end. These directories are
+    # sandbox-only and launcher-owned, so tightening them is safe. The registry
+    # DESTINATION under the user's config dir is not the launcher's, and is not
+    # re-moded.
+    But the registry destination is created only when it lies under a SAME-PATH
+      mount, the only case in which a container path is also a meaningful host
+      path and so the one docker would otherwise create as root on the host
     # Merely lying under some mount is not enough: a cascade `mounts:` entry may
     # set host != container (CS-LNCH-021), and a container path under it names
     # nothing on the host.
-    And every other destination — a CLAUDE_CODE_TMPDIR outside every mount or
-      under a non-same-path one, or <config dir>/sessions when the config dir is
-      absent and therefore not mounted — is left to docker: the launch still
-      succeeds, and nothing is created on the host
-    # Creating those would either fail the launch on a path the host cannot make
-    # (the warning path of CS-LNCH-050 must degrade, not die) or plant a tree
-    # the host was never meant to own — including the config dir itself, which
-    # would flip its existence check for the NEXT launch.
+    And when the config dir is absent and therefore not mounted, <config dir>/sessions
+      is left to docker: the launch still succeeds, and nothing is created there on the host
+    # Creating it would plant the config dir itself on the host, flipping its
+    # existence check for the NEXT launch.
     And the host root is fixed at ~/.cache/claude-sandbox/peers and is not configurable
     # A free-form path would let one tree's <config dir>/sessions be named as
     # the shared root by accident, which would have another tree's sandboxes
@@ -573,9 +609,45 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     # Worktree banner (CS-LNCH-041) sets the precedent: announce a mode with
     # consequences, and only when it is in use.
     Given the shared peer registry is enabled
-    Then stdout carries one line naming the shared host root and that /peers and
+    Then stdout carries exactly one line naming the shared host root and that /peers and
       SendMessage now reach every other opted-in sandbox on this host, and only those
     And nothing is printed when the bridge is off
-    And the line is printed on the degrade path of CS-LNCH-050 too — a launch
-      whose socket root is unresolved is still bridged for discovery, and the
-      warning that follows qualifies the banner rather than replacing it
+    And the line is not printed when the bridge stands down for the session
+      (CS-LNCH-054/055) — that launch is not bridged at all, and its one warning
+      says so instead
+
+  # A bridge that shares the registry but not the socket address is strictly
+  # worse than no bridge: Claude Code drops every peer whose advertised socket
+  # it cannot connect() to, so such a session would list nobody and nobody
+  # would list it — while the registry overmount hid its own tree's real
+  # registry, and with it the same-tree peers it can reach with the key off.
+  # A partial bridge only takes connectivity away, so when the socket cannot
+  # be bridged the whole bridge stands down for that session.
+
+  Scenario: CS-LNCH-054 An env file that owns XDG_RUNTIME_DIR keeps it, and the bridge stands down
+    Given the shared peer registry is enabled
+    And an env file in the cascade defines XDG_RUNTIME_DIR
+    Then no "-e XDG_RUNTIME_DIR" is added
+    # docker -e silently beats --env-file, so adding it would override the
+    # consumer's own choice — the CLAUDE_CODE_TMPDIR precedent (CS-LNCH-034).
+    # The launcher never forwards the host's own XDG_RUNTIME_DIR, so an env
+    # file is the only source that can collide.
+    And neither the registry sessions/ overmount nor the peers-root mount is added
+    And cc-socks/ is not created and no banner is printed
+    And exactly one warning says the bridge is off for this session because an
+      env file sets XDG_RUNTIME_DIR
+    And the docker run argv and the drift fingerprint are those of a key-off launch
+
+  Scenario: CS-LNCH-055 A socket path Claude Code would reject stands the bridge down
+    # Claude Code binds only when Buffer.byteLength(path) <= 103 (the sun_path
+    # limit); past it, it silently falls back to /tmp/cc-socks-<uid> —
+    # container-private, unreachable from any other container. For a home of
+    # /home/rt the root is 36 bytes and the worst-case socket path 58, so this
+    # guards only unusual home directories.
+    Given the shared peer registry is enabled
+    And the worst-case socket path — the peers root + "/cc-socks/" + a 7-digit
+      pid + ".sock" — would exceed 103 bytes
+    Then no "-e XDG_RUNTIME_DIR", no registry sessions/ overmount and no
+      peers-root mount is added
+    And cc-socks/ is not created and no banner is printed
+    And exactly one warning names the length and says the bridge is off for this session
