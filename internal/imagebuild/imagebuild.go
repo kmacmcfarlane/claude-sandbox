@@ -81,7 +81,7 @@ type Options struct {
 
 // BakedSources are the paths (relative to RepoRoot) whose mtimes trigger a
 // base rebuild when newer than the image (CS-IMG-004).
-var BakedSources = []string{"cmd", "internal", "go.mod", "go.sum", "assets.go", "logstream", "entrypoint.sh", "PROMPT_RALPH.md", "mcp"}
+var BakedSources = []string{"cmd", "internal", "go.mod", "go.sum", "assets.go", "logstream", "entrypoint.sh", "PROMPT_RALPH.md", "mcp", "notification-hooks.json"}
 
 // Version computes the git-describe version of the repo checkout.
 func Version(r execx.Runner, repoRoot string) string {

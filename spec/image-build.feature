@@ -35,7 +35,8 @@ Feature: Image build lifecycle (CS-IMG)
     Given any file under the baked source set has mtime after the image creation time
     Then the base is rebuilt with a message about changed baked sources
     # Baked source set after the Go rewrite: the Go source tree (cmd/, internal/,
-    # go.mod/go.sum), logstream/, entrypoint.sh, PROMPT_RALPH.md, mcp/.
+    # go.mod/go.sum), logstream/, entrypoint.sh, PROMPT_RALPH.md, mcp/,
+    # notification-hooks.json (baked as managed settings, CS-LNCH-068).
     # (bash version: bin/, logstream/, entrypoint.sh, PROMPT_RALPH.md, mcp/)
 
   Scenario: CS-IMG-031 Go test files are not baked sources

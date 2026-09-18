@@ -237,7 +237,7 @@ All paths are in the claude-sandbox repo.
 | `entrypoint.sh` | Container entrypoint (UID/GID remapping) — still bash, deliberately |
 | `logstream/*.js` | Ralph NDJSON pipeline stages — still Node, deliberately |
 | `Dockerfile` | Base image (multi-stage: builds the Go binary, then the runtime image) |
-| `notification-hooks.json` | Hook fragment merged into settings.json |
+| `notification-hooks.json` | Notification hooks, baked into the base image as a managed-settings drop-in (`/etc/claude-code/managed-settings.d/`); the host `settings.json` is live, not shadowed |
 | `container-context.md` | Injected into container's CLAUDE.md |
 | `scaffold/` | Base bootstrap seed for `init` (sparse config.yaml, env, Dockerfile.example) — embedded in the binary |
 | `scaffold-ralph/` | Ralph scaffolding seed for `init-ralph` (agent/ docs, scripts/ backlog tool) — embedded |

@@ -24,7 +24,7 @@ COPY cmd/ cmd/
 COPY internal/ internal/
 COPY scaffold/ scaffold/
 COPY scaffold-ralph/ scaffold-ralph/
-COPY container-context.md notification-hooks.json mcp-servers.json PROMPT_RALPH.md ./
+COPY container-context.md mcp-servers.json PROMPT_RALPH.md ./
 RUN --mount=type=cache,id=claude-sandbox-go-mod,target=/go/pkg/mod \
     --mount=type=cache,id=claude-sandbox-go-build,target=/root/.cache/go-build \
     CGO_ENABLED=0 go build -o /out/claude-sandbox ./cmd/claude-sandbox
@@ -110,6 +110,19 @@ COPY --link --chmod=755 --from=builder /out/claude-sandbox /opt/claude-sandbox/b
 RUN ln -s /opt/claude-sandbox/bin/claude-sandbox /opt/claude-sandbox/bin/ralph
 COPY --link logstream/ /opt/claude-sandbox/logstream/
 COPY --link PROMPT_RALPH.md /opt/claude-sandbox/PROMPT_RALPH.md
+
+# Notification hooks as Claude Code MANAGED settings (CS-LNCH-068). Claude Code
+# reads /etc/claude-code/managed-settings.json plus every *.json in
+# managed-settings.d/ on Linux, and hook entries merge across settings levels,
+# so these run ALONGSIDE the host's own hooks in ~/.claude/settings.json —
+# which is live in the container, not shadowed (CS-LNCH-011). A drop-in rather
+# than managed-settings.json so a child image can ship its own policy file.
+# The directories get their own step, and the COPY has no --link: with --link,
+# --chmod=644 is applied to the parent dirs it creates as well, leaving them
+# untraversable by the non-root session user (Claude Code then cannot read
+# the policy; per its docs a claude.ai-authenticated session then exits).
+RUN install -d -m 0755 /etc/claude-code /etc/claude-code/managed-settings.d
+COPY --chmod=644 notification-hooks.json /etc/claude-code/managed-settings.d/10-claude-sandbox.json
 ENV PATH="/opt/claude-sandbox/bin:$PATH"
 
 # Discord notification MCP server (baked in so every project gets it for free)

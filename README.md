@@ -262,7 +262,7 @@ Bare `--attach` / `--join` work when there is exactly one candidate. Exit code 3
 
 ### Config drift
 
-Attaching to or joining a container does **not** rebuild the image, reassemble mounts, or regenerate the injected `CLAUDE.md` / `settings.json` / `.mcp.json` — you are entering a container that was configured when it started. So each container records a hash of its effective configuration, and attaching to one whose configuration no longer matches what is on disk asks first:
+Attaching to or joining a container does **not** rebuild the image, reassemble mounts, or regenerate the injected `CLAUDE.md` / `.mcp.json` — you are entering a container that was configured when it started. So each container records a hash of its effective configuration, and attaching to one whose configuration no longer matches what is on disk asks first:
 
 ```
 Session 'otter' was started with different configuration:
@@ -618,6 +618,14 @@ The base image includes a Discord notification MCP server at `/opt/claude-sandbo
 
 **Setup:** Set `DISCORD_WEBHOOK_URL` in your `.claude-sandbox/env`. The launcher automatically merges the Discord MCP server entry into the container's `.mcp.json` — no manual configuration needed. If you already have a `~/.mcp.json`, the sandbox entries are added alongside your existing servers (the host file is never modified).
 
+### Notification hooks
+
+The base image ships a Claude Code `Notification` hook that posts to `CLAUDE_NOTIFICATION_WEBHOOK_URL` (when set in `.claude-sandbox/env`) whenever a session waits on a permission prompt or goes idle. It is installed as a Claude Code **managed settings** drop-in, `/etc/claude-code/managed-settings.d/10-claude-sandbox.json` (the image's copy of `notification-hooks.json`), so every session — interactive, joined, branched, ralph — gets it, in the base image and in every child image built `FROM claude-sandbox`.
+
+Claude Code merges hook entries across settings levels, so these run **alongside** any hooks in your own `~/.claude/settings.json`; they do not replace them. That also means your host hooks now run inside every sandbox session: a hook that calls a binary or path that exists only on the host will fail there, so guard it (for example `command -v tool >/dev/null || exit 0`) or test for `$CLAUDE_SANDBOX_VERSION`, which is set only inside the sandbox. `/status` names the managed source in its "Setting sources" line ([settings docs](https://code.claude.com/docs/en/settings#check-what-your-organization-enforces)), and a user-level `disableAllHooks` does not turn managed hooks off ([hooks docs](https://code.claude.com/docs/en/hooks#disable-or-remove-hooks)). A child image can add its own `/etc/claude-code/managed-settings.json` or another drop-in without removing them.
+
+Managed settings files are skipped when a higher-ranked managed source applies — server-managed settings from a Team/Enterprise claude.ai organization — so on such an account the sandbox hooks do not run.
+
 ### `.claude-sandbox/config.yaml`
 
 Container configuration. `claude-sandbox init` seeds it from `scaffold/config.yaml` (the starter template in this repo). Parsing and cascade merging are built into the launcher — no external tools (like `yq`) required.
@@ -901,7 +909,7 @@ claude-sandbox completion powershell | Out-String | Invoke-Expression
 
 The container only has access to:
 - The project directory (read/write)
-- `~/.claude/` — auth tokens, project memories, sessions (read/write); `settings.json` is shadowed read-only with notification hooks merged in
+- `~/.claude/` — auth tokens, project memories, sessions, `settings.json` (read/write). `settings.json` is the host file itself, not a copy: plugin installs and enable/disable, `/model`, `/effort` and user-scope permission rules made in a sandbox persist to the host and to the next sandbox. That includes `hooks` and permission `allow` rules, which then also run in your host sessions, outside the sandbox. If `settings.json` is a symlink (for example into a dotfiles repo), its resolved target is also bind-mounted **read-write** at its own path, so the link resolves inside the container and writes land in the target; a dangling link prints one warning and the sandbox runs without user settings. The sandbox notification hooks come from managed settings baked into the image, not from this file (see [Notification hooks](#notification-hooks))
 - `~/.claude.json` — global state, OAuth account (read/write)
 - `~/.mcp.json` — user-scope MCP server config (read-only)
 - `~/.gitconfig` — git identity (read-only, opt-in via `--git`)
@@ -963,7 +971,7 @@ Four images take part in a launch, and the container runs the last of them:
 
 | Image | Built from | Rebuilds when |
 |---|---|---|
-| `claude-sandbox` | `Dockerfile` — OS, toolchains, Docker CLI, Python venv, sandbox binary. **No Claude Code.** | `Dockerfile` or a baked source (`cmd/`, `internal/`, `go.mod`/`go.sum`, `assets.go`, `logstream/`, `entrypoint.sh`, `PROMPT_RALPH.md`, `mcp/`; `_test.go` files excluded) is newer than the image |
+| `claude-sandbox` | `Dockerfile` — OS, toolchains, Docker CLI, Python venv, sandbox binary. **No Claude Code.** | `Dockerfile` or a baked source (`cmd/`, `internal/`, `go.mod`/`go.sum`, `assets.go`, `logstream/`, `entrypoint.sh`, `PROMPT_RALPH.md`, `mcp/`, `notification-hooks.json`; `_test.go` files excluded) is newer than the image |
 | `claude-sandbox-cli` | `Dockerfile.cli` — installs Claude Code, pinned to a version | `Dockerfile.cli` is newer, or you accept a Claude Code update |
 | `claude-sandbox-df-…` | your child `.claude-sandbox/Dockerfile`, `FROM claude-sandbox` | the child Dockerfile is newer, or the base was rebuilt |
 | `<base-or-child>:run` | a generated one-layer "cap": `FROM <base-or-child>` + `COPY --link` of the CLI from `claude-sandbox-cli` | either parent is newer than the cap |
@@ -1141,7 +1149,7 @@ mcp/
 Dockerfile                          Base image: Debian + build-essential, Docker CLI/compose/buildx, Node.js 22 (no Claude Code)
 Dockerfile.cli                      Claude Code CLI image, pinned to a version; copied onto the base/child by the run cap
 entrypoint.sh                       Remaps container user UID/GID to match the host; grants Docker socket access
-notification-hooks.json             Hook fragment merged into container's settings.json
+notification-hooks.json             Notification hooks, baked into the base image as a managed-settings drop-in
 mcp-servers.json                    MCP server fragment merged into container's .mcp.json
 ```
 

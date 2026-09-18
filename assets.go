@@ -26,12 +26,6 @@ var ScaffoldRalph embed.FS
 //go:embed container-context.md
 var ContainerContext []byte
 
-// NotificationHooks is the settings.json fragment merged over the host
-// settings and shadowed in the container.
-//
-//go:embed notification-hooks.json
-var NotificationHooks []byte
-
 // MCPServers is the .mcp.json fragment merged into the host file and shadowed
 // in the container.
 //

@@ -106,6 +106,8 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     # forge host-trusted direnv allow records.
 
   # ---- shadow injections (host files never modified) ----
+  # settings.json is the exception: it is NOT shadowed (CS-LNCH-011) and is
+  # written by sandbox sessions like any host session would write it.
 
   Scenario: CS-LNCH-010 CLAUDE.md shadow merges host memory with container context
     Given the host config dir contains CLAUDE.md
@@ -115,13 +117,76 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     Then the temp file contains container-context.md alone
 
   @changed
-  Scenario: CS-LNCH-011 settings.json shadow merges notification hooks natively
-    # bash: throwaway `docker run node` merge. Go: native JSON merge, same result.
-    Given the host settings.json exists and a notification-hooks fragment is embedded
-    Then a temp merge with the fragment's top-level keys overriding the host's
-      is mounted (read-write path shadow) over $CONFIG_DIR/settings.json
-    Given no host settings.json exists
-    Then the fragment alone is mounted
+  Scenario: CS-LNCH-011 settings.json is not shadowed; the host file is live
+    # Earlier behavior: a per-launch temp copy of the host settings.json with
+    # notification-hooks.json merged over its top-level keys was bind-mounted
+    # over $CONFIG_DIR/settings.json. Every user-scope write a session made —
+    # /plugin install (enabledPlugins), marketplace add, /model, /effort,
+    # permission rules — landed in the temp copy and was lost with the
+    # container, and the top-level merge replaced the host's "hooks" object
+    # wholesale. The hooks now ship as managed settings (CS-LNCH-068).
+    Given the host settings.json exists
+    Then no volume targets $CONFIG_DIR/settings.json
+      and no settings.json temp file is written
+    And the file reaches the container through the config-dir bind (CS-LNCH-008),
+      read-write, so a sandbox session's user-scope writes persist on the host
+    And the drift fingerprint carries no settings.json digest — the file is
+      live, so a host edit is seen by running containers and is not drift
+
+  @new
+  Scenario: CS-LNCH-068 Notification hooks ship as managed settings in the base image
+    # Claude Code reads file-based managed settings on Linux from
+    # /etc/claude-code/managed-settings.json plus every *.json under
+    # /etc/claude-code/managed-settings.d/ (code.claude.com/docs/en/managed-settings).
+    # A drop-in, not managed-settings.json itself, so a child Dockerfile can
+    # ship its own managed-settings.json without deleting these hooks.
+    # Hook entries MERGE across settings levels rather than replacing each
+    # other (code.claude.com/docs/en/hooks), so the host's own hooks in
+    # settings.json run alongside these; verified against Claude Code 2.1.277.
+    Then the base Dockerfile copies notification-hooks.json to
+      /etc/claude-code/managed-settings.d/10-claude-sandbox.json, mode 0644
+    And /etc/claude-code and managed-settings.d are created 0755 by a step of
+      their own before that COPY, and the COPY does not use --link
+    # COPY --link --chmod=644 applies the mode to the parent directories it
+    # creates too, leaving them 0644 — untraversable by the non-root session
+    # user. Claude Code then cannot read the policy, and per the managed-settings
+    # docs, with no other admin source a claude.ai-authenticated session exits
+    # at startup. Caught by the
+    # image smoke build, not by a unit test.
+    And notification-hooks.json is a JSON object whose only key is "hooks"
+    And notification-hooks.json is a baked source (CS-IMG-004), so editing it
+      rebuilds the base image
+    And every image FROM claude-sandbox — child and cap — inherits the file,
+      so interactive, joined, branched and ralph sessions all get the hooks
+      with no per-launch file and no claude argv
+
+  @new
+  Scenario: CS-LNCH-069 A symlinked settings.json keeps working: its target is mounted at its own path
+    # The removed shadow read the host file with os.ReadFile, which follows
+    # links, so a settings.json symlinked into a dotfiles repo reached the
+    # sandbox. The config-dir bind carries the LINK, and a link pointing
+    # outside every mount is dangling in the container — Claude Code logs it at
+    # debug level only and runs with no user settings: no hooks, permission
+    # rules or enabled plugins.
+    Given $CONFIG_DIR/settings.json is a symlink
+    When its fully resolved target (filepath.EvalSymlinks: relative links and
+      chains resolved) is not under any existing same-path mount
+    Then the target file is bind-mounted read-write at its own host path
+      ("<target>:<target>"), so the link resolves identically in the container
+      and sandbox writes land in the target, as on the host
+    And the mount is added after the cascade mounts (CS-LNCH-021), so a
+      target a same-path cascade mount already covers adds nothing
+    When the resolved target is already under a same-path mount — the config
+      dir itself, the project, or a same-path cascade mount
+    Then no mount is added
+    When the link is dangling
+    Then exactly one warning names the link and says the sandbox runs without
+      user settings, and no mount is added
+    When settings.json is a regular file or absent
+    Then nothing is added and nothing is printed
+    And the extra mount is part of the drift fingerprint through the
+      normalized mount set, like every other volume: a container started
+      without it cannot see the user settings, and attach cannot add a mount
 
   Scenario: CS-LNCH-012 .claude.json sibling mounted read-write when present
     Given $CONFIG_PARENT/.claude.json exists
