@@ -179,7 +179,7 @@ JIRA_API_TOKEN="ATATT…"   # WRONG — quotes become part of the token
 JIRA_API_TOKEN=ATATT…     # right
 ```
 
-The launcher lints every env file in the cascade at startup and warns for values wrapped in matching quotes and for CRLF carriage returns. It is **warn-only** — it never rewrites the file, so literal quotes stay possible when genuinely wanted. If a value looks right but fails, also check the file's line endings (`file .claude-sandbox/env`).
+The launcher lints every env file in the cascade at startup and warns for values wrapped in matching quotes. It is **warn-only** — it never rewrites the file, so literal quotes stay possible when genuinely wanted. CRLF line endings are harmless: docker drops the trailing carriage return from each line, so they are not a cause of a failing value.
 
 ### A sibling sandbox is missing from `/peers`
 

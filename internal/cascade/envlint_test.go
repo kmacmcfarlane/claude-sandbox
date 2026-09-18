@@ -103,6 +103,29 @@ var _ = Describe("env file linting", func() {
 		Entry("'\\r\\r': the second '\\r' stays on the value", "KEY=\"x\"\r\r\n"),
 	)
 
+	It("CS-CASC-016: the reader drops exactly one trailing '\\r' per line, as docker does", func() {
+		// Docker 29.8.0: CR=x\r\n is the one-byte value x; RR=y\r\r\n keeps
+		// one '\r'; a bare KEY\r is key KEY.
+		as, err := cascade.ReadEnvAssignments(writeEnv(tmp, "CR=x\r\nRR=y\r\r\nB\r\nBB\r\r\nLAST=z\r"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(as).To(HaveLen(5))
+		type kv struct {
+			Key, Value string
+			HasValue   bool
+		}
+		var got []kv
+		for _, a := range as {
+			got = append(got, kv{a.Key, a.Value, a.HasValue})
+		}
+		Expect(got).To(Equal([]kv{
+			{"CR", "x", true},
+			{"RR", "y\r", true},
+			{"B", "", false},
+			{"BB\r", "", false},
+			{"LAST", "z", true},
+		}))
+	})
+
 	It("CS-CASC-017: a quoted value in a CRLF file still gets the quote warning", func() {
 		// docker strips the '\r' but not the quotes.
 		f := writeEnv(tmp, "A=1\r\nKEY=\"secret\"\r\n")
