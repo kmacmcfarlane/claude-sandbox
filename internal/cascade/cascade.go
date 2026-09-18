@@ -104,7 +104,7 @@ type Config struct {
 	Worktree *bool `yaml:"worktree" json:"-"`
 	// SharedPeerRegistry bridges Claude Code's peer registry and messaging
 	// sockets across containers whose CLAUDE_CONFIG_DIR differs
-	// (CS-LNCH-049..053). Opt-in, default off: the config-dir split is
+	// (CS-LNCH-049..055). Opt-in, default off: the config-dir split is
 	// usually a deliberate work/personal boundary. A pointer, because
 	// resolution is tri-state (CS-LNCH-052) — a falsy
 	// CLAUDE_SANDBOX_SHARED_PEER_REGISTRY must be able to turn an upstream

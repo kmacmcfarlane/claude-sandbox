@@ -44,11 +44,15 @@ one-time setup (idempotent). Use `setup-lsp-plugins --check` to verify status.
   Discovery reaches only sandboxes that share this session's config directory:
   the registry and the socket root both live under `CLAUDE_CONFIG_DIR`, so a
   tree exporting its own does not appear. The `sharedPeerRegistry: true`
-  config key (off by default) bridges that — it mounts one shared host
-  directory over both paths in every opted-in container, and the launcher
-  prints a `Peer registry: shared (…)` line when it is on. That bridge
-  REPLACES the per-tree registry rather than adding to it, so a bridged
-  session sees only the other sessions launched with the key on.
+  config key (off by default) bridges that: every opted-in container mounts
+  one shared folder, `~/.cache/claude-sandbox/peers`, at the same path, uses
+  its `sessions/` as the registry and has `XDG_RUNTIME_DIR` pointed at it, so
+  every session's advertised socket address (`…/peers/cc-socks/<pid>.sock`)
+  is valid in every bridged container. Scratchpads stay under
+  `CLAUDE_CODE_TMPDIR` and do not move. The launcher prints a
+  `Peer registry: shared (…)` line when it is on. That bridge REPLACES the
+  per-tree registry rather than adding to it, so a bridged session sees only
+  the other sessions launched (or relaunched) with the key on.
 - **You may be inside a worktree.** Ralph runs by default, and interactive
   sessions launched with `--worktree` (or config `worktree: true`), start
   `claude` with `--worktree <name>`, so your working directory is

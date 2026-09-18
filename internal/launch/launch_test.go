@@ -442,7 +442,7 @@ var _ = Describe("launch.Build", func() {
 		})
 	})
 
-	Describe("shared peer registry (CS-LNCH-049..053)", func() {
+	Describe("shared peer registry (CS-LNCH-049..055)", func() {
 		var root, cfgDir string
 		BeforeEach(func() {
 			root = filepath.Join(home, ".cache", "claude-sandbox", "peers")
@@ -453,6 +453,33 @@ var _ = Describe("launch.Build", func() {
 			t := true
 			in.Cfg = &cascade.Config{SharedPeerRegistry: &t}
 		}
+		// envValues returns every value docker run receives for key via -e.
+		envValues := func(p *launch.Plan, key string) []string {
+			var vals []string
+			for _, e := range argPairs(p.DockerArgs(proj), "-e") {
+				if k, v, ok := strings.Cut(e, "="); ok && k == key {
+					vals = append(vals, v)
+				}
+			}
+			return vals
+		}
+		// peerEntries is every -v / -e entry the bridge contributes.
+		peerEntries := func(p *launch.Plan) []string {
+			var got []string
+			args := p.DockerArgs(proj)
+			for _, v := range argPairs(args, "-v") {
+				if strings.Contains(v, filepath.Join("claude-sandbox", "peers")) {
+					got = append(got, "-v "+v)
+				}
+			}
+			for _, e := range argPairs(args, "-e") {
+				if strings.HasPrefix(e, "XDG_RUNTIME_DIR=") {
+					got = append(got, "-e "+e)
+				}
+			}
+			return got
+		}
+		rootMount := func() string { return root + ":" + root }
 
 		It("CS-LNCH-049: adds nothing when the key is unset, and an explicit false is byte-identical", func() {
 			before := build().DockerArgs(proj)
@@ -461,18 +488,49 @@ var _ = Describe("launch.Build", func() {
 			Expect(build().DockerArgs(proj)).To(Equal(before))
 			for _, v := range before {
 				Expect(v).NotTo(ContainSubstring("claude-sandbox/peers"))
+				Expect(v).NotTo(ContainSubstring("XDG_RUNTIME_DIR"))
 			}
-			Expect(root).NotTo(BeADirectory())
+			Expect(filepath.Join(home, ".cache", "claude-sandbox")).NotTo(BeADirectory())
 		})
 
-		It("CS-LNCH-050: mounts the shared registry and socket root read-write", func() {
+		It("CS-LNCH-049: with the key on, the argv is the key-off argv plus exactly the bridge entries", func() {
+			off := build().DockerArgs(proj)
+			enable()
+			on := build().DockerArgs(proj)
+			// Remove the three bridge pairs; what remains must be the off argv.
+			var rest []string
+			for i := 0; i < len(on); i++ {
+				if i+1 < len(on) && (on[i] == "-v" || on[i] == "-e") &&
+					(strings.Contains(on[i+1], filepath.Join("claude-sandbox", "peers")) ||
+						strings.HasPrefix(on[i+1], "XDG_RUNTIME_DIR=")) {
+					i++
+					continue
+				}
+				rest = append(rest, on[i])
+			}
+			// The fingerprint label moves with the key by design (CS-LNCH-052).
+			mask := func(args []string) []string {
+				out := make([]string, len(args))
+				for i, a := range args {
+					if strings.HasPrefix(a, "claude-sandbox.confighash=") {
+						a = "claude-sandbox.confighash=<masked>"
+					}
+					out[i] = a
+				}
+				return out
+			}
+			Expect(mask(rest)).To(Equal(mask(off)))
+		})
+
+		It("CS-LNCH-050: mounts the registry, the same-path peers root and sets XDG_RUNTIME_DIR to it", func() {
 			enable()
 			p := build()
 			Expect(p.Volumes).To(ContainElement(
 				filepath.Join(root, "sessions") + ":" + filepath.Join(cfgDir, "sessions")))
-			Expect(p.Volumes).To(ContainElement(
-				filepath.Join(root, "cc-socks") + ":" + filepath.Join(cfgDir, "tmp", "cc-socks")))
-			// EROFS on connect() would break messaging: neither may be :ro.
+			Expect(p.Volumes).To(ContainElement(rootMount()))
+			Expect(envValues(p, "XDG_RUNTIME_DIR")).To(Equal([]string{root}))
+			// Every session bind()s its socket and writes its record: neither
+			// mount may be :ro (bind() under a read-only bind is EROFS).
 			for _, v := range p.Volumes {
 				if strings.Contains(v, filepath.Join("claude-sandbox", "peers")) {
 					Expect(v).NotTo(HaveSuffix(":ro"))
@@ -480,96 +538,98 @@ var _ = Describe("launch.Build", func() {
 			}
 		})
 
-		It("CS-LNCH-050: the host side is the same directory under any CLAUDE_CONFIG_DIR", func() {
-			enable()
-			alt := filepath.Join(home, "alt-cfg")
-			mkdir(alt)
-			env["CLAUDE_CONFIG_DIR"] = alt
-			p := build()
-			Expect(p.Volumes).To(ContainElement(
-				filepath.Join(root, "sessions") + ":" + filepath.Join(alt, "sessions")))
-			Expect(p.Volumes).To(ContainElement(
-				filepath.Join(root, "cc-socks") + ":" + filepath.Join(alt, "tmp", "cc-socks")))
-		})
-
-		It("CS-LNCH-050: follows a host-env CLAUDE_CODE_TMPDIR for the socket root", func() {
+		It("CS-LNCH-050: mounts nothing over a cc-socks under the config dir or CLAUDE_CODE_TMPDIR", func() {
 			enable()
 			env["CLAUDE_CODE_TMPDIR"] = filepath.Join(proj, "scratch")
 			p := build()
-			Expect(p.Volumes).To(ContainElement(
-				filepath.Join(root, "cc-socks") + ":" + filepath.Join(proj, "scratch", "cc-socks")))
+			for _, v := range p.Volumes {
+				parts := strings.Split(v, ":")
+				Expect(parts[1]).NotTo(HaveSuffix("cc-socks"), v)
+			}
+			Expect(filepath.Join(cfgDir, "tmp", "cc-socks")).NotTo(BeADirectory())
+			Expect(filepath.Join(proj, "scratch", "cc-socks")).NotTo(BeADirectory())
 		})
 
-		It("CS-LNCH-050: bridges the registry only, with a warning, when the socket root is unknown", func() {
+		It("CS-LNCH-050: the socket address is IDENTICAL under the default and any other CLAUDE_CONFIG_DIR", func() {
 			enable()
+			def := build()
+			alt := filepath.Join(home, "work", "other-tree", ".claude")
+			mkdir(alt)
+			env["CLAUDE_CONFIG_DIR"] = alt
+			other := build()
+
+			Expect(envValues(other, "XDG_RUNTIME_DIR")).To(Equal(envValues(def, "XDG_RUNTIME_DIR")))
+			Expect(envValues(def, "XDG_RUNTIME_DIR")).To(Equal([]string{root}))
+			Expect(def.Volumes).To(ContainElement(rootMount()))
+			Expect(other.Volumes).To(ContainElement(rootMount()))
+			// Only the registry DESTINATION follows the config dir.
+			Expect(other.Volumes).To(ContainElement(
+				filepath.Join(root, "sessions") + ":" + filepath.Join(alt, "sessions")))
+			Expect(def.Volumes).To(ContainElement(
+				filepath.Join(root, "sessions") + ":" + filepath.Join(cfgDir, "sessions")))
+		})
+
+		It("CS-LNCH-050: CLAUDE_CODE_TMPDIR is unchanged by the bridge, so scratchpads do not move", func() {
+			alt := filepath.Join(home, "alt-cfg")
+			mkdir(alt)
 			ef := filepath.Join(proj, "env")
 			touch(ef, "CLAUDE_CODE_TMPDIR=/somewhere/else\n")
-			in.EnvFiles = []string{ef}
-			p := build()
-			Expect(p.Volumes).To(ContainElement(
-				filepath.Join(root, "sessions") + ":" + filepath.Join(cfgDir, "sessions")))
-			for _, v := range p.Volumes {
-				Expect(v).NotTo(ContainSubstring("cc-socks"))
+			cases := []func(){
+				func() {},
+				func() { env["CLAUDE_CONFIG_DIR"] = alt },
+				func() { env["CLAUDE_CODE_TMPDIR"] = filepath.Join(proj, "scratch") },
+				func() { in.EnvFiles = []string{ef} },
+				func() { Expect(os.RemoveAll(cfgDir)).To(Succeed()) },
 			}
-			Expect(out.String()).To(ContainSubstring("sharedPeerRegistry"))
+			for i, setup := range cases {
+				delete(env, "CLAUDE_CONFIG_DIR")
+				delete(env, "CLAUDE_CODE_TMPDIR")
+				in.EnvFiles = nil
+				mkdir(cfgDir)
+				setup()
+				in.Cfg = nil
+				off := envValues(build(), "CLAUDE_CODE_TMPDIR")
+				enable()
+				Expect(envValues(build(), "CLAUDE_CODE_TMPDIR")).To(Equal(off), fmt.Sprintf("case %d", i))
+			}
 		})
 
-		It("CS-LNCH-051: creates both host directories before docker run, under the fixed root", func() {
+		It("CS-LNCH-051: creates peers/, sessions/ and cc-socks/ 0700 under the fixed root before docker run", func() {
 			enable()
 			Expect(root).NotTo(BeADirectory())
 			build()
-			Expect(filepath.Join(root, "sessions")).To(BeADirectory())
-			Expect(filepath.Join(root, "cc-socks")).To(BeADirectory())
+			for _, d := range []string{root, filepath.Join(root, "sessions"), filepath.Join(root, "cc-socks")} {
+				fi, err := os.Stat(d)
+				Expect(err).NotTo(HaveOccurred(), d)
+				Expect(fi.IsDir()).To(BeTrue(), d)
+				Expect(fi.Mode().Perm()).To(Equal(os.FileMode(0o700)), d)
+			}
 			Expect(launch.PeerRegistryRoot).To(Equal(".cache/claude-sandbox/peers"))
 			// One root for every fixed host-side mount, so they cannot drift.
 			Expect(launch.PeerRegistryRoot).To(HavePrefix(launch.PackageCacheRoot + "/"))
 		})
 
-		It("CS-LNCH-051: creates the mount DESTINATIONS too, so docker never makes them as root", func() {
+		It("CS-LNCH-051: creates the registry DESTINATION 0700, so docker never makes it as root", func() {
 			enable()
-			Expect(filepath.Join(cfgDir, "sessions")).NotTo(BeADirectory())
-			Expect(filepath.Join(cfgDir, "tmp", "cc-socks")).NotTo(BeADirectory())
+			dst := filepath.Join(cfgDir, "sessions")
+			Expect(dst).NotTo(BeADirectory())
 			build()
-			Expect(filepath.Join(cfgDir, "sessions")).To(BeADirectory())
-			Expect(filepath.Join(cfgDir, "tmp", "cc-socks")).To(BeADirectory())
-		})
-
-		It("CS-LNCH-051: creates all four directories 0700", func() {
-			enable()
-			build()
-			for _, d := range []string{
-				filepath.Join(root, "sessions"), filepath.Join(root, "cc-socks"),
-				filepath.Join(cfgDir, "sessions"), filepath.Join(cfgDir, "tmp", "cc-socks"),
-			} {
-				fi, err := os.Stat(d)
-				Expect(err).NotTo(HaveOccurred())
-				Expect(fi.Mode().Perm()).To(Equal(os.FileMode(0o700)), d)
-			}
-		})
-
-		It("CS-LNCH-051: leaves a container-only socket root to docker and still launches", func() {
-			enable()
-			env["CLAUDE_CODE_TMPDIR"] = "/var/tmp/container-only"
-			p, err := launch.Build(in)
+			fi, err := os.Stat(dst)
 			Expect(err).NotTo(HaveOccurred())
-			Expect("/var/tmp/container-only").NotTo(BeADirectory())
-			Expect(p.Volumes).To(ContainElement(
-				filepath.Join(root, "cc-socks") + ":/var/tmp/container-only/cc-socks"))
+			Expect(fi.Mode().Perm()).To(Equal(os.FileMode(0o700)))
 		})
 
-		It("CS-LNCH-051: creates no destination under a mount whose host and container differ", func() {
+		It("CS-LNCH-051: creates no registry destination under a mount whose host and container differ", func() {
 			enable()
 			hostSide := filepath.Join(home, "srv-data")
 			in.Cfg.Mounts = []cascade.Mount{{Host: hostSide, Container: "/data", Writable: true}}
-			env["CLAUDE_CODE_TMPDIR"] = "/data/tmp"
+			env["CLAUDE_CONFIG_DIR"] = "/data/cfg"
 			p, err := launch.Build(in)
 			Expect(err).NotTo(HaveOccurred())
-			// /data is a container path; nothing may be created under it, or
-			// under the host side it maps to, on the host.
 			Expect("/data").NotTo(BeADirectory())
-			Expect(filepath.Join(hostSide, "tmp")).NotTo(BeADirectory())
+			Expect(filepath.Join(hostSide, "cfg")).NotTo(BeADirectory())
 			Expect(p.Volumes).To(ContainElement(
-				filepath.Join(root, "cc-socks") + ":/data/tmp/cc-socks"))
+				filepath.Join(root, "sessions") + ":/data/cfg/sessions"))
 		})
 
 		It("CS-LNCH-051: creates no destination when the config dir is absent and unmounted", func() {
@@ -580,6 +640,8 @@ var _ = Describe("launch.Build", func() {
 			Expect(cfgDir).NotTo(BeADirectory())
 			Expect(p.Volumes).To(ContainElement(
 				filepath.Join(root, "sessions") + ":" + filepath.Join(cfgDir, "sessions")))
+			// Messaging does not depend on the config dir: still bridged.
+			Expect(envValues(p, "XDG_RUNTIME_DIR")).To(Equal([]string{root}))
 		})
 
 		It("CS-LNCH-052: the env var enables it over an unset or false config", func() {
@@ -587,6 +649,7 @@ var _ = Describe("launch.Build", func() {
 			p := build()
 			Expect(p.Volumes).To(ContainElement(
 				filepath.Join(root, "sessions") + ":" + filepath.Join(cfgDir, "sessions")))
+			Expect(envValues(p, "XDG_RUNTIME_DIR")).To(Equal([]string{root}))
 			f := false
 			in.Cfg = &cascade.Config{SharedPeerRegistry: &f}
 			Expect(build().Volumes).To(ContainElement(
@@ -597,9 +660,7 @@ var _ = Describe("launch.Build", func() {
 			enable()
 			for _, v := range []string{"0", "false", "no", "NO"} {
 				env["CLAUDE_SANDBOX_SHARED_PEER_REGISTRY"] = v
-				for _, vol := range build().Volumes {
-					Expect(vol).NotTo(ContainSubstring("claude-sandbox/peers"), v)
-				}
+				Expect(peerEntries(build())).To(BeEmpty(), v)
 			}
 			// Anything else is unset, so the config still wins.
 			env["CLAUDE_SANDBOX_SHARED_PEER_REGISTRY"] = "maybe"
@@ -607,30 +668,75 @@ var _ = Describe("launch.Build", func() {
 				filepath.Join(root, "sessions") + ":" + filepath.Join(cfgDir, "sessions")))
 		})
 
-		It("CS-LNCH-053: prints one banner naming the shared root, only when bridged", func() {
-			Expect(build()).NotTo(BeNil())
-			Expect(out.String()).NotTo(ContainSubstring("Peer registry:"))
-			enable()
-			out.Reset()
-			build()
-			Expect(out.String()).To(ContainSubstring("Peer registry: shared (" + root + ")"))
-			Expect(out.String()).To(ContainSubstring("every other opted-in sandbox on this host, and only those"))
-		})
-
-		It("CS-LNCH-053: prints the banner on the degrade path too, with the warning after it", func() {
-			enable()
-			Expect(os.RemoveAll(cfgDir)).To(Succeed())
-			build()
-			banner := strings.Index(out.String(), "Peer registry: shared (")
-			warn := strings.Index(out.String(), "not bridged")
-			Expect(banner).NotTo(Equal(-1))
-			Expect(warn).To(BeNumerically(">", banner), "the warning qualifies the banner")
-		})
-
 		It("CS-LNCH-052: the fingerprint changes with the key", func() {
 			off := build().ConfigHash
 			enable()
 			Expect(build().ConfigHash).NotTo(Equal(off))
+		})
+
+		It("CS-LNCH-053: prints exactly one banner naming the shared root, only when bridged", func() {
+			Expect(build()).NotTo(BeNil())
+			Expect(out.String()).NotTo(ContainSubstring("Peer registry:"))
+			Expect(out.String()).NotTo(ContainSubstring("sharedPeerRegistry"))
+			enable()
+			out.Reset()
+			build()
+			Expect(strings.Count(out.String(), "Peer registry: shared (")).To(Equal(1))
+			Expect(out.String()).To(ContainSubstring("Peer registry: shared (" + root + ")"))
+			Expect(out.String()).To(ContainSubstring("every other opted-in sandbox on this host, and only those"))
+			Expect(out.String()).NotTo(ContainSubstring("Warning: sharedPeerRegistry"))
+		})
+
+		It("CS-LNCH-054: an env file that sets XDG_RUNTIME_DIR keeps it; the registry is still bridged", func() {
+			enable()
+			ef := filepath.Join(proj, "env")
+			touch(ef, "# comment\nXDG_RUNTIME_DIR=/run/user/1000\n")
+			in.EnvFiles = []string{ef}
+			p := build()
+			Expect(envValues(p, "XDG_RUNTIME_DIR")).To(BeEmpty())
+			Expect(p.Volumes).NotTo(ContainElement(rootMount()))
+			Expect(p.Volumes).To(ContainElement(
+				filepath.Join(root, "sessions") + ":" + filepath.Join(cfgDir, "sessions")))
+			Expect(strings.Count(out.String(), "Peer registry: shared (")).To(Equal(1))
+			Expect(strings.Count(out.String(), "Warning: sharedPeerRegistry")).To(Equal(1))
+			Expect(out.String()).To(ContainSubstring("env file sets XDG_RUNTIME_DIR"))
+			Expect(out.String()).To(ContainSubstring("messaging is not bridged"))
+			// The banner comes first; the warning qualifies it.
+			Expect(strings.Index(out.String(), "Warning: sharedPeerRegistry")).To(
+				BeNumerically(">", strings.Index(out.String(), "Peer registry: shared (")))
+		})
+
+		It("CS-LNCH-055: a socket path over 103 bytes stands messaging down with a warning naming the length", func() {
+			// Pad the home so root + /cc-socks/1234567.sock exceeds 103 bytes.
+			longHome := filepath.Join(home, strings.Repeat("h", 110-len(home)))
+			mkdir(longHome)
+			in.Home = longHome
+			longRoot := filepath.Join(longHome, ".cache", "claude-sandbox", "peers")
+			n := len(longRoot) + len("/cc-socks/1234567.sock")
+			Expect(n).To(BeNumerically(">", 103))
+			enable()
+			p := build()
+			Expect(envValues(p, "XDG_RUNTIME_DIR")).To(BeEmpty())
+			Expect(p.Volumes).NotTo(ContainElement(longRoot + ":" + longRoot))
+			Expect(p.Volumes).To(ContainElement(
+				filepath.Join(longRoot, "sessions") + ":" + filepath.Join(longHome, ".claude", "sessions")))
+			Expect(strings.Count(out.String(), "Warning: sharedPeerRegistry")).To(Equal(1))
+			Expect(out.String()).To(ContainSubstring(fmt.Sprintf("would be %d bytes", n)))
+			Expect(out.String()).To(ContainSubstring("messaging is not bridged"))
+		})
+
+		It("CS-LNCH-055: a path of exactly 103 bytes is still bridged", func() {
+			// root = home + /.cache/claude-sandbox/peers (28); suffix 22.
+			pad := 103 - 22 - 28 - len(home) - 1
+			Expect(pad).To(BeNumerically(">", 0))
+			edge := filepath.Join(home, strings.Repeat("e", pad))
+			mkdir(edge)
+			in.Home = edge
+			edgeRoot := filepath.Join(edge, ".cache", "claude-sandbox", "peers")
+			Expect(len(edgeRoot) + len("/cc-socks/1234567.sock")).To(Equal(103))
+			enable()
+			Expect(envValues(build(), "XDG_RUNTIME_DIR")).To(Equal([]string{edgeRoot}))
+			Expect(out.String()).NotTo(ContainSubstring("Warning: sharedPeerRegistry"))
 		})
 	})
 
