@@ -103,8 +103,8 @@ func Version(r execx.Runner, repoRoot string) string {
 // EnsureBase builds the base image when missing or stale.
 // Returns whether a build happened.
 func EnsureBase(o Options) (rebuilt bool, err error) {
-	fp := baseInputs(o.RepoRoot)
-	if fp == "" {
+	fp, unreadable := baseInputs(o.RepoRoot)
+	if unreadable {
 		fmt.Fprintln(o.Err, "WARNING: could not fingerprint the base image inputs (an unreadable file under the baked sources?);")
 		fmt.Fprintln(o.Err, "  falling back to comparing mtimes with the image creation time (CS-IMG-035).")
 	}
@@ -867,11 +867,13 @@ func (f fingerprint) addSource(name, path string) bool {
 }
 
 // baseInputs fingerprints the repo Dockerfile and the baked source set, with
-// the same _test.go exclusion as the time-based rule (CS-IMG-034).
-func baseInputs(repoRoot string) string {
+// the same _test.go exclusion as the time-based rule (CS-IMG-034). unreadable
+// reports a baked source that exists but could not be read — the case worth a
+// warning; a missing Dockerfile needs none, the build itself will say so.
+func baseInputs(repoRoot string) (fp string, unreadable bool) {
 	f, sum := newFingerprint("base")
 	if !f.addFile("Dockerfile", filepath.Join(repoRoot, "Dockerfile")) {
-		return ""
+		return "", false
 	}
 	for _, rel := range BakedSources {
 		p := filepath.Join(repoRoot, rel)
@@ -883,7 +885,7 @@ func baseInputs(repoRoot string) string {
 		}
 		if !fi.IsDir() {
 			if !f.addSource(rel, p) {
-				return ""
+				return "", true
 			}
 			continue
 		}
@@ -909,10 +911,10 @@ func baseInputs(repoRoot string) string {
 			return nil
 		})
 		if !ok {
-			return ""
+			return "", true
 		}
 	}
-	return sum()
+	return sum(), false
 }
 
 // cliInputs fingerprints Dockerfile.cli. The Claude Code pin is deliberately
