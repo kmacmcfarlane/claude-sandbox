@@ -49,8 +49,9 @@ type Env struct {
 	// means time.Now.
 	Now func() time.Time
 	// TempRoot is where shadow directories are made and swept
-	// (CS-LNCH-080..084); "" means os.TempDir(). Tests point it at a scratch
-	// directory so a test launch never sweeps the real temp root.
+	// (CS-LNCH-080..084); "" means os.TempDir(). Tests must point it at a
+	// scratch directory: under go test the launch panics on the real temp
+	// root rather than sweep it (launch.shadowRoot).
 	TempRoot string
 }
 

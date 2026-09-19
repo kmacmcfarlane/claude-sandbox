@@ -171,3 +171,16 @@ var _ = Describe("shadow directory lifecycle (CS-LNCH-080..084)", func() {
 		Expect(dirNames(f.tmp)).To(BeEmpty())
 	})
 })
+
+// A future fixture that forgets Env.TempRoot must fail loudly, never sweep the
+// real temp root against a faked, empty docker ps (CS-LNCH-082).
+var _ = Describe("test guard: an Env without TempRoot (CS-LNCH-082)", func() {
+	It("CS-LNCH-082: a launch with an empty Env.TempRoot panics before sweeping or making anything", func() {
+		f := newCLIFixture()
+		f.env.TempRoot = ""
+		Expect(func() { f.run() }).To(PanicWith(ContainSubstring("set Env.TempRoot")))
+		for _, l := range f.fake.CommandLines() {
+			Expect(l).NotTo(HavePrefix(sweepPS))
+		}
+	})
+})

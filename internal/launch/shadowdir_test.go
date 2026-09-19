@@ -237,3 +237,37 @@ var _ = Describe("shadow directory lifecycle (CS-LNCH-080..082)", func() {
 		Expect(fake.CommandLines()).To(BeEmpty())
 	})
 })
+
+// Not a production behaviour: under go test the real temp root is refused
+// outright, so a fixture that forgets its scratch root fails loudly instead of
+// sweeping the shadow directories of live sessions on the test machine.
+var _ = Describe("test guard: the real temp root is refused under go test (CS-LNCH-082)", func() {
+	const guard = "real temp root"
+
+	It("CS-LNCH-082: NewShadowDir with the default root panics and makes nothing", func() {
+		Expect(func() { _, _ = launch.NewShadowDir("") }).To(PanicWith(ContainSubstring(guard)))
+		Expect(func() { _, _ = launch.NewShadowDir(os.TempDir()) }).To(PanicWith(ContainSubstring(guard)))
+	})
+
+	It("CS-LNCH-082: PruneShadowDirs with the default root, however spelled, panics before listing anything", func() {
+		fake := &execx.Fake{}
+		for _, root := range []string{"", os.TempDir(), os.TempDir() + "/", filepath.Join(os.TempDir(), ".")} {
+			Expect(func() {
+				_, _ = launch.PruneShadowDirs(fake, root, os.Getuid(), time.Now(), launch.ShadowDirMinAge, "")
+			}).To(PanicWith(ContainSubstring(guard)), "root %q", root)
+		}
+		Expect(fake.CommandLines()).To(BeEmpty())
+	})
+
+	It("CS-LNCH-082: a symlink to the real temp root is refused too", func() {
+		link := filepath.Join(GinkgoT().TempDir(), "tmp-link")
+		Expect(os.Symlink(os.TempDir(), link)).To(Succeed())
+		Expect(func() { _, _ = launch.NewShadowDir(link) }).To(PanicWith(ContainSubstring(guard)))
+	})
+
+	It("CS-LNCH-082: a scratch root under the temp root is allowed", func() {
+		d, err := launch.NewShadowDir(GinkgoT().TempDir())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(d).To(BeADirectory())
+	})
+})

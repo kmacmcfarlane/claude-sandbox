@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"strings"
 	"syscall"
+	"testing"
 	"time"
 
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
@@ -45,7 +46,37 @@ var shadowDirName = regexp.MustCompile(`^` + regexp.QuoteMeta(ShadowDirPrefix) +
 
 // NewShadowDir makes a fresh shadow directory under root ("" = os.TempDir()).
 func NewShadowDir(root string) (string, error) {
-	return os.MkdirTemp(root, ShadowDirPrefix)
+	return os.MkdirTemp(shadowRoot(root), ShadowDirPrefix)
+}
+
+// shadowRoot resolves the temp root shadow directories are made in and swept
+// from ("" = os.TempDir()). Under go test it refuses the real temp root with a
+// panic, which fails the test: a test that forgets to point Env.TempRoot (or
+// Inputs.TempDir) at a scratch directory would otherwise sweep the real temp
+// root against a faked, empty docker ps — deleting the shadow directories of
+// live sessions on the machine running the tests. A fixture mistake must fail
+// loudly, not quietly delete. Outside go test this is exactly the old default.
+func shadowRoot(root string) string {
+	if root == "" {
+		root = os.TempDir()
+	}
+	if testing.Testing() && isSystemTempDir(root) {
+		panic(fmt.Sprintf("launch: a test made or swept shadow directories in the real temp root %s; "+
+			"set Env.TempRoot (or Inputs.TempDir) to a scratch directory such as GinkgoT().TempDir()", root))
+	}
+	return root
+}
+
+// isSystemTempDir reports whether dir is os.TempDir(), however it is spelled
+// (a trailing slash, a symlink).
+func isSystemTempDir(dir string) bool {
+	sys := os.TempDir()
+	if filepath.Clean(dir) == filepath.Clean(sys) {
+		return true
+	}
+	a, errA := os.Stat(dir)
+	b, errB := os.Stat(sys)
+	return errA == nil && errB == nil && os.SameFile(a, b)
 }
 
 // PruneShadowDirs removes the shadow directories under root that no container
@@ -60,9 +91,7 @@ func NewShadowDir(root string) (string, error) {
 // The docker listing runs only when there is a candidate (CS-LNCH-082). If it
 // fails nothing is removed: without it, "unused" cannot be known.
 func PruneShadowDirs(r execx.Runner, root string, uid int, now time.Time, minAge time.Duration, keep string) ([]string, error) {
-	if root == "" {
-		root = os.TempDir()
-	}
+	root = shadowRoot(root)
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		return nil, fmt.Errorf("reading %s: %w", root, err)
