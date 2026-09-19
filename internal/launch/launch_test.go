@@ -878,6 +878,64 @@ var _ = Describe("launch.Build", func() {
 			Expect(p.ConfigHash).To(Equal(off.ConfigHash))
 		})
 
+		// CS-LNCH-108: the stand-down sees XDG_RUNTIME_DIR the way docker reads
+		// the env file, through the cascade's shared reader.
+		DescribeTable("CS-LNCH-108: an env-file XDG_RUNTIME_DIR docker would set stands the bridge down",
+			func(content string, hostSet bool) {
+				ef := filepath.Join(proj, "env")
+				touch(ef, content)
+				in.EnvFiles = []string{ef}
+				if hostSet {
+					env["XDG_RUNTIME_DIR"] = "/run/user/1000"
+				}
+				off := build()
+				out.Reset()
+				enable()
+				p := build()
+				expectStoodDown(p, root, "an env file sets XDG_RUNTIME_DIR")
+				Expect(p.CreateArgs(proj)).To(Equal(off.CreateArgs(proj)))
+				Expect(p.ConfigHash).To(Equal(off.ConfigHash))
+			},
+			Entry("indented with spaces", "  XDG_RUNTIME_DIR=/run/x\n", false),
+			Entry("indented with a tab", "\tXDG_RUNTIME_DIR=/run/x\n", false),
+			Entry("UTF-8 BOM on the first line", "\xEF\xBB\xBFXDG_RUNTIME_DIR=/run/x\n", false),
+			Entry("CRLF line ending", "# c\r\nXDG_RUNTIME_DIR=/run/x\r\n", false),
+			Entry("bare key, host sets it (docker passes it through)", "XDG_RUNTIME_DIR\n", true),
+			Entry("bare CRLF key, host sets it", "XDG_RUNTIME_DIR\r\n", true),
+		)
+
+		It("CS-LNCH-108: a bare key the host sets to \"\" still stands the bridge down (docker passes it)", func() {
+			ef := filepath.Join(proj, "env")
+			touch(ef, "XDG_RUNTIME_DIR\n")
+			in.EnvFiles = []string{ef}
+			in.LookupEnv = func(k string) (string, bool) {
+				if k == "XDG_RUNTIME_DIR" {
+					return "", true
+				}
+				v, ok := env[k]
+				return v, ok
+			}
+			enable()
+			expectStoodDown(build(), root, "an env file sets XDG_RUNTIME_DIR")
+		})
+
+		DescribeTable("CS-LNCH-108: an env-file line docker would not set XDG_RUNTIME_DIR from leaves the bridge on",
+			func(content string) {
+				ef := filepath.Join(proj, "env")
+				touch(ef, content)
+				in.EnvFiles = []string{ef}
+				enable()
+				p := build()
+				Expect(envValues(p, "XDG_RUNTIME_DIR")).To(Equal([]string{root}))
+				Expect(out.String()).NotTo(ContainSubstring("Warning: sharedPeerRegistry"))
+			},
+			Entry("bare key, host does not set it (docker drops it)", "XDG_RUNTIME_DIR\n"),
+			Entry("commented out, indented", "  # XDG_RUNTIME_DIR=/run/x\n"),
+			Entry("blank before '=' (a key docker rejects)", "XDG_RUNTIME_DIR =/run/x\n"),
+			Entry("different case", "xdg_runtime_dir=/run/x\n"),
+			Entry("bare key ending in \\r\\r (key keeps one \\r)", "XDG_RUNTIME_DIR\r\r\n"),
+		)
+
 		It("CS-LNCH-055: a socket path over 103 bytes stands the whole bridge down with a warning naming the length", func() {
 			// Pad the home so root + /cc-socks/1234567.sock exceeds 103 bytes.
 			longHome := filepath.Join(home, strings.Repeat("h", 110-len(home)))
@@ -1568,6 +1626,44 @@ var _ = Describe("launch.Build", func() {
 			Expect(e).NotTo(HavePrefix("CLAUDE_CODE_TMPDIR="))
 		}
 	})
+
+	DescribeTable("CS-LNCH-108: the CLAUDE_CODE_TMPDIR stand-down reads env files as docker does",
+		func(content string, hostSet, standsDown bool) {
+			cfgDir := filepath.Join(home, ".claude")
+			mkdir(cfgDir)
+			ef := filepath.Join(home, "envfile")
+			touch(ef, content)
+			in.EnvFiles = []string{ef}
+			if hostSet {
+				// Set-but-empty: Getenv reads "", so no host forward (CS-LNCH-034),
+				// yet docker passes the bare key through.
+				in.LookupEnv = func(k string) (string, bool) {
+					if k == "CLAUDE_CODE_TMPDIR" {
+						return "", true
+					}
+					v, ok := env[k]
+					return v, ok
+				}
+			}
+			var got []string
+			for _, e := range build().EnvFlags {
+				if strings.HasPrefix(e, "CLAUDE_CODE_TMPDIR") {
+					got = append(got, e)
+				}
+			}
+			if standsDown {
+				Expect(got).To(BeEmpty())
+			} else {
+				Expect(got).To(Equal([]string{"CLAUDE_CODE_TMPDIR=" + filepath.Join(cfgDir, "tmp")}))
+			}
+		},
+		Entry("indented", "  CLAUDE_CODE_TMPDIR=/somewhere\n", false, true),
+		Entry("BOM-prefixed", "\xEF\xBB\xBFCLAUDE_CODE_TMPDIR=/somewhere\n", false, true),
+		Entry("CRLF", "CLAUDE_CODE_TMPDIR=/somewhere\r\n", false, true),
+		Entry("bare key the host sets", "CLAUDE_CODE_TMPDIR\n", true, true),
+		Entry("bare key the host does not set", "CLAUDE_CODE_TMPDIR\n", false, false),
+		Entry("a key docker rejects", "CLAUDE_CODE_TMPDIR =/somewhere\n", false, false),
+	)
 
 	It("renders env files as stacked --env-file flags in cascade order", func() {
 		in.EnvFiles = []string{"/root/env", "/proj/env"}

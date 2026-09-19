@@ -2,7 +2,8 @@ package cascade
 
 // Env file linting. Spec: spec/config-cascade.feature (CS-CASC-013..020).
 // readEnvAssignments is also the reader behind the override notice
-// (envoverride.go, CS-CASC-021..029).
+// (envoverride.go, CS-CASC-021..029) and EnvFilesDefine, the launcher's
+// "does an env file set this key" check (CS-LNCH-108).
 //
 // `docker run --env-file` performs NO quote stripping and no variable
 // expansion: every character after '=' is part of the value. Most other
@@ -94,8 +95,8 @@ type envAssignment struct {
 // utf8BOM is dropped from the first line, as docker does.
 const utf8BOM = "\xEF\xBB\xBF"
 
-// readEnvAssignments is the single env-file reader shared by the linter and
-// the override notice. It follows docker's --env-file parsing: a UTF-8 BOM
+// readEnvAssignments is the single env-file reader shared by the linter, the
+// override notice and EnvFilesDefine. It follows docker's --env-file parsing: a UTF-8 BOM
 // on the first line is dropped, leading whitespace is trimmed, blank and '#'
 // comment lines are skipped (but still counted), and the key runs to the
 // first '='. Before any of that, exactly ONE trailing '\r' is dropped from
@@ -137,6 +138,40 @@ func readEnvAssignments(path string) ([]envAssignment, error) {
 // and free of blanks (docker fails the whole run otherwise).
 func validEnvKey(key string) bool {
 	return key != "" && !strings.ContainsAny(key, " \t")
+}
+
+// EnvFilesDefine reports whether docker, given files as --env-file flags, would
+// set key in the container (CS-LNCH-108). Files are read by readEnvAssignments,
+// so a BOM, leading whitespace and one trailing '\r' are handled as docker
+// handles them. A bare KEY line counts only when lookup finds KEY in the
+// launcher's environment (nil lookup: never), because docker passes that value
+// through and drops the line otherwise — the override notice's rule
+// (CS-CASC-027/028). Keys docker rejects never match; unreadable files are
+// skipped.
+func EnvFilesDefine(files []string, key string, lookup LookupEnv) bool {
+	if !validEnvKey(key) {
+		return false
+	}
+	for _, f := range files {
+		assigns, err := readEnvAssignments(f)
+		if err != nil {
+			continue
+		}
+		for _, a := range assigns {
+			if a.Key != key {
+				continue
+			}
+			if a.HasValue {
+				return true
+			}
+			if lookup != nil {
+				if _, set := lookup(key); set {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // LintEnvFiles lints every file in the cascade and prints the findings.

@@ -173,11 +173,8 @@ type Plan struct {
 
 // lookupEnv reports whether k is set in the launcher's environment.
 func (in *Inputs) lookupEnv(k string) bool {
-	if in.LookupEnv != nil {
-		_, ok := in.LookupEnv(k)
-		return ok
-	}
-	return in.getenv(k) != ""
+	_, ok := in.lookupEnvValue(k)
+	return ok
 }
 
 func (in *Inputs) getenv(k string) string {
@@ -399,7 +396,7 @@ func Build(in Inputs) (*Plan, error) {
 		if !underAnyMount(p.Volumes, v) {
 			fmt.Fprintf(in.Out, "Warning: CLAUDE_CODE_TMPDIR=%s is not under any container mount; scratchpad files will be lost when the session exits.\n", v)
 		}
-	case envFilesDefine(in.EnvFiles, "CLAUDE_CODE_TMPDIR"):
+	case in.envFilesDefine("CLAUDE_CODE_TMPDIR"):
 		// The env file supplies it; adding -e would override the file.
 	case dirExists(configDir):
 		p.EnvFlags = append(p.EnvFlags, "CLAUDE_CODE_TMPDIR="+filepath.Join(configDir, "tmp"))
@@ -879,7 +876,7 @@ func (in *Inputs) assembleSharedPeerRegistry(p *Plan, configDir string) bool {
 	// XDG_RUNTIME_DIR keeps it — the CLAUDE_CODE_TMPDIR precedent. The
 	// launcher never forwards the host's own XDG_RUNTIME_DIR, so an env file
 	// is the only source that can collide.
-	if envFilesDefine(in.EnvFiles, "XDG_RUNTIME_DIR") {
+	if in.envFilesDefine("XDG_RUNTIME_DIR") {
 		fmt.Fprintln(in.Out, "Warning: sharedPeerRegistry is off for this session: an env file sets XDG_RUNTIME_DIR, and the bridge needs to set it to share message sockets. Without that, bridged peers could not reach this session nor it them.")
 		return false
 	}
@@ -1120,25 +1117,22 @@ func samePathMountOf(volumes []string, path string) (string, bool) {
 	return "", false
 }
 
-// envFilesDefine reports whether any env file assigns the key. Parsed with
-// docker --env-file semantics (KEY=VALUE per line, # comments), matching the
-// envlint reader: no quote stripping, no expansion.
-func envFilesDefine(files []string, key string) bool {
-	for _, f := range files {
-		raw, err := os.ReadFile(f)
-		if err != nil {
-			continue
-		}
-		for _, line := range strings.Split(string(raw), "\n") {
-			if line == "" || strings.HasPrefix(line, "#") {
-				continue
-			}
-			if k, _, ok := strings.Cut(line, "="); ok && k == key {
-				return true
-			}
-		}
+// envFilesDefine reports whether docker would set key from the env files,
+// read by the cascade's shared docker-faithful reader (CS-LNCH-108): a BOM,
+// indentation and a CRLF ending do not hide a key, and a bare KEY line counts
+// when the launcher's own environment sets KEY, since docker passes it through.
+func (in *Inputs) envFilesDefine(key string) bool {
+	return cascade.EnvFilesDefine(in.EnvFiles, key, in.lookupEnvValue)
+}
+
+// lookupEnvValue is the launcher's environment as docker resolves a bare env
+// file key against it: LookupEnv when injected, else Getenv with "" as unset.
+func (in *Inputs) lookupEnvValue(k string) (string, bool) {
+	if in.LookupEnv != nil {
+		return in.LookupEnv(k)
 	}
-	return false
+	v := in.getenv(k)
+	return v, v != ""
 }
 
 func fileExists(p string) bool {

@@ -510,7 +510,8 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     And no flag is set when the config dir does not exist
     And a host-env CLAUDE_CODE_TMPDIR is forwarded verbatim instead,
       with a warning when its path is outside every container mount
-    And no flag is set when an env file in the cascade defines the key
+    And no flag is set when an env file in the cascade defines the key, read as
+      docker reads it (CS-LNCH-108)
       # docker -e always beats --env-file, so setting the flag would silently
       # override the consumer's env-file value.
 
@@ -799,7 +800,8 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
 
   Scenario: CS-LNCH-054 An env file that owns XDG_RUNTIME_DIR keeps it, and the bridge stands down
     Given the shared peer registry is enabled
-    And an env file in the cascade defines XDG_RUNTIME_DIR
+    And an env file in the cascade defines XDG_RUNTIME_DIR, read as docker
+      reads it (CS-LNCH-108)
     Then no "-e XDG_RUNTIME_DIR" is added
     # docker -e silently beats --env-file, so adding it would override the
     # consumer's own choice — the CLAUDE_CODE_TMPDIR precedent (CS-LNCH-034).
@@ -852,6 +854,51 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     # link names, which the launcher does not own. The check is an lstat before
     # the chmod; swapping the directory between the two needs write access to
     # the user's own ~/.cache/claude-sandbox, i.e. the user.
+
+  Scenario Outline: CS-LNCH-108 "An env file defines the key" means what docker will pass
+    # The two checks that yield to an env file — the CLAUDE_CODE_TMPDIR stand-down
+    # (CS-LNCH-034) and the sharedPeerRegistry stand-down (CS-LNCH-054) — read
+    # env files through the cascade's shared docker-faithful reader, the one
+    # behind the env lint and the override notice (CS-CASC-016, CS-CASC-026..028).
+    # A second, looser reader missed indented and BOM-prefixed keys, so docker
+    # would set the key while the launcher also added -e for it — silently
+    # overriding the env file, or bridging with a socket path docker replaced.
+    Given an env file in the cascade whose only line is <line>
+    And the launcher's own environment <host> <key>
+    Then the key <counts> as defined by an env file
+    And when it counts, no "-e CLAUDE_CODE_TMPDIR" is added for CLAUDE_CODE_TMPDIR,
+      and the shared peer registry stands down (CS-LNCH-054) for XDG_RUNTIME_DIR
+
+    Examples:
+      | line                              | key                | host         | counts         |
+      | "XDG_RUNTIME_DIR=/run/x"          | XDG_RUNTIME_DIR    | does not set | counts         |
+      | "  XDG_RUNTIME_DIR=/run/x"        | XDG_RUNTIME_DIR    | does not set | counts         |
+      | "\tXDG_RUNTIME_DIR=/run/x"        | XDG_RUNTIME_DIR    | does not set | counts         |
+      | "<BOM>XDG_RUNTIME_DIR=/run/x"     | XDG_RUNTIME_DIR    | does not set | counts         |
+      | "XDG_RUNTIME_DIR=/run/x\r" (CRLF) | XDG_RUNTIME_DIR    | does not set | counts         |
+      | "  CLAUDE_CODE_TMPDIR=/somewhere" | CLAUDE_CODE_TMPDIR | does not set | counts         |
+      | "XDG_RUNTIME_DIR"                 | XDG_RUNTIME_DIR    | sets         | counts         |
+      | "CLAUDE_CODE_TMPDIR"              | CLAUDE_CODE_TMPDIR | sets to ""   | counts         |
+      | "XDG_RUNTIME_DIR\r" (CRLF)        | XDG_RUNTIME_DIR    | sets         | counts         |
+      | "XDG_RUNTIME_DIR"                 | XDG_RUNTIME_DIR    | does not set | does not count |
+      | "# XDG_RUNTIME_DIR=/run/x"        | XDG_RUNTIME_DIR    | does not set | does not count |
+      | "XDG_RUNTIME_DIR =/run/x"         | XDG_RUNTIME_DIR    | does not set | does not count |
+      | "xdg_runtime_dir=/run/x"          | XDG_RUNTIME_DIR    | does not set | does not count |
+
+    # A bare KEY line is docker's pass-through of the launcher's environment
+    # (CS-CASC-027): with the host variable set — even to "" — docker sets KEY
+    # in the container from it, so the env file DOES own the key and the bridge
+    # must stand down: adding -e XDG_RUNTIME_DIR would silently beat the value
+    # the operator asked docker to pass through. With the host variable unset
+    # docker drops the line, so it defines nothing. The environment is read
+    # through the launcher's injected lookup, as the override notice reads it.
+    # The same rule holds for CLAUDE_CODE_TMPDIR, and deliberately so when the
+    # shell sets it to "": docker passes the empty value through, the env file
+    # wins as CS-LNCH-034 says, and the container's scratchpad falls back to
+    # /tmp — the durable scratchpad is off for that session. The launcher does
+    # not second-guess a key the operator asked docker to pass.
+    # "XDG_RUNTIME_DIR =…" is the key "XDG_RUNTIME_DIR " — a key docker rejects
+    # (it fails the whole run), never a definition; the key is case-sensitive.
 
   # ---- reserve, then attach ----
 
