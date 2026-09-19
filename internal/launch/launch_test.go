@@ -482,6 +482,23 @@ var _ = Describe("launch.Build", func() {
 		}
 	})
 
+	It("CS-LNCH-018, CS-LNCH-106: an unset or empty allowlist variable gets no -e, so the env-file value applies", func() {
+		t := true
+		in.CLIAWS = &t
+		mkdir(filepath.Join(home, ".aws"))
+		env["AWS_REGION"] = ""
+		envFile := filepath.Join(proj, ".claude-sandbox", "env")
+		Expect(os.MkdirAll(filepath.Dir(envFile), 0o755)).To(Succeed())
+		Expect(os.WriteFile(envFile, []byte("AWS_PROFILE=from-envfile\nAWS_REGION=eu-west-1\n"), 0o600)).To(Succeed())
+		in.EnvFiles = []string{envFile}
+		p := build()
+		for _, e := range p.EnvFlags {
+			Expect(e).NotTo(HavePrefix("AWS_PROFILE"))
+			Expect(e).NotTo(HavePrefix("AWS_REGION"))
+		}
+		Expect(p.CreateArgs(proj)).To(ContainElements("--env-file", envFile))
+	})
+
 	It("CS-LNCH-103: forwards the AWS allowlist by name and never puts a value in argv", func() {
 		t := true
 		in.CLIAWS = &t

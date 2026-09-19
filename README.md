@@ -783,6 +783,14 @@ env-file value applies. Precedence, highest first: the launcher's environment (f
 `ANTHROPIC_API_KEY`, set even to empty; for the AWS allowlist, non-empty) > the env-file
 cascade (later file wins) > unset.
 
+> **Check for a leftover `ANTHROPIC_API_KEY` in your env files.** Launchers before
+> CS-LNCH-106 blanked any `ANTHROPIC_API_KEY` set in a `.claude-sandbox/env` of the cascade
+> when the host had none. Now that value reaches Claude Code in the container, which then
+> authenticates with the API key instead of your subscription login — automatically under
+> `-p`, so in ralph and headless runs — and a forgotten key can quietly move usage onto API
+> credits. To keep the subscription login, delete the key from the env file, or set it to
+> empty on the host (`export ANTHROPIC_API_KEY=`), which outranks every env file.
+
 `claude-sandbox init` never creates `.claude-sandbox/env`. It seeds
 `.claude-sandbox/env.example`, a commented template that the launcher never reads; copy it
 to `.claude-sandbox/env` only when a project needs its own values. `env.example` holds no
