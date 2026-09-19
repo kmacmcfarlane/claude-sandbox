@@ -898,7 +898,12 @@ own `<config dir>/sessions`, putting other trees' sandboxes into a registry your
 
 The bridge is switched **off for one session**, with one warning and no banner, when an env file
 in the cascade sets `XDG_RUNTIME_DIR` (the launcher will not override it), or when your home
-directory is so long that the socket path would exceed Claude Code's 103-byte limit. It is all
+directory is so long that the socket path would exceed Claude Code's 103-byte limit, or when
+the launcher cannot create one of those directories or restrict it to `0700` — for example a
+`peers/` Docker once created as root, or one replaced by a symlink (the launcher never re-modes
+through a link). That warning names the directory and the fix: make it yours (`chown` it, or
+remove it and relaunch), or set `CLAUDE_SANDBOX_SHARED_PEER_REGISTRY=0` to keep the tree off
+the bridge. It is all
 or nothing: sharing the registry without a shared socket would leave the session listing
 nobody and listed by nobody, while hiding its own tree's registry, which is worse than the key
 being off. That session launches exactly as if the key were off.
