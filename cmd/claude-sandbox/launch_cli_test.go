@@ -279,8 +279,19 @@ var _ = Describe("launcher CLI (end-to-end argv)", func() {
 			"HOST_HOME="+f.home,
 			"HOME="+f.home,
 			"DOCKER_GID=",
-			"ANTHROPIC_API_KEY=",
 		))
+	})
+
+	It("CS-LNCH-106: an unset host ANTHROPIC_API_KEY leaves the env-file value in charge", func() {
+		envFile := filepath.Join(f.proj, ".claude-sandbox", "env")
+		writeFile(envFile, "ANTHROPIC_API_KEY=sk-ant-envfile-sentinel\n")
+		Expect(f.run()).To(Equal(0))
+		args := f.launched().Args
+		for _, a := range args {
+			Expect(a).NotTo(HavePrefix("ANTHROPIC_API_KEY"))
+			Expect(a).NotTo(ContainSubstring("sk-ant-envfile-sentinel"))
+		}
+		Expect(args).To(ContainElements("--env-file", envFile))
 	})
 
 	It("CS-LNCH-024: prints the cascade report root-first with contributing files", func() {

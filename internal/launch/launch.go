@@ -344,13 +344,13 @@ func Build(in Inputs) (*Plan, error) {
 	// "-e NAME=value" — argv is world-readable through ps and /proc while
 	// docker create runs. The docker client resolves a bare name from the
 	// environment it inherits from the launcher (execx.System leaves Env
-	// nil), so the container sees the same value. Unset keeps the explicit
-	// empty value it always had: no secret in it, and it still takes
-	// precedence over an env file exactly as before.
+	// nil), so the container sees the same value.
+	// CS-LNCH-106: unset gets no -e at all. -e outranks --env-file, so the
+	// "ANTHROPIC_API_KEY=" an unset key used to produce (a leftover of the bash
+	// launcher's ${ANTHROPIC_API_KEY:-} passthrough) blanked a key set in the
+	// .claude-sandbox/env cascade.
 	if in.lookupEnv("ANTHROPIC_API_KEY") {
 		p.EnvFlags = append(p.EnvFlags, "ANTHROPIC_API_KEY")
-	} else {
-		p.EnvFlags = append(p.EnvFlags, "ANTHROPIC_API_KEY=")
 	}
 	if d := in.getenv("CLAUDE_CONFIG_DIR"); d != "" {
 		p.EnvFlags = append(p.EnvFlags, "CLAUDE_CONFIG_DIR="+d)

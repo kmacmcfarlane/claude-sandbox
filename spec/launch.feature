@@ -274,6 +274,8 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       AWS_SHARED_CREDENTIALS_FILE AWS_CONFIG_FILE AWS_ACCESS_KEY_ID
       AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_ROLE_ARN
       AWS_WEB_IDENTITY_TOKEN_FILE AWS_ENDPOINT_URL
+    And an allowlist variable unset or empty on the host gets no -e, so a value
+      from the env-file cascade reaches the container (CS-LNCH-106)
 
   Scenario: CS-LNCH-019 AWS path-valued vars mount the parent DIRECTORY read-only
     Given AWS_SHARED_CREDENTIALS_FILE points to an existing file in /home/u/creds-dir/
@@ -439,7 +441,7 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
   Scenario: CS-LNCH-029 Container runtime environment
     Then docker create receives: -it --rm --init,
       -e HOST_UID/HOST_GID/HOST_USER/HOST_HOME of the calling user,
-      -e HOME=$HOME, -e DOCKER_GID, -e ANTHROPIC_API_KEY (CS-LNCH-102),
+      -e HOME=$HOME, -e DOCKER_GID, -e ANTHROPIC_API_KEY when set (CS-LNCH-102),
       -e CLAUDE_SANDBOX_PROJECT_DIR (CS-LNCH-047)
 
   Scenario: CS-LNCH-102 ANTHROPIC_API_KEY is forwarded by name, never by value
@@ -451,9 +453,24 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     Then docker create receives a bare "-e ANTHROPIC_API_KEY"
     And its value appears nowhere in the docker create argv
     Given ANTHROPIC_API_KEY is unset
-    Then docker create receives "-e ANTHROPIC_API_KEY=" as before
-    # The empty value carries no secret and keeps today's container behaviour:
-    # the variable is set and empty, and -e still outranks an env file.
+    Then docker create receives no -e for ANTHROPIC_API_KEY at all (CS-LNCH-106)
+
+  Scenario: CS-LNCH-106 An unset host credential leaves the env-file cascade in charge
+    # -e outranks --env-file, so the "-e ANTHROPIC_API_KEY=" an unset host key
+    # used to produce blanked a key set in a .claude-sandbox/env of the cascade.
+    # That empty value was not a deliberate override: it descends from the bash
+    # launcher's set -u-safe passthrough, -e ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}".
+    # Precedence, most specific first: the launcher's environment (set, even to
+    # "") > the env-file cascade (later file wins) > nothing.
+    Given ANTHROPIC_API_KEY is unset in the launcher's environment
+      And a .claude-sandbox/env of the cascade sets ANTHROPIC_API_KEY
+    Then docker create receives no "-e ANTHROPIC_API_KEY" in any form
+      And the env file's --env-file flag still reaches docker create
+      So the container sees the env-file value
+    Given ANTHROPIC_API_KEY is set in the launcher's environment, even to ""
+    Then the bare "-e ANTHROPIC_API_KEY" outranks the env file, as before
+    # The AWS allowlist (CS-LNCH-018/103) already follows the same rule: an
+    # unset (or empty) variable gets no -e, so an env-file value applies.
 
   Scenario: CS-LNCH-103 AWS allowlist variables are forwarded by name, never by value
     Given aws access is enabled
