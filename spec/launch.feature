@@ -915,6 +915,17 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     Then nothing is removed, one warning is printed, and the launch proceeds
     Given a directory cannot be removed or the temp root cannot be read
     Then one warning is printed and the launch proceeds
+    And the other candidates are still removed
+    Given a candidate's removal failed part-way (a file inside it cannot be
+      unlinked)
+    Then it is renamed "<dir>.unremovable" in place, a name no later sweep
+      matches, and the warning names that path and says to remove it by hand,
+      so a directory that can never be removed warns once, not on every launch
+    But if the rename fails too, its modification time is set to now, so the
+      next hour of launches skip it and it is retried (and warned about) at
+      most once an hour
+    And tests of the launch path never use the real temp root: their shadow
+      directories go to a test temp dir, which a test launch also sweeps
 
   Scenario: CS-LNCH-083 A launch that fails before its session removes its own shadow directory
     Given "docker create" fails (any error other than a retried name conflict)

@@ -162,6 +162,75 @@ var _ = Describe("shadow directory lifecycle (CS-LNCH-080..082)", func() {
 		Expect(old).To(BeADirectory())
 	})
 
+	// unremovable makes an old shadow directory holding a read-only
+	// subdirectory with a file in it, so RemoveAll fails part-way. The
+	// subdirectory is made writable again at cleanup (wherever the directory
+	// ended up), or the test temp dir could not be removed either.
+	unremovable := func(name string) string {
+		if os.Geteuid() == 0 {
+			Skip("root ignores directory permissions")
+		}
+		d := filepath.Join(root, name)
+		sub := filepath.Join(d, "locked")
+		mkdir(sub)
+		touch(filepath.Join(sub, "f"), "x")
+		Expect(os.Chmod(sub, 0o555)).To(Succeed())
+		DeferCleanup(func() {
+			for _, p := range []string{sub, filepath.Join(d+launch.UnremovableSuffix, "locked")} {
+				_ = os.Chmod(p, 0o755)
+			}
+		})
+		t := now.Add(-2 * time.Hour)
+		Expect(os.Chtimes(d, t, t)).To(Succeed())
+		return d
+	}
+
+	It("CS-LNCH-082: a removal that fails part-way is reported, the other candidates are still removed, and the directory is set aside", func() {
+		stuck := unremovable("claude-sandbox111")
+		old := shadow("claude-sandbox222", 2*time.Hour)
+		fake.On(psPattern, "", nil)
+
+		removed, err := prune("")
+		Expect(removed).To(Equal([]string{old}))
+		Expect(old).NotTo(BeADirectory())
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("permission denied"))
+		Expect(err.Error()).To(ContainSubstring(stuck + launch.UnremovableSuffix))
+		Expect(err.Error()).To(ContainSubstring("remove it by hand"))
+		Expect(stuck).NotTo(BeADirectory())
+		Expect(filepath.Join(stuck+launch.UnremovableSuffix, "locked", "f")).To(BeARegularFile())
+
+		// A later launch has no candidate: no listing, no error, no warning.
+		removed, err = prune("")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(removed).To(BeEmpty())
+		Expect(psCalls()).To(Equal(1))
+	})
+
+	It("CS-LNCH-082: when it cannot be renamed either, the directory is backed off for an hour", func() {
+		stuck := unremovable("claude-sandbox111")
+		// A non-empty directory already holds the aside name: rename fails.
+		blocker := filepath.Join(root, "claude-sandbox111"+launch.UnremovableSuffix)
+		mkdir(blocker)
+		touch(filepath.Join(blocker, "x"), "x")
+		fake.On(psPattern, "", nil)
+
+		_, err := prune("")
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("permission denied"))
+		Expect(err.Error()).To(ContainSubstring("retrying in 1h"))
+		Expect(stuck).To(BeADirectory())
+
+		_, err = prune("")
+		Expect(err).NotTo(HaveOccurred(), "skipped while young")
+		Expect(psCalls()).To(Equal(1))
+
+		now = now.Add(launch.ShadowDirMinAge + time.Minute)
+		_, err = prune("")
+		Expect(err).To(HaveOccurred(), "retried once the hour is up")
+		Expect(psCalls()).To(Equal(2))
+	})
+
 	It("CS-LNCH-082: an unreadable temp root is an error, not a panic", func() {
 		_, err := launch.PruneShadowDirs(fake, filepath.Join(root, "missing"), uid, now, launch.ShadowDirMinAge, "")
 		Expect(err).To(HaveOccurred())

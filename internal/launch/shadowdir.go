@@ -96,12 +96,35 @@ func PruneShadowDirs(r execx.Runner, root string, uid int, now time.Time, minAge
 		}
 		// RemoveAll unlinks symlinks inside the directory, never follows them.
 		if err := os.RemoveAll(dir); err != nil {
-			errs = append(errs, err)
+			errs = append(errs, setAside(dir, err, now, minAge))
 			continue
 		}
 		removed = append(removed, dir)
 	}
 	return removed, errors.Join(errs...)
+}
+
+// UnremovableSuffix is appended to a shadow directory whose removal failed
+// (CS-LNCH-082). The result no longer matches shadowDirName, so no later sweep
+// considers it and its warning is printed once, not on every launch.
+const UnremovableSuffix = ".unremovable"
+
+// setAside keeps a directory that could not be removed from warning on every
+// later launch, and returns the error to report for it. It is renamed in place
+// to <dir>.unremovable (never retried: whatever made a file inside it
+// unremovable — another owner, a read-only subdirectory — does not go away by
+// itself, and the warning says to remove it by hand). If even the rename
+// fails, the directory's mtime is set to now, so stale() skips it for minAge
+// and it is retried, and warned about, at most once per minAge.
+func setAside(dir string, rmErr error, now time.Time, minAge time.Duration) error {
+	aside := dir + UnremovableSuffix
+	if err := os.Rename(dir, aside); err == nil {
+		return fmt.Errorf("%w (renamed it %s so later launches skip it; remove it by hand)", rmErr, aside)
+	}
+	if err := os.Chtimes(dir, now, now); err == nil {
+		return fmt.Errorf("%w (retrying in %s)", rmErr, minAge)
+	}
+	return rmErr
 }
 
 // stale reports whether dir is a real directory owned by uid and last modified

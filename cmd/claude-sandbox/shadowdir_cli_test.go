@@ -107,6 +107,31 @@ var _ = Describe("shadow directory lifecycle (CS-LNCH-080..084)", func() {
 		Expect(f.fake.Execed).NotTo(BeNil(), "the session still starts")
 	})
 
+	It("CS-LNCH-082: a directory that cannot be removed warns once, and the next launch is silent", func() {
+		if os.Geteuid() == 0 {
+			Skip("root ignores directory permissions")
+		}
+		stuck := oldShadow(f, "claude-sandbox12345")
+		sub := filepath.Join(stuck, "locked")
+		Expect(os.Mkdir(sub, 0o755)).To(Succeed())
+		Expect(os.WriteFile(filepath.Join(sub, "f"), []byte("x"), 0o644)).To(Succeed())
+		Expect(os.Chmod(sub, 0o555)).To(Succeed())
+		aside := stuck + launch.UnremovableSuffix
+		DeferCleanup(func() { _ = os.Chmod(filepath.Join(aside, "locked"), 0o755) })
+		t := time.Now().Add(-2 * time.Hour)
+		Expect(os.Chtimes(stuck, t, t)).To(Succeed())
+		f.fake.On(sweepPS, "", nil)
+
+		Expect(f.run()).To(Equal(0), f.errw.String())
+		Expect(strings.Count(f.errw.String(), "could not clean up old shadow directories")).To(Equal(1))
+		Expect(f.errw.String()).To(ContainSubstring(aside))
+		Expect(f.fake.Execed).NotTo(BeNil(), "the session still starts")
+
+		f.errw.Reset()
+		Expect(f.run()).To(Equal(0), f.errw.String())
+		Expect(f.errw.String()).NotTo(ContainSubstring("shadow"), "set aside: never warned about again")
+	})
+
 	It("CS-LNCH-082: without a candidate there is no sweep listing", func() {
 		Expect(f.run()).To(Equal(0), f.errw.String())
 		for _, l := range f.fake.CommandLines() {
