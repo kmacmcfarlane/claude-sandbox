@@ -593,6 +593,18 @@ var _ = Describe("launch.Build", func() {
 	Describe("shared peer registry (CS-LNCH-049..055, CS-LNCH-107)", func() {
 		var root, cfgDir string
 		BeforeEach(func() {
+			// A short, fixed-root home: the bridge stands down past a 103-byte
+			// socket path (CS-LNCH-055), so a home under a long TMPDIR would
+			// fail every bridged case for a reason unrelated to the test.
+			// /tmp, not os.TempDir(): TMPDIR is exactly what may be long.
+			short, err := os.MkdirTemp("/tmp", "cs")
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(os.RemoveAll, short)
+			short, err = filepath.EvalSymlinks(short)
+			Expect(err).NotTo(HaveOccurred())
+			home = filepath.Join(short, "h")
+			mkdir(home)
+			in.Home = home
 			root = filepath.Join(home, ".cache", "claude-sandbox", "peers")
 			cfgDir = filepath.Join(home, ".claude")
 			mkdir(cfgDir)
