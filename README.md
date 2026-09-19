@@ -1238,6 +1238,10 @@ the lock is taken, so a launch never sees another launch's directory before that
 created its container; the hour covers launches that could not take the lock and older
 launchers. The sweep makes no docker call unless there is a candidate, never prints on success,
 and any failure (the container listing, a removal) is one warning; it never blocks a launch.
+A directory whose removal fails part-way (say, a file inside it you cannot delete) is renamed
+`<dir>.unremovable` in place and the warning names it: no later sweep matches that name, so it
+warns once rather than on every launch, and it is yours to remove by hand. If even the rename
+fails, the directory is left alone for another hour before it is retried.
 A launch that fails before its session starts (a failed `docker create`, or a failed exec of
 `docker start` once the reservation is removed) removes its own directory, and the config-drift
 check behind `--attach`/`--join` uses a private directory it removes before returning. The
