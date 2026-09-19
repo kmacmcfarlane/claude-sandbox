@@ -16,6 +16,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"hash"
 	"io"
 	"math"
 	"os"
@@ -48,6 +49,13 @@ const (
 
 	// CapTag suffixes the parent image name to form the run image (CS-IMG-024).
 	CapTag = "run"
+
+	// BuildInputsLabel records the fingerprint of what an image was built
+	// from (CS-IMG-032..036). Staleness compares it with the current inputs
+	// instead of comparing mtimes with the image's Created time, which a fully
+	// cached rebuild leaves unchanged — so a source newer than the image made
+	// every launch rebuild, forever.
+	BuildInputsLabel = "claude-sandbox.build-inputs"
 )
 
 // buildEnv is added to every docker build the launcher issues (CS-IMG-027):
@@ -95,6 +103,7 @@ func Version(r execx.Runner, repoRoot string) string {
 // EnsureBase builds the base image when missing or stale.
 // Returns whether a build happened.
 func EnsureBase(o Options) (rebuilt bool, err error) {
+	fp := baseInputs(o.RepoRoot)
 	need := false
 	switch {
 	case o.ForceRebuild:
@@ -102,6 +111,14 @@ func EnsureBase(o Options) (rebuilt bool, err error) {
 	case !imageExists(o.Runner, BaseImageName):
 		need = true
 	default:
+		if labeled, stale := labelVerdict(o.Runner, BaseImageName, fp); labeled {
+			if stale {
+				fmt.Fprintln(o.Out, "Base image inputs changed since last build — rebuilding base image.")
+			}
+			need = stale
+			break
+		}
+		// Unlabeled image: the time-based rule (CS-IMG-003/004, CS-IMG-035).
 		created := imageCreated(o.Runner, BaseImageName)
 		if !created.IsZero() {
 			if mtimeAfter(filepath.Join(o.RepoRoot, "Dockerfile"), created) {
@@ -116,7 +133,8 @@ func EnsureBase(o Options) (rebuilt bool, err error) {
 		return false, nil
 	}
 	fmt.Fprintf(o.Out, "Building %s base image (%s)...\n", BaseImageName, o.Version)
-	args := []string{"build", "-t", BaseImageName, "--build-arg", "CLAUDE_SANDBOX_VERSION=" + o.Version}
+	args := append([]string{"build", "-t", BaseImageName}, labelArgs(fp)...)
+	args = append(args, "--build-arg", "CLAUDE_SANDBOX_VERSION="+o.Version)
 	if o.ForceRebuild {
 		args = append(args, "--no-cache")
 	}
@@ -153,7 +171,8 @@ func resolveClaudeVersion(o Options) string {
 // buildCLI runs the CLI image build pinned to version (CS-IMG-021).
 func buildCLI(o Options, version string, noCache bool) error {
 	fmt.Fprintf(o.Out, "Building %s image (Claude Code %s)...\n", CLIImageName, version)
-	args := []string{"build", "-t", CLIImageName, "--build-arg", "CLAUDE_CODE_VERSION=" + version}
+	args := append([]string{"build", "-t", CLIImageName}, labelArgs(cliInputs(o.RepoRoot))...)
+	args = append(args, "--build-arg", "CLAUDE_CODE_VERSION="+version)
 	if noCache {
 		args = append(args, "--no-cache")
 	}
@@ -171,6 +190,10 @@ func EnsureCLI(o Options) (rebuilt bool, err error) {
 	case !imageExists(o.Runner, CLIImageName):
 		need = true
 	default:
+		if labeled, stale := labelVerdict(o.Runner, CLIImageName, cliInputs(o.RepoRoot)); labeled {
+			need = stale
+			break
+		}
 		created := imageCreated(o.Runner, CLIImageName)
 		if !created.IsZero() && mtimeAfter(filepath.Join(o.RepoRoot, CLIDockerfile), created) {
 			need = true
@@ -257,6 +280,7 @@ func capDockerfile(under string) string {
 // (CS-IMG-024..026). Returns the image to run and whether a build happened.
 func EnsureCap(o Options, under string) (image string, built bool, err error) {
 	cap := CapImageName(under)
+	fp := capInputs(under, ImageID(o.Runner, under), ImageID(o.Runner, CLIImageName))
 	need := false
 	switch {
 	case o.ForceRebuild:
@@ -264,6 +288,10 @@ func EnsureCap(o Options, under string) (image string, built bool, err error) {
 	case !imageExists(o.Runner, cap):
 		need = true
 	default:
+		if labeled, stale := labelVerdict(o.Runner, cap, fp); labeled {
+			need = stale
+			break
+		}
 		capCreated := imageCreated(o.Runner, cap)
 		if capCreated.IsZero() {
 			need = true
@@ -281,7 +309,7 @@ func EnsureCap(o Options, under string) (image string, built bool, err error) {
 	fmt.Fprintf(o.Out, "Building %s run image (%s + Claude Code)...\n", cap, under)
 	err = o.Runner.Run(execx.Cmd{
 		Name:   "docker",
-		Args:   []string{"build", "-t", cap, "-"},
+		Args:   append(append([]string{"build", "-t", cap}, labelArgs(fp)...), "-"),
 		Env:    buildEnv,
 		Stdin:  strings.NewReader(capDockerfile(under)),
 		Stdout: o.Out, Stderr: o.Err,
@@ -381,10 +409,21 @@ func EnsureChild(o Options, spec ChildSpec, baseRebuilt bool, baseOnly bool) (im
 		}
 		return BaseImageName, false, nil
 	}
+	fp := childInputs(spec, ImageID(o.Runner, BaseImageName))
 	need := false
+	labeled, stale := false, false
+	exists := imageExists(o.Runner, spec.ImageName)
+	if exists {
+		// A labeled child compares fingerprints, which cover the base image
+		// ID: a base "rebuild" that reproduced the same image leaves it alone,
+		// and a base whose ID changed rebuilds it whatever the Created times say.
+		labeled, stale = labelVerdict(o.Runner, spec.ImageName, fp)
+	}
 	switch {
-	case !imageExists(o.Runner, spec.ImageName):
+	case !exists:
 		need = true
+	case labeled:
+		need = stale
 	case baseRebuilt:
 		need = true
 	default:
@@ -406,7 +445,7 @@ func EnsureChild(o Options, spec ChildSpec, baseRebuilt bool, baseOnly bool) (im
 	fmt.Fprintf(o.Out, "Building %s child image from %s (context: %s)...\n", spec.ImageName, spec.Dockerfile, spec.Context)
 	err = o.Runner.Run(execx.Cmd{
 		Name:   "docker",
-		Args:   []string{"build", "-t", spec.ImageName, "-f", spec.Dockerfile, spec.Context},
+		Args:   append(append([]string{"build", "-t", spec.ImageName}, labelArgs(fp)...), "-f", spec.Dockerfile, spec.Context),
 		Env:    buildEnv,
 		Stdout: o.Out, Stderr: o.Err,
 	})
@@ -715,6 +754,160 @@ func ImageID(r execx.Runner, name string) string {
 		return ""
 	}
 	return strings.TrimSpace(out)
+}
+
+// ---- build-input fingerprints (CS-IMG-032..036) ----
+
+// fingerprintVersion prefixes every fingerprint so a change to what one covers
+// reads as a mismatch rather than silently matching an old label.
+const fingerprintVersion = "v1"
+
+// imageLabel reads one label of an image; "" when absent or unreadable.
+func imageLabel(r execx.Runner, name, key string) string {
+	out, err := r.Output(execx.Cmd{
+		Name:   "docker",
+		Args:   []string{"image", "inspect", "-f", `{{ index .Config.Labels "` + key + `" }}`, name},
+		Stderr: io.Discard,
+	})
+	if err != nil {
+		return ""
+	}
+	v := strings.TrimSpace(out)
+	if v == "<no value>" {
+		return ""
+	}
+	return v
+}
+
+// labelVerdict decides staleness from the build-inputs label. labeled is false
+// when the image carries no label or the current fingerprint could not be
+// computed; the caller then applies the time-based rule (CS-IMG-035).
+func labelVerdict(r execx.Runner, image, fp string) (labeled, stale bool) {
+	if fp == "" {
+		return false, false
+	}
+	have := imageLabel(r, image, BuildInputsLabel)
+	if have == "" {
+		return false, false
+	}
+	return true, have != fp
+}
+
+// labelArgs stamps a build with its fingerprint (CS-IMG-032). An empty
+// fingerprint stamps nothing, leaving the image on the time-based rule.
+func labelArgs(fp string) []string {
+	if fp == "" {
+		return nil
+	}
+	return []string{"--label", BuildInputsLabel + "=" + fp}
+}
+
+// fingerprint accumulates length-framed parts so no two input sets can
+// concatenate to the same stream.
+type fingerprint struct{ h hash.Hash }
+
+func newFingerprint(kind string) (fingerprint, func() string) {
+	h := sha256.New()
+	f := fingerprint{h: h}
+	f.add(fingerprintVersion)
+	f.add(kind)
+	return f, func() string { return hex.EncodeToString(h.Sum(nil)) }
+}
+
+func (f fingerprint) add(s string) {
+	fmt.Fprintf(f.h, "%d:", len(s))
+	f.h.Write([]byte(s))
+}
+
+// addFile adds a file's name and content; false when it cannot be read.
+func (f fingerprint) addFile(name, path string) bool {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	f.add(name)
+	f.add(string(raw))
+	return true
+}
+
+// baseInputs fingerprints the repo Dockerfile and the baked source set, with
+// the same _test.go exclusion as the time-based rule (CS-IMG-034).
+func baseInputs(repoRoot string) string {
+	f, sum := newFingerprint("base")
+	if !f.addFile("Dockerfile", filepath.Join(repoRoot, "Dockerfile")) {
+		return ""
+	}
+	for _, rel := range BakedSources {
+		p := filepath.Join(repoRoot, rel)
+		fi, err := os.Stat(p)
+		if err != nil {
+			f.add(rel)
+			f.add("\x00absent") // a vanished source is a change too
+			continue
+		}
+		if !fi.IsDir() {
+			if !f.addFile(rel, p) {
+				return ""
+			}
+			continue
+		}
+		ok := true
+		// WalkDir visits in lexical order, so the fingerprint is stable.
+		filepath.WalkDir(p, func(path string, d os.DirEntry, err error) error {
+			if err != nil || !ok {
+				return nil
+			}
+			if d.IsDir() || strings.HasSuffix(d.Name(), "_test.go") {
+				return nil
+			}
+			name, _ := filepath.Rel(repoRoot, path)
+			if !f.addFile(filepath.ToSlash(name), path) {
+				ok = false
+			}
+			return nil
+		})
+		if !ok {
+			return ""
+		}
+	}
+	return sum()
+}
+
+// cliInputs fingerprints Dockerfile.cli. The Claude Code pin is deliberately
+// not an input: the update check owns it (CS-IMG-006..009).
+func cliInputs(repoRoot string) string {
+	f, sum := newFingerprint("cli")
+	if !f.addFile(CLIDockerfile, filepath.Join(repoRoot, CLIDockerfile)) {
+		return ""
+	}
+	return sum()
+}
+
+// childInputs fingerprints the child Dockerfile, its context and the base
+// image it would be built on.
+func childInputs(spec ChildSpec, baseID string) string {
+	if baseID == "" {
+		return ""
+	}
+	f, sum := newFingerprint("child")
+	f.add(spec.Context)
+	if !f.addFile(spec.Dockerfile, spec.Dockerfile) {
+		return ""
+	}
+	f.add(baseID)
+	return sum()
+}
+
+// capInputs fingerprints the generated cap Dockerfile and both parents' IDs.
+func capInputs(under, underID, cliID string) string {
+	if underID == "" || cliID == "" {
+		return ""
+	}
+	f, sum := newFingerprint("cap")
+	f.add(capDockerfile(under))
+	f.add(underID)
+	f.add(cliID)
+	return sum()
 }
 
 func imageExists(r execx.Runner, name string) bool {
