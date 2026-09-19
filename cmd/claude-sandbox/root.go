@@ -916,16 +916,18 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 		Worktree: worktree,
 		Linked:   linked,
 		Version:  version,
-		Headless: headless, LookupEnv: env.lookupEnv,
+		// CS-LNCH-093: recorded on the container for the OOM report.
+		MemoryLimitSource: cascade.MemoryLimitSource(configFiles),
+		Headless:          headless, LookupEnv: env.lookupEnv,
 		Out: env.Out, Err: env.Err,
 	}
 	// Reserve under the host lock: re-validate the noun, pick the pid class,
-	// docker create (CS-SESS-048). The lock is released before the exec.
+	// docker create (CS-SESS-048). The lock is released before the start.
 	plan, err := reserveContainer(env, in, wt, f.Ralph)
 	if err != nil {
 		return err
 	}
-	return startReserved(env, plan)
+	return startReserved(env, plan, headless)
 }
 
 func hostIdentity(getenv func(string) string) (uid, gid int, username, home string) {

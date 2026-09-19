@@ -5,7 +5,8 @@ package main
 // becomes visible to discovery only once it exists. So the choice and the
 // "docker create" that makes it visible run inside one short, host-wide
 // critical section; the container is then started with "docker start -ai"
-// outside it. Image builds happen before the lock is taken, never under it.
+// outside it, as a child the launcher waits on (CS-LNCH-085). Image builds
+// happen before the lock is taken, never under it.
 
 import (
 	"errors"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"github.com/kmacmcfarlane/claude-sandbox/internal/launch"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/oomreport"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/sessions"
 )
 
@@ -34,7 +36,7 @@ const maxCreateAttempts = 3
 
 // minReclaimAge is how old a never-started ralph container must be before a
 // launch reclaims its fixed name (CS-SESS-053). The lock does not cover the
-// gap between a launcher's create and its exec of docker start, so a younger
+// gap between a launcher's create and its docker start, so a younger
 // holder may be a live launch about to start; removing it would be worse than
 // failing. Ten seconds still covers a person retrying after a failed start.
 const minReclaimAge = 10 * time.Second
@@ -94,7 +96,8 @@ func reserveContainer(env *Env, in launch.Inputs, wt worktreeChoice, ralph bool)
 		in.TempDir = d
 		// CS-LNCH-083: a launch that fails before its container exists leaves
 		// nothing behind. A successful reservation keeps the directory: the
-		// container mounts it, and a later launch's sweep removes it.
+		// container mounts it. startReserved removes it once the container
+		// died (CS-LNCH-094); otherwise a later launch's sweep does.
 		defer func() {
 			if err != nil {
 				os.RemoveAll(d)
@@ -151,7 +154,7 @@ func reserveContainer(env *Env, in launch.Inputs, wt worktreeChoice, ralph bool)
 		if ralph {
 			// A fixed name cannot be re-picked. If the holder never started — a
 			// reservation whose "docker start" failed (no TTY, a mount or OCI
-			// error), which the launcher cannot clean up after exec'ing — it is
+			// error), which the launcher does not clean up after — it is
 			// reclaimed at once rather than blocking ralph until the 60 s stale
 			// cleanup. Once only: a second conflict is a real concurrent owner.
 			// Only a holder old enough not to be a concurrent launch still
@@ -210,18 +213,30 @@ func pidClassFrom(found []sessions.Session) string {
 	return strconv.Itoa(sessions.PickClass(sessions.Classes(found), nil))
 }
 
-// startReserved hands the process over to "docker start -ai". Exec returns only
-// on failure, and the reservation would then sit as an orphan until the next
-// launch's stale cleanup, so it is removed here first (CS-LNCH-057).
+// startReserved runs "docker start -ai" as the session child and waits for it
+// (CS-LNCH-085), reporting an OOM kill when the session ends (CS-LNCH-089/090).
+// Its exit code is the launcher's.
 //
-// The shadow directory goes with it (CS-LNCH-083), but only once the
-// reservation is gone: a container that still exists may still mount it.
-func startReserved(env *Env, plan *launch.Plan) error {
-	err := plan.Start(env.Runner)
-	if err != nil && sessions.RemoveReservation(env.Runner, plan.ContainerName) == nil && plan.ShadowDir != "" {
+// If docker cannot be started at all, the reservation would sit as an orphan
+// until the next launch's stale cleanup, so it is removed here first
+// (CS-LNCH-057), and the shadow directory with it (CS-LNCH-083) — but only once
+// the reservation is gone: a container that still exists may still mount it.
+// After a session, the directory goes once the container's die event was seen
+// (CS-LNCH-094); after a detach or a signal-initiated exit it stays, for a
+// later launch's sweep.
+func startReserved(env *Env, plan *launch.Plan, headless bool) error {
+	lim := oomreport.Limit{Value: plan.MemoryLimit, Source: plan.MemoryLimitSource}
+	end, err := runSession(env, plan.StartCmd(), plan.ContainerName, primarySession, lim, headless)
+	if err != nil {
+		if sessions.RemoveReservation(env.Runner, plan.ContainerName) == nil && plan.ShadowDir != "" {
+			os.RemoveAll(plan.ShadowDir)
+		}
+		return err
+	}
+	if end.gone && plan.ShadowDir != "" {
 		os.RemoveAll(plan.ShadowDir)
 	}
-	return err
+	return sessionExit(end.code)
 }
 
 // pruneShadowDirs removes the shadow directories of earlier launches that no

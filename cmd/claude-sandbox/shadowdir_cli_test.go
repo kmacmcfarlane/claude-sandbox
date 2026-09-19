@@ -104,7 +104,7 @@ var _ = Describe("shadow directory lifecycle (CS-LNCH-080..084)", func() {
 
 		Expect(stale).To(BeADirectory())
 		Expect(strings.Count(f.errw.String(), "could not clean up old shadow directories")).To(Equal(1))
-		Expect(f.fake.Execed).NotTo(BeNil(), "the session still starts")
+		Expect(f.fake.Session).NotTo(BeNil(), "the session still starts")
 	})
 
 	It("CS-LNCH-082: without a candidate there is no sweep listing", func() {

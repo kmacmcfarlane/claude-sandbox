@@ -4,7 +4,7 @@ package main
 // scenarios through MainWithEnv with a fully scripted execx.Fake: docker
 // inspect/build/npm/git are all faked, the reserving "docker create" is a
 // recorded call (launched) and the final "docker start" hand-off is recorded
-// in Fake.Execed. HOME/PROJECT_DIR/repo root come from a Getenv map
+// in Fake.Session. HOME/PROJECT_DIR/repo root come from a Getenv map
 // pointed at temp dirs.
 
 import (
@@ -108,9 +108,9 @@ func (f *cliFixture) run(args ...string) int {
 
 // execLine renders the recorded exec hand-off (docker start, attach or exec)
 // as one string.
-func (f *cliFixture) execLine() string {
-	Expect(f.fake.Execed).NotTo(BeNil(), "expected a docker hand-off; stderr:\n%s", f.errw.String())
-	return f.fake.Execed.Name + " " + strings.Join(f.fake.Execed.Args, " ")
+func (f *cliFixture) sessionLine() string {
+	Expect(f.fake.Session).NotTo(BeNil(), "expected a docker session child; stderr:\n%s", f.errw.String())
+	return f.fake.Session.Name + " " + strings.Join(f.fake.Session.Args, " ")
 }
 
 // launched returns the last "docker create" — the reserved container, carrying
@@ -147,7 +147,7 @@ var _ = Describe("launcher CLI (end-to-end argv)", func() {
 	It("CS-LNCH-002: exits 2 with \"unknown flag\" for an unknown flag", func() {
 		Expect(f.run("--frobnicate")).To(Equal(2))
 		Expect(f.errw.String()).To(ContainSubstring("unknown flag"))
-		Expect(f.fake.Execed).To(BeNil())
+		Expect(f.fake.Session).To(BeNil())
 	})
 
 	It("CS-LNCH-002: appends a known claude flag and subsequent args to the container command", func() {
@@ -166,7 +166,7 @@ var _ = Describe("launcher CLI (end-to-end argv)", func() {
 		f.fake.On("docker buildx version", "", execx.Fail(1))
 		Expect(f.run()).To(Equal(2))
 		Expect(f.errw.String()).To(ContainSubstring("docker-buildx-plugin"))
-		Expect(f.fake.Execed).To(BeNil())
+		Expect(f.fake.Session).To(BeNil())
 		Expect(strings.Join(f.fake.CommandLines(), "\n")).NotTo(ContainSubstring("docker build "))
 	})
 
@@ -357,7 +357,7 @@ var _ = Describe("launcher CLI (end-to-end argv)", func() {
 		Expect(out).To(ContainSubstring("claude-sandbox v2.0.0"))
 		Expect(out).To(ContainSubstring("v1.9.0"))
 		Expect(out).To(ContainSubstring("auto-rebuild"))
-		Expect(f.fake.Execed).To(BeNil())
+		Expect(f.fake.Session).To(BeNil())
 	})
 
 	It("CS-LNCH-030: --version prints \"(not built yet)\" when the images do not exist", func() {

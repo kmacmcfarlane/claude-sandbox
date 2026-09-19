@@ -388,3 +388,16 @@ Feature: Config cascade and env stacking (CS-CASC)
     # therefore see the main checkout's files, not the worktree's.
     And a worktree's own .claude-sandbox/Dockerfile still wins, with the worktree as context
     And with dockerfile set but no dockerfileDir, the named file is searched along the same chain
+
+  Scenario: CS-CASC-036 memoryLimit records the file it came from
+    # For the OOM report (CS-LNCH-089, CS-LNCH-093). Only this key: the cascade
+    # keeps no per-key provenance, and nothing else needs one.
+    Given the cascade:
+      | level | config.yaml      |
+      | /ws   | memoryLimit: 16g |
+      | /ws/p | model: opus      |
+    Then the source of memoryLimit is /ws/.claude-sandbox/config.yaml
+    And when /ws/p/.claude-sandbox/config.yaml also sets memoryLimit, the source is that file
+    And when no level sets it, there is no source and the launcher records "default"
+    And a level that sets it to an empty value is the source (it is what the
+      merge took), and the launcher then applies and records the default

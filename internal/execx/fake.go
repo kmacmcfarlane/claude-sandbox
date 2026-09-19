@@ -1,6 +1,7 @@
 package execx
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -16,9 +17,12 @@ import (
 type Fake struct {
 	mu    sync.Mutex
 	Calls []Cmd
-	// Execed records the final Exec hand-off, if any.
-	Execed *Cmd
-	stubs  []stub
+	// Session records the interactive session child (RunSession), if any.
+	Session *Cmd
+	// SessionSignal, when set, is reported as the signal the launcher
+	// forwarded to the session child (a SIGTERM from an SDK client).
+	SessionSignal os.Signal
+	stubs         []stub
 }
 
 type stub struct {
@@ -103,10 +107,26 @@ func (f *Fake) Start(c Cmd) (Process, error) {
 	return p, nil
 }
 
-func (f *Fake) Exec(c Cmd) error {
+// RunSession records c as the session child. A stub matching it scripts the
+// child's exit: execx.Fail(137) ends the session with status 137. A stub whose
+// error is not a CodeError is a failure to start.
+func (f *Fake) RunSession(c Cmd) (SessionResult, error) {
 	f.record(c)
-	f.Execed = &c
-	return nil
+	f.mu.Lock()
+	f.Session = &c
+	sig := f.SessionSignal
+	f.mu.Unlock()
+	out, err := f.match(c)
+	if c.Stdout != nil && out != "" {
+		io.WriteString(c.Stdout, out)
+	}
+	if err != nil {
+		var ce *CodeError
+		if !errors.As(err, &ce) {
+			return SessionResult{Code: -1}, err
+		}
+	}
+	return SessionResult{Code: ExitCode(err), Forwarded: sig}, nil
 }
 
 // CommandLines renders each recorded call as a single string, for assertions.

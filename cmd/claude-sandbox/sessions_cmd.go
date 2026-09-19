@@ -17,6 +17,7 @@ import (
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/imagebuild"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/launch"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/oomreport"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/sessions"
 )
 
@@ -443,25 +444,32 @@ func newInstance(env *Env, projectDir string, f *launchFlags, gitRoot string) st
 	return sessions.PickNoun(append(taken, sessions.Instances(found)...), nil)
 }
 
-// attachTo hands the process over to `docker attach` (CS-SESS-031).
+// attachTo runs `docker attach` as the session child (CS-SESS-031) and, like a
+// new session, reports an OOM kill that ends it (CS-SESS-059). The limit
+// comes from the container's own labels, carried by its events.
 func attachTo(env *Env, s sessions.Session, configuredKeys string) error {
 	detachKeys := launch.ResolveDetachKeys(configuredKeys)
 	fmt.Fprintf(env.Out, "Attaching to %s. Press %s to detach without stopping it.\n", s.Instance, detachKeys)
 	// Docker cannot report whether another client is already attached, so this
 	// cannot be prevented — only mentioned.
 	fmt.Fprintln(env.Out, "If someone else is already attached, you will share the terminal.")
-	return env.Runner.Exec(execx.Cmd{
+	end, err := runSession(env, execx.Cmd{
 		Name: "docker",
 		Args: []string{"attach", "--detach-keys=" + detachKeys, s.Name},
-	})
+	}, s.Name, primarySession, oomreport.Limit{}, false)
+	if err != nil {
+		return err
+	}
+	return sessionExit(end.code)
 }
 
-// joinInto starts another claude inside a running container (CS-SESS-032).
+// joinInto starts another claude inside a running container (CS-SESS-032), as
+// a session child the launcher waits on.
 func joinInto(env *Env, s sessions.Session, projectDir, hostUser, model, configuredKeys string, f *launchFlags, wt worktreeChoice) error {
 	detachKeys := launch.ResolveDetachKeys(configuredKeys)
 	fmt.Fprintf(env.Out, "Starting a new session inside %s.\n", s.Instance)
 	fmt.Fprintln(env.Out, "Note: this session ends if that container's primary session exits, and it cannot be reattached.")
-	// Detaching from an exec'd session orphans it beyond recovery, so this is
+	// Detaching from a joined session orphans it beyond recovery, so this is
 	// the path where docker's ctrl-p,ctrl-q default does the most damage: the
 	// TUI binds ctrl+p, so a stray ctrl+p then ctrl+q would silently lose the
 	// session. Never leave these keys to docker's default.
@@ -492,7 +500,13 @@ func joinInto(env *Env, s sessions.Session, projectDir, hostUser, model, configu
 		args = append(args, "--model", model)
 	}
 	args = append(args, f.Passthrough...)
-	return env.Runner.Exec(execx.Cmd{Name: "docker", Args: args})
+	// CS-SESS-060: judged by the exec's own status, since the container
+	// normally outlives it.
+	end, err := runSession(env, execx.Cmd{Name: "docker", Args: args}, s.Name, joinedSession, oomreport.Limit{}, false)
+	if err != nil {
+		return err
+	}
+	return sessionExit(end.code)
 }
 
 // noteWorktree reports where the session being attached to works, the way

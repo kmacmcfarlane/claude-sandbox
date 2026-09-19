@@ -95,7 +95,7 @@ var _ = Describe("sessions (CS-SESS)", func() {
 		It("CS-SESS-014: a clean launch is unchanged and needs no terminal", func() {
 			running()
 			Expect(f.run()).To(Equal(0))
-			Expect(f.fake.Execed).NotTo(BeNil())
+			Expect(f.fake.Session).NotTo(BeNil())
 			Expect(f.launchLine()).To(HavePrefix("docker create "))
 		})
 
@@ -128,14 +128,14 @@ var _ = Describe("sessions (CS-SESS)", func() {
 			Expect(f.run()).To(Equal(3))
 			Expect(f.errw.String()).To(ContainSubstring("no terminal is attached"))
 			Expect(f.errw.String()).To(ContainSubstring("otter"), "the sessions found are reported before failing")
-			Expect(f.fake.Execed).To(BeNil(), "nothing may be launched")
+			Expect(f.fake.Session).To(BeNil(), "nothing may be launched")
 		})
 
 		It("CS-SESS-016: [q] quits without launching", func() {
 			running(psRow("cs-a", "Up 1 hour", f.proj, "otter"))
 			tty("q")
 			Expect(f.run()).To(Equal(0))
-			Expect(f.fake.Execed).To(BeNil())
+			Expect(f.fake.Session).To(BeNil())
 		})
 
 		It("CS-SESS-016: an empty answer quits rather than launching or attaching", func() {
@@ -143,7 +143,7 @@ var _ = Describe("sessions (CS-SESS)", func() {
 			running(psRow("cs-a", "Up 1 hour", f.proj, "otter"))
 			tty("")
 			Expect(f.run()).To(Equal(0))
-			Expect(f.fake.Execed).To(BeNil())
+			Expect(f.fake.Session).To(BeNil())
 		})
 
 		It("CS-SESS-016: [n] launches a new container alongside the existing one", func() {
@@ -160,7 +160,7 @@ var _ = Describe("sessions (CS-SESS)", func() {
 			running(psRow("cs-a", "Up 1 hour", f.proj, "otter"))
 			tty("a")
 			Expect(f.run()).To(Equal(0))
-			Expect(f.execLine()).To(Equal("docker attach --detach-keys=ctrl-q,ctrl-q cs-a"))
+			Expect(f.sessionLine()).To(Equal("docker attach --detach-keys=ctrl-q,ctrl-q cs-a"))
 			Expect(f.out.String()).To(ContainSubstring("ctrl-q,ctrl-q"), "the detach sequence is printed")
 		})
 
@@ -168,7 +168,7 @@ var _ = Describe("sessions (CS-SESS)", func() {
 			running(psRow("cs-a", "Up 1 hour", f.proj, "otter"))
 			tty("j")
 			Expect(f.run()).To(Equal(0))
-			line := f.execLine()
+			line := f.sessionLine()
 			Expect(line).To(ContainSubstring("docker exec -it --detach-keys=ctrl-q,ctrl-q -u "))
 			Expect(line).To(ContainSubstring(" -w " + f.proj + " cs-a /opt/claude-sandbox/bin/claude-sandbox pidslot -- claude"))
 			Expect(f.out.String()).To(ContainSubstring("cannot be reattached"))
@@ -182,7 +182,7 @@ var _ = Describe("sessions (CS-SESS)", func() {
 
 			running()
 			Expect(f.run()).To(Equal(0))
-			byPath["start"] = f.execLine()
+			byPath["start"] = f.sessionLine()
 			// CS-LNCH-057: the keys belong to the attaching client, never to create.
 			Expect(f.launchLine()).NotTo(ContainSubstring("--detach-keys"))
 
@@ -192,7 +192,7 @@ var _ = Describe("sessions (CS-SESS)", func() {
 				g.fake.On("docker top", "PID  COMMAND\n1  claude\n", nil)
 				g.env.Prompter = &prompt.Scripted{IsTTY: true, Answers: []string{choice}}
 				Expect(g.run()).To(Equal(0))
-				byPath[choice] = g.fake.Execed.Name + " " + strings.Join(g.fake.Execed.Args, " ")
+				byPath[choice] = g.fake.Session.Name + " " + strings.Join(g.fake.Session.Args, " ")
 			}
 
 			for path, line := range byPath {
@@ -209,7 +209,7 @@ var _ = Describe("sessions (CS-SESS)", func() {
 			running(psRow("cs-a", "Up 1 hour", f.proj, "otter"))
 			tty("a")
 			Expect(f.run()).To(Equal(0))
-			Expect(f.execLine()).To(ContainSubstring("--detach-keys=ctrl-^"))
+			Expect(f.sessionLine()).To(ContainSubstring("--detach-keys=ctrl-^"))
 			Expect(f.out.String()).To(ContainSubstring("ctrl-^"))
 		})
 
@@ -220,7 +220,7 @@ var _ = Describe("sessions (CS-SESS)", func() {
 			)
 			tty("a", "heron")
 			Expect(f.run()).To(Equal(0))
-			Expect(f.execLine()).To(HaveSuffix("cs-b"))
+			Expect(f.sessionLine()).To(HaveSuffix("cs-b"))
 		})
 
 		It("CS-SESS-018: an unknown instance at tier 2 fails and lists the choices", func() {
@@ -265,17 +265,17 @@ var _ = Describe("sessions (CS-SESS)", func() {
 
 		It("--attach=INSTANCE attaches with no terminal", func() {
 			Expect(f.run("--attach=otter")).To(Equal(0))
-			Expect(f.execLine()).To(HaveSuffix("cs-a"))
+			Expect(f.sessionLine()).To(HaveSuffix("cs-a"))
 		})
 
 		It("--join=INSTANCE joins with no terminal", func() {
 			Expect(f.run("--join=otter")).To(Equal(0))
-			Expect(f.execLine()).To(ContainSubstring("docker exec"))
+			Expect(f.sessionLine()).To(ContainSubstring("docker exec"))
 		})
 
 		It("bare --attach is unambiguous with a single candidate", func() {
 			Expect(f.run("--attach")).To(Equal(0))
-			Expect(f.execLine()).To(HaveSuffix("cs-a"))
+			Expect(f.sessionLine()).To(HaveSuffix("cs-a"))
 		})
 
 		It("CS-SESS-030: an unknown instance name fails and lists what is available", func() {
@@ -303,7 +303,7 @@ var _ = Describe("sessions (CS-SESS)", func() {
 		)
 		f.env.Prompter = &prompt.Scripted{IsTTY: true, Answers: []string{"heron"}}
 		Expect(f.run("--attach")).To(Equal(0))
-		Expect(f.execLine()).To(HaveSuffix("cs-b"))
+		Expect(f.sessionLine()).To(HaveSuffix("cs-b"))
 	})
 
 	Describe("config drift (CS-SESS-025..027)", func() {
@@ -333,7 +333,7 @@ var _ = Describe("sessions (CS-SESS)", func() {
 			Expect(f.run("--attach=otter")).To(Equal(0))
 			Expect(f.errw.String()).To(ContainSubstring("different configuration"))
 			Expect(f.errw.String()).To(ContainSubstring("will NOT apply"))
-			Expect(f.execLine()).To(ContainSubstring("docker attach"))
+			Expect(f.sessionLine()).To(ContainSubstring("docker attach"))
 		})
 
 		It("CS-SESS-025: [n] launches a new container with the current config instead", func() {
@@ -347,7 +347,7 @@ var _ = Describe("sessions (CS-SESS)", func() {
 			running(psRowFull("cs-a", "Up 1 hour", f.proj, "otter", "", "stalehash1234", "[]"))
 			f.env.Prompter = &prompt.Scripted{IsTTY: true, Answers: []string{"q"}}
 			Expect(f.run("--attach=otter")).To(Equal(0))
-			Expect(f.fake.Execed).To(BeNil())
+			Expect(f.fake.Session).To(BeNil())
 		})
 
 		It("CS-SESS-025: names the drifted files", func() {
@@ -366,7 +366,7 @@ var _ = Describe("sessions (CS-SESS)", func() {
 			f.env.Prompter = &prompt.Scripted{IsTTY: false}
 			Expect(f.run("--attach=otter", "--allow-config-drift")).To(Equal(0))
 			Expect(f.errw.String()).NotTo(ContainSubstring("different configuration"))
-			Expect(f.execLine()).To(ContainSubstring("docker attach"))
+			Expect(f.sessionLine()).To(ContainSubstring("docker attach"))
 		})
 
 		It("CS-SESS-019: drift with no terminal exits 3", func() {
@@ -374,7 +374,7 @@ var _ = Describe("sessions (CS-SESS)", func() {
 			f.env.Prompter = &prompt.Scripted{IsTTY: false}
 			Expect(f.run("--attach=otter")).To(Equal(3))
 			Expect(f.errw.String()).To(ContainSubstring("--allow-config-drift"))
-			Expect(f.fake.Execed).To(BeNil())
+			Expect(f.fake.Session).To(BeNil())
 		})
 
 		It("CS-SESS-025: an absent hash label does not invent drift", func() {
@@ -383,7 +383,7 @@ var _ = Describe("sessions (CS-SESS)", func() {
 			running(psRowFull("cs-a", "Up 1 hour", f.proj, "otter", "", "", ""))
 			f.env.Prompter = &prompt.Scripted{IsTTY: false}
 			Expect(f.run("--attach=otter")).To(Equal(0))
-			Expect(f.execLine()).To(ContainSubstring("docker attach"))
+			Expect(f.sessionLine()).To(ContainSubstring("docker attach"))
 		})
 
 		It("CS-SESS-027: a model mismatch warns on attach", func() {
@@ -399,7 +399,7 @@ var _ = Describe("sessions (CS-SESS)", func() {
 			running(psRowFull("cs-a", "Up 1 hour", f.proj, "otter", "sonnet", hash, "[]"))
 			f.env.Prompter = &prompt.Scripted{IsTTY: false}
 			Expect(f.run("--join=otter", "--model", "opus")).To(Equal(0))
-			Expect(f.execLine()).To(HaveSuffix("claude --model opus"))
+			Expect(f.sessionLine()).To(HaveSuffix("claude --model opus"))
 		})
 	})
 
@@ -503,7 +503,7 @@ var _ = Describe("sessions (CS-SESS)", func() {
 			func(flag string) {
 				Expect(f.run("--branch", flag)).To(Equal(2))
 				Expect(f.errw.String()).To(ContainSubstring("--branch"))
-				Expect(f.fake.Execed).To(BeNil())
+				Expect(f.fake.Session).To(BeNil())
 			},
 			Entry("--ralph", "--ralph"),
 			Entry("--attach", "--attach"),
@@ -528,7 +528,7 @@ var _ = Describe("sessions (CS-SESS)", func() {
 		It("CS-SESS-043: there is no --branch=NAME form — the '=' value would name the result while --attach=/--join= pick a target", func() {
 			Expect(f.run("--branch=sidequest")).To(Equal(2))
 			Expect(f.errw.String()).To(ContainSubstring("unknown flag"))
-			Expect(f.fake.Execed).To(BeNil())
+			Expect(f.fake.Session).To(BeNil())
 		})
 	})
 })

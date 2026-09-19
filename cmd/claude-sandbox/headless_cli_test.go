@@ -71,7 +71,7 @@ var _ = Describe("headless mode (CS-LNCH-058..067)", func() {
 		name := nameOf(args)
 		Expect(args).To(ContainElement(HavePrefix("claude-sandbox.instance=")))
 		Expect(args).To(ContainElement(HavePrefix("claude-sandbox.pidclass=")))
-		Expect(f.execLine()).To(Equal("docker start -ai " + name))
+		Expect(f.sessionLine()).To(Equal("docker start -ai " + name))
 		// Reserved under the lock like every launch (CS-LNCH-057).
 		Expect(f.lock.held()).To(ContainElement(HavePrefix("docker create -i --rm --init ")))
 	})
@@ -96,7 +96,7 @@ var _ = Describe("headless mode (CS-LNCH-058..067)", func() {
 
 		// The live-verification inputs: the exact create and start argv.
 		GinkgoWriter.Printf("HEADLESS CREATE: %s\n", f.launchLine())
-		GinkgoWriter.Printf("HEADLESS START: %s\n", f.execLine())
+		GinkgoWriter.Printf("HEADLESS START: %s\n", f.sessionLine())
 	})
 
 	It("CS-LNCH-063: an interactive launch forwards none of the allowlist", func() {
@@ -244,7 +244,7 @@ var _ = Describe("headless mode (CS-LNCH-058..067)", func() {
 			} {
 				g := newCLIFixture()
 				Expect(g.run(append([]string{"headless"}, a...)...)).To(Equal(2), "%v", a)
-				Expect(g.fake.Execed).To(BeNil(), "%v", a)
+				Expect(g.fake.Session).To(BeNil(), "%v", a)
 				Expect(g.errw.String()).To(ContainSubstring("not valid with headless"), "%v", a)
 			}
 		})
@@ -252,12 +252,12 @@ var _ = Describe("headless mode (CS-LNCH-058..067)", func() {
 		It("is recognized only as the first argument", func() {
 			Expect(f.run("--rebuild", "headless")).To(Equal(2))
 			Expect(f.errw.String()).To(ContainSubstring("'headless' must be the first argument"))
-			Expect(f.fake.Execed).To(BeNil())
+			Expect(f.fake.Session).To(BeNil())
 		})
 
 		It("the launcher's own --version still applies before headless", func() {
 			Expect(f.run("--version")).To(Equal(0))
-			Expect(f.fake.Execed).To(BeNil())
+			Expect(f.fake.Session).To(BeNil())
 		})
 
 		It("is registered with cobra, so help lists it", func() {
@@ -367,7 +367,7 @@ var _ = Describe("headless containers are not candidates (CS-SESS-055)", func() 
 		g := newCLIFixture()
 		g.fake.On("docker ps", psRowMode("cs-h", g.proj, sessions.ModeHeadless, "heron", "4")+"\n", nil)
 		Expect(g.run("--join=heron")).To(Equal(2))
-		Expect(g.fake.Execed).To(BeNil())
+		Expect(g.fake.Session).To(BeNil())
 	})
 
 	It("CS-SESS-055: the --attach= completion does not offer it", func() {

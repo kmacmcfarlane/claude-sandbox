@@ -8,6 +8,8 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
+	"runtime"
 	"syscall"
 )
 
@@ -38,8 +40,23 @@ type Runner interface {
 	Output(c Cmd) (string, error)
 	// Start launches c without waiting.
 	Start(c Cmd) (Process, error)
-	// Exec replaces the current process with c (the docker start hand-off).
-	Exec(c Cmd) error
+	// RunSession runs c as the interactive session child the launcher waits
+	// on (docker start/attach/exec, CS-LNCH-085): the terminal is inherited,
+	// SIGTERM and SIGHUP are forwarded, SIGINT and SIGQUIT are swallowed by
+	// the launcher (CS-LNCH-086). The error is non-nil only when c could not
+	// be started; the child's own outcome is in the result.
+	RunSession(c Cmd) (SessionResult, error)
+}
+
+// SessionResult is how a session child ended.
+type SessionResult struct {
+	// Code is the child's exit status, 128+n when it died of signal n — the
+	// convention a shell uses, so the launcher can pass it through unchanged.
+	Code int
+	// Forwarded is the signal the launcher received and forwarded to the
+	// child (SIGTERM or SIGHUP), nil when the session ended on its own. A
+	// signal-initiated exit is the caller's to end quietly (CS-LNCH-091).
+	Forwarded os.Signal
 }
 
 // ExitCode extracts the exit status from an error returned by Run/Wait.
@@ -108,12 +125,73 @@ func (s System) Start(c Cmd) (Process, error) {
 	return &sysProcess{cmd: cmd}, nil
 }
 
-func (s System) Exec(c Cmd) error {
-	path, err := exec.LookPath(c.Name)
-	if err != nil {
-		return err
+// RunSession starts c as a child in the launcher's own process group, so the
+// terminal keeps delivering its keys and job-control signals to docker
+// directly, and waits for it (CS-LNCH-085/086).
+//
+//   - SIGTERM and SIGHUP are forwarded: sent to the launcher's pid alone (an
+//     SDK client stopping its session, CS-LNCH-091), they would otherwise
+//     never reach docker. A group-wide one reaches docker twice; docker
+//     proxies both, which the container's init absorbs.
+//   - SIGINT and SIGQUIT are caught and dropped, not SIG_IGN'd: an ignored
+//     disposition survives exec, and docker would inherit it. Caught ones
+//     reset to the default in the child.
+//   - Pdeathsig SIGKILL, with the forking OS thread locked for the child's
+//     lifetime (Linux delivers it when that THREAD exits, not the process):
+//     a launcher killed outright takes the docker client with it, exactly
+//     as killing the exec'd client used to.
+func (s System) RunSession(c Cmd) (SessionResult, error) {
+	cmd := s.build(c)
+	// exec.Cmd reads a nil stream as /dev/null; a session needs the terminal.
+	if cmd.Stdin == nil {
+		cmd.Stdin = os.Stdin
 	}
-	env := os.Environ()
-	env = append(env, c.Env...)
-	return syscall.Exec(path, append([]string{c.Name}, c.Args...), env)
+	if cmd.Stdout == nil {
+		cmd.Stdout = os.Stdout
+	}
+	if cmd.Stderr == nil {
+		cmd.Stderr = os.Stderr
+	}
+	cmd.SysProcAttr = sessionAttr()
+
+	// Installed before the fork, so no signal can land in between with the
+	// default action and kill the launcher before it can report.
+	sigs := make(chan os.Signal, 8)
+	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT)
+	defer signal.Stop(sigs)
+
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	if err := cmd.Start(); err != nil {
+		return SessionResult{Code: -1}, err
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+
+	var res SessionResult
+	for {
+		select {
+		case sig := <-sigs:
+			switch sig {
+			case syscall.SIGTERM, syscall.SIGHUP:
+				res.Forwarded = sig
+				cmd.Process.Signal(sig)
+			}
+		case <-done:
+			res.Code = statusCode(cmd.ProcessState)
+			return res, nil
+		}
+	}
+}
+
+// statusCode renders a finished process's status as a shell would: the exit
+// code, or 128+n for death by signal n.
+func statusCode(ps *os.ProcessState) int {
+	if ps == nil {
+		return -1
+	}
+	if ws, ok := ps.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
+		return 128 + int(ws.Signal())
+	}
+	return ps.ExitCode()
 }

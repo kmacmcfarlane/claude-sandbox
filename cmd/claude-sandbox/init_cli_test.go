@@ -4,7 +4,7 @@ package main
 // (CS-INITR-001), spec/layout.feature (CS-LAY-015/016) — CLI-level behavior
 // through MainWithEnv. All external commands (git, docker) go through
 // execx.Fake; the reserving docker create is a recorded call and the final
-// docker start hand-off is recorded via Fake.Execed.
+// docker start hand-off is recorded via Fake.Session.
 
 import (
 	"bytes"
@@ -149,8 +149,8 @@ var _ = Describe("layout adoption at launch", func() {
 		_, err = os.Stat(filepath.Join(sb, "temp"))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(c.fake.CommandLines()).NotTo(ContainElement(ContainSubstring(" init -q")))
-		Expect(c.fake.Execed).NotTo(BeNil())
-		Expect(c.fake.Execed.Name).To(Equal("docker"))
+		Expect(c.fake.Session).NotTo(BeNil())
+		Expect(c.fake.Session.Name).To(Equal("docker"))
 
 		By("default (foreign-safe) value: sidecar init runs before the docker create")
 		proj2 := mkProject()
@@ -183,7 +183,7 @@ var _ = Describe("layout adoption at launch", func() {
 		sb := filepath.Join(proj, ".claude-sandbox")
 		_, err := os.Stat(filepath.Join(sb, "CLAUDE.md"))
 		Expect(err).NotTo(HaveOccurred())
-		Expect(c.fake.Execed).NotTo(BeNil())
+		Expect(c.fake.Session).NotTo(BeNil())
 		Expect(strings.Join(c.launched().Args, " ")).To(ContainSubstring("/opt/claude-sandbox/bin/ralph"))
 
 		By(`interactive "claude-sandbox" leaves the project untouched`)
@@ -193,7 +193,7 @@ var _ = Describe("layout adoption at launch", func() {
 
 		_, err = os.Stat(filepath.Join(proj2, ".claude-sandbox"))
 		Expect(os.IsNotExist(err)).To(BeTrue(), ".claude-sandbox/ must not be created")
-		Expect(c2.fake.Execed).NotTo(BeNil())
+		Expect(c2.fake.Session).NotTo(BeNil())
 		Expect(c2.launched().Args).To(ContainElement("claude"))
 	})
 })

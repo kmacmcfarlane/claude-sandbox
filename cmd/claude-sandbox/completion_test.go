@@ -39,7 +39,7 @@ func (r completionResult) has(name string) bool { return slices.Contains(r.names
 func (f *cliFixture) complete(args ...string) completionResult {
 	code := MainWithEnv(append([]string{cobra.ShellCompRequestCmd}, args...), f.env)
 	Expect(code).To(Equal(0), "stderr:\n%s", f.errw.String())
-	Expect(f.fake.Execed).To(BeNil(), "completion must never hand off to docker")
+	Expect(f.fake.Session).To(BeNil(), "completion must never hand off to docker")
 	return parseCompletion(f.out.String())
 }
 
@@ -88,7 +88,7 @@ var _ = Describe("shell completion", func() {
 			f = newCLIFixture()
 			Expect(f.run("completion", shell)).To(Equal(0), "shell: %s", shell)
 			Expect(f.out.String()).To(ContainSubstring(cobra.ShellCompRequestCmd), "shell: %s", shell)
-			Expect(f.fake.Execed).To(BeNil(), "shell: %s", shell)
+			Expect(f.fake.Session).To(BeNil(), "shell: %s", shell)
 		}
 	})
 
@@ -97,7 +97,7 @@ var _ = Describe("shell completion", func() {
 		// runLaunch would have printed the cascade and built the base image.
 		Expect(f.out.String()).NotTo(ContainSubstring("config cascade"))
 		Expect(f.errw.String()).NotTo(ContainSubstring("Building"))
-		Expect(f.fake.Execed).To(BeNil())
+		Expect(f.fake.Session).To(BeNil())
 	})
 
 	It("CS-COMP-003: __completeNoDesc returns completions without descriptions", func() {
