@@ -151,7 +151,9 @@ session scratchpad inside the mounted config directory (`CLAUDE_CODE_TMPDIR`),
 so working files survive the container and `--resume` picks them back up.
 Set `CLAUDE_CODE_TMPDIR` yourself (host env or `.claude-sandbox/env`) to
 override the location — keep it under a mounted path or it dies with the
-container.
+container. A bare `CLAUDE_CODE_TMPDIR` line (no `=`) in an env file passes your
+shell's value through, and the env file wins; if your shell sets it to empty, the
+empty value is passed and the durable scratchpad is off for that session.
 
 ## Multiple sessions
 
@@ -908,7 +910,9 @@ own `<config dir>/sessions`, putting other trees' sandboxes into a registry your
 `claude` also writes.
 
 The bridge is switched **off for one session**, with one warning and no banner, when an env file
-in the cascade sets `XDG_RUNTIME_DIR` (the launcher will not override it), or when your home
+in the cascade sets `XDG_RUNTIME_DIR` (the launcher will not override it; the file is read as
+docker reads it, so a bare `XDG_RUNTIME_DIR` line counts when your environment sets the variable,
+since docker passes it through), or when your home
 directory is so long that the socket path would exceed Claude Code's 103-byte limit, or when
 the launcher cannot create one of those directories or restrict it to `0700` — for example a
 `peers/` Docker once created as root, or one replaced by a symlink (the launcher never re-modes
