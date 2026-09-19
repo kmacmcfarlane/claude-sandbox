@@ -1059,7 +1059,7 @@ Inside the container, `CLAUDE_SANDBOX_PROJECT_DIR` is always set to the project 
 
 ## Shell completion
 
-`claude-sandbox completion <shell>` prints a completion script for `bash`, `zsh`, `fish`, or `powershell`. It covers the launcher flags (with descriptions), the `init` / `init-ralph` / `ralph` / `headless` subcommands, the flags of the first three, `--model` aliases, and the known `claude` passthrough flags. Once an argument crosses the passthrough boundary — a claude flag, a `--`, or a positional — the launcher stops suggesting its own flags, since everything past that point belongs to `claude`.
+`claude-sandbox completion <shell>` prints a completion script for `bash`, `zsh`, `fish`, or `powershell`. It covers the launcher flags (with descriptions), the `init` / `init-ralph` / `ralph` / `headless` subcommands, the flags of the first three, the launcher flags `headless` accepts (all but `--ralph`, `--limit`, `--attach`, `--join` and `--branch`) plus its `--`, `--model` aliases, and the known `claude` passthrough flags. Once an argument crosses the passthrough boundary — a claude flag, a `--`, or a positional — the launcher stops suggesting its own flags, since everything past that point belongs to `claude`.
 
 ```bash
 # bash (needs bash-completion v2; see caveats below)
