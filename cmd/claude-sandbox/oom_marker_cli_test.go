@@ -94,6 +94,15 @@ var _ = Describe("the OOM marker (CS-SESS-061..063)", func() {
 			Expect(f.out.String()).NotTo(ContainSubstring("OOM"))
 			Expect(f.errw.String()).To(BeEmpty())
 		})
+
+		It("CS-SESS-062: a partial failure keeps the marks docker printed", func() {
+			running(psRow("cs-a", "Up 1 hour", f.proj, "otter"), psRow("cs-b", "Up 2 hours", f.proj, "heron"))
+			f.fake.On(oomInspect, "/cs-a true\n", execx.Fail(1))
+			Expect(f.run("sessions")).To(Equal(0))
+			Expect(f.out.String()).To(ContainSubstring("1 (OOM)"))
+			Expect(strings.Count(f.out.String(), "1 (OOM)")).To(Equal(1))
+			Expect(f.errw.String()).To(BeEmpty())
+		})
 	})
 
 	Describe("the note before attach or join", func() {
@@ -115,6 +124,14 @@ var _ = Describe("the OOM marker (CS-SESS-061..063)", func() {
 			Expect(f.run("--join=otter")).To(Equal(0))
 			Expect(f.errw.String()).To(ContainSubstring(note + "not recorded on this container.\n"))
 			Expect(f.sessionLine()).To(HavePrefix("docker exec -it "))
+		})
+
+		It("CS-SESS-063: a container without an instance label is named by its mode", func() {
+			running(psRow("cs-a", "Up 1 hour", f.proj, ""))
+			f.fake.On(oomInspect, "/cs-a true\n", nil)
+			Expect(f.run("--attach")).To(Equal(0))
+			Expect(f.errw.String()).To(ContainSubstring("(session 'claude') was killed by the OOM killer"))
+			Expect(f.errw.String()).NotTo(ContainSubstring("(session '')"))
 		})
 
 		It("CS-SESS-063: the default limit is named as the default", func() {

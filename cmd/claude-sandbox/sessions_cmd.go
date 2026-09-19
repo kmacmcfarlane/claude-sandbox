@@ -160,9 +160,15 @@ func noteEarlierOOM(env *Env, s sessions.Session) {
 	if !t[0].OOMKilled {
 		return
 	}
+	// A container without an instance label is named by its mode, as
+	// reportRunning names it.
+	label := s.Instance
+	if label == "" {
+		label = s.Mode
+	}
 	lim := oomreport.Limit{Value: s.MemoryLimit, Source: s.MemoryLimitSource}
 	fmt.Fprintf(env.Err, "Note: an earlier process in this container (session '%s') was killed by the OOM killer; memoryLimit: %s.\n",
-		s.Instance, oomreport.DescribeLimit(lim))
+		label, oomreport.DescribeLimit(lim))
 }
 
 // uptime trims docker's "Up 2 hours (healthy)" to "2 hours".

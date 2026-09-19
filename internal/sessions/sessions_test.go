@@ -430,12 +430,28 @@ var _ = Describe("the OOM marker (CS-SESS-061..063)", func() {
 		Expect(strings.Count(string(b), "oomKilled")).To(Equal(1))
 	})
 
-	It("CS-SESS-062: a failing inspect marks nothing", func() {
-		fake.On("docker inspect", "/a true\n", execx.Fail(1))
+	It("CS-SESS-062: an inspect that fails with no output marks nothing", func() {
+		fake.On("docker inspect", "", execx.Fail(1))
 		all := []sessions.Session{{Name: "a"}, {Name: "b"}}
 		sessions.MarkOOM(fake, all)
 		Expect(all[0].OOMKilled).To(BeFalse())
 		Expect(all[1].OOMKilled).To(BeFalse())
+	})
+
+	It("CS-SESS-062: a partial failure keeps the marks docker printed before failing", func() {
+		// docker prints the containers it found, then fails on the missing
+		// one ("No such container", exit 1).
+		fake.On("docker inspect", "/a true\n/c false\n", execx.Fail(1))
+		all := []sessions.Session{{Name: "a"}, {Name: "gone"}, {Name: "c"}}
+		sessions.MarkOOM(fake, all)
+		Expect([]bool{all[0].OOMKilled, all[1].OOMKilled, all[2].OOMKilled}).To(Equal([]bool{true, false, false}))
+	})
+
+	It("CS-SESS-061: a successful inspect with fewer lines than names marks only what it reported", func() {
+		fake.On("docker inspect", "/b true\n", nil)
+		all := []sessions.Session{{Name: "a"}, {Name: "b"}, {Name: "c"}}
+		sessions.MarkOOM(fake, all)
+		Expect([]bool{all[0].OOMKilled, all[1].OOMKilled, all[2].OOMKilled}).To(Equal([]bool{false, true, false}))
 	})
 
 	It("CS-SESS-063: discovery reads the create-time memoryLimit labels from the same ps output", func() {

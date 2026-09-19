@@ -295,8 +295,11 @@ const oomFormat = "{{.Name}} {{.State.OOMKilled}}"
 // MarkOOM sets OOMKilled on each session whose container docker reports as
 // OOM-killed, with ONE "docker inspect" across all of them — "docker ps
 // --format" cannot read State.OOMKilled (CS-SESS-061). Nothing runs for an
-// empty list. The marker is informational: an inspect that fails marks
-// nothing and is not an error (CS-SESS-062).
+// empty list. The marker is informational, so a failure is never an error
+// (CS-SESS-062). The output is parsed even when docker exits non-zero:
+// docker prints the lines of the containers it found before failing on a
+// missing one (a --rm container removed since the ps), so a partial failure
+// keeps the marks it got; containers it did not report stay unmarked.
 func MarkOOM(r execx.Runner, all []Session) {
 	if len(all) == 0 {
 		return
@@ -305,10 +308,7 @@ func MarkOOM(r execx.Runner, all []Session) {
 	for _, s := range all {
 		args = append(args, s.Name)
 	}
-	out, err := r.Output(execx.Cmd{Name: "docker", Args: args, Stderr: io.Discard})
-	if err != nil {
-		return
-	}
+	out, _ := r.Output(execx.Cmd{Name: "docker", Args: args, Stderr: io.Discard})
 	killed := map[string]bool{}
 	for _, line := range strings.Split(out, "\n") {
 		f := strings.Fields(line)

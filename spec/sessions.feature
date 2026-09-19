@@ -628,8 +628,12 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
   Scenario: CS-SESS-062 A failing OOM inspect leaves "sessions" as it was
     Given the batched "docker inspect" exits non-zero
     When "claude-sandbox sessions" is run
-    Then every container is listed without a marker, no error is printed and
-      the exit status is 0
+    Then no error is printed and the exit status is 0
+    And a total failure (no output) lists every container without a marker
+    And a partial failure keeps the marks it did get: docker prints the lines
+      of the containers it found before failing on a missing one (a --rm
+      container removed between "docker ps" and the inspect), and only the
+      containers it did not report stay unmarked
 
   Scenario: CS-SESS-063 A note before attach or join into an OOM-killed container
     Given the container chosen for attach or join has State.OOMKilled true
