@@ -741,9 +741,17 @@ Set in `.claude-sandbox/config.yaml`. Controls how the directory is version-cont
   they would only dirty the tree — and warns instead: either set `trackInHost: false` in the
   local `.claude-sandbox/config.yaml` (and delete any of those five lines an earlier launch
   already appended — they are dead), or drop the ignore rule (`git check-ignore -v
-  .claude-sandbox/ignore-probe` names it, wherever it lives — a directory holding tracked
-  files is itself never reported ignored, so the launcher asks about a child path) and the sidecar `.git` to track the
-  directory in the host. Modes are never switched silently.
+  --no-index .claude-sandbox` names it, wherever it lives — without `--no-index` git never
+  reports a directory holding tracked files as ignored) and the sidecar `.git` to track the
+  directory in the host. Modes are never switched silently. A rule that excludes only the
+  directory's children, such as `.claude-sandbox/*`, is not a conflict: the `!` lines work
+  beneath it, so the entries are proposed as usual.
+- **Which rules count as "ignoring the directory":** for the `false`-mode checks (the
+  "hidden now" warning and the sidecar init) the launcher asks `git check-ignore` about two
+  never-existing children, `.claude-sandbox/ignore-probe` and `.claude-sandbox/ignore-probe.md`,
+  and counts the directory as ignored only when both are. A whitelist-style ignore (`*`,
+  `!*/`, `!*.*`) or a rule like `*.md` hides only one of them and does not count. A rule
+  that negates one of those probe paths by name defeats the check; don't write one.
 
 ```yaml
 # trackInHost: true
@@ -898,7 +906,12 @@ own `<config dir>/sessions`, putting other trees' sandboxes into a registry your
 
 The bridge is switched **off for one session**, with one warning and no banner, when an env file
 in the cascade sets `XDG_RUNTIME_DIR` (the launcher will not override it), or when your home
-directory is so long that the socket path would exceed Claude Code's 103-byte limit. It is all
+directory is so long that the socket path would exceed Claude Code's 103-byte limit, or when
+the launcher cannot create one of those directories or restrict it to `0700` — for example a
+`peers/` Docker once created as root, or one replaced by a symlink (the launcher never re-modes
+through a link). That warning names the directory and the fix: make it yours (`chown` it, or
+remove it and relaunch), or set `CLAUDE_SANDBOX_SHARED_PEER_REGISTRY=0` to keep the tree off
+the bridge. It is all
 or nothing: sharing the registry without a shared socket would leave the session listing
 nobody and listed by nobody, while hiding its own tree's registry, which is worse than the key
 being off. That session launches exactly as if the key were off.

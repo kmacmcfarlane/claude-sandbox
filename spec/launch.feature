@@ -786,7 +786,7 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       SendMessage now reach every other opted-in sandbox on this host, and only those
     And nothing is printed when the bridge is off
     And the line is not printed when the bridge stands down for the session
-      (CS-LNCH-054/055) — that launch is not bridged at all, and its one warning
+      (CS-LNCH-054/055/107) — that launch is not bridged at all, and its one warning
       says so instead
 
   # A bridge that shares the registry but not the socket address is strictly
@@ -824,6 +824,34 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       peers-root mount is added
     And cc-socks/ is not created and no banner is printed
     And exactly one warning names the length and says the bridge is off for this session
+    And the docker create argv and the drift fingerprint are those of a key-off launch
+
+  Scenario: CS-LNCH-107 A peer directory the launcher cannot own stands the bridge down with a remedy
+    # CS-LNCH-051 creates and tightens peers/, peers/sessions/ and peers/cc-socks/.
+    # When that fails — a directory docker once created as root, a read-only
+    # one, a regular file in the way — erroring out would fail EVERY launch in
+    # every tree that inherits the key, for a feature whose absence costs only
+    # cross-tree messaging. The launch cannot proceed bridged (Claude Code would
+    # refuse the socket dir and fall back to a private /tmp), so it proceeds
+    # exactly as with the key off, like CS-LNCH-054/055.
+    Given the shared peer registry is enabled
+    And one of peers/, peers/sessions/ or peers/cc-socks/ cannot be created or
+      restricted to 0700 — or the registry destination <config dir>/sessions
+      cannot be created where CS-LNCH-051 creates it
+    Then the launch still succeeds
+    And no "-e XDG_RUNTIME_DIR", no registry sessions/ overmount and no
+      peers-root mount is added, and no banner is printed
+    And exactly one warning says the bridge is off for this session, names the
+      directory and the error, and names both remedies: make the directory yours
+      (chown it, or remove it and relaunch) or set
+      CLAUDE_SANDBOX_SHARED_PEER_REGISTRY=0 to keep this tree off the bridge
+    And the docker create argv and the drift fingerprint are those of a key-off launch
+    And a peers/, peers/sessions/ or peers/cc-socks/ that is a SYMLINK is refused
+      the same way, and its target's mode is left unchanged
+    # chmod follows symlinks: tightening through one would re-mode whatever the
+    # link names, which the launcher does not own. The check is an lstat before
+    # the chmod; swapping the directory between the two needs write access to
+    # the user's own ~/.cache/claude-sandbox, i.e. the user.
 
   # ---- reserve, then attach ----
 

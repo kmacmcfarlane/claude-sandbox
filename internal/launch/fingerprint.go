@@ -100,7 +100,7 @@ func (in *Inputs) configFingerprint(p *Plan, ha hostAccess, sharedPeerRegistry b
 	// without the bridge cannot message across trees however the config reads
 	// now. The resolved mounts above already move with it; this line makes the
 	// dependency explicit rather than incidental. It is the APPLIED value: a
-	// session whose bridge stood down (CS-LNCH-054/055) launched exactly as
+	// session whose bridge stood down (CS-LNCH-054/055/107) launched exactly as
 	// with the key off and hashes like one.
 	fmt.Fprintf(&env, "sharedPeerRegistry=%t\n", sharedPeerRegistry)
 	fmt.Fprintf(&env, "uid=%d gid=%d user=%s home=%s\n", in.HostUID, in.HostGID, in.HostUser, in.Home)
