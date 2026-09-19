@@ -205,6 +205,7 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
       | --join     | join enters an existing container; branch forks one    |
       | --resume   | --branch already implies a resume; passing both would   |
       | --continue | hand claude the flag twice                              |
+      | --resume=abc | the "=" spelling is the same flag (CS-LNCH-100)       |
 
   Scenario: CS-SESS-043 Naming the fork composes with claude's own --name
     # There is deliberately NO --branch=NAME form: on --attach=/--join= the "="

@@ -112,7 +112,7 @@ See [Multiple sessions](#multiple-sessions) for what these do and when to reach 
 
 ### Passthrough arguments
 
-Any arguments not listed above are passed through to `claude` (in interactive mode) or `ralph` (in `--ralph` mode). Unrecognized `--` flags are rejected; use `--` to force passthrough if needed. For example:
+Any arguments not listed above are passed through to `claude` (in interactive mode) or `ralph` (in `--ralph` mode). Unrecognized `--` flags are rejected; use `--` to force passthrough if needed. A known `claude` flag starts the passthrough in any spelling `claude` accepts: `--disallowedTools Bash`, `--disallowedTools=Bash`, or the kebab-case `--disallowed-tools` / `--allowed-tools`. `--model=opus` is the launcher's own `--model`, same as `--model opus`. For example:
 
 ```bash
 # Pass --resume to claude:
@@ -638,6 +638,12 @@ Control how ralph handles rate limits and quota exhaustion.
 | `--quota-pause N` | `300` | Seconds between re-probes on quota exhaustion |
 | `--quota-max-wait N` | `18000` | Max seconds to wait for quota reset (5h) |
 
+### OOM-killed iterations
+
+The container runs with swap off (`memoryLimit`, default `8g`), so a build or test run that outgrows the limit makes the kernel's OOM killer kill a process inside the container. Ralph reads the container's cgroup v2 `oom_kill` counter (`/sys/fs/cgroup/memory.events`) before and after every iteration. When claude itself exits 137 **and** the counter rose, the iteration's outcome is `oom` — before, such an iteration looked `ok`, because the pipeline's run-logger still reported ok when claude's output just stopped.
+
+On an `oom` outcome ralph prints and notifies a message naming the `memoryLimit` in effect (read from the cgroup's `memory.max`, e.g. `16g`) and the remedies — raise `memoryLimit` in `.claude-sandbox/config.yaml`, or cap build/test parallelism (e.g. `ginkgo --procs=N`, `go test -p N`, `make -jN`) — then waits a fixed 60 seconds and re-runs the same iteration **once** (Ctrl-C or the stop file during that wait ends the loop without the retry). If the retry is OOM-killed too, ralph notifies and exits 137; a quota park or rate-limit retry in between does not clear the first OOM, only an iteration that completes does. An iteration that hits the hard time limit is always `iteration_timeout`, even if its claude died of the timeout's own KILL while something else was OOM-killed. A counter rise without claude dying (say, one killed test binary) is not an iteration failure, and where the counter cannot be read (no cgroup v2) classification is exactly as before.
+
 ### Logging
 
 Ralph produces two logs per run: a **run log** (structured metrics) and a **raw log** (complete NDJSON stream). Both sit in the ralph directory (`.claude-sandbox/ralph/`) by default.
@@ -663,6 +669,7 @@ Per-iteration metrics appended to `.claude-sandbox/ralph/runlog.json`. Each iter
 - **Cost** — total USD cost
 - **Turns** — number of API round-trips
 - **Subagent breakdown** — per-subagent tokens, duration, and model
+- **Outcome** — how ralph classified the iteration: `ok`, `quota_exhausted`, `rate_limit`, `watchdog_timeout`, `iteration_timeout`, `error` or `oom` (an `oom` entry also carries `claudeExit` and `oomKills`). A retried iteration has one entry per attempt. When run-logger wrote no entry (interactive mode), ralph adds a minimal one for any outcome other than `ok`.
 
 To include a story ID and name in the log, emit a structured marker in your orchestrator's output:
 
@@ -770,6 +777,22 @@ CLAUDE_NOTIFICATION_WEBHOOK_URL=https://discord.com/api/webhooks/YOUR_ID/YOUR_TO
 refresh there reaches them all. A project `.claude-sandbox/env` is for a genuine
 per-project override only — its keys override the same keys upstream, so a stale token
 copied into a project env silently hides the fresh one upstream.
+
+**Host variables the launcher forwards outrank the env file.** `docker create -e` beats
+`--env-file`, so a credential the launcher forwards from its own environment wins over the
+same key in any env file. The launcher forwards `ANTHROPIC_API_KEY` (and, with `--aws`, the
+AWS allowlist) only when it is set on the host: unset there, no `-e` is passed and the
+env-file value applies. Precedence, highest first: the launcher's environment (for
+`ANTHROPIC_API_KEY`, set even to empty; for the AWS allowlist, non-empty) > the env-file
+cascade (later file wins) > unset.
+
+> **Check for a leftover `ANTHROPIC_API_KEY` in your env files.** Launchers before
+> CS-LNCH-106 blanked any `ANTHROPIC_API_KEY` set in a `.claude-sandbox/env` of the cascade
+> when the host had none. Now that value reaches Claude Code in the container, which then
+> authenticates with the API key instead of your subscription login — automatically under
+> `-p`, so in ralph and headless runs — and a forgotten key can quietly move usage onto API
+> credits. To keep the subscription login, delete the key from the env file, or set it to
+> empty on the host (`export ANTHROPIC_API_KEY=`), which outranks every env file.
 
 `claude-sandbox init` never creates `.claude-sandbox/env`. It seeds
 `.claude-sandbox/env.example`, a commented template that the launcher never reads; copy it
@@ -1046,7 +1069,7 @@ If no `.claude-sandbox/Dockerfile` is found anywhere up to `/`, the launcher war
 | Variable | Default | Description |
 |---|---|---|
 | `PROJECT_DIR` | `$(pwd)` | Project directory to mount. Either way the launcher uses the **physical** path (symlinks resolved) and prints `Project: <physical> (resolved from <logical>)` when that differs — see [Multiple sessions](#multiple-sessions) |
-| `ANTHROPIC_API_KEY` | (none) | Passed through to the container |
+| `ANTHROPIC_API_KEY` | (none) | Passed through to the container by name (a bare `-e ANTHROPIC_API_KEY`, which docker resolves from the launcher's environment), so the key never appears in the `docker create` argv visible to `ps`. Forwarded only when set on the launcher host (even to empty, which then outranks any env file); unset, no `-e` is passed at all, so an `ANTHROPIC_API_KEY` from the `.claude-sandbox/env` cascade reaches the container — see [`.claude-sandbox/env`](#claude-sandboxenv) |
 | `CLAUDE_NOTIFICATION_WEBHOOK_URL` | (none) | Discord webhook for interactive notification hooks (permission prompts, idle) |
 | `CLAUDE_SANDBOX_HOST_ACCESS_SSH_ENABLED` | (unset) | Mount `~/.ssh/` read-only (equivalent to `--ssh`) |
 | `CLAUDE_SANDBOX_HOST_ACCESS_GIT_ENABLED` | (unset) | Mount `~/.gitconfig` read-only (equivalent to `--git`) |
@@ -1065,7 +1088,7 @@ Inside the container, `CLAUDE_SANDBOX_PROJECT_DIR` is always set to the project 
 
 ## Shell completion
 
-`claude-sandbox completion <shell>` prints a completion script for `bash`, `zsh`, `fish`, or `powershell`. It covers the launcher flags (with descriptions), the `init` / `init-ralph` / `ralph` / `headless` subcommands, the flags of the first three, `--model` aliases, and the known `claude` passthrough flags. Once an argument crosses the passthrough boundary — a claude flag, a `--`, or a positional — the launcher stops suggesting its own flags, since everything past that point belongs to `claude`.
+`claude-sandbox completion <shell>` prints a completion script for `bash`, `zsh`, `fish`, or `powershell`. It covers the launcher flags (with descriptions), the `init` / `init-ralph` / `ralph` / `headless` subcommands, the flags of the first three, the launcher flags `headless` accepts (all but `--ralph`, `--limit`, `--attach`, `--join` and `--branch`) plus its `--`, `--model` aliases, and the known `claude` passthrough flags. Once an argument crosses the passthrough boundary — a claude flag, a `--`, or a positional — the launcher stops suggesting its own flags, since everything past that point belongs to `claude`.
 
 ```bash
 # bash (needs bash-completion v2; see caveats below)
@@ -1126,7 +1149,7 @@ SSH, git, Docker socket, AWS and package-cache mounts are all opt-in. Enable the
 
 **Docker socket** — when enabled, the entrypoint adds the container user to the socket's group automatically, so Claude can run `docker compose`, `make up`, etc. Note: Docker socket access is effectively root-equivalent on the host. This setup trusts Claude not to abuse it (e.g., launching a container that mounts `/` read-write). The goal is to prevent *accidental* damage to the host, not to defend against a deliberately adversarial agent.
 
-**AWS** — mounts `~/.aws/` read-only, giving Claude access to your credentials, config, and SSO cache for the AWS CLI or SDKs. Also forwards an allowlist of host `AWS_*` env vars (`AWS_PROFILE`, `AWS_DEFAULT_PROFILE`, `AWS_REGION`, `AWS_DEFAULT_REGION`, `AWS_SHARED_CREDENTIALS_FILE`, `AWS_CONFIG_FILE`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_ROLE_ARN`, `AWS_WEB_IDENTITY_TOKEN_FILE`, `AWS_ENDPOINT_URL`) when set — so direnv-managed profile/region selection takes effect inside the container. For path-valued vars (`AWS_SHARED_CREDENTIALS_FILE`, `AWS_CONFIG_FILE`, `AWS_WEB_IDENTITY_TOKEN_FILE`) the file's **parent directory** is bind-mounted read-only at its host path so the AWS CLI/SDK can read them regardless of where they live on the host (e.g. a project-local `.aws/` dir). Mounting the directory (rather than the individual file) means credential refreshes on the host — which write a temp file and atomically rename it over the original — propagate live into a running container instead of hitting `EBUSY` on a pinned single-file mount. (If such a var points at a file sitting directly in a broad directory like your home root, the mount is refused with a warning rather than exposing the whole directory — move it into a dedicated subdir.)
+**AWS** — mounts `~/.aws/` read-only, giving Claude access to your credentials, config, and SSO cache for the AWS CLI or SDKs. Also forwards an allowlist of host `AWS_*` env vars (`AWS_PROFILE`, `AWS_DEFAULT_PROFILE`, `AWS_REGION`, `AWS_DEFAULT_REGION`, `AWS_SHARED_CREDENTIALS_FILE`, `AWS_CONFIG_FILE`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_ROLE_ARN`, `AWS_WEB_IDENTITY_TOKEN_FILE`, `AWS_ENDPOINT_URL`) when set, each by name only (a bare `-e NAME`, so no key or token value appears in the `docker create` argv) — so direnv-managed profile/region selection takes effect inside the container. For path-valued vars (`AWS_SHARED_CREDENTIALS_FILE`, `AWS_CONFIG_FILE`, `AWS_WEB_IDENTITY_TOKEN_FILE`) the file's **parent directory** is bind-mounted read-only at its host path so the AWS CLI/SDK can read them regardless of where they live on the host (e.g. a project-local `.aws/` dir). Mounting the directory (rather than the individual file) means credential refreshes on the host — which write a temp file and atomically rename it over the original — propagate live into a running container instead of hitting `EBUSY` on a pinned single-file mount. (If such a var points at a file sitting directly in a broad directory like your home root, the mount is refused with a warning rather than exposing the whole directory — move it into a dedicated subdir.)
 
 **Git** — mounts a read-only **copy** of `~/.gitconfig` so Claude can make commits with your identity. A copy is used (rather than the host file directly) because `git config` and many editors save via lock-and-rename, which would fail with `EBUSY` against a live single-file mountpoint — so your host-side `git config` keeps working while the sandbox runs. Host edits to `~/.gitconfig` are picked up on the next launch, not live.
 
@@ -1255,12 +1278,12 @@ Four images take part in a launch, and the container runs the last of them:
 
 | Image | Built from | Rebuilds when |
 |---|---|---|
-| `claude-sandbox` | `Dockerfile` — OS, toolchains, Docker CLI, Python venv, sandbox binary. **No Claude Code.** | the content of `Dockerfile` or of a baked source (`cmd/`, `internal/`, `go.mod`/`go.sum`, `assets.go`, `logstream/`, `entrypoint.sh`, `PROMPT_RALPH.md`, `mcp/`, `notification-hooks.json`; `_test.go` files excluded) changed |
+| `claude-sandbox` | `Dockerfile` — OS, toolchains, Docker CLI, Python venv, sandbox binary. **No Claude Code.** | the content of `Dockerfile` or of a baked source (`cmd/`, `internal/`, `go.mod`/`go.sum`, `assets.go`, the embedded `scaffold/`, `scaffold-ralph/`, `container-context.md` and `mcp-servers.json`, `logstream/`, `entrypoint.sh`, `PROMPT_RALPH.md`, `mcp/discord-notify/`, `notification-hooks.json` — every path the Dockerfile `COPY`s; `_test.go` files and build-context debris such as `__pycache__/` excluded) changed |
 | `claude-sandbox-cli` | `Dockerfile.cli` — installs Claude Code, pinned to a version | the content of `Dockerfile.cli` changed, or you accept a Claude Code update |
 | `claude-sandbox-df-…` | your child `.claude-sandbox/Dockerfile`, `FROM claude-sandbox` | the child Dockerfile's content changed, or the base image ID did |
 | `<base-or-child>:run` | a generated one-layer "cap": `FROM <base-or-child>` + `COPY --link` of the CLI from `claude-sandbox-cli` | either parent's image ID changed |
 
-Each build stamps the image with a `claude-sandbox.build-inputs` label: a hash of exactly the inputs in the last column. The next launch recomputes that hash and rebuilds only on a mismatch, so touching a file, pulling without changes, or opening a fresh worktree (whose files are all newer than your images) rebuilds nothing. The launcher used to compare file mtimes with the image's creation time instead. A fully cached rebuild leaves the creation time unchanged, so once a file was newer than the image, every launch rebuilt it again. An image built before the label existed still uses that old time rule until its next build stamps it. Note that the label is part of the image config: when the base gets its first label, children built on the old base rebuild once. `docker image inspect -f '{{ index .Config.Labels "claude-sandbox.build-inputs" }}' <image>` shows an image's label.
+Each build stamps the image with a `claude-sandbox.build-inputs` label: a hash of exactly the inputs in the last column. For the base, a file's permissions count only where they reach the image: the executable bits of `logstream/`, `PROMPT_RALPH.md` and `mcp/discord-notify/`, which the Dockerfile copies without `--chmod`. So a checkout made under a different umask (group-writable files) rebuilds nothing. A baked source that is itself a symlink is followed, as `COPY` follows it, so edits behind the link count; `COPY` follows only a target inside the repo, so a link pointing outside it is not read (the build would fail on it anyway). Upgrading to a launcher with this rule rebuilds the base, and each child, once, because the recorded hashes changed. The next launch recomputes that hash and rebuilds only on a mismatch, so touching a file, pulling without changes, or opening a fresh worktree (whose files are all newer than your images) rebuilds nothing. The launcher used to compare file mtimes with the image's creation time instead. A fully cached rebuild leaves the creation time unchanged, so once a file was newer than the image, every launch rebuilt it again. An image built before the label existed still uses that old time rule until its next build stamps it. Note that the label is part of the image config: when the base gets its first label, children built on the old base rebuild once. `docker image inspect -f '{{ index .Config.Labels "claude-sandbox.build-inputs" }}' <image>` shows an image's label.
 
 The point of the split is what a **Claude Code update costs**: previously the CLI was installed mid-way through the base Dockerfile, so every update invalidated the base from that layer down and — because every child's `FROM` ID changed — rebuilt every child image cold (minutes per project for a 13-second install). Now an update rebuilds the small CLI image once and a one-layer cap per project on its next launch; the base and children are untouched. The cap is built from a Dockerfile fed on stdin (no build context) and takes about a second when cached.
 

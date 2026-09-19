@@ -475,10 +475,51 @@ var _ = Describe("launch.Build", func() {
 		p := build()
 		Expect(p.Volumes).To(ContainElement(awsDir + ":" + awsDir + ":ro"))
 		Expect(p.EnvFlags).To(ContainElements(
-			"AWS_PROFILE=dev", "AWS_REGION=us-west-2", "AWS_ACCESS_KEY_ID=AKIA123"))
+			"AWS_PROFILE", "AWS_REGION", "AWS_ACCESS_KEY_ID"))
 		// Unset allowlist vars are not forwarded.
 		for _, e := range p.EnvFlags {
-			Expect(e).NotTo(HavePrefix("AWS_SESSION_TOKEN="))
+			Expect(e).NotTo(HavePrefix("AWS_SESSION_TOKEN"))
+		}
+	})
+
+	It("CS-LNCH-018, CS-LNCH-106: an unset or empty allowlist variable gets no -e, so the env-file value applies", func() {
+		t := true
+		in.CLIAWS = &t
+		mkdir(filepath.Join(home, ".aws"))
+		env["AWS_REGION"] = ""
+		envFile := filepath.Join(proj, ".claude-sandbox", "env")
+		Expect(os.MkdirAll(filepath.Dir(envFile), 0o755)).To(Succeed())
+		Expect(os.WriteFile(envFile, []byte("AWS_PROFILE=from-envfile\nAWS_REGION=eu-west-1\n"), 0o600)).To(Succeed())
+		in.EnvFiles = []string{envFile}
+		p := build()
+		for _, e := range p.EnvFlags {
+			Expect(e).NotTo(HavePrefix("AWS_PROFILE"))
+			Expect(e).NotTo(HavePrefix("AWS_REGION"))
+		}
+		Expect(p.CreateArgs(proj)).To(ContainElements("--env-file", envFile))
+	})
+
+	It("CS-LNCH-103: forwards the AWS allowlist by name and never puts a value in argv", func() {
+		t := true
+		in.CLIAWS = &t
+		env["AWS_PROFILE"] = "dev-profile-value"
+		env["AWS_ACCESS_KEY_ID"] = "AKIASENTINELKEYID"
+		env["AWS_SECRET_ACCESS_KEY"] = "sentinel-secret-access-key"
+		env["AWS_SESSION_TOKEN"] = "sentinel-session-token"
+		env["AWS_REGION"] = "" // set-but-empty stays unforwarded, as before
+		p := build()
+		args := p.CreateArgs(proj)
+		for _, k := range []string{"AWS_PROFILE", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"} {
+			Expect(p.EnvFlags).To(ContainElement(k))
+			Expect(args).To(ContainElement(k))
+		}
+		for _, e := range p.EnvFlags {
+			Expect(e).NotTo(HavePrefix("AWS_REGION"), "empty allowlist var must not be forwarded")
+		}
+		for _, a := range args {
+			for _, v := range []string{"dev-profile-value", "AKIASENTINELKEYID", "sentinel-secret-access-key", "sentinel-session-token"} {
+				Expect(a).NotTo(ContainSubstring(v))
+			}
 		}
 	})
 
@@ -1261,7 +1302,12 @@ var _ = Describe("launch.Build", func() {
 	})
 
 	It("CS-LNCH-029: container runtime environment flags", func() {
-		env["ANTHROPIC_API_KEY"] = ""
+		in.LookupEnv = func(k string) (string, bool) {
+			if k == "ANTHROPIC_API_KEY" {
+				return "", true
+			}
+			return "", false
+		}
 		p := build()
 		args := p.CreateArgs(proj)
 		Expect(args[0:4]).To(Equal([]string{"create", "-it", "--rm", "--init"}))
@@ -1272,18 +1318,94 @@ var _ = Describe("launch.Build", func() {
 			"HOST_HOME="+home,
 			"HOME="+home,
 			"DOCKER_GID=",
-			"ANTHROPIC_API_KEY=",
+			"ANTHROPIC_API_KEY",
 		))
-		// Every env flag is rendered as -e KEY=VAL in the argv.
+		// Every env flag is rendered as "-e <flag>" in the argv.
 		for _, e := range p.EnvFlags {
 			Expect(args).To(ContainElement(e))
 		}
 	})
 
-	It("CS-LNCH-029: forwards ANTHROPIC_API_KEY when set", func() {
-		env["ANTHROPIC_API_KEY"] = "sk-test"
-		p := build()
-		Expect(p.EnvFlags).To(ContainElement("ANTHROPIC_API_KEY=sk-test"))
+	Describe("ANTHROPIC_API_KEY forwarding (CS-LNCH-102)", func() {
+		const secret = "sk-ant-sentinel-value"
+		var lookup map[string]string
+		BeforeEach(func() {
+			lookup = map[string]string{}
+			in.LookupEnv = func(k string) (string, bool) { v, ok := lookup[k]; return v, ok }
+		})
+
+		It("CS-LNCH-102: a set key is passed as a bare -e NAME and its value never reaches argv", func() {
+			env["ANTHROPIC_API_KEY"] = secret
+			lookup["ANTHROPIC_API_KEY"] = secret
+			p := build()
+			args := p.CreateArgs(proj)
+			Expect(p.EnvFlags).To(ContainElement("ANTHROPIC_API_KEY"))
+			idx := -1
+			for i, a := range args {
+				Expect(a).NotTo(ContainSubstring(secret))
+				if a == "ANTHROPIC_API_KEY" {
+					idx = i
+				}
+			}
+			Expect(idx).To(BeNumerically(">", 0))
+			Expect(args[idx-1]).To(Equal("-e"))
+		})
+
+		It("CS-LNCH-102: a set-but-empty key is also passed by name", func() {
+			lookup["ANTHROPIC_API_KEY"] = ""
+			p := build()
+			Expect(p.EnvFlags).To(ContainElement("ANTHROPIC_API_KEY"))
+			Expect(p.EnvFlags).NotTo(ContainElement("ANTHROPIC_API_KEY="))
+		})
+
+		It("CS-LNCH-102, CS-LNCH-106: an unset key gets no -e in any form, so an env-file value applies", func() {
+			envFile := filepath.Join(proj, ".claude-sandbox", "env")
+			Expect(os.MkdirAll(filepath.Dir(envFile), 0o755)).To(Succeed())
+			Expect(os.WriteFile(envFile, []byte("ANTHROPIC_API_KEY="+secret+"\n"), 0o600)).To(Succeed())
+			in.EnvFiles = []string{envFile}
+			p := build()
+			for _, e := range p.EnvFlags {
+				Expect(e).NotTo(HavePrefix("ANTHROPIC_API_KEY"))
+			}
+			args := p.CreateArgs(proj)
+			for _, a := range args {
+				Expect(a).NotTo(HavePrefix("ANTHROPIC_API_KEY"))
+				Expect(a).NotTo(ContainSubstring(secret))
+			}
+			Expect(args).To(ContainElements("--env-file", envFile))
+		})
+
+		It("CS-LNCH-106: a set key still outranks the env file with a bare -e NAME", func() {
+			lookup["ANTHROPIC_API_KEY"] = ""
+			envFile := filepath.Join(proj, ".claude-sandbox", "env")
+			Expect(os.MkdirAll(filepath.Dir(envFile), 0o755)).To(Succeed())
+			Expect(os.WriteFile(envFile, []byte("ANTHROPIC_API_KEY="+secret+"\n"), 0o600)).To(Succeed())
+			in.EnvFiles = []string{envFile}
+			p := build()
+			Expect(p.EnvFlags).To(ContainElement("ANTHROPIC_API_KEY"))
+			Expect(p.CreateArgs(proj)).To(ContainElements("--env-file", envFile))
+		})
+	})
+
+	It("CS-LNCH-104: forwarded credential values do not change the drift fingerprint", func() {
+		t := true
+		in.CLIAWS = &t
+		mkdir(filepath.Join(home, ".aws"))
+		set := func(v string) {
+			env["ANTHROPIC_API_KEY"] = "sk-" + v
+			env["AWS_ACCESS_KEY_ID"] = "AKIA" + v
+			env["AWS_SECRET_ACCESS_KEY"] = "secret-" + v
+			env["AWS_SESSION_TOKEN"] = "token-" + v
+		}
+		set("one")
+		first := build()
+		set("two")
+		second := build()
+		Expect(second.ConfigHash).To(Equal(first.ConfigHash))
+		for _, l := range append(first.Labels, second.Labels...) {
+			Expect(l).NotTo(ContainSubstring("secret-"))
+			Expect(l).NotTo(ContainSubstring("token-"))
+		}
 	})
 
 	// ---- durable scratchpad root ----

@@ -92,6 +92,9 @@ var _ = Describe("ralph loop", func() {
 			Hostname:    "test-host",
 			PID:         os.Getpid(),
 			Rand:        func(int) int { return 25 }, // jitter factor exactly 1.0
+			// Never the host's real cgroup (CS-RLP-023): absent -> no OOM
+			// classification, the pre-existing behaviour.
+			CgroupDir: filepath.Join(work, "no-cgroup"),
 		}
 	})
 

@@ -25,9 +25,13 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     # Pass-through allowlist: --resume --continue --verbose --output-format
     # --allowedTools --disallowedTools --permission-prompt-tool --mcp-config
     # --permission-mode --append-system-prompt --system-prompt --max-turns
-    # --print --input-format --model --fallback-model --name
+    # --print --input-format --model --fallback-model --name, plus claude's
+    # kebab-case aliases --allowed-tools --disallowed-tools (CS-LNCH-101)
     # (-n, the short form of --name, needs no allowlisting: single-dash args
     # are positionals to the launcher grammar and already pass through)
+    # The allowlist only locates the passthrough boundary; claude validates
+    # its own arguments. A --flag=value spelling of an entry is matched by the
+    # part before "=" (CS-LNCH-100).
     #
     # --continue is the supported "resume the newest session for this directory"
     # path, and the launcher deliberately adds no flag of its own for it: a
@@ -56,6 +60,35 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
   Scenario: CS-LNCH-005 --model and --limit require values
     When "claude-sandbox --model" is run with no value
     Then it exits 2
+
+  Scenario: CS-LNCH-100 A known claude flag written as --flag=value starts the passthrough
+    When "claude-sandbox --disallowedTools=Bash --frobnicate" is run
+    Then "--disallowedTools=Bash" and all subsequent args are appended to the container command unmodified
+    When "claude-sandbox --resume=abc" is run
+    Then "--resume=abc" is appended to the container command
+    When "claude-sandbox --model=opus --resume" is run
+    Then the launcher consumes --model=opus exactly like "--model opus"
+      (the model is re-emitted on the container command and "--resume" starts the passthrough)
+    When "claude-sandbox --model=" is run
+    Then it exits 2, like "--model" with no value (CS-LNCH-005)
+    When "claude-sandbox --model==x" is run
+    Then it exits 2 naming the invalid value
+    When "claude-sandbox --frobnicate=1" or "claude-sandbox --dangerous=true" is run
+    Then it exits 2 with "unknown flag"
+    # Only the part before the first "=" is looked up in the allowlist. Launcher
+    # flags are matched first and are never mistaken for passthrough:
+    # --worktree=NAME, --attach=N and --join=N keep their launcher meaning, and
+    # a launcher flag that takes no value is still unknown with "=value".
+    # --model is launcher-owned (CS-LNCH-005/023), so its "=" form is consumed
+    # too rather than smuggled past the launcher's model resolution.
+
+  Scenario: CS-LNCH-101 Claude's kebab-case aliases of allowlisted flags pass through
+    When "claude-sandbox --allowed-tools Bash" or "claude-sandbox --disallowed-tools=Bash" is run
+    Then the flag and all subsequent args are appended to the container command
+    # The aliases are exactly those "claude --help" lists beside an allowlisted
+    # flag (verified on Claude Code 2.1.277: "--allowedTools, --allowed-tools"
+    # and "--disallowedTools, --disallowed-tools"; no other allowlisted flag
+    # has one). Completion offers them as passed-through claude flags.
 
   Scenario: CS-LNCH-006 PROJECT_DIR overrides the working directory
     Given PROJECT_DIR=/other/proj is set
@@ -236,11 +269,13 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
   Scenario: CS-LNCH-018 AWS directory mount and env forwarding
     Given aws access is enabled and ~/.aws exists
     Then "-v ~/.aws:~/.aws:ro" is added
-    And each set variable from the allowlist is forwarded with -e:
+    And each set variable from the allowlist is forwarded as a bare -e NAME (CS-LNCH-103):
       AWS_PROFILE AWS_DEFAULT_PROFILE AWS_REGION AWS_DEFAULT_REGION
       AWS_SHARED_CREDENTIALS_FILE AWS_CONFIG_FILE AWS_ACCESS_KEY_ID
       AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_ROLE_ARN
       AWS_WEB_IDENTITY_TOKEN_FILE AWS_ENDPOINT_URL
+    And an allowlist variable unset or empty on the host gets no -e, so a value
+      from the env-file cascade reaches the container (CS-LNCH-106)
 
   Scenario: CS-LNCH-019 AWS path-valued vars mount the parent DIRECTORY read-only
     Given AWS_SHARED_CREDENTIALS_FILE points to an existing file in /home/u/creds-dir/
@@ -406,8 +441,54 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
   Scenario: CS-LNCH-029 Container runtime environment
     Then docker create receives: -it --rm --init,
       -e HOST_UID/HOST_GID/HOST_USER/HOST_HOME of the calling user,
-      -e HOME=$HOME, -e DOCKER_GID, -e ANTHROPIC_API_KEY (empty when unset),
+      -e HOME=$HOME, -e DOCKER_GID, -e ANTHROPIC_API_KEY when set (CS-LNCH-102),
       -e CLAUDE_SANDBOX_PROJECT_DIR (CS-LNCH-047)
+
+  Scenario: CS-LNCH-102 ANTHROPIC_API_KEY is forwarded by name, never by value
+    # argv is readable by any local user through ps and /proc while docker
+    # create runs. A bare "-e NAME" makes the docker client read the value from
+    # the environment it inherits from the launcher, so the container sees the
+    # same value and argv never carries it (the CS-LNCH-063 technique).
+    Given ANTHROPIC_API_KEY is set in the launcher's environment, even to ""
+    Then docker create receives a bare "-e ANTHROPIC_API_KEY"
+    And its value appears nowhere in the docker create argv
+    Given ANTHROPIC_API_KEY is unset
+    Then docker create receives no -e for ANTHROPIC_API_KEY at all (CS-LNCH-106)
+
+  Scenario: CS-LNCH-106 An unset host credential leaves the env-file cascade in charge
+    # -e outranks --env-file, so the "-e ANTHROPIC_API_KEY=" an unset host key
+    # used to produce blanked a key set in a .claude-sandbox/env of the cascade.
+    # That empty value was not a deliberate override: it descends from the bash
+    # launcher's set -u-safe passthrough, -e ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}".
+    # Precedence, most specific first: the launcher's environment (set, even to
+    # "") > the env-file cascade (later file wins) > nothing.
+    Given ANTHROPIC_API_KEY is unset in the launcher's environment
+      And a .claude-sandbox/env of the cascade sets ANTHROPIC_API_KEY
+    Then docker create receives no "-e ANTHROPIC_API_KEY" in any form
+      And the env file's --env-file flag still reaches docker create
+      So the container sees the env-file value
+    Given ANTHROPIC_API_KEY is set in the launcher's environment, even to ""
+    Then the bare "-e ANTHROPIC_API_KEY" outranks the env file, as before
+    # The AWS allowlist (CS-LNCH-018/103) already follows the same rule: an
+    # unset (or empty) variable gets no -e, so an env-file value applies.
+
+  Scenario: CS-LNCH-103 AWS allowlist variables are forwarded by name, never by value
+    Given aws access is enabled
+    Then each allowlist variable set to a non-empty value is passed as a bare "-e NAME"
+    And no AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY or AWS_SESSION_TOKEN value
+      appears in the docker create argv
+    # Every allowlist name is inherited unchanged, so the non-secret ones go
+    # bare too: one rule, no per-name judgement to get wrong later.
+
+  Scenario: CS-LNCH-104 Forwarding by name does not change the drift fingerprint
+    Given two launches that differ only in the values of ANTHROPIC_API_KEY
+      and the AWS allowlist variables
+    Then both carry the same confighash
+    # Forwarded values were never hashed (only the aws host-access switch is),
+    # and the fingerprint must not start hashing secrets now. Values the
+    # launcher computes or that name paths (CLAUDE_CONFIG_DIR,
+    # CLAUDE_CODE_TMPDIR, CLAUDE_SANDBOX_PID_CLASS, XDG_RUNTIME_DIR, the
+    # package-cache vars) stay NAME=value: they are not credentials.
 
   Scenario: CS-LNCH-033 The primary session gets the configured detach keys
     # Omitting the flag does not mean "no detach keys" — it means docker's own

@@ -497,6 +497,37 @@ var _ = Describe("image build lifecycle", func() {
 			Expect(out.String()).To(ContainSubstring("Baked sources changed"))
 		})
 
+		DescribeTable("CS-IMG-004: rebuilds when a source embedded into the binary is newer",
+			func(rel string) {
+				images["claude-sandbox"] = &imgState{created: imgT}
+				touchAt(filepath.Join(repo, rel), time.Now())
+				rebuilt, err := imagebuild.EnsureBase(o)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(rebuilt).To(BeTrue())
+				Expect(out.String()).To(ContainSubstring("Baked sources changed"))
+			},
+			Entry("scaffold/", "scaffold/config.yaml"),
+			Entry("scaffold-ralph/", "scaffold-ralph/agent/PROMPT.md"),
+			Entry("container-context.md", "container-context.md"),
+			Entry("mcp-servers.json", "mcp-servers.json"),
+		)
+
+		DescribeTable("CS-IMG-038: does not rebuild when only build-context debris is newer",
+			func(rel string) {
+				images["claude-sandbox"] = &imgState{created: imgT}
+				touchAt(filepath.Join(repo, rel), time.Now())
+				rebuilt, err := imagebuild.EnsureBase(o)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(rebuilt).To(BeFalse())
+				Expect(buildLines(fake)).To(BeEmpty())
+			},
+			Entry("__pycache__", "scaffold-ralph/scripts/backlog/__pycache__/backlog.cpython-311.pyc"),
+			Entry(".pytest_cache", "scaffold-ralph/scripts/.pytest_cache/v/cache/nodeids"),
+			Entry("a stray .pyc", "scaffold-ralph/scripts/backlog/stray.pyc"),
+			Entry("a dot-entry under scaffold/", "scaffold/.DS_Store"),
+			Entry("a dot-dir under scaffold-ralph/", "scaffold-ralph/agent/.idea/workspace.xml"),
+		)
+
 		It("CS-IMG-031: does not rebuild when only a Go test file is newer", func() {
 			images["claude-sandbox"] = &imgState{created: imgT}
 			touchAt(filepath.Join(repo, "internal", "foo", "foo_test.go"), time.Now())
@@ -635,6 +666,7 @@ var _ = Describe("image build lifecycle", func() {
 
 		It("CS-IMG-034: the base fingerprint covers the Dockerfile and baked sources but not _test.go files", func() {
 			touchAt(filepath.Join(repo, "internal", "foo", "foo.go"), old)
+			touchAt(filepath.Join(repo, "mcp", "discord-notify", "index.mjs"), old)
 			a := baseStamp()
 			touchAt(filepath.Join(repo, "internal", "foo", "foo_test.go"), time.Now())
 			Expect(baseStamp()).To(Equal(a), "a test file is not an input")
@@ -643,6 +675,43 @@ var _ = Describe("image build lifecycle", func() {
 			Expect(b).NotTo(Equal(a), "a new baked source is an input")
 			Expect(os.WriteFile(filepath.Join(repo, "Dockerfile"), []byte("FROM scratch\n"), 0o644)).To(Succeed())
 			Expect(baseStamp()).NotTo(Equal(b), "the Dockerfile is an input")
+		})
+
+		It("CS-IMG-004: the sources embedded into the binary are base fingerprint inputs", func() {
+			for _, rel := range []string{"scaffold/config.yaml", "scaffold-ralph/agent/PROMPT.md", "container-context.md", "mcp-servers.json"} {
+				touchAt(filepath.Join(repo, rel), old)
+			}
+			a := baseStamp()
+			for _, rel := range []string{"scaffold/config.yaml", "scaffold-ralph/agent/PROMPT.md", "container-context.md", "mcp-servers.json"} {
+				p := filepath.Join(repo, rel)
+				orig, err := os.ReadFile(p)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(os.WriteFile(p, []byte("edited\n"), 0o644)).To(Succeed())
+				Expect(baseStamp()).NotTo(Equal(a), rel+" is an input")
+				Expect(os.WriteFile(p, orig, 0o644)).To(Succeed())
+				Expect(baseStamp()).To(Equal(a))
+			}
+		})
+
+		It("CS-IMG-038: build-context debris under the baked sources is not a fingerprint input", func() {
+			touchAt(filepath.Join(repo, "scaffold-ralph", "scripts", "backlog", "backlog.py"), old)
+			touchAt(filepath.Join(repo, "scaffold", "config.yaml"), old)
+			touchAt(filepath.Join(repo, "internal", "foo", "foo.go"), old)
+			touchAt(filepath.Join(repo, "mcp", "discord-notify", "index.mjs"), old)
+			a := baseStamp()
+			for _, rel := range []string{
+				"scaffold-ralph/scripts/backlog/__pycache__/backlog.cpython-311.pyc",
+				"scaffold-ralph/scripts/.pytest_cache/v/cache/nodeids",
+				"internal/foo/stray.pyo",
+				"scaffold/.DS_Store",
+				"scaffold-ralph/agent/.idea/workspace.xml",
+			} {
+				touchAt(filepath.Join(repo, rel), time.Now())
+				Expect(baseStamp()).To(Equal(a), rel+" is not an input")
+			}
+			// A dot-entry outside the scaffold trees is in the build context.
+			touchAt(filepath.Join(repo, "mcp", "discord-notify", ".npmrc"), old)
+			Expect(baseStamp()).NotTo(Equal(a))
 		})
 
 		It("CS-IMG-034: symlinks count by their target, so directory and dangling links still fingerprint", func() {
@@ -656,10 +725,141 @@ var _ = Describe("image build lifecycle", func() {
 			Expect(baseStamp()).NotTo(Equal(a), "a retargeted link is a change")
 		})
 
-		It("CS-IMG-034: a permission change to a baked file is an input", func() {
+		It("CS-IMG-039: a checkout under umask 002 fingerprints like one under 022", func() {
+			files := []string{
+				"cmd/main.go", "entrypoint.sh", "notification-hooks.json", "scaffold/config.yaml",
+				"logstream/run-logger.js", "PROMPT_RALPH.md", "mcp/discord-notify/index.mjs",
+			}
+			for _, rel := range files {
+				touchAt(filepath.Join(repo, rel), old)
+				Expect(os.Chmod(filepath.Join(repo, rel), 0o644)).To(Succeed())
+			}
+			Expect(os.Chmod(filepath.Join(repo, "logstream", "run-logger.js"), 0o755)).To(Succeed())
 			a := baseStamp()
-			Expect(os.Chmod(filepath.Join(repo, "entrypoint.sh"), 0o755)).To(Succeed())
+			for _, rel := range files {
+				Expect(os.Chmod(filepath.Join(repo, rel), 0o664)).To(Succeed())
+			}
+			Expect(os.Chmod(filepath.Join(repo, "logstream", "run-logger.js"), 0o775)).To(Succeed())
+			Expect(baseStamp()).To(Equal(a), "group-write is a umask artifact, not an image change")
+		})
+
+		DescribeTable("CS-IMG-039: an exec-bit change is an input only where COPY preserves the mode",
+			func(rel string, input bool) {
+				p := filepath.Join(repo, rel)
+				touchAt(p, old)
+				Expect(os.Chmod(p, 0o644)).To(Succeed())
+				a := baseStamp()
+				Expect(os.Chmod(p, 0o755)).To(Succeed())
+				if input {
+					Expect(baseStamp()).NotTo(Equal(a), rel+" keeps its mode in the image")
+				} else {
+					Expect(baseStamp()).To(Equal(a), rel+" is compiled, embedded or COPY --chmod'd")
+				}
+			},
+			Entry("a logstream script", "logstream/run-logger.js", true),
+			Entry("PROMPT_RALPH.md", "PROMPT_RALPH.md", true),
+			Entry("the MCP server source", "mcp/discord-notify/index.mjs", true),
+			Entry("entrypoint.sh (--chmod=755)", "entrypoint.sh", false),
+			Entry("notification-hooks.json (--chmod=644)", "notification-hooks.json", false),
+			Entry("Go source", "cmd/main.go", false),
+			Entry("an embedded scaffold file", "scaffold-ralph/scripts/backlog/backlog.py", false),
+		)
+
+		It("CS-IMG-040: a symlinked top-level baked directory is fingerprinted by its in-context target's contents", func() {
+			touchAt(filepath.Join(repo, "logstream", "run-logger.js"), old)
+			Expect(os.Chmod(filepath.Join(repo, "logstream", "run-logger.js"), 0o755)).To(Succeed())
+			a := baseStamp()
+
+			// The same tree, reached through a relative link inside the repo.
+			tgt := filepath.Join(repo, "shared", "logstream")
+			touchAt(filepath.Join(tgt, "run-logger.js"), old)
+			Expect(os.Chmod(filepath.Join(tgt, "run-logger.js"), 0o755)).To(Succeed())
+			Expect(os.RemoveAll(filepath.Join(repo, "logstream"))).To(Succeed())
+			Expect(os.Symlink("shared/logstream", filepath.Join(repo, "logstream"))).To(Succeed())
+			Expect(baseStamp()).To(Equal(a), "COPY bakes the target's contents under the source's name")
+			Expect(errw.String()).NotTo(ContainSubstring("could not fingerprint"))
+
+			Expect(os.WriteFile(filepath.Join(tgt, "run-logger.js"), []byte("edited\n"), 0o755)).To(Succeed())
+			b := baseStamp()
+			Expect(b).NotTo(Equal(a), "an edit behind the link is a change")
+			touchAt(filepath.Join(tgt, "added.js"), old)
+			c := baseStamp()
+			Expect(c).NotTo(Equal(b), "a file added behind the link is a change")
+			Expect(os.Chmod(filepath.Join(tgt, "added.js"), 0o755)).To(Succeed())
+			Expect(baseStamp()).NotTo(Equal(c), "the target's exec bits reach the image")
+		})
+
+		It("CS-IMG-040: a symlinked top-level baked file is fingerprinted by its in-context target's content", func() {
+			touchAt(filepath.Join(repo, "PROMPT_RALPH.md"), old)
+			a := baseStamp()
+			touchAt(filepath.Join(repo, "docs", "prompt.md"), old)
+			Expect(os.Remove(filepath.Join(repo, "PROMPT_RALPH.md"))).To(Succeed())
+			Expect(os.Symlink("docs/prompt.md", filepath.Join(repo, "PROMPT_RALPH.md"))).To(Succeed())
+			Expect(baseStamp()).To(Equal(a))
+			Expect(os.WriteFile(filepath.Join(repo, "docs", "prompt.md"), []byte("edited\n"), 0o644)).To(Succeed())
 			Expect(baseStamp()).NotTo(Equal(a))
+		})
+
+		It("CS-IMG-040: a symlink at a nested COPY source path (mcp/discord-notify) is followed", func() {
+			tgt := filepath.Join(repo, "shared", "discord-notify")
+			touchAt(filepath.Join(tgt, "index.mjs"), old)
+			Expect(os.MkdirAll(filepath.Join(repo, "mcp"), 0o755)).To(Succeed())
+			Expect(os.Symlink("../shared/discord-notify", filepath.Join(repo, "mcp", "discord-notify"))).To(Succeed())
+			a := baseStamp()
+			Expect(os.WriteFile(filepath.Join(tgt, "index.mjs"), []byte("edited\n"), 0o644)).To(Succeed())
+			Expect(baseStamp()).NotTo(Equal(a), "an MCP source edit behind the link is a change")
+		})
+
+		It("CS-IMG-040: behind a followed link, .dockerignore debris rules apply to the target's real path", func() {
+			tgt := filepath.Join(repo, "scaffold", "logstream")
+			touchAt(filepath.Join(tgt, "run-logger.js"), old)
+			Expect(os.Symlink("scaffold/logstream", filepath.Join(repo, "logstream"))).To(Succeed())
+			a := baseStamp()
+			touchAt(filepath.Join(tgt, ".DS_Store"), old)
+			Expect(baseStamp()).To(Equal(a), "scaffold/logstream/.DS_Store is outside the build context")
+		})
+
+		DescribeTable("CS-IMG-040: a symlinked baked source whose target is outside the build context is never walked",
+			func(link func(ext string) string) {
+				ext := GinkgoT().TempDir()
+				touchAt(filepath.Join(ext, "run-logger.js"), old)
+				Expect(os.Symlink(link(ext), filepath.Join(repo, "logstream"))).To(Succeed())
+				a := baseStamp()
+				Expect(a).NotTo(BeEmpty())
+				Expect(errw.String()).NotTo(ContainSubstring("could not fingerprint"))
+				Expect(os.WriteFile(filepath.Join(ext, "run-logger.js"), []byte("edited\n"), 0o644)).To(Succeed())
+				touchAt(filepath.Join(ext, "more", "added.js"), time.Now())
+				Expect(baseStamp()).To(Equal(a), "COPY cannot read it, so its contents are not inputs")
+
+				// Nor is it a time-rule trigger.
+				images["claude-sandbox"] = &imgState{created: imgT}
+				fake.Calls = nil
+				rebuilt, err := imagebuild.EnsureBase(o)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(rebuilt).To(BeFalse())
+			},
+			Entry("an absolute target", func(ext string) string { return ext }),
+			Entry("a ../ target", func(ext string) string {
+				r, err := filepath.Rel(repo, ext)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(r).To(HavePrefix(".."))
+				return r
+			}),
+		)
+
+		It("CS-IMG-040: the time rule follows a symlinked top-level baked directory", func() {
+			tgt := filepath.Join(repo, "shared", "logstream")
+			touchAt(filepath.Join(tgt, "run-logger.js"), old)
+			Expect(os.Symlink("shared/logstream", filepath.Join(repo, "logstream"))).To(Succeed())
+			images["claude-sandbox"] = &imgState{created: imgT}
+			fake.Calls = nil
+			rebuilt, err := imagebuild.EnsureBase(o)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rebuilt).To(BeFalse())
+			touchAt(filepath.Join(tgt, "run-logger.js"), time.Now())
+			rebuilt, err = imagebuild.EnsureBase(o)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rebuilt).To(BeTrue(), "a newer file behind the link is a newer baked source")
 		})
 
 		It("CS-IMG-002: --rebuild rebuilds a labeled child even when the base image ID is unchanged", func() {

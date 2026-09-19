@@ -183,6 +183,10 @@ var _ = Describe("shell completion", func() {
 		},
 		Entry("CS-COMP-010: after a known claude flag", "CS-COMP-010",
 			[]string{"--resume", "--"}, cobra.ShellCompDirectiveDefault),
+		Entry("CS-COMP-010: after a known claude flag written --flag=value (CS-LNCH-100)", "CS-COMP-010",
+			[]string{"--disallowedTools=Bash", "--"}, cobra.ShellCompDirectiveDefault),
+		Entry("CS-COMP-010: after a kebab-case claude alias (CS-LNCH-101)", "CS-COMP-010",
+			[]string{"--allowed-tools", "--"}, cobra.ShellCompDirectiveDefault),
 		Entry("CS-COMP-011: after \"--\"", "CS-COMP-011",
 			[]string{"--", "--"}, cobra.ShellCompDirectiveDefault),
 		Entry("CS-COMP-012: after a positional argument", "CS-COMP-012",
@@ -224,6 +228,76 @@ var _ = Describe("shell completion", func() {
 		r := f.complete("ralph", "--model", "")
 		Expect(r.names).To(ConsistOf("opus", "sonnet", "haiku"))
 	})
+
+	// ---- headless ----
+
+	Describe("CS-COMP-025: headless completes the launcher flags valid for headless", func() {
+		rejected := []string{"--ralph", "--limit", "--attach", "--join", "--branch"}
+		claudeOwned := []string{"--help", "-h", "--version"}
+
+		It("offers the headless launcher flags with descriptions, and \"--\"", func() {
+			for _, word := range []string{"", "--"} {
+				f = newCLIFixture()
+				r := f.complete("headless", word)
+				for _, name := range visibleLaunchFlags() {
+					if slices.Contains(rejected, name) || slices.Contains(claudeOwned, name) {
+						Expect(r.has(name)).To(BeFalse(), "word %q: %q offered after headless", word, name)
+						continue
+					}
+					Expect(r.has(name)).To(BeTrue(), "word %q: missing %q in %v", word, name, r.names)
+					Expect(r.descs[name]).NotTo(BeEmpty(), "flag %q completed without a description", name)
+				}
+				Expect(r.has("--")).To(BeTrue(), "word %q: missing \"--\" in %v", word, r.names)
+				Expect(r.directive).To(Equal(cobra.ShellCompDirectiveNoFileComp), "word %q", word)
+			}
+		})
+
+		It("narrows to the typed prefix and keeps completing after a launcher flag", func() {
+			r := f.complete("headless", "--dangerous", "--no-")
+			Expect(r.names).To(ConsistOf("--no-update-check", "--no-worktree", "--no-session-check"))
+		})
+
+		It("completes --model with the model aliases", func() {
+			r := f.complete("headless", "--model", "")
+			Expect(r.names).To(ConsistOf("opus", "sonnet", "haiku"))
+			Expect(r.directive).To(Equal(cobra.ShellCompDirectiveNoFileComp))
+		})
+
+		It("excludes exactly the flags runHeadless rejects", func() {
+			// Drift guard: the excluded set must be what the command refuses.
+			for _, name := range rejected {
+				f = newCLIFixture()
+				args := []string{"headless", name}
+				if name == "--limit" {
+					args = append(args, "5")
+				}
+				Expect(f.run(args...)).To(Equal(2), name)
+				Expect(f.errw.String()).To(ContainSubstring("not valid with headless"), name)
+			}
+		})
+
+		It("is served the same way through __completeNoDesc", func() {
+			Expect(MainWithEnv([]string{cobra.ShellCompNoDescRequestCmd, "headless", "--"}, f.env)).To(Equal(0))
+			r := parseCompletion(f.out.String())
+			Expect(r.names).To(ContainElements("--dangerous", "--model", "--"))
+			Expect(r.names).NotTo(ContainElement("--ralph"))
+		})
+	})
+
+	DescribeTable("CS-COMP-026: headless offers nothing launcher-specific past \"--\" or after a rejected flag",
+		func(args []string, wantDirective cobra.ShellCompDirective) {
+			r := f.complete(append([]string{"headless"}, args...)...)
+			for _, name := range append(visibleLaunchFlags(), "--") {
+				Expect(r.has(name)).To(BeFalse(), "%v: %q offered", args, name)
+			}
+			Expect(r.directive).To(Equal(wantDirective), "%v", args)
+		},
+		Entry("after \"--\"", []string{"--", "--"}, cobra.ShellCompDirectiveDefault),
+		Entry("after \"--\" and a launcher flag", []string{"--dangerous", "--", ""}, cobra.ShellCompDirectiveDefault),
+		Entry("after --help, which is claude's", []string{"--help", "--"}, cobra.ShellCompDirectiveDefault),
+		Entry("after a rejected flag", []string{"--ralph", "--"}, cobra.ShellCompDirectiveNoFileComp),
+		Entry("after an unknown flag", []string{"--frobnicate", "--"}, cobra.ShellCompDirectiveNoFileComp),
+	)
 
 	// ---- drift guards ----
 

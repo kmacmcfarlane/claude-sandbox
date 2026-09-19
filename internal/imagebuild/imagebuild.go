@@ -15,6 +15,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash"
 	"io"
@@ -87,9 +88,98 @@ type Options struct {
 	AutoUpdate    bool   // --update: auto-accept the update rebuild (CS-IMG-009)
 }
 
-// BakedSources are the paths (relative to RepoRoot) whose mtimes trigger a
-// base rebuild when newer than the image (CS-IMG-004).
-var BakedSources = []string{"cmd", "internal", "go.mod", "go.sum", "assets.go", "logstream", "entrypoint.sh", "PROMPT_RALPH.md", "mcp", "notification-hooks.json"}
+// BakedSources are the paths (relative to RepoRoot) the base Dockerfile COPYs
+// from the build context: their contents are the base fingerprint (CS-IMG-034)
+// and, for an unlabeled image, their mtimes trigger a rebuild (CS-IMG-004). A
+// test parses the Dockerfile so a new COPY cannot be left out (CS-IMG-037),
+// and so each entry is exactly a COPY source path: that is the level at which
+// BuildKit follows a symlinked source, and so does bakedRoot (CS-IMG-040).
+var BakedSources = []string{
+	"cmd", "internal", "go.mod", "go.sum", "assets.go",
+	// Embedded into the binary by assets.go.
+	"scaffold", "scaffold-ralph", "container-context.md", "mcp-servers.json",
+	"logstream", "entrypoint.sh", "PROMPT_RALPH.md", "mcp/discord-notify", "notification-hooks.json",
+}
+
+// ModeBakedSources are the baked sources whose permission bits reach the
+// image: the final stage of the base Dockerfile COPYs them from the build
+// context without --chmod (CS-IMG-039). Every other baked source is compiled
+// or embedded into the binary, or COPYed with --chmod. A test parses the
+// Dockerfile so this cannot drift from it.
+var ModeBakedSources = []string{"logstream", "PROMPT_RALPH.md", "mcp/discord-notify"}
+
+// keepsMode reports whether a repo-relative, slash-separated baked path is
+// under ModeBakedSources.
+func keepsMode(rel string) bool {
+	for _, s := range ModeBakedSources {
+		if rel == s || strings.HasPrefix(rel, s+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// errOutsideContext marks a baked source that is a symlink resolving outside
+// the build context: BuildKit's COPY fails on it ("not found"), so there is
+// nothing to fingerprint and its target is never walked (CS-IMG-040).
+var errOutsideContext = errors.New("baked source resolves outside the build context")
+
+// bakedRoot resolves a baked source (a COPY source path) the way BuildKit's
+// COPY does: a source that is itself a symlink is followed when, and only
+// when, its target is inside the build context (the repo root), so what it
+// points to is what gets baked (CS-IMG-040). ctxRel is the resolved path
+// relative to the context, slash-separated — the path .dockerignore rules
+// see. errOutsideContext reports a target outside the context; any other
+// error means the source is absent (or dangling).
+func bakedRoot(repoRoot, rel string) (root, ctxRel string, fi os.FileInfo, err error) {
+	root, err = filepath.EvalSymlinks(filepath.Join(repoRoot, rel))
+	if err != nil {
+		return "", "", nil, err
+	}
+	ctx, cerr := filepath.EvalSymlinks(repoRoot)
+	if cerr != nil {
+		ctx = filepath.Clean(repoRoot)
+	}
+	r, rerr := filepath.Rel(ctx, root)
+	if rerr != nil || r == ".." || strings.HasPrefix(r, ".."+string(filepath.Separator)) || filepath.IsAbs(r) {
+		return "", "", nil, errOutsideContext
+	}
+	fi, err = os.Stat(root)
+	return root, filepath.ToSlash(r), fi, err
+}
+
+// bakedName names a walked entry under the baked source rel (resolved to
+// root) as the build context sees it: repo-relative, slash-separated, and
+// under rel's own name even when rel is a symlink to somewhere else.
+func bakedName(rel, root, path string) string {
+	if path == root {
+		return rel
+	}
+	r, _ := filepath.Rel(root, path)
+	return rel + "/" + filepath.ToSlash(r)
+}
+
+// bakedSkip reports whether a walked entry under a baked source directory is
+// not part of the image, so it is neither fingerprinted nor an mtime trigger.
+// rel is the entry's real path relative to the build context, with forward
+// slashes — behind a followed symlink, the target's path, since that is what
+// .dockerignore filters (bakedName is the name the image sees). Go tests are not compiled in
+// (CS-IMG-031); the rest mirrors the .dockerignore debris lines that keep
+// files out of the build context (CS-IMG-038). For a directory, true means
+// skip the whole subtree.
+func bakedSkip(rel string, d os.DirEntry) bool {
+	name := d.Name()
+	switch {
+	case name == "__pycache__" || name == ".pytest_cache":
+		return true
+	case strings.HasPrefix(name, ".") &&
+		(strings.HasPrefix(rel, "scaffold/") || strings.HasPrefix(rel, "scaffold-ralph/")):
+		return true
+	case d.IsDir():
+		return false
+	}
+	return strings.HasSuffix(name, "_test.go") || strings.HasSuffix(name, ".pyc") || strings.HasSuffix(name, ".pyo")
+}
 
 // Version computes the git-describe version of the repo checkout.
 func Version(r execx.Runner, repoRoot string) string {
@@ -798,7 +888,9 @@ func ImageID(r execx.Runner, name string) string {
 
 // fingerprintVersion prefixes every fingerprint so a change to what one covers
 // reads as a mismatch rather than silently matching an old label.
-const fingerprintVersion = "v1"
+//
+// v2: permission bits only where they reach the image (CS-IMG-039).
+const fingerprintVersion = "v2"
 
 // imageLabel reads one label of an image; "" when absent or unreadable.
 func imageLabel(r execx.Runner, name, key string) string {
@@ -870,9 +962,11 @@ func (f fingerprint) addFile(name, path string) bool {
 
 // addSource adds one baked source entry as a COPY would bake it: a symlink
 // by its target (COPY copies the link, and a dangling or directory link must
-// not make the fingerprint uncomputable), a regular file by its content and
-// permission bits. Anything else (sockets, devices) is skipped.
-func (f fingerprint) addSource(name, path string) bool {
+// not make the fingerprint uncomputable), a regular file by its content and,
+// when keepMode, its executable bits — the only mode bits that both reach the
+// image and do not depend on the checkout's umask (CS-IMG-039). Anything else
+// (sockets, devices) is skipped.
+func (f fingerprint) addSource(name, path string, keepMode bool) bool {
 	fi, err := os.Lstat(path)
 	if err != nil {
 		return false
@@ -891,14 +985,18 @@ func (f fingerprint) addSource(name, path string) bool {
 		if !f.addFile(name, path) {
 			return false
 		}
-		f.add(fi.Mode().Perm().String())
+		mode := "-"
+		if keepMode {
+			mode = fmt.Sprintf("x%03o", fi.Mode().Perm()&0o111)
+		}
+		f.add(mode)
 		return true
 	}
 	return true
 }
 
 // baseInputs fingerprints the repo Dockerfile and the baked source set, with
-// the same _test.go exclusion as the time-based rule (CS-IMG-034). unreadable
+// the same exclusions as the time-based rule (bakedSkip; CS-IMG-034/038). unreadable
 // reports a baked source that exists but could not be read — the case worth a
 // warning; a missing Dockerfile needs none, the build itself will say so.
 func baseInputs(repoRoot string) (fp string, unreadable bool) {
@@ -907,15 +1005,20 @@ func baseInputs(repoRoot string) (fp string, unreadable bool) {
 		return "", false
 	}
 	for _, rel := range BakedSources {
-		p := filepath.Join(repoRoot, rel)
-		fi, err := os.Stat(p)
+		p, ctxRel, fi, err := bakedRoot(repoRoot, rel)
+		if err == errOutsideContext {
+			// Unbuildable, and possibly huge: never walked (CS-IMG-040).
+			f.add(rel)
+			f.add("\x00outside-context")
+			continue
+		}
 		if err != nil {
 			f.add(rel)
 			f.add("\x00absent") // a vanished source is a change too
 			continue
 		}
 		if !fi.IsDir() {
-			if !f.addSource(rel, p) {
+			if !f.addSource(rel, p, keepsMode(rel)) {
 				return "", true
 			}
 			continue
@@ -932,11 +1035,17 @@ func baseInputs(repoRoot string) (fp string, unreadable bool) {
 				ok = false
 				return nil
 			}
-			if d.IsDir() || strings.HasSuffix(d.Name(), "_test.go") {
+			name := bakedName(rel, p, path)
+			if path != p && bakedSkip(bakedName(ctxRel, p, path), d) {
+				if d.IsDir() {
+					return filepath.SkipDir
+				}
 				return nil
 			}
-			name, _ := filepath.Rel(repoRoot, path)
-			if !f.addSource(filepath.ToSlash(name), path) {
+			if d.IsDir() {
+				return nil
+			}
+			if !f.addSource(name, path, keepsMode(name)) {
 				ok = false
 			}
 			return nil
@@ -1012,8 +1121,8 @@ func mtimeAfter(path string, t time.Time) bool {
 
 func anyNewer(root string, rels []string, t time.Time) bool {
 	for _, rel := range rels {
-		p := filepath.Join(root, rel)
-		fi, err := os.Stat(p)
+		// Follow a symlinked source as COPY does (CS-IMG-040).
+		p, ctxRel, fi, err := bakedRoot(root, rel)
 		if err != nil {
 			continue
 		}
@@ -1025,12 +1134,18 @@ func anyNewer(root string, rels []string, t time.Time) bool {
 		}
 		newer := false
 		filepath.WalkDir(p, func(path string, d os.DirEntry, err error) error {
-			if err != nil || newer || d.IsDir() {
+			if err != nil || newer {
 				return nil
 			}
-			// Tests are not compiled into the binary, so a test-only edit
-			// cannot change the image (CS-IMG-031).
-			if strings.HasSuffix(d.Name(), "_test.go") {
+			// Tests and build-context debris cannot change the image
+			// (CS-IMG-031, CS-IMG-038).
+			if path != p && bakedSkip(bakedName(ctxRel, p, path), d) {
+				if d.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if d.IsDir() {
 				return nil
 			}
 			if info, ierr := d.Info(); ierr == nil && info.ModTime().After(t) {
