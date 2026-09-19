@@ -60,6 +60,7 @@ func Terminate() { tracker.signal(syscall.SIGTERM) }
 // 124 on hard timeout).
 func (l *Loop) runIterationReal(iter int, resume bool) int {
 	l.claudeExit = 0
+	l.timedOut = false
 	promptBytes, err := l.promptData()
 	if err != nil {
 		fmt.Fprintln(l.Err, err)
@@ -132,14 +133,35 @@ func (l *Loop) runIterationReal(iter int, resume bool) int {
 	tracker.set(cmds)
 	defer tracker.set(nil)
 
-	// Hard iteration timeout: TERM the tree, KILL 30s later (CS-RLP-015).
+	// Hard iteration timeout: TERM the tree, KILL after the grace
+	// (CS-RLP-015). The pending KILL is cancelled once the pipeline has
+	// finished, so it can never land on the next iteration's processes.
+	grace := l.killGrace
+	if grace == 0 {
+		grace = 30 * time.Second
+	}
 	var timedOut atomic.Bool
+	var killMu sync.Mutex
+	var killTimer *time.Timer
+	finished := false
 	timer := time.AfterFunc(time.Duration(l.IterationTimeout)*time.Second, func() {
 		timedOut.Store(true)
 		tracker.signal(syscall.SIGTERM)
-		time.AfterFunc(30*time.Second, func() { tracker.signal(syscall.SIGKILL) })
+		killMu.Lock()
+		defer killMu.Unlock()
+		if !finished {
+			killTimer = time.AfterFunc(grace, func() { tracker.signal(syscall.SIGKILL) })
+		}
 	})
-	defer timer.Stop()
+	defer func() {
+		timer.Stop()
+		killMu.Lock()
+		defer killMu.Unlock()
+		finished = true
+		if killTimer != nil {
+			killTimer.Stop()
+		}
+	}()
 
 	// pipefail: the rightmost non-zero exit wins.
 	rc := 0
@@ -159,6 +181,7 @@ func (l *Loop) runIterationReal(iter int, resume bool) int {
 	// death is 128+N (SIGKILL -> 137) where ExitCode() would say -1.
 	l.claudeExit = claudeExitStatus(cmds[0])
 	if timedOut.Load() {
+		l.timedOut = true
 		return 124
 	}
 	return rc

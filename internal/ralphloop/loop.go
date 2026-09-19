@@ -54,6 +54,9 @@ type Options struct {
 	// OOMBackoff is the fixed pause before an OOM-killed iteration's single
 	// retry (CS-RLP-026); 0 -> 60s.
 	OOMBackoff time.Duration
+	// killGrace is the hard timeout's TERM->KILL grace (CS-RLP-015); 0 ->
+	// 30s. Unexported: only white-box tests shorten it.
+	killGrace time.Duration
 
 	Runner execx.Runner
 	Out    io.Writer
@@ -84,6 +87,10 @@ type Loop struct {
 	// claudeExit is the last iteration's claude exit status (128+N for a
 	// signal), the input to OOM classification (CS-RLP-023).
 	claudeExit int
+	// timedOut is set when the last iteration hit the hard time limit
+	// (CS-RLP-015); its claude may have died of the timeout's own KILL, so
+	// the OOM check is skipped (CS-RLP-024).
+	timedOut bool
 
 	// ReserveClass replaces the pid-class burn before each iteration's claude
 	// (CS-PID-006); nil means the real one.
@@ -370,7 +377,7 @@ func (l *Loop) recordOutcome(iter int, outcome Outcome, oomKills int) {
 	}
 	entry["outcome"] = string(outcome)
 	if outcome == OutcomeOOM {
-		entry["claudeExit"] = oomExitCode
+		entry["claudeExit"] = l.claudeExit
 		entry["oomKills"] = oomKills
 	}
 	out, err := json.MarshalIndent(runs, "", "  ")
@@ -468,14 +475,18 @@ func (l *Loop) run() int {
 		// run-logger writes "ok" when claude's stdout merely closes.
 		var outcome Outcome
 		oomKills := 0
-		if IsOOM(l.claudeExit, oomBefore.n, oomBefore.ok, oomAfter.n, oomAfter.ok) {
+		if !l.timedOut && IsOOM(l.claudeExit, oomBefore.n, oomBefore.ok, oomAfter.n, oomAfter.ok) {
 			outcome = OutcomeOOM
 			oomKills = oomAfter.n - oomBefore.n
 		} else {
 			outcome = Classify(rc, l.QuotaFile, l.StderrFile, l.MarkerFile)
 		}
 		l.recordOutcome(iter, outcome, oomKills) // CS-RLP-029
-		if outcome != OutcomeOOM {
+		// CS-RLP-026: only an iteration that COMPLETES with a non-oom outcome
+		// resets the streak; quota parks and rate-limit retries re-run the
+		// same iteration and leave it alone.
+		switch outcome {
+		case OutcomeOK, OutcomeWatchdogTimeout, OutcomeIterationTimeout:
 			oomStreak = 0
 		}
 		switch outcome {
@@ -491,7 +502,16 @@ func (l *Loop) run() int {
 			// CS-RLP-026: back off, then re-run the same iteration once.
 			fmt.Fprintf(l.Out, "[oom] %s Retrying iteration %d once in %s.\n", msg, iter, FormatWait(int(l.OOMBackoff/time.Second)))
 			l.notify(fmt.Sprintf("⚠ **%s** — %s Retrying iteration %d once.", l.project(), msg, iter))
-			l.Sleep(l.OOMBackoff)
+			switch l.pause(l.OOMBackoff) {
+			case pauseInterrupted:
+				fmt.Fprintln(l.Out, "Interrupted. Exiting.")
+				l.notify(fmt.Sprintf("🛑 **%s** — Loop interrupted by user at iteration %d.", l.project(), iter))
+				return 0
+			case pauseStopped:
+				fmt.Fprintf(l.Out, "Stop file detected (%s). Exiting.\n", l.StopFile)
+				l.notify(fmt.Sprintf("🛑 **%s** — Stop file detected. Loop exiting after iteration %d.", l.project(), iter))
+				return 0
+			}
 			iter--
 
 		case OutcomeOK:
@@ -549,6 +569,34 @@ func (l *Loop) run() int {
 		l.Sleep(3 * time.Second) // CS-RLP-018
 		resume = false
 	}
+}
+
+type pauseResult int
+
+const (
+	pauseDone pauseResult = iota
+	pauseInterrupted
+	pauseStopped
+)
+
+// pause sleeps d in 1-second steps, ending early on an interrupt or the stop
+// file (CS-RLP-026) so neither waits out the back-off nor launches a retry.
+func (l *Loop) pause(d time.Duration) pauseResult {
+	for d > 0 {
+		step := time.Second
+		if d < step {
+			step = d
+		}
+		l.Sleep(step)
+		d -= step
+		if l.Interrupted() {
+			return pauseInterrupted
+		}
+		if fileExists(l.StopFile) {
+			return pauseStopped
+		}
+	}
+	return pauseDone
 }
 
 // backoff computes the rate-limit delay: RetryDelay * 2^(attempt-1), capped
@@ -663,6 +711,9 @@ func (l *Loop) runIteration(iter int, resume bool) int {
 		// The seam returns claude's exit status; there is no pipeline.
 		rc := l.RunIter(l, iter)
 		l.claudeExit = rc
+		// The seam has no timer: a 124 with no watchdog marker is the hard
+		// timeout, exactly as Classify reads it.
+		l.timedOut = rc == 124 && !fileExists(l.MarkerFile)
 		return rc
 	}
 	return l.runIterationReal(iter, resume)

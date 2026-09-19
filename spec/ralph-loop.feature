@@ -131,6 +131,8 @@ Feature: Ralph loop lifecycle (CS-RLP)
   Scenario: CS-RLP-015 Hard iteration timeout wraps each iteration
     Then the iteration is killed with TERM (KILL after 30s grace) after
       --iteration-timeout seconds (default 7200)
+    And the pending KILL is cancelled as soon as the iteration's pipeline has
+      finished, so it can never land on the next iteration's processes
 
   Scenario: CS-RLP-016 Iteration limit ends the loop
     Given --limit 2
@@ -221,6 +223,10 @@ Feature: Ralph loop lifecycle (CS-RLP)
       | 137  | 1      | 1     | (the CS-RQT-001..004 classification) |
       | 0    | 0      | 1     | (the CS-RQT-001..004 classification) |
       | 1    | 0      | 1     | (the CS-RQT-001..004 classification) |
+    Given the iteration hit the hard time limit (CS-RLP-015)
+    When claude exited 137 (the timeout's delayed KILL) and the counter rose
+      because some other process was OOM-killed during the iteration
+    Then the OOM check is skipped and the outcome is "iteration_timeout"
     # A raise without claude dying is a non-fatal kill of some other process
     # (a test binary, a compiler): not an iteration failure. A 137 without a
     # raise is a SIGKILL from elsewhere (the hard-timeout's KILL, the user).
@@ -239,10 +245,17 @@ Feature: Ralph loop lifecycle (CS-RLP)
     Given outcome oom at iteration N
     Then ralph prints the OOM message (CS-RLP-028) and notifies it
     And sleeps a fixed 60 seconds (the OOM back-off; not the rate-limit backoff,
-      which is jittered and grows)
+      which is jittered and grows), in 1-second steps
     And re-runs iteration N (the counter is not advanced)
-    When the retry classifies anything but oom
-    Then the consecutive-oom streak resets and that outcome is handled as usual
+    When the loop is interrupted (SIGINT) during the back-off
+    Then the back-off ends early, no retry is launched, and ralph notifies and
+      exits 0 as for CS-RLP-017
+    When the stop file appears during the back-off
+    Then the back-off ends early, no retry is launched, and ralph exits 0 as for CS-RLP-009
+    And the consecutive-oom streak resets only when an iteration COMPLETES with a
+      non-oom outcome (ok, watchdog_timeout, iteration_timeout)
+    But a quota park or rate-limit retry in between does NOT reset it: oom,
+      quota_exhausted (parked, restored), oom again is a second consecutive oom
 
   Scenario: CS-RLP-027 A second consecutive oom stops the loop
     Given outcome oom at iteration N

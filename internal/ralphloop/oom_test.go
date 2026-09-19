@@ -136,18 +136,37 @@ var _ = Describe("OOM-killed iterations", func() {
 	}
 
 	Describe("the counter", func() {
-		It("CS-RLP-023: memory.events is read before and after each iteration", func() {
-			var seenBefore []int
+		It("CS-RLP-023: the before-sample is taken per iteration, not assumed to be 0", func() {
+			// The counter already stands at 5 when the loop starts: a 137
+			// with no rise during the iteration is not an oom.
+			kills = 5
+			writeEvents(cgroup, kills)
+			script(stepExit(137))
+			Expect(ralphloop.Run(opts)).To(Equal(137), "CS-RQT-012 error")
+			Expect(out.String()).NotTo(ContainSubstring("[oom]"))
+		})
+
+		It("CS-RLP-023: a rise between iterations is not charged to the next one", func() {
+			// The counter rises during the 3s pacing sleep after iteration 1;
+			// iteration 2's claude then exits 137 with no rise of its own.
 			opts.Limit = 2
-			opts.RunIter = func(l *ralphloop.Loop, iter int) int {
-				// The iteration sees the counter the loop sampled before it.
-				n, readable := ralphloop.ReadOOMKills(cgroup)
-				Expect(readable).To(BeTrue())
-				seenBefore = append(seenBefore, n)
-				return 0
+			opts.Sleep = func(d time.Duration) {
+				sleeps = append(sleeps, d)
+				if d == 3*time.Second {
+					kills++
+					writeEvents(cgroup, kills)
+				}
 			}
+			script(ok, stepExit(137))
+			Expect(ralphloop.Run(opts)).To(Equal(137))
+			Expect(out.String()).NotTo(ContainSubstring("[oom]"))
+		})
+
+		It("CS-RLP-023: the after-sample is taken once the iteration is over", func() {
+			script(oomed(1), ok)
 			Expect(ralphloop.Run(opts)).To(Equal(0))
-			Expect(seenBefore).To(Equal([]int{0, 0}))
+			Expect(out.String()).To(ContainSubstring("[oom]"))
+			Expect(iters).To(Equal([]int{1, 1}))
 		})
 
 		It("CS-RLP-023: ReadOOMKills parses the oom_kill line and reports unreadable input", func() {
@@ -220,6 +239,13 @@ var _ = Describe("OOM-killed iterations", func() {
 			}),
 		)
 
+		It("CS-RLP-025: an unreadable BEFORE-sample is not read as 0", func() {
+			Expect(os.Remove(filepath.Join(cgroup, "memory.events"))).To(Succeed())
+			script(func(*ralphloop.Loop, int) int { writeEvents(cgroup, 1); return 137 })
+			Expect(ralphloop.Run(opts)).To(Equal(137), "falls through to CS-RQT-012")
+			Expect(out.String()).NotTo(ContainSubstring("[oom]"))
+		})
+
 		It("CS-RLP-025: no cgroup at all (cgroup v1) runs exactly as before", func() {
 			opts.CgroupDir = filepath.Join(work, "absent")
 			script(stepExit(137))
@@ -234,7 +260,7 @@ var _ = Describe("OOM-killed iterations", func() {
 			script(oomed(1), ok, ok)
 			Expect(ralphloop.Run(opts)).To(Equal(0))
 			Expect(iters).To(Equal([]int{1, 1, 2}), "iteration 1 is re-run, not skipped")
-			Expect(nonPacing()).To(Equal([]time.Duration{60 * time.Second}))
+			Expect(nonPacing()).To(Equal(steps(60)))
 			Expect(out.String()).To(ContainSubstring("Retrying iteration 1 once in 1m0s"))
 			Expect(notes[0]).To(ContainSubstring("OOM killer"))
 		})
@@ -243,7 +269,7 @@ var _ = Describe("OOM-killed iterations", func() {
 			opts.OOMBackoff = 5 * time.Second
 			script(oomed(1), ok)
 			Expect(ralphloop.Run(opts)).To(Equal(0))
-			Expect(nonPacing()).To(Equal([]time.Duration{5 * time.Second}))
+			Expect(nonPacing()).To(Equal(steps(5)))
 		})
 
 		It("CS-RLP-026: a non-oom retry resets the streak, so a later oom is retried again", func() {
@@ -251,7 +277,72 @@ var _ = Describe("OOM-killed iterations", func() {
 			script(oomed(1), ok, oomed(1), ok)
 			Expect(ralphloop.Run(opts)).To(Equal(0))
 			Expect(iters).To(Equal([]int{1, 1, 2, 2}))
-			Expect(nonPacing()).To(Equal([]time.Duration{60 * time.Second, 60 * time.Second}))
+			Expect(nonPacing()).To(Equal(steps(120)))
+		})
+
+		It("CS-RLP-026: an interrupt during the back-off ends it early and launches no retry", func() {
+			interrupted := false
+			opts.Interrupted = func() bool { return interrupted }
+			opts.Sleep = func(d time.Duration) {
+				sleeps = append(sleeps, d)
+				if len(sleeps) == 3 {
+					interrupted = true
+				}
+			}
+			script(oomed(1), ok)
+			Expect(ralphloop.Run(opts)).To(Equal(0))
+			Expect(iters).To(Equal([]int{1}), "no retry")
+			Expect(sleeps).To(Equal(steps(3)), "the rest of the back-off is not waited out")
+			Expect(out.String()).To(ContainSubstring("Interrupted. Exiting."))
+			Expect(notes[len(notes)-1]).To(ContainSubstring("interrupted by user"))
+			Expect(filepath.Join(ralph, "lock")).NotTo(BeAnExistingFile())
+		})
+
+		It("CS-RLP-026: the stop file during the back-off ends it early and launches no retry", func() {
+			opts.Sleep = func(d time.Duration) {
+				sleeps = append(sleeps, d)
+				if len(sleeps) == 2 {
+					Expect(os.WriteFile(filepath.Join(ralph, "stop"), nil, 0o644)).To(Succeed())
+				}
+			}
+			script(oomed(1), ok)
+			Expect(ralphloop.Run(opts)).To(Equal(0))
+			Expect(iters).To(Equal([]int{1}), "no retry")
+			Expect(sleeps).To(Equal(steps(2)))
+			Expect(out.String()).To(ContainSubstring("Stop file detected"))
+		})
+
+		It("CS-RLP-026: a quota park between two ooms does not reset the streak", func() {
+			fake := &execx.Fake{}
+			fake.On("ping", `{"type":"result"}`, nil)
+			opts.Runner = fake
+			opts.Limit = 3
+			quota := func(l *ralphloop.Loop, _ int) int {
+				Expect(os.WriteFile(l.QuotaFile, []byte("quota_exhausted\n"), 0o644)).To(Succeed())
+				return 0
+			}
+			script(oomed(1), quota, oomed(1), ok)
+			Expect(ralphloop.Run(opts)).To(Equal(137), "second consecutive oom")
+			Expect(iters).To(Equal([]int{1, 1, 1}))
+			Expect(out.String()).To(ContainSubstring("The retry was OOM-killed too"))
+		})
+
+		It("CS-RLP-026: a rate-limit retry between two ooms does not reset the streak", func() {
+			opts.Limit = 3
+			rate := func(l *ralphloop.Loop, _ int) int {
+				Expect(os.WriteFile(l.QuotaFile, []byte("rate_limit\n"), 0o644)).To(Succeed())
+				return 0
+			}
+			script(oomed(1), rate, oomed(1), ok)
+			Expect(ralphloop.Run(opts)).To(Equal(137))
+			Expect(iters).To(Equal([]int{1, 1, 1}))
+		})
+
+		It("CS-RLP-026: a completed timeout iteration resets the streak", func() {
+			opts.Limit = 3
+			script(oomed(1), stepExit(124), oomed(1), ok)
+			Expect(ralphloop.Run(opts)).To(Equal(0))
+			Expect(iters).To(Equal([]int{1, 1, 2, 2, 3}))
 		})
 
 		It("CS-RLP-027: a second consecutive oom stops the loop, notifies, and exits 137", func() {
@@ -259,7 +350,7 @@ var _ = Describe("OOM-killed iterations", func() {
 			script(oomed(1), oomed(2), ok)
 			Expect(ralphloop.Run(opts)).To(Equal(137))
 			Expect(iters).To(Equal([]int{1, 1}))
-			Expect(nonPacing()).To(Equal([]time.Duration{60 * time.Second}), "no second back-off")
+			Expect(nonPacing()).To(Equal(steps(60)), "no second back-off")
 			Expect(out.String()).To(ContainSubstring("The retry was OOM-killed too. Exiting."))
 			last := notes[len(notes)-1]
 			Expect(last).To(ContainSubstring("Loop stopped"))
@@ -340,3 +431,13 @@ var _ = Describe("OOM-killed iterations", func() {
 })
 
 func ptr(s string) *string { return &s }
+
+// steps is the OOM back-off as the loop sleeps it: n one-second steps
+// (CS-RLP-026), interruptible between steps.
+func steps(n int) []time.Duration {
+	got := make([]time.Duration, n)
+	for i := range got {
+		got[i] = time.Second
+	}
+	return got
+}
