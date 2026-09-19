@@ -141,7 +141,7 @@ var _ = Describe("shadow directory lifecycle (CS-LNCH-080..084)", func() {
 	It("CS-LNCH-084: the would-be config hash leaves no shadow directory behind", func() {
 		fl, err := scanLaunchArgs(nil)
 		Expect(err).NotTo(HaveOccurred())
-		hash, _ := wouldBeFingerprint(f.env, f.proj, fl, &cascade.Config{}, nil)
+		hash, _ := wouldBeFingerprint(f.env, f.proj, fl, &cascade.Config{}, nil, nil)
 		Expect(hash).NotTo(BeEmpty())
 		Expect(dirNames(f.tmp)).To(BeEmpty())
 	})
