@@ -112,7 +112,7 @@ See [Multiple sessions](#multiple-sessions) for what these do and when to reach 
 
 ### Passthrough arguments
 
-Any arguments not listed above are passed through to `claude` (in interactive mode) or `ralph` (in `--ralph` mode). Unrecognized `--` flags are rejected; use `--` to force passthrough if needed. For example:
+Any arguments not listed above are passed through to `claude` (in interactive mode) or `ralph` (in `--ralph` mode). Unrecognized `--` flags are rejected; use `--` to force passthrough if needed. A known `claude` flag starts the passthrough in any spelling `claude` accepts: `--disallowedTools Bash`, `--disallowedTools=Bash`, or the kebab-case `--disallowed-tools` / `--allowed-tools`. `--model=opus` is the launcher's own `--model`, same as `--model opus`. For example:
 
 ```bash
 # Pass --resume to claude:

@@ -136,6 +136,73 @@ var _ = Describe("scanLaunchArgs", func() {
 		Expect(f.Passthrough).To(Equal([]string{"--ralph", "--frobnicate"}))
 	})
 
+	It("CS-LNCH-100: a known claude flag written as --flag=value starts the passthrough", func() {
+		for flag := range knownPassthrough {
+			if flag == "--model" {
+				continue // launcher-owned; its "=" form is covered below
+			}
+			arg := flag + "=x"
+			f, err := scanLaunchArgs([]string{arg, "tail", "--frobnicate"})
+			Expect(err).NotTo(HaveOccurred(), "arg: %s", arg)
+			Expect(f.Passthrough).To(Equal([]string{arg, "tail", "--frobnicate"}), "arg: %s", arg)
+		}
+
+		// The reviewer's case, after launcher flags that are still consumed.
+		f, err := scanLaunchArgs([]string{"--dangerous", "--disallowedTools=Bash", "--rebuild"})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(f.Dangerous).To(BeTrue())
+		Expect(f.Rebuild).To(BeFalse())
+		Expect(f.Passthrough).To(Equal([]string{"--disallowedTools=Bash", "--rebuild"}))
+	})
+
+	It("CS-LNCH-100: --model=MODEL is consumed by the launcher like --model MODEL", func() {
+		f, err := scanLaunchArgs([]string{"--model=opus", "--resume"})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(f.Model).To(Equal("opus"))
+		Expect(f.Passthrough).To(Equal([]string{"--resume"}))
+
+		_, err = scanLaunchArgs([]string{"--model="})
+		Expect(err).To(HaveOccurred())
+		Expect(execx.ExitCode(err)).To(Equal(2))
+		Expect(err.Error()).To(ContainSubstring("--model requires a value"))
+
+		_, err = scanLaunchArgs([]string{"--model==x"})
+		Expect(err).To(HaveOccurred())
+		Expect(execx.ExitCode(err)).To(Equal(2))
+		Expect(err.Error()).To(ContainSubstring("invalid value '=x'"))
+	})
+
+	It("CS-LNCH-100: launcher =value flags keep their launcher meaning", func() {
+		f, err := scanLaunchArgs([]string{"--worktree=feature-x", "--attach=otter", "--join=heron"})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(f.WorktreeName).To(Equal("feature-x"))
+		Expect(f.AttachTarget).To(Equal("otter"))
+		Expect(f.JoinTarget).To(Equal("heron"))
+		Expect(f.Passthrough).To(BeNil())
+	})
+
+	It("CS-LNCH-100: an unknown flag or a no-value launcher flag with =value still exits 2", func() {
+		for _, bad := range []string{"--frobnicate=1", "--dangerous=true", "--rebuild=1", "--=x", "--disallowTools=Bash"} {
+			_, err := scanLaunchArgs([]string{bad})
+			Expect(err).To(HaveOccurred(), bad)
+			Expect(execx.ExitCode(err)).To(Equal(2), bad)
+			Expect(err.Error()).To(ContainSubstring("unknown flag"), bad)
+		}
+	})
+
+	It("CS-LNCH-101: claude's kebab-case aliases of allowlisted flags pass through", func() {
+		for _, args := range [][]string{
+			{"--allowed-tools", "Bash", "--frobnicate"},
+			{"--disallowed-tools", "Bash", "--frobnicate"},
+			{"--allowed-tools=Bash", "--frobnicate"},
+			{"--disallowed-tools=Bash", "--frobnicate"},
+		} {
+			f, err := scanLaunchArgs(args)
+			Expect(err).NotTo(HaveOccurred(), "args: %v", args)
+			Expect(f.Passthrough).To(Equal(args), "args: %v", args)
+		}
+	})
+
 	It("CS-LNCH-005: --model and --limit require values", func() {
 		for _, flag := range []string{"--model", "--limit"} {
 			_, err := scanLaunchArgs([]string{flag})

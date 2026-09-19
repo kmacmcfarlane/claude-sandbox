@@ -510,6 +510,7 @@ var _ = Describe("sessions (CS-SESS)", func() {
 			Entry("--join", "--join"),
 			Entry("--resume", "--resume"),
 			Entry("--continue", "--continue"),
+			Entry("--resume=ID (CS-LNCH-100)", "--resume=abc"),
 		)
 
 		It("CS-SESS-043: --branch composes with claude's own --name to name the fork", func() {
