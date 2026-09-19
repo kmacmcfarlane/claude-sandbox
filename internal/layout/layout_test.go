@@ -1,6 +1,6 @@
 package layout_test
 
-// Spec: spec/layout.feature (CS-LAY-001..014, 017..020). CS-LAY-015/016
+// Spec: spec/layout.feature (CS-LAY-001..014, 017..022). CS-LAY-015/016
 // (launcher adoption) live in cmd/claude-sandbox. Git behavior is scripted
 // through execx.Fake: unmatched commands succeed, so by default the project IS
 // a git work tree and check-ignore reports the path as ignored. Host-tracked
@@ -11,6 +11,7 @@ package layout_test
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -311,7 +312,7 @@ var _ = Describe("layout lifecycle", func() {
 			Expect(errText).To(ContainSubstring("skipping the host-tracked .gitignore entries"))
 			Expect(errText).To(ContainSubstring("set trackInHost: false in .claude-sandbox/config.yaml"))
 			Expect(errText).To(ContainSubstring("and delete any .claude-sandbox/env, temp/, ralph/, !config.yaml or !Dockerfile lines already in .gitignore"))
-			Expect(errText).To(ContainSubstring("drop the ignore rule (`git check-ignore -v .claude-sandbox/ignore-probe` names it) and .claude-sandbox/.git"))
+			Expect(errText).To(ContainSubstring("drop the ignore rule (`git check-ignore -v --no-index .claude-sandbox` names it) and .claude-sandbox/.git"))
 			Expect(errText).NotTo(ContainSubstring("(sidecar layout)"))
 		}
 
@@ -389,6 +390,7 @@ var _ = Describe("layout lifecycle", func() {
 	Describe("mode conflict: sidecar config over host-tracked content", func() {
 		const wt = ".claude/worktrees/"
 		const probe = "check-ignore -q -- .claude-sandbox/ignore-probe"
+		const dirProbe = "check-ignore -q --no-index -- .claude-sandbox"
 		const warn = "WARNING: trackInHost is false but the host repo already tracks"
 		const warnRule = "WARNING: trackInHost is false and the host repo tracks"
 		// tracked scripts `git ls-files -z -- .claude-sandbox` to list files.
@@ -396,10 +398,11 @@ var _ = Describe("layout lifecycle", func() {
 			fake.On("ls-files -z -- .claude-sandbox", strings.Join(files, "\x00")+"\x00", nil)
 		}
 		// realGitRule models real git under a "/.claude-sandbox/" rule with
-		// tracked content: the directory itself is NOT reported ignored, a new
-		// child path is.
+		// tracked content: the directory itself is NOT reported ignored unless
+		// asked with --no-index (CS-LAY-018), a new child path is.
 		realGitRule := func() {
-			fake.On(probe, "", nil)
+			fake.On(probe, "", nil) // matches both child probes (CS-LAY-022)
+			fake.On(dirProbe, "", nil)
 			fake.On("check-ignore", "", execx.Fail(1))
 		}
 		expectRemedies := func(errText string) {
@@ -473,6 +476,7 @@ var _ = Describe("layout lifecycle", func() {
 
 			By("the child probe is asked, and no sidecar init follows the rule")
 			Expect(fake.CommandLines()).To(ContainElement("git -C " + proj + " check-ignore -q -- .claude-sandbox/ignore-probe"))
+			Expect(fake.CommandLines()).To(ContainElement("git -C " + proj + " check-ignore -q -- .claude-sandbox/ignore-probe.md"))
 			Expect(fake.CommandLines()).NotTo(ContainElement(ContainSubstring(" init -q")))
 			Expect(countLine(read(hostGI), "/.claude-sandbox/")).To(Equal(1), "the existing rule is left alone")
 		})
@@ -551,6 +555,102 @@ var _ = Describe("layout lifecycle", func() {
 			Expect(fake2.CommandLines()).NotTo(ContainElement(ContainSubstring("ls-files")))
 		})
 	})
+	Describe("probe robustness", func() {
+		const dirProbe = "git -C %s check-ignore -q --no-index -- .claude-sandbox"
+		const bare = ".claude-sandbox/ignore-probe"
+		const withExt = ".claude-sandbox/ignore-probe.md"
+		trueLines := []string{
+			".claude-sandbox/env", ".claude-sandbox/temp/", ".claude-sandbox/ralph/",
+			"!.claude-sandbox/config.yaml", "!.claude-sandbox/Dockerfile",
+		}
+		// ignores scripts git check-ignore path by path: the --no-index
+		// directory probe answers dir, each child probe answers from children.
+		ignores := func(dir bool, children map[string]bool) {
+			fake.OnFunc("check-ignore", func(c execx.Cmd) (string, error) {
+				path := c.Args[len(c.Args)-1]
+				hit := children[path]
+				if path == ".claude-sandbox" {
+					hit = dir
+				}
+				if hit {
+					return "", nil
+				}
+				return "", execx.Fail(1)
+			})
+		}
+		tracked := func(files ...string) {
+			fake.On("ls-files -z -- .claude-sandbox", strings.Join(files, "\x00")+"\x00", nil)
+		}
+		childProbes := func() []string {
+			var got []string
+			for _, l := range fake.CommandLines() {
+				if strings.Contains(l, "check-ignore") && !strings.Contains(l, "--no-index") {
+					got = append(got, l[strings.LastIndex(l, " ")+1:])
+				}
+			}
+			return got
+		}
+
+		It("CS-LAY-021: a children-only rule does not refuse the host-tracked entries", func() {
+			// ".claude-sandbox/*": the directory is not excluded, every child is.
+			write(hostGI, ".claude-sandbox/*\n")
+			ignores(false, map[string]bool{bare: true, withExt: true})
+			Expect(setup(true, ptr(true))).To(Succeed())
+
+			Expect(fake.CommandLines()).To(ContainElement(fmt.Sprintf(dirProbe, proj)))
+			Expect(errOut.String()).NotTo(ContainSubstring("WARNING: trackInHost"))
+			content := read(hostGI)
+			for _, l := range trueLines {
+				Expect(countLine(content, l)).To(Equal(1), l)
+			}
+			Expect(countLine(content, ".claude-sandbox/*")).To(Equal(1), "the rule is left alone")
+		})
+
+		It("CS-LAY-021: a rule excluding the directory itself still refuses them (CS-LAY-018)", func() {
+			ignores(true, map[string]bool{bare: true, withExt: true})
+			Expect(setup(true, ptr(true))).To(Succeed())
+			Expect(errOut.String()).To(ContainSubstring("WARNING: trackInHost is true but the host repo already ignores .claude-sandbox/; skipping"))
+			Expect(countLine(read(hostGI), ".claude-sandbox/env")).To(BeZero())
+		})
+
+		It("CS-LAY-022: a whitelist-style ignore that hides only the dot-less probe does not count", func() {
+			// "*", "!*/", "!*.*": ignore-probe is hidden, ignore-probe.md is not.
+			ignores(false, map[string]bool{bare: true})
+			tracked(".claude-sandbox/config.yaml")
+			Expect(setup(false, ptr(true))).To(Succeed())
+			Expect(childProbes()).To(Equal([]string{bare, withExt}))
+			Expect(errOut.String()).To(ContainSubstring("WARNING: trackInHost is false but the host repo already tracks 1 file under .claude-sandbox/; skipping"))
+			Expect(errOut.String()).NotTo(ContainSubstring("being hidden from git NOW"))
+
+			By("with nothing tracked, the CS-LAY-006 note applies and no sidecar is initialized")
+			fake = &execx.Fake{}
+			ignores(false, map[string]bool{bare: true})
+			fake.On("ls-files", "", nil)
+			errOut.Reset()
+			Expect(setup(false, ptr(false))).To(Succeed())
+			Expect(errOut.String()).To(ContainSubstring("is not gitignored by the host repo; skipping sidecar git init"))
+			Expect(fake.CommandLines()).NotTo(ContainElement(ContainSubstring(" init -q")))
+		})
+
+		It("CS-LAY-022: a rule that hides only names with an extension does not count, and stops at the first probe", func() {
+			// "*.md": ignore-probe is not hidden, so ignore-probe.md is never asked.
+			ignores(false, map[string]bool{withExt: true})
+			fake.On("ls-files", "", nil)
+			Expect(setup(false, ptr(false))).To(Succeed())
+			Expect(childProbes()).To(Equal([]string{bare}))
+			Expect(errOut.String()).To(ContainSubstring("skipping sidecar git init"))
+			Expect(fake.CommandLines()).NotTo(ContainElement(ContainSubstring(" init -q")))
+		})
+
+		It("CS-LAY-022: both probes ignored counts as ignored, as before", func() {
+			ignores(false, map[string]bool{bare: true, withExt: true})
+			fake.On("ls-files", "", nil)
+			Expect(setup(false, ptr(true))).To(Succeed())
+			Expect(childProbes()).To(Equal([]string{bare, withExt}))
+			Expect(fake.CommandLines()).To(ContainElement("git -C " + sb + " init -q"))
+		})
+	})
+
 	Describe("gitignore editing mechanics", func() {
 		It("CS-LAY-010: only missing lines are proposed, matched exactly", func() {
 			hostTracks()

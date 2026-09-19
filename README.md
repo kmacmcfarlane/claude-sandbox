@@ -741,9 +741,17 @@ Set in `.claude-sandbox/config.yaml`. Controls how the directory is version-cont
   they would only dirty the tree — and warns instead: either set `trackInHost: false` in the
   local `.claude-sandbox/config.yaml` (and delete any of those five lines an earlier launch
   already appended — they are dead), or drop the ignore rule (`git check-ignore -v
-  .claude-sandbox/ignore-probe` names it, wherever it lives — a directory holding tracked
-  files is itself never reported ignored, so the launcher asks about a child path) and the sidecar `.git` to track the
-  directory in the host. Modes are never switched silently.
+  --no-index .claude-sandbox` names it, wherever it lives — without `--no-index` git never
+  reports a directory holding tracked files as ignored) and the sidecar `.git` to track the
+  directory in the host. Modes are never switched silently. A rule that excludes only the
+  directory's children, such as `.claude-sandbox/*`, is not a conflict: the `!` lines work
+  beneath it, so the entries are proposed as usual.
+- **Which rules count as "ignoring the directory":** for the `false`-mode checks (the
+  "hidden now" warning and the sidecar init) the launcher asks `git check-ignore` about two
+  never-existing children, `.claude-sandbox/ignore-probe` and `.claude-sandbox/ignore-probe.md`,
+  and counts the directory as ignored only when both are. A whitelist-style ignore (`*`,
+  `!*/`, `!*.*`) or a rule like `*.md` hides only one of them and does not count. A rule
+  that negates one of those probe paths by name defeats the check; don't write one.
 
 ```yaml
 # trackInHost: true
