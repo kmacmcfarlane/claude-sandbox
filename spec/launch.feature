@@ -878,6 +878,7 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       | "XDG_RUNTIME_DIR=/run/x\r" (CRLF) | XDG_RUNTIME_DIR    | does not set | counts         |
       | "  CLAUDE_CODE_TMPDIR=/somewhere" | CLAUDE_CODE_TMPDIR | does not set | counts         |
       | "XDG_RUNTIME_DIR"                 | XDG_RUNTIME_DIR    | sets         | counts         |
+      | "CLAUDE_CODE_TMPDIR"              | CLAUDE_CODE_TMPDIR | sets to ""   | counts         |
       | "XDG_RUNTIME_DIR\r" (CRLF)        | XDG_RUNTIME_DIR    | sets         | counts         |
       | "XDG_RUNTIME_DIR"                 | XDG_RUNTIME_DIR    | does not set | does not count |
       | "# XDG_RUNTIME_DIR=/run/x"        | XDG_RUNTIME_DIR    | does not set | does not count |
@@ -891,6 +892,11 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     # the operator asked docker to pass through. With the host variable unset
     # docker drops the line, so it defines nothing. The environment is read
     # through the launcher's injected lookup, as the override notice reads it.
+    # The same rule holds for CLAUDE_CODE_TMPDIR, and deliberately so when the
+    # shell sets it to "": docker passes the empty value through, the env file
+    # wins as CS-LNCH-034 says, and the container's scratchpad falls back to
+    # /tmp — the durable scratchpad is off for that session. The launcher does
+    # not second-guess a key the operator asked docker to pass.
     # "XDG_RUNTIME_DIR =…" is the key "XDG_RUNTIME_DIR " — a key docker rejects
     # (it fails the whole run), never a definition; the key is case-sensitive.
 

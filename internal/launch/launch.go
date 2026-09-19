@@ -173,11 +173,8 @@ type Plan struct {
 
 // lookupEnv reports whether k is set in the launcher's environment.
 func (in *Inputs) lookupEnv(k string) bool {
-	if in.LookupEnv != nil {
-		_, ok := in.LookupEnv(k)
-		return ok
-	}
-	return in.getenv(k) != ""
+	_, ok := in.lookupEnvValue(k)
+	return ok
 }
 
 func (in *Inputs) getenv(k string) string {

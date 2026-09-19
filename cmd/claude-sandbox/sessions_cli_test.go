@@ -12,6 +12,7 @@ package main
 // path is given the keys in the first place.
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -552,3 +553,45 @@ func currentHash(f *cliFixture) string {
 	Expect(hash).NotTo(BeEmpty())
 	return hash
 }
+
+var _ = Describe("would-be fingerprint vs the launch (CS-LNCH-108)", func() {
+	It("CS-LNCH-108, CS-SESS-020: a bare env-file XDG_RUNTIME_DIR the host sets to \"\" stands down in both, so the hashes agree", func() {
+		f := newCLIFixture()
+		// A short fixed-root home: past 103 bytes the bridge stands down for
+		// length (CS-LNCH-055) and this test would pass vacuously.
+		short, err := os.MkdirTemp("/tmp", "cs")
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(os.RemoveAll, short)
+		short, err = filepath.EvalSymlinks(short)
+		Expect(err).NotTo(HaveOccurred())
+		f.envmap["HOME"] = filepath.Join(short, "h")
+		Expect(os.MkdirAll(filepath.Join(short, "h", ".claude"), 0o755)).To(Succeed())
+		writeFile(filepath.Join(f.proj, ".claude-sandbox", "config.yaml"), "sharedPeerRegistry: true\n")
+		envFile := filepath.Join(f.proj, ".claude-sandbox", "env")
+
+		launchHash := func() string {
+			f.fake.Calls = nil
+			f.out.Reset()
+			Expect(f.run("--new")).To(Equal(0))
+			for _, l := range argPairsCLI(f.launched().Args, "--label") {
+				if v, ok := strings.CutPrefix(l, "claude-sandbox.confighash="); ok {
+					return v
+				}
+			}
+			Fail("no confighash label")
+			return ""
+		}
+
+		// Control: bridged without the bare line, so the stand-down below is
+		// caused by it and not by the socket-path length.
+		writeFile(envFile, "OTHER=1\n")
+		launchHash()
+		Expect(f.out.String()).To(ContainSubstring("Peer registry: shared ("))
+
+		writeFile(envFile, "XDG_RUNTIME_DIR\n")
+		f.envmap["XDG_RUNTIME_DIR"] = "" // set-but-empty: Getenv alone reads it as unset
+		got := launchHash()
+		Expect(f.out.String()).To(ContainSubstring("an env file sets XDG_RUNTIME_DIR"))
+		Expect(currentHash(f)).To(Equal(got))
+	})
+})

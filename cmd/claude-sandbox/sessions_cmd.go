@@ -399,7 +399,11 @@ func wouldBeFingerprint(env *Env, projectDir string, f *launchFlags, cfg *cascad
 	plan, err := launch.Build(launch.Inputs{
 		ProjectDir: projectDir, Home: home, TempDir: shadow,
 		HostUID: uid, HostGID: gid, HostUser: uname,
-		Getenv:    env.Getenv,
+		Getenv: env.Getenv,
+		// The launch passes it too (runLaunch): a bare env-file key resolves
+		// against it, so without it the XDG_RUNTIME_DIR stand-down could differ
+		// and every attach would report false drift (CS-LNCH-108).
+		LookupEnv: env.lookupEnv,
 		RalphMode: f.Ralph, Limit: f.Limit, SkipPermissions: f.Dangerous,
 		CLIModel: f.Model, Passthrough: f.Passthrough,
 		CLISSH: f.SSH, CLIGit: f.Git, CLIDockerSocket: f.DockerSocket, CLIAWS: f.AWS,

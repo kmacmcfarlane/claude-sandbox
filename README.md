@@ -151,7 +151,9 @@ session scratchpad inside the mounted config directory (`CLAUDE_CODE_TMPDIR`),
 so working files survive the container and `--resume` picks them back up.
 Set `CLAUDE_CODE_TMPDIR` yourself (host env or `.claude-sandbox/env`) to
 override the location — keep it under a mounted path or it dies with the
-container.
+container. A bare `CLAUDE_CODE_TMPDIR` line (no `=`) in an env file passes your
+shell's value through, and the env file wins; if your shell sets it to empty, the
+empty value is passed and the durable scratchpad is off for that session.
 
 ## Multiple sessions
 
