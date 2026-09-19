@@ -80,7 +80,7 @@ func Setup(project string, trackInHost bool, opts Options) error {
 	// trackInHost is false. Probed only in that mode; a failed probe is 0.
 	hostTracked := 0
 	if !trackInHost && hostIsGit {
-		hostTracked = hostTrackedCount(opts.Runner, project)
+		hostTracked = HostTrackedCount(opts.Runner, project)
 	}
 
 	// CS-LAY-002: seed once, never overwrite. Not in the CS-LAY-020 conflict
@@ -100,14 +100,16 @@ func Setup(project string, trackInHost bool, opts Options) error {
 		// negations defensively re-include config/Dockerfile against broad
 		// host ignore rules; no-ops otherwise.
 		if hostIsGit {
-			// CS-LAY-018: over a whole-dir ignore or a sidecar repo these
-			// lines are dead (git cannot re-include inside an ignored dir) and
-			// only leave the tree dirty. Warn, never switch modes, and still
+			// CS-LAY-018: over a rule excluding the directory itself or a
+			// sidecar repo these lines are dead (git cannot re-include inside
+			// an excluded dir) and only leave the tree dirty. A rule excluding
+			// only the children (".claude-sandbox/*") is not a conflict: the
+			// negations work beneath it (CS-LAY-021). Warn, never switch modes, and still
 			// propose the worktrees line alone.
 			if conflict := hostTrackConflict(opts.Runner, project, sb); conflict != "" {
 				fmt.Fprintf(opts.errw(), "WARNING: trackInHost is true but %s; skipping the host-tracked .gitignore entries, which would be dead there.\n", conflict)
 				fmt.Fprintln(opts.errw(), "  Either set trackInHost: false in .claude-sandbox/config.yaml (and delete any .claude-sandbox/env, temp/, ralph/, !config.yaml or !Dockerfile lines already in .gitignore — they are dead),")
-				fmt.Fprintln(opts.errw(), "  or drop the ignore rule (`git check-ignore -v "+ignoreProbe+"` names it) and .claude-sandbox/.git to track the directory in the host.")
+				fmt.Fprintln(opts.errw(), "  or drop the ignore rule (`git check-ignore -v --no-index "+dirProbe+"` names it) and .claude-sandbox/.git to track the directory in the host.")
 				gitignoreAdd(hostGI, opts, withWorktreesLine(hostGI)...)
 				return nil
 			}
@@ -189,11 +191,11 @@ func isGitWorkTree(r execx.Runner, dir string) bool {
 }
 
 // hostTrackConflict reports why host-tracked (trackInHost: true) .gitignore
-// entries would be dead — CS-LAY-018: the host repo already ignores the whole
-// .claude-sandbox/ directory, a sidecar .git exists inside it, or both.
+// entries would be dead — CS-LAY-018: the host repo excludes the
+// .claude-sandbox directory itself, a sidecar .git exists inside it, or both.
 // Returns "" when neither condition holds.
 func hostTrackConflict(r execx.Runner, project, sb string) string {
-	ignored := dirIgnored(r, project)
+	ignored := dirExcluded(r, project)
 	sidecar := dirExists(filepath.Join(sb, ".git"))
 	switch {
 	case ignored && sidecar:
@@ -206,10 +208,12 @@ func hostTrackConflict(r execx.Runner, project, sb string) string {
 	return ""
 }
 
-// hostTrackedCount returns how many files the host repo tracks under
-// .claude-sandbox/ (CS-LAY-020). A failed probe returns 0, so behaviour is
-// exactly as before: a probe failure never counts as "tracked".
-func hostTrackedCount(r execx.Runner, project string) int {
+// HostTrackedCount returns how many files the host repo tracks under
+// .claude-sandbox/ (CS-LAY-020). A failed probe returns 0 (including a
+// project outside any git work tree), so behaviour is exactly as before: a
+// probe failure never counts as "tracked". init shares it to default its
+// greenfield trackInHost prompt to true in that state (CS-INIT-031).
+func HostTrackedCount(r execx.Runner, project string) int {
 	out, err := r.Output(execx.Cmd{Name: "git", Args: []string{"-C", project, "ls-files", "-z", "--", ".claude-sandbox"}, Stderr: io.Discard})
 	if err != nil {
 		return 0
@@ -223,19 +227,51 @@ func hostTrackedCount(r execx.Runner, project string) int {
 	return n
 }
 
-// ignoreProbe is a path under .claude-sandbox/ that never exists. Whether
-// the host ignores the directory is asked of this child, never of the
-// directory itself: git reports a directory holding tracked files as NOT
-// ignored even beneath a "/.claude-sandbox/" rule, while every new file in it
-// is ignored (CS-LAY-018, CS-LAY-020). The question that matters is whether a
-// new file there would be hidden, which is what the child answers.
+// dirProbe is the directory path asked by dirExcluded — no trailing slash:
+// with one, git matches it against "dir/*" rules as if it were a child.
+const dirProbe = ".claude-sandbox"
+
+// dirExcluded reports whether the host repo excludes the .claude-sandbox
+// directory ITSELF — the one state in which no "!" rule can re-include
+// anything beneath it (CS-LAY-018, CS-LAY-021). --no-index is required: git
+// otherwise reports a directory holding tracked files as NOT ignored even
+// beneath a "/.claude-sandbox/" rule. A rule excluding only the children
+// (".claude-sandbox/*", "/.claude-sandbox/**") does not match the directory.
+func dirExcluded(r execx.Runner, project string) bool {
+	err := r.Run(execx.Cmd{Name: "git", Args: []string{"-C", project, "check-ignore", "-q", "--no-index", "--", dirProbe}, Stdout: io.Discard, Stderr: io.Discard})
+	return err == nil
+}
+
+// ignoreProbes are two unlike paths under .claude-sandbox/ that never exist
+// (CS-LAY-022). Whether new files there would be hidden is asked of children,
+// never of the directory: git reports a directory holding tracked files as
+// NOT ignored even beneath a "/.claude-sandbox/" rule (CS-LAY-020). Two
+// shapes, because one name is fooled by rules aimed at some names only: a
+// whitelist ("*", "!*/", "!*.*") hides the dot-less name alone, "*.md" the
+// other alone. ignoreProbe, the first, is the one the warnings name.
+// Known limitation: a rule negating a probe path by name defeats this.
 const ignoreProbe = ".claude-sandbox/ignore-probe"
 
+var ignoreProbes = []string{ignoreProbe, ignoreProbe + ".md"}
+
+// DirIgnored is dirIgnored for callers outside layout: init's greenfield
+// trackInHost prompt defaults to true only when new files under
+// .claude-sandbox/ are NOT hidden (CS-INIT-031). dirExcluded implies it, so
+// it also covers the whole-dir half of CS-LAY-018.
+func DirIgnored(r execx.Runner, project string) bool {
+	return dirIgnored(r, project)
+}
+
 // dirIgnored reports whether the host repo ignores new files under
-// .claude-sandbox/, via ignoreProbe.
+// .claude-sandbox/: true only when every ignoreProbes path is ignored.
 func dirIgnored(r execx.Runner, project string) bool {
-	err := r.Run(execx.Cmd{Name: "git", Args: []string{"-C", project, "check-ignore", "-q", "--", ignoreProbe}, Stdout: io.Discard, Stderr: io.Discard})
-	return err == nil
+	for _, p := range ignoreProbes {
+		err := r.Run(execx.Cmd{Name: "git", Args: []string{"-C", project, "check-ignore", "-q", "--", p}, Stdout: io.Discard, Stderr: io.Discard})
+		if err != nil {
+			return false
+		}
+	}
+	return true
 }
 
 func dirExists(p string) bool {

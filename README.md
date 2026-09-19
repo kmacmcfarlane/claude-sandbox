@@ -486,7 +486,7 @@ Spec: `spec/launch.feature` CS-LNCH-058..067, `spec/sessions.feature` CS-SESS-05
 `init` sets up the `.claude-sandbox/` directory in the current project and exits (it does **not** launch a container):
 
 - Creates `.claude-sandbox/config.yaml` (from the example) and `.claude-sandbox/env.example`, and prints the config cascade when parent directories contribute files. It never creates a real `.claude-sandbox/env` — see [`.claude-sandbox/env`](#claude-sandboxenv) for why, and where secrets belong.
-- Prompts for **`trackInHost`** (default `false`) — unless `--track-in-host` / `--no-track-in-host` is passed, or there is no tty. When a parent `.claude-sandbox/config.yaml` already sets it, the prompt shows the inherited value: press Enter to inherit (nothing written locally — the commented hint records the inherited value and its source), or answer `y`/`n` to write a local override. See [`trackInHost`](#claude-sandboxconfigyaml) for what it controls.
+- Prompts for **`trackInHost`** (default `false`; `true` when the host repo already tracks files under `.claude-sandbox/` — `git ls-files -- .claude-sandbox` lists any — and neither hides new files there (by any ignore rule, including one that covers only the directory's children) nor has a sidecar `.claude-sandbox/.git`, since `false` there only earns the warning described under [`trackInHost`](#trackinhost--host-history-vs-clean-host-repo) on every launch) — unless `--track-in-host` / `--no-track-in-host` is passed. With no tty, or with `--yes`, the default is written without asking — so `true` in such a host-tracking repo. When a parent `.claude-sandbox/config.yaml` already sets it, the prompt shows the inherited value: press Enter to inherit (nothing written locally — the commented hint records the inherited value and its source), or answer `y`/`n` to write a local override. See [`trackInHost`](#claude-sandboxconfigyaml) for what it controls.
 - Seeds `Dockerfile.example` without asking — a copy of the nearest parent `.claude-sandbox/Dockerfile` when one exists (the report names it), the generic scaffold example otherwise. It is inactive until renamed. `--no-copy-parent-dockerfile` forces the generic example; `--copy-parent-dockerfile` is accepted and is the default.
 - Runs the standard layout setup: `temp/`+`reports/` skeleton, seeded `.claude-sandbox/CLAUDE.md`, the host `.gitignore` entries that the `trackInHost` answer implies (written without a further prompt — the answer already chose them; `--no-gitignore` skips them, `--gitignore` is the default), and (when `trackInHost: false`) the internal sidecar git repo.
 - A fresh interactive `init` therefore asks exactly **one** question — `trackInHost`. `--yes` answers it with the default for scripted bootstraps; the other flags are non-interactive overrides, not prompt-skippers. (The launch-time `.gitignore` prompt, which guards a hand-edited `.gitignore` outside a bootstrap, is unchanged.)
@@ -744,9 +744,17 @@ Set in `.claude-sandbox/config.yaml`. Controls how the directory is version-cont
   they would only dirty the tree — and warns instead: either set `trackInHost: false` in the
   local `.claude-sandbox/config.yaml` (and delete any of those five lines an earlier launch
   already appended — they are dead), or drop the ignore rule (`git check-ignore -v
-  .claude-sandbox/ignore-probe` names it, wherever it lives — a directory holding tracked
-  files is itself never reported ignored, so the launcher asks about a child path) and the sidecar `.git` to track the
-  directory in the host. Modes are never switched silently.
+  --no-index .claude-sandbox` names it, wherever it lives — without `--no-index` git never
+  reports a directory holding tracked files as ignored) and the sidecar `.git` to track the
+  directory in the host. Modes are never switched silently. A rule that excludes only the
+  directory's children, such as `.claude-sandbox/*`, is not a conflict: the `!` lines work
+  beneath it, so the entries are proposed as usual.
+- **Which rules count as "ignoring the directory":** for the `false`-mode checks (the
+  "hidden now" warning and the sidecar init) the launcher asks `git check-ignore` about two
+  never-existing children, `.claude-sandbox/ignore-probe` and `.claude-sandbox/ignore-probe.md`,
+  and counts the directory as ignored only when both are. A whitelist-style ignore (`*`,
+  `!*/`, `!*.*`) or a rule like `*.md` hides only one of them and does not count. A rule
+  that negates one of those probe paths by name defeats the check; don't write one.
 
 ```yaml
 # trackInHost: true
@@ -901,7 +909,12 @@ own `<config dir>/sessions`, putting other trees' sandboxes into a registry your
 
 The bridge is switched **off for one session**, with one warning and no banner, when an env file
 in the cascade sets `XDG_RUNTIME_DIR` (the launcher will not override it), or when your home
-directory is so long that the socket path would exceed Claude Code's 103-byte limit. It is all
+directory is so long that the socket path would exceed Claude Code's 103-byte limit, or when
+the launcher cannot create one of those directories or restrict it to `0700` — for example a
+`peers/` Docker once created as root, or one replaced by a symlink (the launcher never re-modes
+through a link). That warning names the directory and the fix: make it yours (`chown` it, or
+remove it and relaunch), or set `CLAUDE_SANDBOX_SHARED_PEER_REGISTRY=0` to keep the tree off
+the bridge. It is all
 or nothing: sharing the registry without a shared socket would leave the session listing
 nobody and listed by nobody, while hiding its own tree's registry, which is worse than the key
 being off. That session launches exactly as if the key were off.
@@ -1276,6 +1289,10 @@ the lock is taken, so a launch never sees another launch's directory before that
 created its container; the hour covers launches that could not take the lock and older
 launchers. The sweep makes no docker call unless there is a candidate, never prints on success,
 and any failure (the container listing, a removal) is one warning; it never blocks a launch.
+A directory whose removal fails part-way (say, a file inside it you cannot delete) is renamed
+`<dir>.unremovable` in place and the warning names it: no later sweep matches that name, so it
+warns once rather than on every launch, and it is yours to remove by hand. If even the rename
+fails, the directory is left alone for another hour before it is retried.
 A launch that fails before its session starts (a failed `docker create`, or a `docker start`
 that cannot be run, once the reservation is removed) removes its own directory, and the config-drift
 check behind `--attach`/`--join` uses a private directory it removes before returning. The

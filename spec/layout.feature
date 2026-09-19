@@ -152,14 +152,18 @@ Feature: .claude-sandbox/ layout lifecycle (CS-LAY)
     # config set trackInHost: true over a checkout in sidecar mode, and every
     # launch re-appended the five lines. Modes are never silently switched —
     # the launcher warns and leaves the choice to the user.
-    # "Ignores the directory" is asked of a child path that never exists,
-    # `git check-ignore -q -- .claude-sandbox/ignore-probe`, never of the
-    # directory itself: real git reports a directory that holds tracked files
-    # as NOT ignored even beneath a "/.claude-sandbox/" rule, while every new
-    # file in it is ignored. Probing the directory let this check miss the
-    # rule after the CS-LAY-020 remedy "set trackInHost: true" (2026-09-18).
+    # "Ignores the directory" means the host EXCLUDES THE DIRECTORY ITSELF,
+    # the one state in which no "!" line can reach inside it. It is asked as
+    # `git check-ignore -q --no-index -- .claude-sandbox` (no trailing slash):
+    # without --no-index real git reports a directory that holds tracked files
+    # as NOT ignored even beneath a "/.claude-sandbox/" rule (probing that way
+    # let this check miss the rule after the CS-LAY-020 remedy "set
+    # trackInHost: true", 2026-09-18); with a trailing slash git matches the
+    # path against "dir/*" rules as if it were a child. Until 2026-09-19 this
+    # asked the CS-LAY-020 child probe instead, which also fired under rules
+    # that exclude only the children (CS-LAY-021).
     Given the project is a git work tree and the effective trackInHost is true
-    And EITHER the host repo already ignores new files under .claude-sandbox/ (git check-ignore of the child probe)
+    And EITHER the host repo excludes the .claude-sandbox directory itself (the --no-index directory probe)
       OR .claude-sandbox/.git exists (a sidecar repo), or both
     When SetupLayout runs
     Then none of the host-tracked entries (CS-LAY-009) is proposed or appended
@@ -167,7 +171,7 @@ Feature: .claude-sandbox/ layout lifecycle (CS-LAY)
       ignore, the sidecar .git, or both — and the two remedies: set trackInHost: false
       in the local .claude-sandbox/config.yaml (and delete any of the five lines a
       previous launch already appended — they are dead), or drop the ignore rule
-      (`git check-ignore -v .claude-sandbox/ignore-probe` names it, wherever it lives: the project
+      (`git check-ignore -v --no-index .claude-sandbox` names it, wherever it lives: the project
       .gitignore, a parent's, .git/info/exclude or core.excludesFile) and
       .claude-sandbox/.git to track the directory in the host
     And ".claude/worktrees/" is still proposed when missing (CS-LAY-017), and not
@@ -217,15 +221,17 @@ Feature: .claude-sandbox/ layout lifecycle (CS-LAY)
       other clone and worktree that pulls or merges it
     And when .claude-sandbox/.git exists, remedy 1 carries one more clause: remove it,
       since CS-LAY-018 refuses the host-tracked entries while it exists
-    Given a host ignore rule ALREADY covers the directory (the child probe of CS-LAY-018
-      is ignored; git reports the directory itself as not ignored because it holds
+    Given a host ignore rule ALREADY covers the directory (the child probes of CS-LAY-022
+      are both ignored; git reports the directory itself as not ignored because it holds
       tracked files) — the incident state after the ignore was once accepted
     Then the one warning is a distinct message instead: new files under .claude-sandbox/
       are being hidden from git NOW, and the rule (`git check-ignore -v
       .claude-sandbox/ignore-probe` names it) must be removed whichever remedy is chosen,
       followed by the same two remedies
-    And following remedy 1 with the rule still present lands in CS-LAY-018 (no dead
-      lines are appended); once the rule is removed, the CS-LAY-009 entries are proposed
+    And following remedy 1 with a rule that excludes the directory itself still present
+      lands in CS-LAY-018 (no dead lines are appended); under a rule that excludes only the
+      children (".claude-sandbox/*") it lands in CS-LAY-021; once the rule is removed, the
+      CS-LAY-009 entries are proposed
     And ".claude/worktrees/" is still proposed when missing (CS-LAY-017), and not
       when a covering rule already exists
     And no sidecar repo is initialized, even when an existing rule already ignores the
@@ -244,3 +250,48 @@ Feature: .claude-sandbox/ layout lifecycle (CS-LAY)
       never changes behaviour silently, and never counts as "tracked"
     Given ls-files lists nothing
     Then "/.claude-sandbox/" is proposed exactly as in CS-LAY-003
+
+  # ---- probe robustness ----
+
+  @new
+  Scenario: CS-LAY-021 A rule that excludes only the children does not refuse the host-tracked entries
+    # git cannot re-include a file whose parent DIRECTORY is excluded, but a
+    # rule such as ".claude-sandbox/*" or "/.claude-sandbox/**" excludes the
+    # children, not the directory, so "!.claude-sandbox/config.yaml" and
+    # "!.claude-sandbox/Dockerfile" take effect beneath it (verified with git
+    # 2.39: both become untracked-visible, every other new file stays
+    # ignored). The CS-LAY-009 lines are live there, so refusing them was a
+    # false positive (review of 18a7, 2026-09-18).
+    Given the project is a git work tree, the effective trackInHost is true and no .claude-sandbox/.git exists
+    And the host rule excludes only the children of .claude-sandbox/ (the --no-index
+      directory probe of CS-LAY-018 reports the directory not ignored, e.g. ".claude-sandbox/*")
+    When SetupLayout runs
+    Then no CS-LAY-018 warning is printed and the CS-LAY-009 entries are proposed exactly as there
+    And the rule itself is left alone
+    Given the rule excludes the directory itself ("/.claude-sandbox/", "/.claude-sandbox",
+      "sub/" above a project in sub/, or any rule git applies to the directory path)
+    Then CS-LAY-018 fires as before
+
+  @new
+  Scenario: CS-LAY-022 "New files under .claude-sandbox/ are ignored" asks two unlike child names
+    # The CS-LAY-020 incident check and the sidecar init of CS-LAY-005/006
+    # ask whether a NEW file under the directory would be hidden. One child
+    # name is fooled by rules aimed at some names only: a whitelist-style
+    # ignore ("*", "!*/", "!*.*") hides the dot-less "ignore-probe" while
+    # re-including every name with an extension, and "*.md" hides only the
+    # other shape. So the answer is yes only when BOTH never-existing children
+    # are ignored: `git check-ignore -q -- .claude-sandbox/ignore-probe` AND
+    # `git check-ignore -q -- .claude-sandbox/ignore-probe.md`.
+    Given the project is a git work tree
+    When a host rule ignores both probes (e.g. "/.claude-sandbox/", ".claude-sandbox/*")
+    Then the directory counts as ignored for CS-LAY-005/006 and CS-LAY-020, as before
+    When a host rule ignores only one of them (e.g. "*" + "!*/" + "!*.*", or "*.md")
+    Then the directory does not count as ignored: with trackInHost false and host-tracked files
+      the plain CS-LAY-020 warning is printed, not the "hidden from git NOW" one; with
+      nothing tracked the CS-LAY-006 note applies and no sidecar is initialized
+    And the second probe is not asked when the first is not ignored
+    # Known limitation, accepted: a rule that negates a probe path by name
+    # (".claude-sandbox/*" + "!.claude-sandbox/ignore-probe.md") makes the
+    # directory count as not ignored although other new files are. Such a
+    # rule can only be written deliberately against this probe; the CS-LAY-018
+    # directory probe is unaffected by it.

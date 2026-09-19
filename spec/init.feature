@@ -78,11 +78,66 @@ Feature: init subcommand (CS-INIT)
     When init runs and the user answers "y" at the trackInHost prompt
     Then config.yaml contains "trackInHost: true"
 
-  Scenario: CS-INIT-011 No terminal resolves trackInHost to false without prompting
+  @changed
+  Scenario: CS-INIT-011 No terminal resolves trackInHost to the prompt's default without prompting
+    # Earlier wording: "resolves trackInHost to false". The default is false
+    # except in the CS-INIT-031 state, where it is true.
     Given no interactive terminal is attached
     When "claude-sandbox init" is run
-    Then config.yaml contains "trackInHost: false"
+    Then config.yaml contains "trackInHost: false" (true in the CS-INIT-031 state)
     And no prompt was shown
+    # CS-INIT-009 describes a host repo that tracks nothing under
+    # .claude-sandbox/; CS-INIT-031 flips the default when it does.
+
+  @new
+  Scenario: CS-INIT-031 Greenfield prompt defaults to true when the host already tracks .claude-sandbox/ files
+    # Defaulting to false here lands the operator in the CS-LAY-020 state —
+    # trackInHost false over host-tracked files — whose warning then repeats
+    # on every launch. The probe is CS-LAY-020's own
+    # (`git -C <project> ls-files -z -- .claude-sandbox`); a failed probe or
+    # a non-git project counts as zero files, so the default stays false.
+    Given a project with no .claude-sandbox/config.yaml and no upstream config
+    And `git ls-files -- .claude-sandbox` in the project lists N >= 1 files
+    And an interactive terminal
+    When "claude-sandbox init" is run
+    Then the trackInHost prompt's default is true, and its preamble says why:
+      the host repo already tracks N file(s) under .claude-sandbox/
+    When the user presses Enter
+    Then config.yaml contains "trackInHost: true"
+    And no warning is printed (neither CS-LAY-018 nor CS-LAY-020)
+    When the user answers "n" instead
+    Then config.yaml contains "trackInHost: false" (an explicit answer still wins)
+    And the CS-LAY-020 warning follows
+    # No terminal and --yes take the prompt's default (CS-INIT-011/025), so
+    # they resolve to true in this state as well.
+    Given the files are tracked BUT the host also hides new files under
+      .claude-sandbox/ — by any rule, whether it excludes the directory itself
+      ("/.claude-sandbox/") or only its children (".claude-sandbox/*"), i.e.
+      CS-LAY-020's child probes are all ignored — or .claude-sandbox/.git exists
+    When "claude-sandbox init" is run and the user presses Enter
+    Then the prompt's default stays false, with the ordinary preamble
+    And the CS-LAY-020 warning is printed, including that new files there
+      are being hidden from git now when an ignore rule covers them
+    # True would trade that warning for CS-LAY-018's (a whole-dir rule or a
+    # sidecar), which does not say new files are being dropped, or — under a
+    # children-only rule (CS-LAY-021) — for no warning at all while every new
+    # file but config.yaml/Dockerfile stays hidden. The check is CS-LAY-020's
+    # "new files hidden" probe (layout.DirIgnored), which a whole-dir
+    # exclusion implies, plus the sidecar .git.
+
+  @new
+  Scenario: CS-INIT-032 Flags, an upstream value and an existing config keep their precedence over host-tracked files
+    Given `git ls-files -- .claude-sandbox` in the project lists N >= 1 files
+    When "claude-sandbox init --no-track-in-host" is run
+    Then config.yaml contains "trackInHost: false" and no prompt was shown (CS-INIT-008)
+    Given an upstream config sets "trackInHost: false"
+    When init runs and the user presses Enter
+    Then the prompt is the inherited-value prompt of CS-INIT-014 and trackInHost is inherited
+    Given .claude-sandbox/config.yaml already exists
+    When "claude-sandbox init" is run
+    Then config.yaml is unchanged and no prompt is shown (CS-INIT-013)
+    # The host-tracked probe runs only on the greenfield no-flag, no-upstream
+    # branch, which is the only one whose default it changes.
 
   Scenario: CS-INIT-012 Flag on an existing config updates trackInHost in place
     Given .claude-sandbox/config.yaml exists containing "# trackInHost: false"

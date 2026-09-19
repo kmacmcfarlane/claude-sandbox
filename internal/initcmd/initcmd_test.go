@@ -179,7 +179,7 @@ var _ = Describe("init subcommand", func() {
 			Expect(read(cfg)).To(MatchRegexp(`(?m)^trackInHost: true$`))
 		})
 
-		It("CS-INIT-011: no terminal resolves trackInHost to false without prompting", func() {
+		It("CS-INIT-011: no terminal resolves trackInHost to the prompt's default (false here) without prompting", func() {
 			// The real TTY prompter answers the default silently when /dev/tty
 			// is unavailable; Scripted{IsTTY: false} with no answers models that.
 			r := &run{prompter: &prompt.Scripted{IsTTY: false}}
@@ -211,6 +211,141 @@ var _ = Describe("init subcommand", func() {
 			Expect(r.init(proj, initcmd.Flags{})).To(Succeed())
 			Expect(read(cfg)).To(Equal("model: opus\n# trackInHost: false\n"))
 			Expect(r.prompter.Asked).To(BeEmpty())
+		})
+	})
+
+	Describe("host repo already tracks .claude-sandbox/ files", func() {
+		// trackedFake scripts a git work tree that does not ignore
+		// .claude-sandbox/ and whose `git ls-files -z -- .claude-sandbox`
+		// (CS-LAY-020's probe) lists two files.
+		trackedFake := func() *execx.Fake {
+			f := &execx.Fake{}
+			f.On("check-ignore", "", execx.Fail(1))
+			f.On("ls-files -z -- .claude-sandbox", ".claude-sandbox/agent/PRD.md\x00.claude-sandbox/work/a.md\x00", nil)
+			return f
+		}
+
+		It("CS-INIT-031: the greenfield prompt defaults to true and says why", func() {
+			By("interactive Enter accepts true; no CS-LAY-020 warning follows")
+			r := &run{fake: trackedFake(), prompter: &prompt.Scripted{IsTTY: true, Answers: []string{""}}}
+			Expect(r.init(proj, initcmd.Flags{})).To(Succeed())
+			Expect(r.prompter.Asked).To(HaveLen(1))
+			Expect(r.prompter.Asked[0]).To(ContainSubstring("Track in host repo?"))
+			Expect(r.errOut.String()).To(ContainSubstring("[Y] Track in THIS repo"))
+			Expect(r.errOut.String()).To(ContainSubstring("default: the host repo already tracks 2 files under .claude-sandbox/"))
+			Expect(read(cfg)).To(MatchRegexp(`(?m)^trackInHost: true$`))
+			Expect(r.errOut.String()).NotTo(ContainSubstring("WARNING")) // neither CS-LAY-018 nor CS-LAY-020
+			gi := read(filepath.Join(proj, ".gitignore"))
+			Expect(gi).To(ContainSubstring(".claude-sandbox/env"))
+			Expect(gi).NotTo(ContainSubstring("/.claude-sandbox/\n"))
+
+			By("an explicit n still writes false (and CS-LAY-020 then warns)")
+			p2 := filepath.Join(tmp, "p2")
+			mkdir(p2)
+			r2 := &run{fake: trackedFake(), prompter: &prompt.Scripted{IsTTY: true, Answers: []string{"n"}}}
+			Expect(r2.init(p2, initcmd.Flags{})).To(Succeed())
+			Expect(read(filepath.Join(p2, ".claude-sandbox", "config.yaml"))).To(MatchRegexp(`(?m)^trackInHost: false$`))
+			Expect(r2.errOut.String()).To(ContainSubstring("WARNING: trackInHost is false but the host repo already tracks 2 files under .claude-sandbox/"))
+
+			By("no terminal and --yes take the same default")
+			for i, tc := range []struct {
+				flags    initcmd.Flags
+				prompter *prompt.Scripted
+			}{
+				{initcmd.Flags{}, &prompt.Scripted{IsTTY: false}},
+				{initcmd.Flags{Yes: true}, nil},
+			} {
+				p := filepath.Join(tmp, "q", string(rune('a'+i)))
+				mkdir(p)
+				rr := &run{fake: trackedFake(), prompter: tc.prompter}
+				Expect(rr.init(p, tc.flags)).To(Succeed())
+				Expect(read(filepath.Join(p, ".claude-sandbox", "config.yaml"))).To(MatchRegexp(`(?m)^trackInHost: true$`), "case %d", i)
+			}
+
+			By("a single tracked file reads in the singular")
+			p3 := filepath.Join(tmp, "p3")
+			mkdir(p3)
+			one := &execx.Fake{}
+			one.On("check-ignore", "", execx.Fail(1))
+			one.On("ls-files -z -- .claude-sandbox", ".claude-sandbox/config.yaml\x00", nil)
+			r3 := &run{fake: one, prompter: &prompt.Scripted{IsTTY: true}}
+			Expect(r3.init(p3, initcmd.Flags{})).To(Succeed())
+			Expect(r3.errOut.String()).To(ContainSubstring("already tracks 1 file under .claude-sandbox/)"))
+
+			By("tracked files under a whole-dir ignore: default stays false; CS-LAY-020 says new files are hidden now")
+			p5 := filepath.Join(tmp, "p5")
+			mkdir(p5)
+			ignored := &execx.Fake{}
+			ignored.On("check-ignore", "", nil) // the host ignores new files under .claude-sandbox/
+			ignored.On("ls-files -z -- .claude-sandbox", ".claude-sandbox/agent/PRD.md\x00", nil)
+			r5 := &run{fake: ignored, prompter: &prompt.Scripted{IsTTY: true, Answers: []string{""}}}
+			Expect(r5.init(p5, initcmd.Flags{})).To(Succeed())
+			Expect(r5.errOut.String()).To(ContainSubstring("[N] Keep out of the repo"))
+			Expect(r5.errOut.String()).NotTo(ContainSubstring("(default: the host repo already tracks"))
+			Expect(read(filepath.Join(p5, ".claude-sandbox", "config.yaml"))).To(MatchRegexp(`(?m)^trackInHost: false$`))
+			Expect(r5.errOut.String()).To(ContainSubstring("new files there are being hidden from git NOW"))
+			Expect(r5.errOut.String()).NotTo(ContainSubstring("WARNING: trackInHost is true"))
+
+			By("tracked files under a children-only rule (.claude-sandbox/*): default stays false")
+			p7 := filepath.Join(tmp, "p7")
+			mkdir(p7)
+			children := &execx.Fake{}
+			children.On("--no-index", "", execx.Fail(1)) // the directory itself is not excluded (CS-LAY-021)
+			children.On("check-ignore", "", nil)         // but every child probe is ignored
+			children.On("ls-files -z -- .claude-sandbox", ".claude-sandbox/agent/PRD.md\x00", nil)
+			r7 := &run{fake: children, prompter: &prompt.Scripted{IsTTY: true, Answers: []string{""}}}
+			Expect(r7.init(p7, initcmd.Flags{})).To(Succeed())
+			Expect(r7.errOut.String()).To(ContainSubstring("[N] Keep out of the repo"))
+			Expect(read(filepath.Join(p7, ".claude-sandbox", "config.yaml"))).To(MatchRegexp(`(?m)^trackInHost: false$`))
+			Expect(r7.errOut.String()).To(ContainSubstring("new files there are being hidden from git NOW"))
+
+			By("tracked files with a sidecar .git: default stays false")
+			p6 := filepath.Join(tmp, "p6")
+			mkdir(filepath.Join(p6, ".claude-sandbox", ".git"))
+			r6 := &run{fake: trackedFake(), prompter: &prompt.Scripted{IsTTY: true, Answers: []string{""}}}
+			Expect(r6.init(p6, initcmd.Flags{})).To(Succeed())
+			Expect(r6.errOut.String()).To(ContainSubstring("[N] Keep out of the repo"))
+			Expect(read(filepath.Join(p6, ".claude-sandbox", "config.yaml"))).To(MatchRegexp(`(?m)^trackInHost: false$`))
+			Expect(r6.errOut.String()).To(ContainSubstring("WARNING: trackInHost is false but the host repo already tracks 2 files"))
+			Expect(r6.errOut.String()).NotTo(ContainSubstring("WARNING: trackInHost is true"))
+
+			By("a failed probe keeps the false default (CS-INIT-009)")
+			p4 := filepath.Join(tmp, "p4")
+			mkdir(p4)
+			failing := &execx.Fake{}
+			failing.On("check-ignore", "", execx.Fail(1))
+			failing.On("ls-files", "", execx.Fail(128))
+			r4 := &run{fake: failing, prompter: &prompt.Scripted{IsTTY: true, Answers: []string{""}}}
+			Expect(r4.init(p4, initcmd.Flags{})).To(Succeed())
+			Expect(r4.errOut.String()).To(ContainSubstring("[N] Keep out of the repo"))
+			Expect(read(filepath.Join(p4, ".claude-sandbox", "config.yaml"))).To(MatchRegexp(`(?m)^trackInHost: false$`))
+		})
+
+		It("CS-INIT-032: flags, an upstream value and an existing config keep their precedence", func() {
+			By("--no-track-in-host: explicit false, no prompt")
+			r := &run{fake: trackedFake()}
+			Expect(r.init(proj, initcmd.Flags{TrackInHost: ptr(false)})).To(Succeed())
+			Expect(read(cfg)).To(MatchRegexp(`(?m)^trackInHost: false$`))
+			Expect(r.prompter.Asked).To(BeEmpty())
+
+			By("upstream false: the inherited-value prompt, Enter inherits")
+			ws := filepath.Join(tmp, "ws")
+			write(filepath.Join(ws, ".claude-sandbox", "config.yaml"), "trackInHost: false\n")
+			p := filepath.Join(ws, "p")
+			mkdir(p)
+			r2 := &run{fake: trackedFake(), prompter: &prompt.Scripted{IsTTY: true, Answers: []string{""}}}
+			Expect(r2.init(p, initcmd.Flags{})).To(Succeed())
+			Expect(r2.prompter.Asked).To(ConsistOf(ContainSubstring("[Enter=inherit false, y/n=override]")))
+			Expect(read(filepath.Join(p, ".claude-sandbox", "config.yaml"))).NotTo(MatchRegexp(`(?m)^trackInHost:`))
+
+			By("existing config: untouched, no prompt")
+			p3 := filepath.Join(tmp, "p3")
+			existing := filepath.Join(p3, ".claude-sandbox", "config.yaml")
+			write(existing, "model: opus\n")
+			r3 := &run{fake: trackedFake(), prompter: &prompt.Scripted{IsTTY: true}}
+			Expect(r3.init(p3, initcmd.Flags{})).To(Succeed())
+			Expect(read(existing)).To(Equal("model: opus\n"))
+			Expect(r3.prompter.Asked).To(BeEmpty())
 		})
 	})
 

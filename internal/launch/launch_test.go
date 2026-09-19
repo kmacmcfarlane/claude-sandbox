@@ -590,7 +590,7 @@ var _ = Describe("launch.Build", func() {
 		})
 	})
 
-	Describe("shared peer registry (CS-LNCH-049..055)", func() {
+	Describe("shared peer registry (CS-LNCH-049..055, CS-LNCH-107)", func() {
 		var root, cfgDir string
 		BeforeEach(func() {
 			root = filepath.Join(home, ".cache", "claude-sandbox", "peers")
@@ -875,9 +875,104 @@ var _ = Describe("launch.Build", func() {
 			longRoot := filepath.Join(longHome, ".cache", "claude-sandbox", "peers")
 			n := len(longRoot) + len("/cc-socks/1234567.sock")
 			Expect(n).To(BeNumerically(">", 103))
+			off := build()
+			out.Reset()
 			enable()
 			p := build()
 			expectStoodDown(p, longRoot, fmt.Sprintf("would be %d bytes", n))
+			// Exactly a key-off launch, fingerprint included.
+			Expect(p.CreateArgs(proj)).To(Equal(off.CreateArgs(proj)))
+			Expect(p.ConfigHash).To(Equal(off.ConfigHash))
+		})
+
+		// expectPeerDirStandDown pins a CS-LNCH-107 stand-down: the launch
+		// succeeds as a key-off launch, with one warning naming the directory,
+		// the error and both remedies.
+		expectPeerDirStandDown := func(setup func(), dir, errText string) {
+			off := build()
+			out.Reset()
+			enable()
+			setup()
+			p, err := launch.Build(in)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(peerEntries(p)).To(BeEmpty())
+			Expect(envValues(p, "XDG_RUNTIME_DIR")).To(BeEmpty())
+			Expect(p.CreateArgs(proj)).To(Equal(off.CreateArgs(proj)))
+			Expect(p.ConfigHash).To(Equal(off.ConfigHash))
+			o := out.String()
+			Expect(o).NotTo(ContainSubstring("Peer registry:"))
+			Expect(strings.Count(o, "Warning: sharedPeerRegistry")).To(Equal(1))
+			Expect(o).To(ContainSubstring("Warning: sharedPeerRegistry is off for this session: cannot prepare " + dir + " ("))
+			Expect(o).To(ContainSubstring(errText))
+			Expect(o).To(ContainSubstring("chown it, or remove it and relaunch"))
+			Expect(o).To(ContainSubstring("CLAUDE_SANDBOX_SHARED_PEER_REGISTRY=0"))
+		}
+
+		It("CS-LNCH-107: a chmod that fails on a peer dir stands the whole bridge down with the remedy", func() {
+			var tried []string
+			expectPeerDirStandDown(func() {
+				in.Chmod = func(name string, _ os.FileMode) error {
+					tried = append(tried, name)
+					return &os.PathError{Op: "chmod", Path: name, Err: syscall.EPERM}
+				}
+			}, root, "restricting it to 0700: chmod "+root+": operation not permitted")
+			// It stops at the first failure: one warning, not three.
+			Expect(tried).To(Equal([]string{root}))
+		})
+
+		It("CS-LNCH-107: a peer dir that cannot be created stands the bridge down", func() {
+			if os.Getuid() == 0 {
+				Skip("root ignores directory permissions")
+			}
+			parent := filepath.Join(home, ".cache", "claude-sandbox")
+			mkdir(parent)
+			Expect(os.Chmod(parent, 0o500)).To(Succeed())
+			DeferCleanup(func() { _ = os.Chmod(parent, 0o755) })
+			expectPeerDirStandDown(func() {}, root, "creating it: mkdir "+root+": permission denied")
+		})
+
+		It("CS-LNCH-107: a regular file where cc-socks/ belongs stands the bridge down", func() {
+			sock := filepath.Join(root, "cc-socks")
+			mkdir(root)
+			touch(sock, "")
+			expectPeerDirStandDown(func() {}, sock, "creating it:")
+		})
+
+		It("CS-LNCH-107: a registry destination that cannot be created stands the bridge down", func() {
+			if os.Getuid() == 0 {
+				Skip("root ignores directory permissions")
+			}
+			Expect(os.Chmod(cfgDir, 0o500)).To(Succeed())
+			DeferCleanup(func() { _ = os.Chmod(cfgDir, 0o755) })
+			dst := filepath.Join(cfgDir, "sessions")
+			expectPeerDirStandDown(func() {}, dst, "creating it: mkdir "+dst+": permission denied")
+		})
+
+		It("CS-LNCH-107: a symlinked peers dir is refused and its target is not re-moded", func() {
+			target := filepath.Join(home, "elsewhere")
+			Expect(os.MkdirAll(target, 0o755)).To(Succeed())
+			Expect(os.Chmod(target, 0o755)).To(Succeed())
+			mkdir(filepath.Dir(root))
+			Expect(os.Symlink(target, root)).To(Succeed())
+			expectPeerDirStandDown(func() {}, root, "it is a symlink")
+			fi, err := os.Stat(target)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(fi.Mode().Perm()).To(Equal(os.FileMode(0o755)))
+			// Nothing was created through the link either.
+			Expect(filepath.Join(target, "sessions")).NotTo(BeADirectory())
+		})
+
+		It("CS-LNCH-107: a symlinked sessions/ is refused and its target is not re-moded", func() {
+			target := filepath.Join(home, "elsewhere-sessions")
+			Expect(os.MkdirAll(target, 0o755)).To(Succeed())
+			Expect(os.Chmod(target, 0o755)).To(Succeed())
+			mkdir(root)
+			link := filepath.Join(root, "sessions")
+			Expect(os.Symlink(target, link)).To(Succeed())
+			expectPeerDirStandDown(func() {}, link, "it is a symlink")
+			fi, err := os.Stat(target)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(fi.Mode().Perm()).To(Equal(os.FileMode(0o755)))
 		})
 
 		It("CS-LNCH-051: tightens an existing wider peers/, sessions/ and cc-socks/ to 0700", func() {

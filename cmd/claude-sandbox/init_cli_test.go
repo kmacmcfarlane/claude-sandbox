@@ -38,6 +38,9 @@ func newInitCLI(vars map[string]string) *initCLI {
 		Getenv: func(k string) string { return c.vars[k] },
 		// Never the real ~/.cache/claude-sandbox/launch.lock from a test.
 		Lock: &fakeLock{fake: c.fake},
+		// Never the real temp root either: a launch makes its shadow
+		// directory there and sweeps it (CS-LNCH-081/082).
+		TempRoot: GinkgoT().TempDir(),
 	}
 	return c
 }

@@ -59,6 +59,10 @@ type Inputs struct {
 	// container, never hashed (CS-LNCH-093).
 	MemoryLimitSource string
 
+	// Chmod restricts a launcher-owned peer-registry directory (CS-LNCH-051).
+	// Nil means os.Chmod; tests inject a failure (CS-LNCH-107).
+	Chmod func(string, os.FileMode) error
+
 	// Linked is the verified linked git worktree the project lies in, nil
 	// otherwise (CS-LNCH-070). Its common git dir is mounted read-write at
 	// its own path so git works in the container (CS-LNCH-071).
@@ -401,7 +405,7 @@ func Build(in Inputs) (*Plan, error) {
 		p.EnvFlags = append(p.EnvFlags, "CLAUDE_CODE_TMPDIR="+filepath.Join(configDir, "tmp"))
 	}
 
-	// CS-LNCH-049..055: opt-in bridge for peer discovery and messaging across
+	// CS-LNCH-049..055, 107: opt-in bridge for peer discovery and messaging across
 	// containers whose CLAUDE_CONFIG_DIR differs. Default off: with the key
 	// unset this adds nothing and the argv is unchanged.
 	// Tri-state, not the OR shape of `dangerous`: an operator whose workspace
@@ -410,14 +414,11 @@ func Build(in Inputs) (*Plan, error) {
 	// fall-through there would silently cross the boundary they just opted out
 	// of. Same argument as worktree mode (CS-LNCH-042).
 	sharedPeers := ResolveTristate(nil, in.getenv("CLAUDE_SANDBOX_SHARED_PEER_REGISTRY"), in.Cfg.SharedPeerRegistry, false)
-	// bridged is what was APPLIED: a session that stands down (CS-LNCH-054/055)
+	// bridged is what was APPLIED: a session that stands down (CS-LNCH-054/055/107)
 	// launches exactly as with the key off, so it hashes like one.
 	bridged := false
 	if sharedPeers {
-		var err error
-		if bridged, err = in.assembleSharedPeerRegistry(p, configDir); err != nil {
-			return nil, err
-		}
+		bridged = in.assembleSharedPeerRegistry(p, configDir)
 	}
 
 	// CS-SESS-020/021: hash the effective configuration, then record it and the
@@ -861,8 +862,9 @@ const worstSocketSuffix = "/" + peerSocketsDir + "/1234567.sock"
 // same-path bind, hence mkPeerDest's guard.
 //
 // It reports whether the bridge was applied; false means it stood down for
-// this session (CS-LNCH-054/055) and the plan is exactly the key-off plan.
-func (in *Inputs) assembleSharedPeerRegistry(p *Plan, configDir string) (bool, error) {
+// this session (CS-LNCH-054/055/107) and the plan is exactly the key-off plan.
+// It never fails the launch: every obstacle is a stand-down with one warning.
+func (in *Inputs) assembleSharedPeerRegistry(p *Plan, configDir string) bool {
 	root := filepath.Join(in.Home, PeerRegistryRoot)
 
 	// CS-LNCH-054/055: when the socket cannot be bridged, the WHOLE bridge
@@ -879,24 +881,31 @@ func (in *Inputs) assembleSharedPeerRegistry(p *Plan, configDir string) (bool, e
 	// is the only source that can collide.
 	if envFilesDefine(in.EnvFiles, "XDG_RUNTIME_DIR") {
 		fmt.Fprintln(in.Out, "Warning: sharedPeerRegistry is off for this session: an env file sets XDG_RUNTIME_DIR, and the bridge needs to set it to share message sockets. Without that, bridged peers could not reach this session nor it them.")
-		return false, nil
+		return false
 	}
 	// 055: past maxSocketPath Claude Code would silently bind in a
 	// container-private /tmp instead, advertising an address no other
 	// container can reach.
 	if n := len(root) + len(worstSocketSuffix); n > maxSocketPath {
 		fmt.Fprintf(in.Out, "Warning: sharedPeerRegistry is off for this session: the message socket path %s would be %d bytes, over Claude Code's %d-byte limit. Without a shared socket, bridged peers could not reach this session nor it them.\n", root+worstSocketSuffix, n, maxSocketPath)
-		return false, nil
+		return false
 	}
 
 	// Every launcher-owned directory is created, and TIGHTENED, before any
 	// mount is assembled: MkdirAll leaves an existing wider mode alone, and
 	// Claude Code silently falls back to a container-private /tmp when the
 	// socket directory's ancestry is group- or world-writable.
+	//
+	// CS-LNCH-107: a directory that cannot be made ours (root-owned, read-only,
+	// a file or a symlink in the way) stands the bridge down rather than
+	// failing the launch — an error here would fail every launch in every tree
+	// inheriting the key. Nothing has been mounted yet, so the plan is still
+	// the key-off plan. The warning names the fix, since it will recur.
 	sessions := filepath.Join(root, peerSessionsDir)
 	for _, d := range []string{root, sessions, filepath.Join(root, peerSocketsDir)} {
 		if err := in.mkOwnedPeerDir(d); err != nil {
-			return false, err
+			in.peerDirStandDown(d, err)
+			return false
 		}
 	}
 	// Guarded BEFORE the mount is appended: afterwards the destination would
@@ -904,7 +913,8 @@ func (in *Inputs) assembleSharedPeerRegistry(p *Plan, configDir string) (bool, e
 	// the user's config dir and is not the launcher's to tighten.
 	dstSessions := filepath.Join(configDir, peerSessionsDir)
 	if err := in.mkPeerDest(p, dstSessions); err != nil {
-		return false, err
+		in.peerDirStandDown(dstSessions, err)
+		return false
 	}
 	p.Volumes = append(p.Volumes,
 		fmt.Sprintf("%s:%s", sessions, dstSessions),
@@ -917,7 +927,13 @@ func (in *Inputs) assembleSharedPeerRegistry(p *Plan, configDir string) (bool, e
 	// never asked. Like the Worktree banner, it prints only when the mode is
 	// actually in use.
 	fmt.Fprintf(in.Out, "Peer registry: shared (%s) - /peers and SendMessage reach every other opted-in sandbox on this host, and only those.\n", root)
-	return true, nil
+	return true
+}
+
+// peerDirStandDown prints the one CS-LNCH-107 warning: the directory, the
+// error, and both remedies.
+func (in *Inputs) peerDirStandDown(dir string, err error) {
+	fmt.Fprintf(in.Out, "Warning: sharedPeerRegistry is off for this session: cannot prepare %s (%v). Make it a directory you own (chown it, or remove it and relaunch), or set CLAUDE_SANDBOX_SHARED_PEER_REGISTRY=0 to keep this tree off the bridge.\n", dir, err)
 }
 
 // mkPeerDest creates a mount DESTINATION, but only when it is a host path
@@ -943,7 +959,7 @@ func (in *Inputs) mkPeerDest(p *Plan, dst string) error {
 // mkPeerDir creates one side of a peer-registry mount as the invoking user.
 func (in *Inputs) mkPeerDir(dir string) error {
 	if err := os.MkdirAll(dir, peerDirMode); err != nil {
-		return fmt.Errorf("shared peer registry: creating %s: %w", dir, err)
+		return fmt.Errorf("creating it: %w", err)
 	}
 	return nil
 }
@@ -951,12 +967,28 @@ func (in *Inputs) mkPeerDir(dir string) error {
 // mkOwnedPeerDir creates a directory under PeerRegistryRoot and enforces
 // peerDirMode even when it already existed wider (CS-LNCH-051). These are
 // sandbox-only directories the launcher owns, so tightening them is safe.
+//
+// It never tightens through a symlink (CS-LNCH-107): chmod follows links, and
+// the target of one is not the launcher's. MkdirAll accepts a link to a
+// directory, so the Lstat comes after it. The window between Lstat and Chmod
+// is open only to someone who can write the user's own cache directory.
 func (in *Inputs) mkOwnedPeerDir(dir string) error {
 	if err := in.mkPeerDir(dir); err != nil {
 		return err
 	}
-	if err := os.Chmod(dir, peerDirMode); err != nil {
-		return fmt.Errorf("shared peer registry: restricting %s to 0700: %w", dir, err)
+	fi, err := os.Lstat(dir)
+	if err != nil {
+		return err
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return errors.New("it is a symlink; the launcher restricts only a real directory")
+	}
+	chmod := in.Chmod
+	if chmod == nil {
+		chmod = os.Chmod
+	}
+	if err := chmod(dir, peerDirMode); err != nil {
+		return fmt.Errorf("restricting it to 0700: %w", err)
 	}
 	return nil
 }
