@@ -206,6 +206,14 @@ func hostTrackConflict(r execx.Runner, project, sb string) string {
 	return ""
 }
 
+// HostTrackConflict is hostTrackConflict for the project's own
+// .claude-sandbox/: non-empty when trackInHost true would hit CS-LAY-018 (the
+// host ignores new files under the dir, or a sidecar .git exists). init's
+// greenfield prompt defaults to true only when it is empty (CS-INIT-031).
+func HostTrackConflict(r execx.Runner, project string) string {
+	return hostTrackConflict(r, project, paths.SandboxDir(project))
+}
+
 // HostTrackedCount returns how many files the host repo tracks under
 // .claude-sandbox/ (CS-LAY-020). A failed probe returns 0 (including a
 // project outside any git work tree), so behaviour is exactly as before: a

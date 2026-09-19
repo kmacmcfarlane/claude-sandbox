@@ -78,13 +78,16 @@ Feature: init subcommand (CS-INIT)
     When init runs and the user answers "y" at the trackInHost prompt
     Then config.yaml contains "trackInHost: true"
 
-  Scenario: CS-INIT-011 No terminal resolves trackInHost to false without prompting
+  @changed
+  Scenario: CS-INIT-011 No terminal resolves trackInHost to the prompt's default without prompting
+    # Earlier wording: "resolves trackInHost to false". The default is false
+    # except in the CS-INIT-031 state, where it is true.
     Given no interactive terminal is attached
     When "claude-sandbox init" is run
-    Then config.yaml contains "trackInHost: false"
+    Then config.yaml contains "trackInHost: false" (true in the CS-INIT-031 state)
     And no prompt was shown
-    # CS-INIT-009 and CS-INIT-011 describe a host repo that tracks nothing
-    # under .claude-sandbox/; CS-INIT-031 flips the default when it does.
+    # CS-INIT-009 describes a host repo that tracks nothing under
+    # .claude-sandbox/; CS-INIT-031 flips the default when it does.
 
   @new
   Scenario: CS-INIT-031 Greenfield prompt defaults to true when the host already tracks .claude-sandbox/ files
@@ -101,11 +104,22 @@ Feature: init subcommand (CS-INIT)
       the host repo already tracks N file(s) under .claude-sandbox/
     When the user presses Enter
     Then config.yaml contains "trackInHost: true"
-    And no CS-LAY-020 warning is printed
+    And no warning is printed (neither CS-LAY-018 nor CS-LAY-020)
     When the user answers "n" instead
     Then config.yaml contains "trackInHost: false" (an explicit answer still wins)
+    And the CS-LAY-020 warning follows
     # No terminal and --yes take the prompt's default (CS-INIT-011/025), so
     # they resolve to true in this state as well.
+    Given the files are tracked BUT the host also ignores new files under
+      .claude-sandbox/ (git check-ignore of the child probe), or
+      .claude-sandbox/.git exists
+    When "claude-sandbox init" is run and the user presses Enter
+    Then the prompt's default stays false, with the ordinary preamble
+    And the CS-LAY-020 warning is printed, including that new files there
+      are being hidden from git now when an ignore rule covers the directory
+    # True would only trade that warning for CS-LAY-018's, which does not say
+    # new files are being dropped and whose first remedy (trackInHost: false)
+    # leads back here. The check is CS-LAY-018's own (layout.HostTrackConflict).
 
   @new
   Scenario: CS-INIT-032 Flags, an upstream value and an existing config keep their precedence over host-tracked files
