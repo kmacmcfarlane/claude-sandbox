@@ -86,7 +86,19 @@ func Run(project string, f Flags, d Deps) error {
 			track = &v
 		}
 	default:
-		v := promptTrackInHost(d.Prompter)
+		// CS-INIT-031: the default follows what the host repo already does.
+		// Over host-tracked files a false default would land in the CS-LAY-020
+		// state, warned about on every launch. Not when the host hides new
+		// files under the dir (any ignore rule, children-only included — true
+		// would then write no warning while new files stay hidden) or a
+		// sidecar .git exists: there CS-LAY-020's warning is the one the
+		// operator needs. Probed only here — flags, an existing config and an
+		// upstream value never consult it (CS-INIT-032).
+		n := layout.HostTrackedCount(d.Runner, project)
+		if n > 0 && (layout.DirIgnored(d.Runner, project) || pathExists(filepath.Join(sb, ".git"))) {
+			n = 0
+		}
+		v := promptTrackInHost(d.Prompter, n)
 		track = &v
 	}
 
@@ -199,7 +211,21 @@ func Run(project string, f Flags, d Deps) error {
 	return nil
 }
 
-func promptTrackInHost(p prompt.Prompter) bool {
+// promptTrackInHost asks the greenfield trackInHost question. The default is
+// false (foreign-safe) unless the host repo already tracks hostTracked > 0
+// files under .claude-sandbox/, when it is true and the preamble says why
+// (CS-INIT-009, CS-INIT-031).
+func promptTrackInHost(p prompt.Prompter, hostTracked int) bool {
+	if hostTracked > 0 {
+		noun := "files"
+		if hostTracked == 1 {
+			noun = "file"
+		}
+		pre := "How should .claude-sandbox/ be version-controlled?\n" +
+			fmt.Sprintf("  [Y] Track in THIS repo   — own project; env/temp/ralph gitignored, rest committed (default: the host repo already tracks %d %s under .claude-sandbox/)\n", hostTracked, noun) +
+			"  [n] Keep out of the repo — gitignore /.claude-sandbox/ + internal sidecar repo"
+		return p.Confirm(pre, "Track in host repo?", true, promptTimeout)
+	}
 	pre := "How should .claude-sandbox/ be version-controlled?\n" +
 		"  [y] Track in THIS repo   — own project; env/temp/ralph gitignored, rest committed\n" +
 		"  [N] Keep out of the repo — gitignore /.claude-sandbox/ + internal sidecar repo (default)"
@@ -299,6 +325,11 @@ func setTrackInHostHint(cfgPath string, val bool, source string) error {
 		content += fmt.Sprintf("\n%s\n", line)
 	}
 	return os.WriteFile(cfgPath, []byte(content), 0o644)
+}
+
+func pathExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
 }
 
 func fileExists(p string) bool {
