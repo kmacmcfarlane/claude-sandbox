@@ -104,7 +104,7 @@ var _ = Describe("shadow directory lifecycle (CS-LNCH-080..084)", func() {
 
 		Expect(stale).To(BeADirectory())
 		Expect(strings.Count(f.errw.String(), "could not clean up old shadow directories")).To(Equal(1))
-		Expect(f.fake.Execed).NotTo(BeNil(), "the session still starts")
+		Expect(f.fake.Session).NotTo(BeNil(), "the session still starts")
 	})
 
 	It("CS-LNCH-082: a directory that cannot be removed warns once, and the next launch is silent", func() {
@@ -125,7 +125,7 @@ var _ = Describe("shadow directory lifecycle (CS-LNCH-080..084)", func() {
 		Expect(f.run()).To(Equal(0), f.errw.String())
 		Expect(strings.Count(f.errw.String(), "could not clean up old shadow directories")).To(Equal(1))
 		Expect(f.errw.String()).To(ContainSubstring(aside))
-		Expect(f.fake.Execed).NotTo(BeNil(), "the session still starts")
+		Expect(f.fake.Session).NotTo(BeNil(), "the session still starts")
 
 		f.errw.Reset()
 		Expect(f.run()).To(Equal(0), f.errw.String())

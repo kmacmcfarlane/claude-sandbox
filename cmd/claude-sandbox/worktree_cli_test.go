@@ -136,7 +136,7 @@ var _ = Describe("worktree mode (CS-LNCH-041..047, CS-SESS-045..047)", func() {
 			Expect(g.run(bad)).To(Equal(2), bad)
 			Expect(g.errw.String()).To(ContainSubstring("--worktree"), bad)
 			Expect(g.fake.Calls).To(BeEmpty(), "no command may run for %s", bad)
-			Expect(g.fake.Execed).To(BeNil())
+			Expect(g.fake.Session).To(BeNil())
 		}
 	})
 
@@ -245,8 +245,8 @@ var _ = Describe("worktree mode (CS-LNCH-041..047, CS-SESS-045..047)", func() {
 			noTTY()
 			f.envmap["CLAUDE_SANDBOX_WORKTREE"] = "1"
 			Expect(f.run("--join=otter", "--model", "opus")).To(Equal(0), f.errw.String())
-			Expect(f.execLine()).To(HaveSuffix("pidslot -- claude --worktree --model opus"))
-			Expect(f.execLine()).NotTo(ContainSubstring("--worktree otter"), "never the primary's worktree")
+			Expect(f.sessionLine()).To(HaveSuffix("pidslot -- claude --worktree --model opus"))
+			Expect(f.sessionLine()).NotTo(ContainSubstring("--worktree otter"), "never the primary's worktree")
 		})
 
 		It("CS-SESS-046: --worktree=NAME names the joined session's worktree", func() {
@@ -254,7 +254,7 @@ var _ = Describe("worktree mode (CS-LNCH-041..047, CS-SESS-045..047)", func() {
 			running(psRowWorktree("cs-a", "Up 1 hour", f.proj, "otter", "otter"))
 			noTTY()
 			Expect(f.run("--join=otter", "--worktree=side")).To(Equal(0))
-			Expect(f.execLine()).To(HaveSuffix("pidslot -- claude --worktree side"))
+			Expect(f.sessionLine()).To(HaveSuffix("pidslot -- claude --worktree side"))
 		})
 
 		It("CS-SESS-046: the default, --no-worktree, or a non-git project joins the shared checkout", func() {
@@ -262,18 +262,18 @@ var _ = Describe("worktree mode (CS-LNCH-041..047, CS-SESS-045..047)", func() {
 			running(psRowWorktree("cs-a", "Up 1 hour", f.proj, "otter", "otter"))
 			noTTY()
 			Expect(f.run("--join=otter")).To(Equal(0))
-			Expect(f.execLine()).To(HaveSuffix("pidslot -- claude"), "the interactive default is the shared checkout")
+			Expect(f.sessionLine()).To(HaveSuffix("pidslot -- claude"), "the interactive default is the shared checkout")
 
-			f.fake.Execed = nil
+			f.fake.Session = nil
 			Expect(f.run("--join=otter", "--no-worktree")).To(Equal(0))
-			Expect(f.execLine()).To(HaveSuffix("pidslot -- claude"))
+			Expect(f.sessionLine()).To(HaveSuffix("pidslot -- claude"))
 
 			g := newCLIFixture() // not a git work tree
 			g.fake.On("docker ps", psRow("cs-a", "Up 1 hour", g.proj, "otter")+"\n", nil)
 			g.fake.On("docker top", "PID  COMMAND\n1  claude\n", nil)
 			g.env.Prompter = &prompt.Scripted{IsTTY: false}
 			Expect(g.run("--join=otter")).To(Equal(0))
-			Expect(g.execLine()).To(HaveSuffix("pidslot -- claude"))
+			Expect(g.sessionLine()).To(HaveSuffix("pidslot -- claude"))
 		})
 
 		It("CS-SESS-047: attach reports the session's worktree without blocking", func() {
@@ -281,7 +281,7 @@ var _ = Describe("worktree mode (CS-LNCH-041..047, CS-SESS-045..047)", func() {
 			running(psRowWorktree("cs-a", "Up 1 hour", f.proj, "otter", "otter"))
 			noTTY()
 			Expect(f.run("--attach=otter", "--worktree")).To(Equal(0), f.errw.String())
-			Expect(f.execLine()).To(HavePrefix("docker attach "))
+			Expect(f.sessionLine()).To(HavePrefix("docker attach "))
 			Expect(f.errw.String()).To(ContainSubstring("Note: session 'otter' runs in worktree 'otter' (branch worktree-otter)."))
 			Expect(f.errw.String()).NotTo(ContainSubstring("cannot change"))
 		})

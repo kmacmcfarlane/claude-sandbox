@@ -48,6 +48,9 @@ type Env struct {
 	// Now is the clock stale reservations are judged by (CS-SESS-052); nil
 	// means time.Now.
 	Now func() time.Time
+	// IsTerminal decides whether a writer is a terminal, for the terminal
+	// reset before an OOM report (CS-LNCH-092); nil means execx.IsTerminal.
+	IsTerminal func(io.Writer) bool
 	// TempRoot is where shadow directories are made and swept
 	// (CS-LNCH-080..084); "" means os.TempDir(). Tests point it at a scratch
 	// directory so a test launch never sweeps the real temp root.
@@ -955,16 +958,18 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 		Worktree: worktree,
 		Linked:   linked,
 		Version:  version,
-		Headless: headless, LookupEnv: env.lookupEnv,
+		// CS-LNCH-093: recorded on the container for the OOM report.
+		MemoryLimitSource: cascade.MemoryLimitSource(configFiles),
+		Headless:          headless, LookupEnv: env.lookupEnv,
 		Out: env.Out, Err: env.Err,
 	}
 	// Reserve under the host lock: re-validate the noun, pick the pid class,
-	// docker create (CS-SESS-048). The lock is released before the exec.
+	// docker create (CS-SESS-048). The lock is released before the start.
 	plan, err := reserveContainer(env, in, wt, f.Ralph)
 	if err != nil {
 		return err
 	}
-	return startReserved(env, plan)
+	return startReserved(env, plan, headless)
 }
 
 func hostIdentity(getenv func(string) string) (uid, gid int, username, home string) {

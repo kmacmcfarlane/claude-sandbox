@@ -1,8 +1,8 @@
 Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
   The default (no-subcommand) invocation builds images as needed, assembles
   the container invocation, reserves the container with "docker create" under
-  the host launch lock, and execs "docker start -ai" on it (CS-LNCH-057,
-  CS-SESS-048). Tests assert on the constructed docker argv via the injected
+  the host launch lock, and runs "docker start -ai" on it as a child it waits
+  on (CS-LNCH-057, CS-LNCH-085, CS-SESS-048). Tests assert on the constructed docker argv via the injected
   command runner.
   Go home: internal/launch, cmd/claude-sandbox.
 
@@ -865,20 +865,22 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     When a new container is launched
     Then "docker create -it --rm --init ... --name <container> <image> <command...>"
       runs first, with every flag, mount, env var and label "docker run" had
-    And then "docker start -ai --detach-keys=<seq> <container>" replaces the
-      current process, so its exit code is the container's
+    And then "docker start -ai --detach-keys=<seq> <container>" runs as the
+      session child the launcher waits on (CS-LNCH-085), and its exit code
+      becomes the launcher's
     And --detach-keys is on "docker start" and never on "docker create"
-    And join ("docker exec") and attach ("docker attach") are unchanged
-    Given "docker start" cannot be executed
+    And join ("docker exec") and attach ("docker attach") keep their argv
+    Given "docker start" cannot be started
     Then the reserved container is removed before the error is reported
 
   # ---- shadow directory lifecycle ----
   # Every launch writes its shadow files (CLAUDE.md, .mcp.json, gitconfig) into
   # one fresh "claude-sandbox<digits>" directory under the temp root and
-  # bind-mounts them. The launcher ends by exec'ing "docker start", so it can
-  # never remove its own directory after the session; a later launch does, once
-  # no container still uses it. Headless probes (Paseo's "--version" and
-  # "auth status") are full launches, so without this the directories pile up.
+  # bind-mounts them. The launcher removes its own directory once the session's
+  # container has died (CS-LNCH-094); after a detach, a signal-initiated exit or
+  # a launcher that was killed, a later launch does, once no container still
+  # uses it. Headless probes (Paseo's "--version" and "auth status") are full
+  # launches, so without this the directories pile up.
 
   Scenario: CS-LNCH-080 The shadow directory is made under the lock and named on the container
     When a new container is launched
@@ -931,7 +933,7 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     Given "docker create" fails (any error other than a retried name conflict)
       or the launch fails after the directory was made and before the create
     Then the launch's shadow directory is removed before the error is reported
-    Given "docker start" cannot be executed and the reservation was removed
+    Given "docker start" cannot be started and the reservation was removed
     Then the shadow directory is removed too
     But if removing the reservation failed, the container may still use the
       directory, so it is kept (a later launch's sweep takes it)
@@ -980,8 +982,9 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     When a headless launch runs
     Then every launcher message (the config cascade, the env override notice,
       banners, image build output, warnings) goes to stderr
-    And the launcher writes nothing to stdout; only the exec'd "docker start"
-      does, with claude's stdout
+    And the launcher writes nothing to stdout; only its "docker start" child
+      does, with claude's stdout, and an OOM report goes to stderr too
+      (CS-LNCH-089/090)
 
   Scenario: CS-LNCH-061 A headless launch never prompts and never needs a decision
     # The TTY prompter opens /dev/tty, which a daemon with a controlling
@@ -1135,3 +1138,171 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     When "claude-sandbox --ralph" or "claude-sandbox headless" launches
     Then the linked cascade (CS-CASC-031), child Dockerfile (CS-CASC-033) and
       git dir mount (CS-LNCH-071) apply exactly as for an interactive launch
+
+  # ---- the session child and the OOM report (CS-LNCH-085..094) ----
+  # The launcher used to exec docker, so nothing was left to say why a session
+  # ended: an OOM kill by the container's memory cgroup (memoryLimit, swap off)
+  # looked exactly like Claude Code dying. With --rm the container is gone
+  # before an inspect after exit could read State.OOMKilled, so the launcher
+  # stays resident, watches the daemon's events for the container, and reports.
+
+  Scenario: CS-LNCH-085 Every interactive path runs docker as a child the launcher waits on
+    When a session is started on any of these paths
+      | path     | child                                  |
+      | new      | docker start -ai (interactive, ralph, --branch, [b]) |
+      | headless | docker start -ai (no -t, no detach keys) |
+      | attach   | docker attach (CS-SESS-031, CS-SESS-059) |
+      | join     | docker exec (CS-SESS-032, CS-SESS-060) |
+    Then docker runs as a child in the launcher's own process group, with the
+      launcher's stdin, stdout and stderr, and the launcher waits for it
+    And no path replaces the launcher process with docker
+    And the launcher exits with the child's status: its exit code, or 128+n
+      when it died of signal n
+    And a child that cannot be started at all is an error (exit 2), as before
+    # The in-container pidslot helper still execs (CS-PID-001): it is not the
+    # launcher, and it runs inside the container.
+
+  Scenario: CS-LNCH-086 The launcher's signal handling around the child
+    While the session child runs
+    Then SIGTERM and SIGHUP received by the launcher are forwarded to the child
+    And SIGINT and SIGQUIT are dropped by the launcher when its process group
+      is the foreground group of its controlling terminal
+      (tcgetpgrp(open("/dev/tty")) == getpgrp()): the terminal delivered them
+      to docker directly (same process group), and the launcher must survive
+      them to report
+    And otherwise — no controlling terminal (/dev/tty cannot be opened), or a
+      launcher in a background group — they were sent to the launcher alone
+      (kill -INT <pid>, a supervisor's interrupt) and are forwarded to docker
+    And they are caught, never set to SIG_IGN, because an ignored disposition
+      is inherited across exec and docker would ignore them too
+    And a signal the launcher inherited as ignored (nohup's SIGHUP, a
+      background job's SIGINT) is not caught: it stays ignored for the
+      launcher and for docker, as it was when the launcher exec'd docker
+    And the child is started with a parent-death signal (SIGKILL) from an OS
+      thread locked for the child's lifetime, so a launcher killed outright
+      takes the docker client with it, as killing the exec'd client did
+    # Linux only; a platform without parent-death signals omits it.
+
+  Scenario: CS-LNCH-087 The events subscription starts before the child
+    When a session child is about to start for container <name>
+    Then "docker events --since <now> --filter container=<name> --filter event=oom
+      --filter event=die --format {{json .}}" is started first, and stopped
+      once the report is decided
+    And --since replays whatever the daemon published between <now> and the
+      moment the subscription connected, so an instant death is not missed
+    And a subscription that cannot start never blocks the session: nothing is
+      reported for it
+
+  Scenario: CS-LNCH-088 A detached client is silent
+    Given the session child of a primary session (new, headless, attach) returned
+      without a signal from the launcher
+    When no die event for the container arrives within 2 s, or the event
+      stream ends first
+    Then the container is taken to be still running (the client detached) and
+      nothing is printed, whatever oom events were seen
+    # die follows the client's return by milliseconds (measured ~3 ms).
+    And a die with exit 137 and no oom yet waits at most 150 ms more for an
+      oom, which the daemon may publish after the die it caused; a 137 with
+      none (docker kill, a stop timeout) is then quiet
+
+  Scenario: CS-LNCH-089 An OOM-killed session is reported on stderr
+    Given a die event with exitCode 137 and at least one oom event
+    Then the launcher prints to stderr, after the child's output:
+      """
+      claude-sandbox: this session was killed by the container's OOM killer (exit 137; N OOM kills).
+        memoryLimit: <limit> (from <config.yaml path>); swap is off by design.
+        Remedies: raise memoryLimit in that file, or cap build/test parallelism (e.g. ginkgo --procs=N, go test -p N, make -jN).
+      """
+    And "1 OOM kill" is singular
+    And when no config.yaml in the cascade sets memoryLimit the second line reads
+      "memoryLimit: 8g (the default; no config.yaml in the cascade sets it)" and
+      the remedy "set a higher memoryLimit in .claude-sandbox/config.yaml"
+    And the limit and its source are the container's labels as carried by its
+      events (CS-LNCH-093), else what the launch resolved, else "not recorded
+      on this container"
+    And the launcher still exits 137
+
+  Scenario: CS-LNCH-090 An OOM kill the session survived is one softer line
+    Given oom events were seen for the container
+    And the session ended some other way (a die with another exit code)
+    Then exactly one line is printed to stderr:
+      "claude-sandbox: note: the container's OOM killer killed N processes during
+      this session (memoryLimit <limit> (from <source>)); the session itself was
+      not killed."
+    And a die without any oom event prints nothing
+
+  Scenario: CS-LNCH-091 A signal-initiated exit is silent and prompt
+    # The Paseo headless contract: an SDK client sends SIGTERM and expects the
+    # command to exit promptly with docker's status, then SIGKILLs after ~2 s.
+    Given the launcher received SIGTERM or SIGHUP and forwarded it (CS-LNCH-086)
+    When the child returns
+    Then the launcher exits at once with the child's status: no die wait, no
+      report, no terminal reset
+    And the shadow directory is left to a later launch's sweep (CS-LNCH-081)
+
+  Scenario: CS-LNCH-092 The terminal is reset before the report, only on a terminal
+    Given the session was OOM-killed (CS-LNCH-089), the launch is not headless,
+      and the launcher's stderr is a terminal
+    Then before the report the launcher writes only the resets of the modes
+      Claude Code's TUI sets: synchronized update (?2026l), bracketed paste
+      (?2004l), focus events (?1004l), theme notifications (?2031l), mouse
+      tracking (?1006l ?1003l ?1002l ?1000l), the kitty keyboard flags (CSI < u),
+      modifyOtherKeys (CSI > 4 m), SGR 0 and cursor visible (?25h)
+    And never the alternate screen exit (?1049l) or a scroll-region reset
+      (DECSTBM), which move the cursor on a terminal that never entered them
+    And a headless launch, or a stderr that is not a terminal, gets the plain
+      report lines only
+    And the non-fatal note (CS-LNCH-090) never resets anything: the TUI exited
+      on its own and restored its modes
+
+  Scenario: CS-LNCH-093 The memory limit and its source are recorded on the container
+    When a new container is created
+    Then it carries the labels "claude-sandbox.memorylimit=<limit>" and
+      "claude-sandbox.memorylimitsource=<source>", where <source> is the
+      most-local config.yaml that sets memoryLimit (CS-CASC-036) or "default"
+    And the same pair is passed as CLAUDE_SANDBOX_MEMORY_LIMIT and
+      CLAUDE_SANDBOX_MEMORY_LIMIT_SOURCE, for reports made inside the container
+    And neither is part of the config hash: the limit is already hashed as
+      "memory=", and which file sets it is not a property of the container, so
+      moving an unchanged memoryLimit between cascade levels is not drift
+
+  Scenario: CS-LNCH-094 A new launch removes its shadow directory once its container died
+    Given a new container's session child returned and its die event was seen
+    Then the launch's shadow directory is removed before the launcher exits
+    And after a detach (no die), a signal-initiated exit, or a launcher that
+      was killed, it is kept: the sweep of a later launch (CS-LNCH-081) is the
+      backstop
+    And attach and join never remove a shadow directory
+
+  Scenario: CS-LNCH-095 Events are matched to the container by exact name
+    # docker's "container=<name>" events filter matches names by PREFIX, so
+    # the subscription of claude-sandbox-…-otter-2 also receives the events of
+    # claude-sandbox-…-otter-20.
+    When an oom or die event arrives whose "name" attribute is not exactly the
+      container's name
+    Then it is ignored: it counts toward no report, and its die neither ends
+      the wait nor removes this launch's shadow directory
+
+  Scenario: CS-LNCH-096 A start that never ran the container is cleaned up at once
+    Given a new container's "docker start" returned without a signal from the launcher
+    When "docker inspect" then reports the container still "created"
+    Then the start never ran it (a TTY, mount or OCI error, which docker printed):
+      there is no die to wait for, the reservation is removed with "docker rm"
+      and the shadow directory with it, and the launcher exits with docker's status
+    And the stale-reservation sweep (CS-SESS-052) stays the backstop when the
+      removal fails
+
+  Scenario: CS-LNCH-097 Signals after the child exited never kill the launcher mid-report
+    Given the session child has exited and the launcher is waiting for die or
+      writing its report
+    Then the signal handlers of CS-LNCH-086 are still installed; they are
+      released only once the report is written
+    And a SIGTERM, SIGHUP, SIGINT or SIGQUIT arriving then ends the wait at
+      once: nothing is printed and the launcher exits with the child's status,
+      never 143
+
+  Scenario: CS-LNCH-098 The events watcher dies with the launcher
+    Then "docker events" runs in its own process group, so the terminal's
+      signals never reach it
+    And on Linux it has a parent-death SIGKILL from an OS thread held for its
+      lifetime, so a launcher killed outright (SIGKILL) never leaves it running

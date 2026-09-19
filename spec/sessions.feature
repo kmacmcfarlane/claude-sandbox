@@ -375,9 +375,10 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
 
   # ---- attach and join mechanics ----
 
-  Scenario: CS-SESS-031 Attach hands off to docker attach with safe detach keys
+  Scenario: CS-SESS-031 Attach runs docker attach with safe detach keys
     When attach is chosen
-    Then "docker attach --detach-keys=<seq> <container>" replaces the current process
+    Then "docker attach --detach-keys=<seq> <container>" runs as the session
+      child the launcher waits on (CS-LNCH-085)
     And <seq> comes from the detachKeys config key, defaulting to "ctrl-q,ctrl-q"
     And the detach sequence is printed before handing off
     # Docker's own default is ctrl-p,ctrl-q, but the Claude Code TUI binds ctrl+p.
@@ -410,15 +411,16 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
     # Repeatability is the point: a reattach that could not itself be detached
     # would make recovery a one-shot escape rather than normal operation.
 
-  Scenario: CS-SESS-032 Join execs claude as the host user
+  Scenario: CS-SESS-032 Join runs claude as the host user
     When join is chosen
     Then "docker exec -it --detach-keys=<seq> -u <host user> -w <project dir>
-      <container> claude ..." replaces the current process
+      <container> claude ..." runs as the session child the launcher waits on
+      (CS-LNCH-085)
     And the output warns that a detached joined session cannot be recovered
     # -u is required: exec skips the entrypoint's gosu step and the image ends
     # USER root. -w is redundant (docker create's -w is inherited via Config.WorkingDir)
     # but passed explicitly so the working directory never depends on that.
-    # The detach keys matter most here: detaching an exec'd session orphans it
+    # The detach keys matter most here: detaching a joined session orphans it
     # beyond recovery, so leaving docker's ctrl-p,ctrl-q default in place would
     # let a stray ctrl+p (which the TUI binds) begin losing the session.
 
@@ -444,7 +446,7 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
   Scenario: CS-SESS-044 Join runs claude through the pid-class helper
     When join is chosen
     Then "docker exec ... <container> /opt/claude-sandbox/bin/claude-sandbox pidslot -- claude ..."
-      replaces the current process
+      runs as the session child
     # See spec/pidslot.feature (CS-PID-005): the joined session inherits the
     # container's CLAUDE_SANDBOX_PID_CLASS and lands on the same residue class.
 
@@ -468,8 +470,8 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
       reservations are removed (CS-SESS-052), the instance noun is re-validated
       (CS-SESS-054), the pid class is picked, and "docker create" runs
     And the lock is released after "docker create" returns and before
-      "docker start" is executed; the file is opened close-on-exec, so an exec
-      can never carry the lock into the session
+      "docker start" is started; the file is opened close-on-exec, so the
+      docker child can never carry the lock into the session
     And two concurrent launches therefore never receive the same noun or class
     # Host-wide rather than per project because pid classes are host-wide.
     Given the lock cannot be taken (unwritable directory, or held for 30 s)
@@ -534,11 +536,11 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
       reclaims it once it is older than 10 seconds (below), and any launch's
       stale sweep removes it after 60 seconds (CS-SESS-052)
     But when the ralph container holding the name is in the "created" state (a
-      reservation whose "docker start" failed after the exec, which the launcher
-      can no longer clean up) AND was created more than 10 seconds ago, it is
+      reservation whose "docker start" failed, which the launcher does not
+      clean up) AND was created more than 10 seconds ago, it is
       removed and the create retried once
     And a younger "created" holder is never removed: the lock is released
-      before the exec of "docker start", so it may be a concurrent launch about
+      before its "docker start", so it may be a concurrent launch about
       to start. The launch attempting the reclaim fails with the "already
       exists" error instead, and the holder is left untouched
     # Read with "docker inspect --type container -f '{{.State.Status}} {{.Created}}'";
@@ -572,3 +574,28 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
     And "claude-sandbox sessions" lists it, marked "headless" in the MODE column
       (and "mode": "headless" in --json)
     And its instance noun and pid class still count as taken for new launches
+
+  # ---- the OOM report on attach and join ----
+
+  Scenario: CS-SESS-059 Attach reports an OOM kill like a new session
+    When "docker attach" returns without a signal from the launcher
+    Then it is judged as a primary session (CS-LNCH-088..090): a die within
+      2 s with exit 137 and an oom event prints the OOM report, oom events
+      with another death print the softer line, no die (a detach) prints nothing
+    And the limit and its source come from the container's create-time labels,
+      carried by its events (CS-LNCH-093): attach never re-resolves the config
+    And the launcher exits with docker attach's status
+
+  Scenario: CS-SESS-060 A joined session is judged by its own exit status
+    # The container normally outlives a joined session, so there is no die to
+    # wait for.
+    When the joined "docker exec" returns without a signal from the launcher
+    Then with exit 137 the launcher waits up to 2 s for an oom event, and
+      with one prints the OOM report (CS-LNCH-089); a die of the container
+      ends that wait early, leaving only 150 ms for an oom that trails it
+    And with any other status it waits briefly (150 ms) for oom events that
+      are still in flight, and prints the softer line (CS-LNCH-090) when
+      there are any
+    And exit 137 with no oom event prints nothing (the process was killed some
+      other way)
+    And the launcher exits with docker exec's status

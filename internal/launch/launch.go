@@ -1,6 +1,6 @@
 // Package launch assembles the container invocation: mounts, shadow-file
 // injections, host-access resolution, the container command, and the
-// create-then-start hand-off (CS-LNCH-057).
+// create-then-start of the session (CS-LNCH-057, CS-LNCH-085).
 // Spec: spec/launch.feature (CS-LNCH).
 package launch
 
@@ -18,6 +18,7 @@ import (
 	"github.com/kmacmcfarlane/claude-sandbox/internal/cascade"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/imagebuild"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/oomreport"
 )
 
 // Inputs collects everything needed to assemble the docker create argv.
@@ -52,6 +53,11 @@ type Inputs struct {
 
 	// Version stamps the claude-sandbox.version label.
 	Version string
+
+	// MemoryLimitSource is the cascade file that set memoryLimit
+	// (cascade.MemoryLimitSource), "" when none did. Recorded on the
+	// container, never hashed (CS-LNCH-093).
+	MemoryLimitSource string
 
 	// Chmod restricts a launcher-owned peer-registry directory (CS-LNCH-051).
 	// Nil means os.Chmod; tests inject a failure (CS-LNCH-107).
@@ -124,6 +130,10 @@ var HeadlessEnv = []string{
 // `-it` puts the terminal in raw mode, so XON/XOFF flow control does not eat it.
 const DefaultDetachKeys = "ctrl-q,ctrl-q"
 
+// DefaultMemoryLimit is the container memory limit when no config.yaml in
+// the cascade sets memoryLimit (CS-LNCH-022).
+const DefaultMemoryLimit = "8g"
+
 // ResolveDetachKeys applies the configured override, falling back to the
 // default. Every caller must route through here so the three docker paths
 // cannot disagree about which keys detach.
@@ -147,6 +157,9 @@ type Plan struct {
 	DetachKeys    string   // --detach-keys sequence, for docker start only
 	// Headless renders create with -i but no -t (CS-LNCH-059).
 	Headless bool
+	// MemoryLimitSource is where MemoryLimit came from: a config.yaml path,
+	// oomreport.SourceDefault, or "" when the caller did not say (CS-LNCH-093).
+	MemoryLimitSource string
 	// ShadowDir is the directory holding this launch's shadow files, also
 	// recorded as the claude-sandbox.shadowdir label (CS-LNCH-080).
 	ShadowDir string
@@ -282,9 +295,9 @@ func Build(in Inputs) (*Plan, error) {
 	in.mountSettingsTarget(p, configDir)
 
 	// CS-LNCH-022: memory limit.
-	p.MemoryLimit = in.Cfg.MemoryLimit
+	p.MemoryLimit, p.MemoryLimitSource = in.Cfg.MemoryLimit, in.MemoryLimitSource
 	if p.MemoryLimit == "" {
-		p.MemoryLimit = "8g"
+		p.MemoryLimit, p.MemoryLimitSource = DefaultMemoryLimit, oomreport.SourceDefault
 	}
 
 	// CS-LNCH-033: detach keys for the primary session. A headless session has
@@ -444,6 +457,17 @@ func Build(in Inputs) (*Plan, error) {
 		p.Labels = append(p.Labels, "claude-sandbox.pidclass="+in.PIDClass)
 		p.EnvFlags = append(p.EnvFlags, "CLAUDE_SANDBOX_PID_CLASS="+in.PIDClass)
 	}
+	// CS-LNCH-093: the memory limit and its source, for the OOM report of a
+	// later attach or join (read back from the event stream's labels) and for
+	// code inside the container. Labels and EnvFlags are outside the config
+	// hash: the value is already hashed ("memory="), and where in the cascade
+	// it is written is not a property of the container.
+	p.Labels = append(p.Labels,
+		oomreport.LabelMemoryLimit+"="+p.MemoryLimit,
+		oomreport.LabelMemoryLimitSource+"="+p.MemoryLimitSource)
+	p.EnvFlags = append(p.EnvFlags,
+		"CLAUDE_SANDBOX_MEMORY_LIMIT="+p.MemoryLimit,
+		"CLAUDE_SANDBOX_MEMORY_LIMIT_SOURCE="+p.MemoryLimitSource)
 	// CS-LNCH-080: name the shadow directory, so a later launch's sweep knows
 	// this container still uses it. Labels are outside the config hash.
 	if in.TempDir != "" {
@@ -556,10 +580,11 @@ func isNameConflict(stderr string) bool {
 		(strings.Contains(stderr, "The container name") && strings.Contains(stderr, "is already in use"))
 }
 
-// Start hands the process over to "docker start -ai" (CS-LNCH-057), whose exit
-// code is the container's. It returns only if the exec itself failed.
-func (p *Plan) Start(r execx.Runner) error {
-	return r.Exec(execx.Cmd{Name: "docker", Args: p.StartArgs()})
+// StartCmd is the session child that attaches to the reserved container,
+// "docker start -ai" (CS-LNCH-057), whose exit code is the container's. The
+// launcher runs it as a child and waits (CS-LNCH-085).
+func (p *Plan) StartCmd() execx.Cmd {
+	return execx.Cmd{Name: "docker", Args: p.StartArgs()}
 }
 
 func (in *Inputs) tempFile(name string, content []byte) (string, error) {

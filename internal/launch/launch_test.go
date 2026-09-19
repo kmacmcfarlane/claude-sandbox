@@ -1095,6 +1095,30 @@ var _ = Describe("launch.Build", func() {
 		Expect(p.CreateArgs(proj)).To(ContainElements("--memory", "16g", "--memory-swap", "16g"))
 	})
 
+	It("CS-LNCH-093: records the memory limit and its source as labels and env, outside the config hash", func() {
+		p := build()
+		Expect(p.MemoryLimitSource).To(Equal("default"))
+		Expect(p.Labels).To(ContainElements("claude-sandbox.memorylimit=8g", "claude-sandbox.memorylimitsource=default"))
+		Expect(p.EnvFlags).To(ContainElements("CLAUDE_SANDBOX_MEMORY_LIMIT=8g", "CLAUDE_SANDBOX_MEMORY_LIMIT_SOURCE=default"))
+
+		in.Cfg = &cascade.Config{MemoryLimit: "16g"}
+		in.MemoryLimitSource = "/ws/.claude-sandbox/config.yaml"
+		upstream := build()
+		Expect(upstream.Labels).To(ContainElements("claude-sandbox.memorylimit=16g",
+			"claude-sandbox.memorylimitsource=/ws/.claude-sandbox/config.yaml"))
+		Expect(upstream.EnvFlags).To(ContainElements("CLAUDE_SANDBOX_MEMORY_LIMIT=16g",
+			"CLAUDE_SANDBOX_MEMORY_LIMIT_SOURCE=/ws/.claude-sandbox/config.yaml"))
+		Expect(upstream.CreateArgs(proj)).To(ContainElements("--label", "claude-sandbox.memorylimit=16g"))
+
+		// The same limit written at another cascade level launches the same
+		// container: not drift.
+		in.MemoryLimitSource = "/ws/p/.claude-sandbox/config.yaml"
+		Expect(build().ConfigHash).To(Equal(upstream.ConfigHash))
+		// A different limit is.
+		in.Cfg = &cascade.Config{MemoryLimit: "32g"}
+		Expect(build().ConfigHash).NotTo(Equal(upstream.ConfigHash))
+	})
+
 	It("CS-LNCH-023: model precedence CLI > YAML", func() {
 		in.Cfg = &cascade.Config{Model: "opus"}
 		in.CLIModel = "sonnet"
@@ -1310,15 +1334,14 @@ var _ = Describe("launch.Build", func() {
 	})
 
 	Describe("CS-LNCH-057: reserve, then start", func() {
-		It("reserves with docker create and hands off to docker start -ai", func() {
+		It("reserves with docker create; the session child is docker start -ai", func() {
 			fake := &execx.Fake{}
 			p := build()
 			Expect(p.Reserve(fake, proj, errw)).To(Succeed())
-			Expect(p.Start(fake)).To(Succeed())
-			Expect(fake.Calls).To(HaveLen(2))
+			Expect(fake.Calls).To(HaveLen(1))
 			Expect(fake.Calls[0].Args).To(Equal(p.CreateArgs(proj)))
-			Expect(fake.Execed).NotTo(BeNil())
-			Expect(fake.Execed.Args).To(Equal(p.StartArgs()))
+			// CS-LNCH-085: a Cmd for the launcher to run as a child, not an exec.
+			Expect(p.StartCmd()).To(Equal(execx.Cmd{Name: "docker", Args: p.StartArgs()}))
 		})
 
 		It("forwards docker's warnings from a successful create", func() {

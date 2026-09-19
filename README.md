@@ -401,6 +401,9 @@ claude-sandbox headless [launcher flags] -- <claude args>
   config.
 - The container is labelled `claude-sandbox.mode=headless`, listed by `claude-sandbox sessions`,
   and never offered to `--attach` or `--join`.
+- **Stopping.** SIGTERM (or SIGHUP) to the launcher is forwarded to `docker start`, and the
+  launcher exits at once with docker's status, printing nothing. An OOM kill of the session is
+  reported on stderr as plain lines (see [Memory limit](#memory-limit)).
 
 Everything else is an ordinary launch: the same cascade, mounts, host access, image builds and
 [launch reservation](#launch-reservation), so several sessions started at once get distinct
@@ -951,13 +954,23 @@ hostAccess:
 
 #### Memory limit
 
-The container is capped at **8 GB** of RAM by default (swap disabled). If the container exceeds this limit, Docker OOM-kills it. Override with the `memoryLimit` key using Docker memory notation:
+The container is capped at **8 GB** of RAM by default (swap disabled). If the container exceeds this limit, the kernel's OOM killer kills a process inside it. Override with the `memoryLimit` key using Docker memory notation:
 
 ```yaml
 memoryLimit: 16g
 ```
 
 The limit is **per container**, so running several sessions in their own containers multiplies it. Sessions joined into one container share that container's limit.
+
+When an OOM kill ends your session, the launcher says so on stderr instead of leaving it to look like Claude Code crashing:
+
+```
+claude-sandbox: this session was killed by the container's OOM killer (exit 137; 2 OOM kills).
+  memoryLimit: 16g (from /ws/.claude-sandbox/config.yaml); swap is off by design.
+  Remedies: raise memoryLimit in that file, or cap build/test parallelism (e.g. ginkgo --procs=N, go test -p N, make -jN).
+```
+
+When the OOM killer killed something during the session (a test binary, say) but the session ended some other way, it prints one softer `claude-sandbox: note: …` line instead. The same applies to a session you attached to or joined; the limit and the file it came from are recorded on the container when it is created (labels `claude-sandbox.memorylimit` / `claude-sandbox.memorylimitsource`, and `CLAUDE_SANDBOX_MEMORY_LIMIT` / `CLAUDE_SANDBOX_MEMORY_LIMIT_SOURCE` inside it). Nothing is printed after a detach, or when you ended the session with a signal. To make this possible the launcher does not replace itself with `docker`: it runs `docker start`/`attach`/`exec` as a child, watches `docker events` for the container's `oom` and `die` events, and exits with docker's status (see [The session child](#the-session-child)).
 
 #### Detach keys
 
@@ -1196,7 +1209,7 @@ holds it: discovers every sandbox container on the host **including `created` on
 re-checks the noun it picked earlier (for the worktree banner) and re-picks it if a concurrent
 launch took it meanwhile, picks the pid class, and runs `docker create`, which reserves the
 name atomically. The lock is released before `docker start` (the file is also opened
-close-on-exec, so an exec can never carry it into the session). It is **never** held across an
+close-on-exec, so the docker child can never carry it into the session). It is **never** held across an
 image build: images are checked and built first, so a slow build does not serialize other
 launches. The critical section takes milliseconds.
 
@@ -1207,7 +1220,7 @@ that does not take the lock got there first — the launcher re-picks and retrie
 attempts, then fails with a clear error. A ralph launch, whose name is fixed, fails on the
 first conflict (the error says to stop the running one, or to retry in a few seconds when it is
 the never-started leftover of a ralph launch that just failed) — unless the container holding the name is itself a `created` reservation
-more than 10 seconds old that never started (its `docker start` failed after the launcher had exec'd it, e.g. no TTY or
+more than 10 seconds old that never started (its `docker start` failed, e.g. no TTY or
 a mount error); that one is removed and the create retried once. Only docker's name conflict
 (`Conflict. The container name … is already in use`) counts; `Conflicting options` flag errors
 are reported as they are. If the lock cannot be taken within 30 seconds, the launcher warns and
@@ -1222,13 +1235,51 @@ create conflict retry above, but two concurrent launches from inside different c
 get the same pid class.
 Spec: `spec/sessions.feature` CS-SESS-048..054, `spec/launch.feature` CS-LNCH-057.
 
+#### The session child
+
+The launcher does not `exec` docker. On every interactive path — `docker start -ai` for a new
+container (interactive, ralph, `--branch`, headless), `docker attach`, and a join's
+`docker exec` — it runs docker as a child and waits for it. Docker stays in the launcher's
+process group (it does not get one of its own) and shares the launcher's stdin, stdout and
+stderr, so the terminal reaches it exactly as before. The launcher stays alive to report an OOM
+kill (see [Memory limit](#memory-limit)). What changes:
+
+- **Exit code.** The launcher exits with docker's status, or 128+n when docker died of signal n.
+- **Signals.** SIGTERM and SIGHUP sent to the launcher are forwarded to docker, and an exit
+  they cause is silent and immediate (no report), which is what an SDK client such as Paseo
+  expects when it stops a session. SIGINT and SIGQUIT generated by the terminal (while
+  docker holds it in raw mode Ctrl-C is just a byte for claude; outside raw mode the terminal
+  signals the whole foreground group) already reach docker, so the launcher drops its own copy
+  and survives; when the launcher is not the terminal's foreground job — no controlling terminal, as under a
+  supervisor, or a background job — a `kill -INT <pid>` is forwarded to docker instead. A
+  signal the launcher inherited as ignored (`nohup`) stays ignored. Signals that arrive while
+  the launcher waits for `die` or writes its report end that wait at once, silently, with
+  docker's status. On Linux docker and the events watcher get a parent-death SIGKILL, so a
+  launcher killed outright takes them with it.
+- **Events.** Before the child starts, the launcher subscribes to
+  `docker events --filter container=<name> --filter event=oom --filter event=die` and keeps
+  only events whose name is exactly the container's (docker's filter matches prefixes). When the
+  child returns it waits up to 2 seconds for `die`; if none comes, you detached and nothing is
+  printed. **A detach therefore takes up to 2 seconds longer to return to your shell.** A joined
+  session is judged by its own exit status (137) instead, since its container keeps running.
+- **Failed starts.** A `docker start` that never ran the container (it is still `created`)
+  removes the reservation and its shadow directory at once instead of leaving them to the next
+  launch's sweep.
+- **Terminal.** Before an OOM report on a terminal, the launcher switches off the modes Claude
+  Code's TUI sets (bracketed paste, focus and theme reporting, mouse tracking, the kitty
+  keyboard protocol, modifyOtherKeys, synchronized output; cursor shown). It never sends the
+  alternate-screen exit or a scroll-region reset, which would move the cursor. Headless
+  sessions and redirected stderr get plain lines.
+
+Spec: `spec/launch.feature` CS-LNCH-085..098, `spec/sessions.feature` CS-SESS-059/060.
+
 #### Shadow directory cleanup
 
 Each launch writes its shadow files (the merged `CLAUDE.md`, `.mcp.json`, `gitconfig`) into one
 fresh `claude-sandbox<digits>` directory under the temp root (`$TMPDIR`, else `/tmp`) and
-bind-mounts them. The launcher ends by exec'ing `docker start`, so it cannot remove its own
-directory after the session; instead the container carries a `claude-sandbox.shadowdir` label
-naming it, and every later launch sweeps, under the launch lock and right after discovery, the
+bind-mounts them. The launcher removes its own directory when the session's container has
+died. After a detach, a signal-initiated exit or a launcher that was killed it cannot, so the
+container carries a `claude-sandbox.shadowdir` label naming it, and every later launch sweeps, under the launch lock and right after discovery, the
 directories nothing uses any more. A directory is removed only when its name is exactly
 `claude-sandbox` followed by digits, it is a real directory (symlinks are never followed or
 removed) owned by you, it has not been modified for an hour, and no container on the host — in
@@ -1242,12 +1293,12 @@ A directory whose removal fails part-way (say, a file inside it you cannot delet
 `<dir>.unremovable` in place and the warning names it: no later sweep matches that name, so it
 warns once rather than on every launch, and it is yours to remove by hand. If even the rename
 fails, the directory is left alone for another hour before it is retried.
-A launch that fails before its session starts (a failed `docker create`, or a failed exec of
-`docker start` once the reservation is removed) removes its own directory, and the config-drift
+A launch that fails before its session starts (a failed `docker create`, or a `docker start`
+that cannot be run, once the reservation is removed) removes its own directory, and the config-drift
 check behind `--attach`/`--join` uses a private directory it removes before returning. The
 label is not part of the config-drift hash. Headless probes such as Paseo's `--version` and
 `auth status` are full launches, so this is what keeps them from filling the temp root.
-Spec: `spec/launch.feature` CS-LNCH-080..084.
+Spec: `spec/launch.feature` CS-LNCH-080..084, CS-LNCH-094.
 
 ### Image layering
 

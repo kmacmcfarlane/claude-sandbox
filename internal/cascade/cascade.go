@@ -280,3 +280,27 @@ func TrackInHostSource(files []string) string {
 	}
 	return src
 }
+
+// MemoryLimitSource returns the most-local config file that sets memoryLimit
+// ("" when none does), for the OOM report and the container's labels
+// (CS-CASC-036). files are root-first, as Load takes them. Only this key is
+// tracked: the cascade keeps no per-key provenance, and the report needs
+// nothing else. A file that sets the key to an empty value still counts —
+// it is what the merge took — and the caller then reports the default.
+func MemoryLimitSource(files []string) string {
+	src := ""
+	for _, f := range files {
+		raw, err := os.ReadFile(f)
+		if err != nil {
+			continue
+		}
+		var doc map[string]any
+		if yaml.Unmarshal(raw, &doc) != nil {
+			continue
+		}
+		if _, ok := doc["memoryLimit"]; ok {
+			src = f
+		}
+	}
+	return src
+}

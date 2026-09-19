@@ -70,7 +70,7 @@ var _ = Describe("launch reservation (CS-SESS-048..054, CS-LNCH-057)", func() {
 	var f *cliFixture
 	BeforeEach(func() { f = newCLIFixture() })
 
-	It("CS-LNCH-057, CS-SESS-048: discovery, pick and create run under the lock; start is exec'd after release", func() {
+	It("CS-LNCH-057, CS-SESS-048, CS-LNCH-087: discovery, pick and create run under the lock; events and start come after release", func() {
 		Expect(f.run()).To(Equal(0), f.errw.String())
 
 		held := f.lock.held()
@@ -78,14 +78,17 @@ var _ = Describe("launch reservation (CS-SESS-048..054, CS-LNCH-057)", func() {
 		Expect(held[0]).To(HavePrefix("docker ps -a "), "discovery is the first thing under the lock")
 		Expect(held[len(held)-1]).To(HavePrefix("docker create -it --rm --init "), "create is the last")
 
-		// The exec comes after the release, and names the created container.
-		Expect(f.fake.Execed).NotTo(BeNil())
+		// The session child comes after the release, and names the created
+		// container; the events subscription comes between the two.
+		Expect(f.fake.Session).NotTo(BeNil())
 		lines := f.fake.CommandLines()
-		Expect(lines[len(lines)-1]).To(HavePrefix("docker start "))
-		Expect(f.lock.releasedAt[0]).To(Equal(len(lines)-1), "released before the start exec, after the create")
+		Expect(lines[len(lines)-2]).To(HavePrefix("docker start "))
+		Expect(lines[len(lines)-3]).To(HavePrefix("docker events "))
+		Expect(lines[len(lines)-1]).To(HavePrefix("docker inspect "), "did the start run it (CS-LNCH-096)")
+		Expect(f.lock.releasedAt[0]).To(Equal(len(lines)-3), "released after the create, before the subscription and the start")
 		name := nameOf(f.launched().Args)
 		Expect(name).NotTo(BeEmpty())
-		Expect(f.execLine()).To(Equal("docker start -ai --detach-keys=ctrl-q,ctrl-q " + name))
+		Expect(f.sessionLine()).To(Equal("docker start -ai --detach-keys=ctrl-q,ctrl-q " + name))
 	})
 
 	It("CS-LNCH-057: ralph, --branch and the [b] fork are reserved and started the same way", func() {
@@ -104,7 +107,7 @@ var _ = Describe("launch reservation (CS-SESS-048..054, CS-LNCH-057)", func() {
 			g.env.Prompter = &prompt.Scripted{IsTTY: c.tty != nil, Answers: c.tty}
 			Expect(g.run(c.args...)).To(Equal(0), "%v: %s", c.args, g.errw.String())
 			Expect(g.lock.held()).To(ContainElement(HavePrefix("docker create -it --rm --init ")))
-			Expect(g.execLine()).To(Equal("docker start -ai --detach-keys=ctrl-q,ctrl-q "+nameOf(g.launched().Args)), "%v", c.args)
+			Expect(g.sessionLine()).To(Equal("docker start -ai --detach-keys=ctrl-q,ctrl-q "+nameOf(g.launched().Args)), "%v", c.args)
 		}
 	})
 
@@ -178,7 +181,7 @@ var _ = Describe("launch reservation (CS-SESS-048..054, CS-LNCH-057)", func() {
 		g.env.Prompter = &prompt.Scripted{IsTTY: false}
 		Expect(g.run("--attach=otter")).To(Equal(2))
 		Expect(g.errw.String()).To(ContainSubstring("no running sessions"))
-		Expect(g.fake.Execed).To(BeNil())
+		Expect(g.fake.Session).To(BeNil())
 
 		h := newCLIFixture()
 		h.fake.On("docker ps", strings.Replace(row, f.proj, h.proj, 1)+"\n", nil)
@@ -217,7 +220,7 @@ var _ = Describe("launch reservation (CS-SESS-048..054, CS-LNCH-057)", func() {
 		}
 		Expect(names).To(HaveLen(2))
 		Expect(names[1]).NotTo(Equal(names[0]), "the lost noun is not picked again")
-		Expect(f.execLine()).To(HaveSuffix(" " + names[1]))
+		Expect(f.sessionLine()).To(HaveSuffix(" " + names[1]))
 		Expect(f.errw.String()).To(ContainSubstring("was taken during launch; picking another instance"))
 		// Every attempt runs inside the one critical section.
 		Expect(f.lock.acquiredAt).To(HaveLen(1))
@@ -228,7 +231,7 @@ var _ = Describe("launch reservation (CS-SESS-048..054, CS-LNCH-057)", func() {
 		Expect(f.run()).To(Equal(2))
 		Expect(createCount(f)).To(Equal(3))
 		Expect(f.errw.String()).To(ContainSubstring("gave up after 3 attempts"))
-		Expect(f.fake.Execed).To(BeNil(), "nothing is started")
+		Expect(f.fake.Session).To(BeNil(), "nothing is started")
 		Expect(f.lock.releasedAt).To(HaveLen(1), "the lock is released on failure too")
 	})
 
@@ -254,7 +257,7 @@ var _ = Describe("launch reservation (CS-SESS-048..054, CS-LNCH-057)", func() {
 		Expect(held).To(ContainElement(inspect + " " + name))
 		Expect(held).To(ContainElement("docker rm " + name))
 		Expect(f.errw.String()).To(ContainSubstring("it never started"))
-		Expect(f.execLine()).To(HaveSuffix(" " + name))
+		Expect(f.sessionLine()).To(HaveSuffix(" " + name))
 
 		// A holder that is really running is never removed.
 		g := newCLIFixture()
@@ -327,7 +330,7 @@ var _ = Describe("launch reservation (CS-SESS-048..054, CS-LNCH-057)", func() {
 		// CS-SESS-048: the fallback covers names only, and says so.
 		Expect(f.errw.String()).To(ContainSubstring("Container names stay unique"))
 		Expect(f.errw.String()).To(ContainSubstring("may get the same pid class"))
-		Expect(f.fake.Execed).NotTo(BeNil())
+		Expect(f.fake.Session).NotTo(BeNil())
 	})
 
 	Describe("CS-SESS-054: the early noun is re-validated under the lock", func() {
@@ -395,11 +398,11 @@ var _ = Describe("launch reservation (CS-SESS-048..054, CS-LNCH-057)", func() {
 	})
 })
 
-// execFailRunner wraps the fake so the final exec fails, as when the docker
-// binary vanished between create and start.
+// execFailRunner wraps the fake so the session child cannot be started, as
+// when the docker binary vanished between create and start.
 type execFailRunner struct{ *execx.Fake }
 
-func (r *execFailRunner) Exec(c execx.Cmd) error {
-	r.Fake.Exec(c)
-	return errors.New("exec: docker: not found")
+func (r *execFailRunner) RunSession(c execx.Cmd) (execx.SessionResult, error) {
+	r.Fake.RunSession(c)
+	return execx.SessionResult{Code: -1}, errors.New("exec: docker: not found")
 }
