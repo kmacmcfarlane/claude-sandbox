@@ -131,6 +131,8 @@ Feature: Ralph loop lifecycle (CS-RLP)
   Scenario: CS-RLP-015 Hard iteration timeout wraps each iteration
     Then the iteration is killed with TERM (KILL after 30s grace) after
       --iteration-timeout seconds (default 7200)
+    And the pending KILL is cancelled as soon as the iteration's pipeline has
+      finished, so it can never land on the next iteration's processes
 
   Scenario: CS-RLP-016 Iteration limit ends the loop
     Given --limit 2
@@ -191,3 +193,99 @@ Feature: Ralph loop lifecycle (CS-RLP)
     # The scaffold-ralph agent docs (AGENT_FLOW.md, PROMPT*.md) carry no
     # merge-into-main step at all, in either mode; the loop's block is the
     # per-run reminder that names the branch.
+
+  # ---- OOM-killed iterations (d95a option 5b; operator decision 8) ----
+  # The launcher runs the container with --memory X --memory-swap X, so swap is
+  # off and the kernel's OOM killer fires inside the container's cgroup. Only
+  # the process that allocated past the limit dies (memory.oom.group=0): when
+  # that is the iteration's claude, the loop survives, sees claude exit 137 and
+  # sees the cgroup's oom_kill counter rise. Before this, the pipeline's
+  # run-logger still wrote "ok" to the quota-status file and the iteration was
+  # silently classified ok.
+
+  Scenario: CS-RLP-023 The loop samples the cgroup oom_kill counter around every iteration
+    Then before each iteration and again right after it, the loop reads the
+      oom_kill line of <cgroup-dir>/memory.events
+    And <cgroup-dir> is /sys/fs/cgroup (the container's own cgroup v2 root),
+      an injected seam in tests
+    And the claude exit code used for OOM classification is claude's OWN exit
+      status, 128+N when a signal killed it (SIGKILL -> 137), not the
+      pipeline's pipefail code
+
+  Scenario Outline: CS-RLP-024 Exit 137 plus a raised counter classifies "oom"
+    Given claude exited <exit>
+    And the oom_kill counter went from <before> to <after>
+    Then the outcome is "<outcome>"
+    Examples:
+      | exit | before | after | outcome                            |
+      | 137  | 0      | 1     | oom                                |
+      | 137  | 2      | 5     | oom                                |
+      | 137  | 1      | 1     | (the CS-RQT-001..004 classification) |
+      | 0    | 0      | 1     | (the CS-RQT-001..004 classification) |
+      | 1    | 0      | 1     | (the CS-RQT-001..004 classification) |
+    Given the iteration hit the hard time limit (CS-RLP-015)
+    When claude exited 137 (the timeout's delayed KILL) and the counter rose
+      because some other process was OOM-killed during the iteration
+    Then the OOM check is skipped and the outcome is "iteration_timeout"
+    # A raise without claude dying is a non-fatal kill of some other process
+    # (a test binary, a compiler): not an iteration failure. A 137 without a
+    # raise is a SIGKILL from elsewhere (the hard-timeout's KILL, the user).
+    # The oom check runs AHEAD of the CS-RQT chain because run-logger still
+    # writes "ok" when claude's stdout just closes; the chain itself is
+    # unchanged.
+
+  Scenario: CS-RLP-025 An unreadable counter never invents an oom
+    Given <cgroup-dir>/memory.events is missing (cgroup v1, no cgroup mount),
+      has no oom_kill line, or its value does not parse, before OR after the iteration
+    When claude exits 137
+    Then the outcome is the CS-RQT-001..004 classification
+    And the loop neither crashes nor prints an OOM message
+
+  Scenario: CS-RLP-026 The first oom backs off and retries the same iteration once
+    Given outcome oom at iteration N
+    Then ralph prints the OOM message (CS-RLP-028) and notifies it
+    And sleeps a fixed 60 seconds (the OOM back-off; not the rate-limit backoff,
+      which is jittered and grows), in 1-second steps
+    And re-runs iteration N (the counter is not advanced)
+    When the loop is interrupted (SIGINT) during the back-off
+    Then the back-off ends early, no retry is launched, and ralph notifies and
+      exits 0 as for CS-RLP-017
+    When the stop file appears during the back-off
+    Then the back-off ends early, no retry is launched, and ralph exits 0 as for CS-RLP-009
+    And the consecutive-oom streak resets only when an iteration COMPLETES with a
+      non-oom outcome (ok, watchdog_timeout, iteration_timeout)
+    But a quota park or rate-limit retry in between does NOT reset it: oom,
+      quota_exhausted (parked, restored), oom again is a second consecutive oom
+
+  Scenario: CS-RLP-027 A second consecutive oom stops the loop
+    Given outcome oom at iteration N
+    And the retry of iteration N is also oom
+    Then ralph prints the OOM message, notifies it through the existing
+      notification path (CS-RQT-013), and exits 137
+    And there is no second back-off
+
+  Scenario: CS-RLP-028 The OOM message names memoryLimit and the remedies
+    Then the message states that claude was killed by the container's OOM killer,
+      with the iteration, exit 137 and how many OOM kills the iteration saw
+    And it names the memoryLimit in effect, read from <cgroup-dir>/memory.max
+      and formatted in memoryLimit notation:
+      | memory.max  | shown                   |
+      | 17179869184 | 16g                     |
+      | 1610612736  | 1536m                   |
+      | max         | unlimited               |
+      | (unreadable)| unknown                 |
+    And it says swap is off by design
+    And it names the remedies: raise memoryLimit in .claude-sandbox/config.yaml,
+      or cap build/test parallelism (e.g. ginkgo --procs=N, go test -p N, make -jN)
+
+  Scenario: CS-RLP-029 Every classified outcome is recorded in runlog.json
+    When an iteration is classified
+    Then run-logger's entry for that iteration in the current run gets an
+      "outcome" field (ok, quota_exhausted, rate_limit, watchdog_timeout,
+      iteration_timeout, error or oom)
+    And an oom entry also carries "claudeExit" (137) and "oomKills" (the counter delta)
+    And a retried iteration's second entry is annotated separately
+      (the latest entry for iteration N that has no outcome yet)
+    When run-logger wrote no entry (interactive mode, or it never flushed)
+    Then ralph appends a minimal {iteration, endedAt, outcome} entry for any
+      outcome other than ok, and leaves an ok iteration unrecorded as before

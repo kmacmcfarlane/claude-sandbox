@@ -635,6 +635,12 @@ Control how ralph handles rate limits and quota exhaustion.
 | `--quota-pause N` | `300` | Seconds between re-probes on quota exhaustion |
 | `--quota-max-wait N` | `18000` | Max seconds to wait for quota reset (5h) |
 
+### OOM-killed iterations
+
+The container runs with swap off (`memoryLimit`, default `8g`), so a build or test run that outgrows the limit makes the kernel's OOM killer kill a process inside the container. Ralph reads the container's cgroup v2 `oom_kill` counter (`/sys/fs/cgroup/memory.events`) before and after every iteration. When claude itself exits 137 **and** the counter rose, the iteration's outcome is `oom` — before, such an iteration looked `ok`, because the pipeline's run-logger still reported ok when claude's output just stopped.
+
+On an `oom` outcome ralph prints and notifies a message naming the `memoryLimit` in effect (read from the cgroup's `memory.max`, e.g. `16g`) and the remedies — raise `memoryLimit` in `.claude-sandbox/config.yaml`, or cap build/test parallelism (e.g. `ginkgo --procs=N`, `go test -p N`, `make -jN`) — then waits a fixed 60 seconds and re-runs the same iteration **once** (Ctrl-C or the stop file during that wait ends the loop without the retry). If the retry is OOM-killed too, ralph notifies and exits 137; a quota park or rate-limit retry in between does not clear the first OOM, only an iteration that completes does. An iteration that hits the hard time limit is always `iteration_timeout`, even if its claude died of the timeout's own KILL while something else was OOM-killed. A counter rise without claude dying (say, one killed test binary) is not an iteration failure, and where the counter cannot be read (no cgroup v2) classification is exactly as before.
+
 ### Logging
 
 Ralph produces two logs per run: a **run log** (structured metrics) and a **raw log** (complete NDJSON stream). Both sit in the ralph directory (`.claude-sandbox/ralph/`) by default.
@@ -660,6 +666,7 @@ Per-iteration metrics appended to `.claude-sandbox/ralph/runlog.json`. Each iter
 - **Cost** — total USD cost
 - **Turns** — number of API round-trips
 - **Subagent breakdown** — per-subagent tokens, duration, and model
+- **Outcome** — how ralph classified the iteration: `ok`, `quota_exhausted`, `rate_limit`, `watchdog_timeout`, `iteration_timeout`, `error` or `oom` (an `oom` entry also carries `claudeExit` and `oomKills`). A retried iteration has one entry per attempt. When run-logger wrote no entry (interactive mode), ralph adds a minimal one for any outcome other than `ok`.
 
 To include a story ID and name in the log, emit a structured marker in your orchestrator's output:
 

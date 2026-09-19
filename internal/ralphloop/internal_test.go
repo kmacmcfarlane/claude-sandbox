@@ -42,6 +42,8 @@ var _ = Describe("defaults (white-box)", func() {
 		Expect(o.RetryDelay).To(Equal(30))
 		Expect(o.QuotaPause).To(Equal(300))
 		Expect(o.QuotaMaxWait).To(Equal(18000))
+		Expect(o.CgroupDir).To(Equal("/sys/fs/cgroup"), "CS-RLP-023")
+		Expect(o.OOMBackoff).To(Equal(60*time.Second), "CS-RLP-026")
 	})
 })
 
@@ -261,5 +263,98 @@ var _ = Describe("runIterationReal", func() {
 		start := time.Now()
 		Expect(l.runIterationReal(1, false)).To(Equal(124))
 		Expect(time.Since(start)).To(BeNumerically("<", 10*time.Second))
+	})
+
+	It("CS-RLP-023: claude's own exit status is kept for OOM classification, 128+N for a signal death", func() {
+		// A shell that SIGKILLs itself stands in for an OOM-killed claude.
+		// The pipefail code the CS-RQT chain sees is unchanged (143 for any
+		// signal death); only the separate claude status says 137.
+		tmp := GinkgoT().TempDir()
+		script := filepath.Join(tmp, "killed-claude")
+		Expect(os.WriteFile(script, []byte("#!/bin/sh\nkill -KILL $$\n"), 0o755)).To(Succeed())
+		l := newLoop(tmp)
+		l.ClaudeBin = script
+		Expect(l.runIterationReal(1, false)).To(Equal(143))
+		Expect(l.claudeExit).To(Equal(137))
+
+		exit3 := filepath.Join(tmp, "exit3-claude")
+		Expect(os.WriteFile(exit3, []byte("#!/bin/sh\nexit 3\n"), 0o755)).To(Succeed())
+		l = newLoop(tmp)
+		l.ClaudeBin = exit3
+		Expect(l.runIterationReal(1, false)).To(Equal(3))
+		Expect(l.claudeExit).To(Equal(3))
+	})
+})
+
+var _ = Describe("hard timeout vs the next iteration and the OOM check (white-box)", func() {
+	newLoop := func(tmp string) *Loop {
+		prompt := filepath.Join(tmp, "PROMPT.md")
+		addendum := filepath.Join(tmp, "PROMPT_INTERACTIVE.md")
+		Expect(os.WriteFile(prompt, []byte("the prompt"), 0o644)).To(Succeed())
+		Expect(os.WriteFile(addendum, []byte("the addendum"), 0o644)).To(Succeed())
+		l := &Loop{Options: Options{
+			WorkDir: tmp, RepoRoot: tmp, Interactive: true, IterationTimeout: 3600,
+			PromptRalph: []byte("ralph base"), Out: &bytes.Buffer{}, Err: &bytes.Buffer{},
+			killGrace: 2 * time.Second,
+		}}
+		l.PromptFile = prompt
+		l.Addendum = addendum
+		l.StderrFile = filepath.Join(tmp, "stderr")
+		l.RawLogBase = filepath.Join(tmp, "rawlog")
+		return l
+	}
+
+	It("CS-RLP-015: the pending KILL is cancelled when the pipeline finishes, so it never hits the next iteration", func() {
+		// Iteration 1 times out after 1s and dies of the TERM at once; its
+		// KILL would fire 2s later. Iteration 2 runs through that moment and
+		// must survive it.
+		tmp := GinkgoT().TempDir()
+		slow := filepath.Join(tmp, "slow-claude")
+		Expect(os.WriteFile(slow, []byte("#!/bin/sh\nsleep 30\n"), 0o755)).To(Succeed())
+		l := newLoop(tmp)
+		l.ClaudeBin = slow
+		l.IterationTimeout = 1
+		Expect(l.runIterationReal(1, false)).To(Equal(124))
+		Expect(l.timedOut).To(BeTrue())
+
+		next := filepath.Join(tmp, "next-claude")
+		Expect(os.WriteFile(next, []byte("#!/bin/sh\nsleep 3\nexit 0\n"), 0o755)).To(Succeed())
+		l = newLoop(tmp)
+		l.ClaudeBin = next
+		Expect(l.runIterationReal(2, false)).To(Equal(0))
+		Expect(l.claudeExit).To(Equal(0), "not SIGKILLed by iteration 1's timer")
+		Expect(l.timedOut).To(BeFalse())
+	})
+
+	It("CS-RLP-024: a claude KILLed by the hard timeout is iteration_timeout even when the counter rose", func() {
+		// claude ignores TERM, so the timeout's delayed KILL takes it (exit
+		// 137) while the counter shows another process OOM-killed that
+		// iteration.
+		work := GinkgoT().TempDir()
+		cgroup := filepath.Join(work, "cgroup")
+		agent := filepath.Join(work, ".claude-sandbox", "agent")
+		Expect(os.MkdirAll(cgroup, 0o755)).To(Succeed())
+		Expect(os.MkdirAll(agent, 0o755)).To(Succeed())
+		for _, n := range []string{"PROMPT.md", "PROMPT_INTERACTIVE.md"} {
+			Expect(os.WriteFile(filepath.Join(agent, n), []byte("p"), 0o644)).To(Succeed())
+		}
+		for _, k := range []string{"STOP_FILE", "PROMPT_FILE", "CLAUDE_BIN"} {
+			GinkgoT().Setenv(k, "")
+		}
+		events := filepath.Join(cgroup, "memory.events")
+		Expect(os.WriteFile(events, []byte("oom_kill 0\n"), 0o644)).To(Succeed())
+		stubborn := filepath.Join(work, "stubborn-claude")
+		body := "#!/bin/sh\ntrap '' TERM\nprintf 'oom_kill 1\\n' > " + events + "\nsleep 120\n"
+		Expect(os.WriteFile(stubborn, []byte(body), 0o755)).To(Succeed())
+		out := &bytes.Buffer{}
+		code := Run(Options{
+			WorkDir: work, RepoRoot: work, PromptRalph: []byte("base"), Limit: 1,
+			Interactive: true, ClaudeBin: stubborn, IterationTimeout: 1, killGrace: time.Second,
+			Out: out, Err: &bytes.Buffer{}, Sleep: func(time.Duration) {},
+			Notify: func(string) {}, Hostname: "h", PID: os.Getpid(), CgroupDir: cgroup,
+		})
+		Expect(code).To(Equal(0), "iteration_timeout continues; the limit ends the loop")
+		Expect(out.String()).NotTo(ContainSubstring("[oom]"))
+		Expect(out.String()).To(ContainSubstring("hit hard time limit"))
 	})
 })
