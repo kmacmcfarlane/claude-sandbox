@@ -87,9 +87,36 @@ type Options struct {
 	AutoUpdate    bool   // --update: auto-accept the update rebuild (CS-IMG-009)
 }
 
-// BakedSources are the paths (relative to RepoRoot) whose mtimes trigger a
-// base rebuild when newer than the image (CS-IMG-004).
-var BakedSources = []string{"cmd", "internal", "go.mod", "go.sum", "assets.go", "logstream", "entrypoint.sh", "PROMPT_RALPH.md", "mcp", "notification-hooks.json"}
+// BakedSources are the paths (relative to RepoRoot) the base Dockerfile COPYs
+// from the build context: their contents are the base fingerprint (CS-IMG-034)
+// and, for an unlabeled image, their mtimes trigger a rebuild (CS-IMG-004). A
+// test parses the Dockerfile so a new COPY cannot be left out (CS-IMG-037).
+var BakedSources = []string{
+	"cmd", "internal", "go.mod", "go.sum", "assets.go",
+	// Embedded into the binary by assets.go.
+	"scaffold", "scaffold-ralph", "container-context.md", "mcp-servers.json",
+	"logstream", "entrypoint.sh", "PROMPT_RALPH.md", "mcp", "notification-hooks.json",
+}
+
+// bakedSkip reports whether a walked entry under a baked source directory is
+// not part of the image, so it is neither fingerprinted nor an mtime trigger.
+// rel is repo-relative with forward slashes. Go tests are not compiled in
+// (CS-IMG-031); the rest mirrors the .dockerignore debris lines that keep
+// files out of the build context (CS-IMG-038). For a directory, true means
+// skip the whole subtree.
+func bakedSkip(rel string, d os.DirEntry) bool {
+	name := d.Name()
+	switch {
+	case name == "__pycache__" || name == ".pytest_cache":
+		return true
+	case strings.HasPrefix(name, ".") &&
+		(strings.HasPrefix(rel, "scaffold/") || strings.HasPrefix(rel, "scaffold-ralph/")):
+		return true
+	case d.IsDir():
+		return false
+	}
+	return strings.HasSuffix(name, "_test.go") || strings.HasSuffix(name, ".pyc") || strings.HasSuffix(name, ".pyo")
+}
 
 // Version computes the git-describe version of the repo checkout.
 func Version(r execx.Runner, repoRoot string) string {
@@ -898,7 +925,7 @@ func (f fingerprint) addSource(name, path string) bool {
 }
 
 // baseInputs fingerprints the repo Dockerfile and the baked source set, with
-// the same _test.go exclusion as the time-based rule (CS-IMG-034). unreadable
+// the same exclusions as the time-based rule (bakedSkip; CS-IMG-034/038). unreadable
 // reports a baked source that exists but could not be read — the case worth a
 // warning; a missing Dockerfile needs none, the build itself will say so.
 func baseInputs(repoRoot string) (fp string, unreadable bool) {
@@ -932,11 +959,18 @@ func baseInputs(repoRoot string) (fp string, unreadable bool) {
 				ok = false
 				return nil
 			}
-			if d.IsDir() || strings.HasSuffix(d.Name(), "_test.go") {
+			name, _ := filepath.Rel(repoRoot, path)
+			name = filepath.ToSlash(name)
+			if path != p && bakedSkip(name, d) {
+				if d.IsDir() {
+					return filepath.SkipDir
+				}
 				return nil
 			}
-			name, _ := filepath.Rel(repoRoot, path)
-			if !f.addSource(filepath.ToSlash(name), path) {
+			if d.IsDir() {
+				return nil
+			}
+			if !f.addSource(name, path) {
 				ok = false
 			}
 			return nil
@@ -1025,12 +1059,18 @@ func anyNewer(root string, rels []string, t time.Time) bool {
 		}
 		newer := false
 		filepath.WalkDir(p, func(path string, d os.DirEntry, err error) error {
-			if err != nil || newer || d.IsDir() {
+			if err != nil || newer {
 				return nil
 			}
-			// Tests are not compiled into the binary, so a test-only edit
-			// cannot change the image (CS-IMG-031).
-			if strings.HasSuffix(d.Name(), "_test.go") {
+			// Tests and build-context debris cannot change the image
+			// (CS-IMG-031, CS-IMG-038).
+			if name, _ := filepath.Rel(root, path); path != p && bakedSkip(filepath.ToSlash(name), d) {
+				if d.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if d.IsDir() {
 				return nil
 			}
 			if info, ierr := d.Info(); ierr == nil && info.ModTime().After(t) {

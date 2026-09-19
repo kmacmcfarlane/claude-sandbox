@@ -36,9 +36,14 @@ Feature: Image build lifecycle (CS-IMG)
     # Unlabeled images only (CS-IMG-035); the set is also what the base fingerprint hashes (CS-IMG-034).
     Given any file under the baked source set has mtime after the image creation time
     Then the base is rebuilt with a message about changed baked sources
-    # Baked source set after the Go rewrite: the Go source tree (cmd/, internal/,
-    # go.mod/go.sum), logstream/, entrypoint.sh, PROMPT_RALPH.md, mcp/,
-    # notification-hooks.json (baked as managed settings, CS-LNCH-068).
+    # Baked source set: every repo path the base Dockerfile COPYs (CS-IMG-037) —
+    # the Go source tree (cmd/, internal/, go.mod/go.sum, assets.go), the trees
+    # assets.go embeds into the binary (scaffold/, scaffold-ralph/,
+    # container-context.md, mcp-servers.json), logstream/, entrypoint.sh,
+    # PROMPT_RALPH.md, mcp/, notification-hooks.json (baked as managed settings,
+    # CS-LNCH-068). scaffold/, scaffold-ralph/, container-context.md and
+    # mcp-servers.json were COPYed but missing from the set, so editing them
+    # rebuilt nothing and the running binary kept seeding the old files.
     # (bash version: bin/, logstream/, entrypoint.sh, PROMPT_RALPH.md, mcp/)
 
   Scenario: CS-IMG-031 Go test files are not baked sources
@@ -47,6 +52,22 @@ Feature: Image build lifecycle (CS-IMG)
     # Tests are not compiled into the binary, so a test-only edit cannot change
     # the image — and a base rebuild is expensive, because it invalidates every
     # child image built FROM it.
+
+  Scenario: CS-IMG-037 Every source the base Dockerfile COPYs is a baked source
+    Given the repo-root Dockerfile's COPY and ADD instructions that read from the build
+      context (not --from another stage or image)
+    Then each source path is in the baked source set or under a directory in it
+    # A test parses the Dockerfile, so adding a COPY without extending the set
+    # fails CI instead of silently shipping a stale image.
+
+  Scenario: CS-IMG-038 Build-context debris is not a baked source
+    Given a file under the baked source set that .dockerignore keeps out of the build
+      context: anything under a __pycache__ or .pytest_cache directory, a *.pyc or *.pyo
+      file, or a dot-entry under scaffold/ or scaffold-ralph/
+    Then it is neither an input to the base fingerprint nor a trigger of the time rule
+    # The image cannot contain it, so it cannot make the image stale; without this
+    # a pytest run under scaffold-ralph/scripts would rebuild the base (and every
+    # child) on the next launch.
 
   Scenario: CS-IMG-005 Version stamp
     Then the build arg CLAUDE_SANDBOX_VERSION carries "git describe --tags --always --dirty"
