@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -23,25 +24,55 @@ import (
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
 )
 
+// syncBuffer is a bytes.Buffer safe to read while exec's copy goroutine
+// writes it.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
 // helper is the test binary running as a launcher (see helperEnv).
 type helper struct {
 	cmd    *exec.Cmd
 	stdout *bufio.Reader
-	stderr bytes.Buffer
+	stderr syncBuffer
 }
 
 // startHelper runs script as the helper's session child and waits for the
-// child to print "ready <pid>", returning that pid.
-func startHelper(script string) (*helper, int) {
+// child to print "ready <pid>", returning that pid. The helper runs in a new
+// session, so it has no controlling terminal: /dev/tty cannot be opened, as
+// for a supervisor or SDK client. extraEnv adds helper modes; wrap, when
+// set, is a sh -c prefix that execs the helper ("$0").
+func startHelper(script string, extraEnv ...string) (*helper, int) {
+	return startHelperVia("", script, extraEnv...)
+}
+
+func startHelperVia(wrap, script string, extraEnv ...string) (*helper, int) {
 	h := &helper{cmd: exec.Command(os.Args[0])}
-	h.cmd.Env = append(os.Environ(), helperEnv+"="+script)
+	if wrap != "" {
+		h.cmd = exec.Command("sh", "-c", wrap+`; exec "$0"`, os.Args[0])
+	}
+	h.cmd.Env = append(append(os.Environ(), helperEnv+"="+script), extraEnv...)
 	h.cmd.Stderr = &h.stderr
+	h.cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	out, err := h.cmd.StdoutPipe()
 	Expect(err).NotTo(HaveOccurred())
 	h.stdout = bufio.NewReader(out)
 	Expect(h.cmd.Start()).To(Succeed())
 	line, err := h.stdout.ReadString('\n')
-	Expect(err).NotTo(HaveOccurred(), h.stderr.String())
+	Expect(err).NotTo(HaveOccurred(), "helper stderr: %s", h.stderr.String())
 	f := strings.Fields(line)
 	Expect(f).To(HaveLen(2), line)
 	Expect(f[0]).To(Equal("ready"))
@@ -50,11 +81,25 @@ func startHelper(script string) (*helper, int) {
 	return h, pid
 }
 
+// readLine reads the helper's next stdout line.
+func (h *helper) readLine() string {
+	line, err := h.stdout.ReadString('\n')
+	Expect(err).NotTo(HaveOccurred(), "helper stderr: %s", h.stderr.String())
+	return strings.TrimSpace(line)
+}
+
 // wait returns the helper's exit status.
 func (h *helper) wait() int {
 	io.Copy(io.Discard, h.stdout)
 	h.cmd.Wait()
 	return h.cmd.ProcessState.ExitCode()
+}
+
+// sigIgnored reads a SigIgn mask line and reports whether sig is in it.
+func sigIgnored(line string, sig syscall.Signal) bool {
+	mask, err := strconv.ParseUint(strings.TrimSpace(strings.TrimPrefix(line, "SigIgn:")), 16, 64)
+	Expect(err).NotTo(HaveOccurred(), line)
+	return mask&(1<<(uint(sig)-1)) != 0
 }
 
 // gone reports whether pid no longer runs (absent, or a zombie).
@@ -71,12 +116,15 @@ var _ = Describe("RunSession (CS-LNCH-085/086)", func() {
 	It("CS-LNCH-085: passes the child's exit code through", func() {
 		res, err := execx.System{}.RunSession(execx.Cmd{Name: "sh", Args: []string{"-c", "exit 7"}, Stdin: strings.NewReader("")})
 		Expect(err).NotTo(HaveOccurred())
-		Expect(res).To(Equal(execx.SessionResult{Code: 7}))
+		res.Done()
+		Expect(res.Code).To(Equal(7))
+		Expect(res.Forwarded).To(BeNil())
 	})
 
 	It("CS-LNCH-085: reports death by signal n as 128+n", func() {
 		res, err := execx.System{}.RunSession(execx.Cmd{Name: "sh", Args: []string{"-c", "kill -KILL $$"}, Stdin: strings.NewReader("")})
 		Expect(err).NotTo(HaveOccurred())
+		res.Done()
 		Expect(res.Code).To(Equal(137))
 	})
 
@@ -99,12 +147,62 @@ var _ = Describe("RunSession (CS-LNCH-085/086)", func() {
 		Expect(h.stderr.String()).To(ContainSubstring("forwarded=hangup"))
 	})
 
-	It("CS-LNCH-086: SIGINT and SIGQUIT to the launcher alone are dropped, and the launcher survives", func() {
-		h, _ := startHelper(`echo ready $$; sleep 0.4; exit 5`)
+	It("CS-LNCH-086: in the terminal's foreground group, SIGINT and SIGQUIT are dropped and the launcher survives", func() {
+		// The terminal delivered them to docker already (same group).
+		h, _ := startHelper(`trap 'exit 44' INT; trap 'exit 45' QUIT; echo ready $$; sleep 0.4; exit 5`, helperForeground+"=1")
 		Expect(h.cmd.Process.Signal(syscall.SIGINT)).To(Succeed())
 		Expect(h.cmd.Process.Signal(syscall.SIGQUIT)).To(Succeed())
 		Expect(h.wait()).To(Equal(5))
 		Expect(h.stderr.String()).NotTo(ContainSubstring("forwarded"))
+	})
+
+	It("CS-LNCH-086: with no controlling terminal, kill -INT <launcher> reaches the child", func() {
+		h, _ := startHelper(`trap 'exit 44' INT; echo ready $$; while :; do sleep 0.05; done`)
+		Expect(h.cmd.Process.Signal(syscall.SIGINT)).To(Succeed())
+		Expect(h.wait()).To(Equal(44))
+	})
+
+	It("CS-LNCH-086: with no controlling terminal, SIGQUIT reaches the child too", func() {
+		h, _ := startHelper(`trap 'exit 45' QUIT; echo ready $$; while :; do sleep 0.05; done`)
+		Expect(h.cmd.Process.Signal(syscall.SIGQUIT)).To(Succeed())
+		Expect(h.wait()).To(Equal(45))
+	})
+
+	It("CS-LNCH-086: the foreground check answers false with no controlling terminal", func() {
+		h, _ := startHelper(`echo ready $$; if (: < /dev/tty) 2>/dev/null; then echo tty; else echo notty; fi`)
+		Expect(h.readLine()).To(Equal("notty"), "the helper really has no /dev/tty")
+		h.wait()
+		// And in-process: the check is safe to call whatever the test runner has.
+		Expect(func() { execx.ForegroundOfTTY() }).NotTo(Panic())
+	})
+
+	It("CS-LNCH-086: a signal inherited as ignored stays ignored, for the launcher and for docker", func() {
+		if runtime.GOOS != "linux" {
+			Skip("reads /proc")
+		}
+		h, _ := startHelperVia(`trap "" HUP`, `echo ready $$; grep SigIgn /proc/self/status; sleep 0.3; exit 6`)
+		Expect(sigIgnored(h.readLine(), syscall.SIGHUP)).To(BeTrue(), "nohup's SIGHUP reaches docker still ignored")
+		Expect(h.cmd.Process.Signal(syscall.SIGHUP)).To(Succeed())
+		Expect(h.wait()).To(Equal(6), "the launcher neither died nor forwarded it")
+		Expect(h.stderr.String()).NotTo(ContainSubstring("forwarded"))
+	})
+
+	It("CS-LNCH-097: after the child exits, signals arrive on Late until Release instead of killing the launcher", func() {
+		h, _ := startHelper(`echo ready $$; exit 9`, helperLate+"=1")
+		Expect(h.readLine()).To(Equal("returned"))
+		Expect(h.cmd.Process.Signal(syscall.SIGTERM)).To(Succeed())
+		Expect(h.wait()).To(Equal(9), "the child's status, not 143")
+		Expect(h.stderr.String()).To(ContainSubstring("late=terminated"))
+	})
+
+	It("CS-LNCH-098: a process started with DieWithParent dies when the launcher is killed outright", func() {
+		if runtime.GOOS != "linux" {
+			Skip("parent-death signals are Linux-only")
+		}
+		h, child := startHelper(`echo ready $$; exec sleep 30`, helperTether+"=1")
+		Expect(h.cmd.Process.Signal(syscall.SIGKILL)).To(Succeed())
+		h.wait()
+		Eventually(func() bool { return gone(child) }, 3*time.Second, 20*time.Millisecond).Should(BeTrue())
 	})
 
 	It("CS-LNCH-086: a launcher killed outright takes the child with it", func() {
@@ -121,19 +219,18 @@ var _ = Describe("RunSession (CS-LNCH-085/086)", func() {
 		if runtime.GOOS != "linux" {
 			Skip("reads /proc")
 		}
-		var out bytes.Buffer
-		_, err := execx.System{}.RunSession(execx.Cmd{Name: "sh", Args: []string{"-c", "exec grep SigIgn /proc/self/status"}, Stdin: strings.NewReader(""), Stdout: &out})
-		Expect(err).NotTo(HaveOccurred())
-		mask, perr := strconv.ParseUint(strings.TrimSpace(strings.TrimPrefix(out.String(), "SigIgn:")), 16, 64)
-		Expect(perr).NotTo(HaveOccurred(), out.String())
-		Expect(mask&(1<<(uint(syscall.SIGINT)-1))).To(BeZero(), "SIGINT ignored in the child")
-		Expect(mask&(1<<(uint(syscall.SIGQUIT)-1))).To(BeZero(), "SIGQUIT ignored in the child")
+		h, _ := startHelper(`echo ready $$; grep SigIgn /proc/self/status`)
+		line := h.readLine()
+		h.wait()
+		Expect(sigIgnored(line, syscall.SIGINT)).To(BeFalse(), "SIGINT ignored in the child")
+		Expect(sigIgnored(line, syscall.SIGQUIT)).To(BeFalse(), "SIGQUIT ignored in the child")
 	})
 
 	It("CS-LNCH-086: the child stays in the launcher's process group, so the terminal reaches it", func() {
 		var out bytes.Buffer
-		_, err := execx.System{}.RunSession(execx.Cmd{Name: "sh", Args: []string{"-c", "ps -o pgid= -p $$ 2>/dev/null || cut -d' ' -f5 /proc/$$/stat"}, Stdin: strings.NewReader(""), Stdout: &out})
+		res, err := execx.System{}.RunSession(execx.Cmd{Name: "sh", Args: []string{"-c", "ps -o pgid= -p $$ 2>/dev/null || cut -d' ' -f5 /proc/$$/stat"}, Stdin: strings.NewReader(""), Stdout: &out})
 		Expect(err).NotTo(HaveOccurred())
+		res.Done()
 		pgid, _ := syscall.Getpgid(os.Getpid())
 		Expect(strings.TrimSpace(out.String())).To(Equal(strconv.Itoa(pgid)))
 	})
@@ -163,7 +260,14 @@ var _ = Describe("Fake.RunSession", func() {
 
 		f.SessionSignal = syscall.SIGTERM
 		res, _ = f.RunSession(execx.Cmd{Name: "docker", Args: []string{"attach", "x"}})
-		Expect(res).To(Equal(execx.SessionResult{Code: 0, Forwarded: syscall.SIGTERM}))
+		Expect(res.Code).To(Equal(0))
+		Expect(res.Forwarded).To(Equal(syscall.SIGTERM))
+		res.Done()
+		Expect(f.Released).To(Equal(1))
+
+		f.LateSignal = syscall.SIGINT
+		res, _ = f.RunSession(execx.Cmd{Name: "docker", Args: []string{"attach", "x"}})
+		Expect(<-res.Late).To(Equal(syscall.SIGINT))
 	})
 
 	It("a non-code error is a failure to start", func() {

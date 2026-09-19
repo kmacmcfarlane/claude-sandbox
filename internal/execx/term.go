@@ -18,3 +18,18 @@ func IsTerminal(w io.Writer) bool {
 	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), uintptr(ioctlGetTermios), uintptr(unsafe.Pointer(&t)))
 	return errno == 0
 }
+
+// foregroundOfTTY reports whether this process's group is the foreground
+// process group of its controlling terminal: tcgetpgrp(open("/dev/tty")) ==
+// getpgrp(). With no controlling terminal /dev/tty cannot be opened (ENXIO),
+// and the answer is false.
+func foregroundOfTTY() bool {
+	tty, err := os.OpenFile("/dev/tty", os.O_RDONLY, 0)
+	if err != nil {
+		return false
+	}
+	defer tty.Close()
+	var pgrp int32
+	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, tty.Fd(), uintptr(syscall.TIOCGPGRP), uintptr(unsafe.Pointer(&pgrp)))
+	return errno == 0 && int(pgrp) == syscall.Getpgrp()
+}

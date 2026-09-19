@@ -34,6 +34,14 @@ one-time setup (idempotent). Use `setup-lsp-plugins --check` to verify status.
 
 - The project is mounted at its real host path so `docker compose` volume resolution works against the host daemon.
 - Files you create are owned by the host user (UID/GID remapping handled by the entrypoint).
+- **Memory is capped, with swap off.** `$CLAUDE_SANDBOX_MEMORY_LIMIT` is this
+  container's limit (e.g. `8g`) and `$CLAUDE_SANDBOX_MEMORY_LIMIT_SOURCE` the
+  `.claude-sandbox/config.yaml` that set it (`default` when none did). Past
+  the limit the kernel's OOM killer kills the process that allocated — a
+  test binary, a compiler, or `claude` itself, which ends the session. Keep
+  build/test parallelism bounded (`ginkgo --procs=N`, `go test -p N`,
+  `make -jN`) rather than defaulting to one worker per host CPU; a
+  `Killed` / exit 137 from a tool usually means this.
 - **Sibling sandboxes are discoverable by name.** Every sandbox container is its own
   PID namespace, so the launcher assigns each one a PID class
   (`CLAUDE_SANDBOX_PID_CLASS`) and the entrypoint lands `claude` on a PID no

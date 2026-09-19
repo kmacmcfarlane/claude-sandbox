@@ -82,9 +82,10 @@ var _ = Describe("launch reservation (CS-SESS-048..054, CS-LNCH-057)", func() {
 		// container; the events subscription comes between the two.
 		Expect(f.fake.Session).NotTo(BeNil())
 		lines := f.fake.CommandLines()
-		Expect(lines[len(lines)-1]).To(HavePrefix("docker start "))
-		Expect(lines[len(lines)-2]).To(HavePrefix("docker events "))
-		Expect(f.lock.releasedAt[0]).To(Equal(len(lines)-2), "released after the create, before the subscription and the start")
+		Expect(lines[len(lines)-2]).To(HavePrefix("docker start "))
+		Expect(lines[len(lines)-3]).To(HavePrefix("docker events "))
+		Expect(lines[len(lines)-1]).To(HavePrefix("docker inspect "), "did the start run it (CS-LNCH-096)")
+		Expect(f.lock.releasedAt[0]).To(Equal(len(lines)-3), "released after the create, before the subscription and the start")
 		name := nameOf(f.launched().Args)
 		Expect(name).NotTo(BeEmpty())
 		Expect(f.sessionLine()).To(Equal("docker start -ai --detach-keys=ctrl-q,ctrl-q " + name))

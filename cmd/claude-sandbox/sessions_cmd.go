@@ -17,7 +17,6 @@ import (
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/imagebuild"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/launch"
-	"github.com/kmacmcfarlane/claude-sandbox/internal/oomreport"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/sessions"
 )
 
@@ -456,7 +455,7 @@ func attachTo(env *Env, s sessions.Session, configuredKeys string) error {
 	end, err := runSession(env, execx.Cmd{
 		Name: "docker",
 		Args: []string{"attach", "--detach-keys=" + detachKeys, s.Name},
-	}, s.Name, primarySession, oomreport.Limit{}, false)
+	}, s.Name, sessionOpts{kind: primarySession})
 	if err != nil {
 		return err
 	}
@@ -502,7 +501,7 @@ func joinInto(env *Env, s sessions.Session, projectDir, hostUser, model, configu
 	args = append(args, f.Passthrough...)
 	// CS-SESS-060: judged by the exec's own status, since the container
 	// normally outlives it.
-	end, err := runSession(env, execx.Cmd{Name: "docker", Args: args}, s.Name, joinedSession, oomreport.Limit{}, false)
+	end, err := runSession(env, execx.Cmd{Name: "docker", Args: args}, s.Name, sessionOpts{kind: joinedSession})
 	if err != nil {
 		return err
 	}

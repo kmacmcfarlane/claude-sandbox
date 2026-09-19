@@ -1126,11 +1126,19 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
   Scenario: CS-LNCH-086 The launcher's signal handling around the child
     While the session child runs
     Then SIGTERM and SIGHUP received by the launcher are forwarded to the child
-    And SIGINT and SIGQUIT are caught and dropped by the launcher: the
-      terminal delivers them to docker directly (same process group), and the
-      launcher must survive them to report
+    And SIGINT and SIGQUIT are dropped by the launcher when its process group
+      is the foreground group of its controlling terminal
+      (tcgetpgrp(open("/dev/tty")) == getpgrp()): the terminal delivered them
+      to docker directly (same process group), and the launcher must survive
+      them to report
+    And otherwise — no controlling terminal (/dev/tty cannot be opened), or a
+      launcher in a background group — they were sent to the launcher alone
+      (kill -INT <pid>, a supervisor's interrupt) and are forwarded to docker
     And they are caught, never set to SIG_IGN, because an ignored disposition
       is inherited across exec and docker would ignore them too
+    And a signal the launcher inherited as ignored (nohup's SIGHUP, a
+      background job's SIGINT) is not caught: it stays ignored for the
+      launcher and for docker, as it was when the launcher exec'd docker
     And the child is started with a parent-death signal (SIGKILL) from an OS
       thread locked for the child's lifetime, so a launcher killed outright
       takes the docker client with it, as killing the exec'd client did
@@ -1153,9 +1161,10 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       stream ends first
     Then the container is taken to be still running (the client detached) and
       nothing is printed, whatever oom events were seen
-    # die follows the client's return by milliseconds (measured ~3 ms). A die
-    # with exit 137 but no oom yet waits the same bound for an oom, which the
-    # daemon may publish after the die it caused.
+    # die follows the client's return by milliseconds (measured ~3 ms).
+    And a die with exit 137 and no oom yet waits at most 150 ms more for an
+      oom, which the daemon may publish after the die it caused; a 137 with
+      none (docker kill, a stop timeout) is then quiet
 
   Scenario: CS-LNCH-089 An OOM-killed session is reported on stderr
     Given a die event with exitCode 137 and at least one oom event
@@ -1225,3 +1234,36 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       was killed, it is kept: the sweep of a later launch (CS-LNCH-081) is the
       backstop
     And attach and join never remove a shadow directory
+
+  Scenario: CS-LNCH-095 Events are matched to the container by exact name
+    # docker's "container=<name>" events filter matches names by PREFIX, so
+    # the subscription of claude-sandbox-…-otter-2 also receives the events of
+    # claude-sandbox-…-otter-20.
+    When an oom or die event arrives whose "name" attribute is not exactly the
+      container's name
+    Then it is ignored: it counts toward no report, and its die neither ends
+      the wait nor removes this launch's shadow directory
+
+  Scenario: CS-LNCH-096 A start that never ran the container is cleaned up at once
+    Given a new container's "docker start" returned without a signal from the launcher
+    When "docker inspect" then reports the container still "created"
+    Then the start never ran it (a TTY, mount or OCI error, which docker printed):
+      there is no die to wait for, the reservation is removed with "docker rm"
+      and the shadow directory with it, and the launcher exits with docker's status
+    And the stale-reservation sweep (CS-SESS-052) stays the backstop when the
+      removal fails
+
+  Scenario: CS-LNCH-097 Signals after the child exited never kill the launcher mid-report
+    Given the session child has exited and the launcher is waiting for die or
+      writing its report
+    Then the signal handlers of CS-LNCH-086 are still installed; they are
+      released only once the report is written
+    And a SIGTERM, SIGHUP, SIGINT or SIGQUIT arriving then ends the wait at
+      once: nothing is printed and the launcher exits with the child's status,
+      never 143
+
+  Scenario: CS-LNCH-098 The events watcher dies with the launcher
+    Then "docker events" runs in its own process group, so the terminal's
+      signals never reach it
+    And on Linux it has a parent-death SIGKILL from an OS thread held for its
+      lifetime, so a launcher killed outright (SIGKILL) never leaves it running

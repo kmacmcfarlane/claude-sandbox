@@ -9,4 +9,7 @@ import "syscall"
 // have been left by whatever killed it.
 func sessionAttr() *syscall.SysProcAttr { return &syscall.SysProcAttr{} }
 
+// tetherAttr: its own process group; no parent-death signal off Linux.
+func tetherAttr() *syscall.SysProcAttr { return &syscall.SysProcAttr{Setpgid: true} }
+
 const ioctlGetTermios = syscall.TIOCGETA

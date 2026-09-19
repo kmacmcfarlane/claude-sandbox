@@ -22,7 +22,12 @@ type Fake struct {
 	// SessionSignal, when set, is reported as the signal the launcher
 	// forwarded to the session child (a SIGTERM from an SDK client).
 	SessionSignal os.Signal
-	stubs         []stub
+	// LateSignal, when set, arrives on the result's Late channel: a signal
+	// received after the session child exited (CS-LNCH-097).
+	LateSignal os.Signal
+	// Released counts the Release calls of RunSession results.
+	Released int
+	stubs    []stub
 }
 
 type stub struct {
@@ -114,7 +119,7 @@ func (f *Fake) RunSession(c Cmd) (SessionResult, error) {
 	f.record(c)
 	f.mu.Lock()
 	f.Session = &c
-	sig := f.SessionSignal
+	sig, late := f.SessionSignal, f.LateSignal
 	f.mu.Unlock()
 	out, err := f.match(c)
 	if c.Stdout != nil && out != "" {
@@ -126,7 +131,17 @@ func (f *Fake) RunSession(c Cmd) (SessionResult, error) {
 			return SessionResult{Code: -1}, err
 		}
 	}
-	return SessionResult{Code: ExitCode(err), Forwarded: sig}, nil
+	res := SessionResult{Code: ExitCode(err), Forwarded: sig, Release: func() {
+		f.mu.Lock()
+		f.Released++
+		f.mu.Unlock()
+	}}
+	if late != nil {
+		ch := make(chan os.Signal, 1)
+		ch <- late
+		res.Late = ch
+	}
+	return res, nil
 }
 
 // CommandLines renders each recorded call as a single string, for assertions.

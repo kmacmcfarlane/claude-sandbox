@@ -6,8 +6,10 @@ package oomreport_test
 // output is the event stream, which ends when the stub's output does.
 
 import (
+	"io"
 	"os"
 	"strings"
+	"syscall"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -53,7 +55,7 @@ var _ = Describe("oomreport", func() {
 	It("CS-LNCH-087: a subscription that cannot start has seen nothing and never blocks", func() {
 		w := oomreport.Start(failStart{&execx.Fake{}}, "cs-x", time.Now())
 		start := time.Now()
-		o := w.Await(time.Minute, oomreport.Died)
+		o, _ := w.Await(time.Minute, oomreport.Died, nil)
 		Expect(time.Since(start)).To(BeNumerically("<", time.Second))
 		Expect(o).To(Equal(oomreport.Outcome{}))
 		Expect(oomreport.Primary(o)).To(Equal(oomreport.Quiet))
@@ -62,7 +64,7 @@ var _ = Describe("oomreport", func() {
 
 	It("CS-LNCH-089, CS-LNCH-093: counts oom events and reads the die's exit code and the limit labels", func() {
 		w, _ := watch(ev("oom", "", limitLabels...) + ev("oom", "", limitLabels...) + ev("die", "137", limitLabels...))
-		o := w.Await(time.Second, oomreport.Died)
+		o, _ := w.Await(time.Second, oomreport.Died, nil)
 		Expect(o.Died).To(BeTrue())
 		Expect(o.ExitCode).To(Equal(137))
 		Expect(o.OOMKills).To(Equal(2))
@@ -72,14 +74,14 @@ var _ = Describe("oomreport", func() {
 
 	It("ignores lines that are not oom or die events", func() {
 		w, _ := watch("not json\n" + `{"Action":"start","Actor":{"Attributes":{}}}` + "\n" + ev("die", "0"))
-		o := w.Await(time.Second, oomreport.Died)
+		o, _ := w.Await(time.Second, oomreport.Died, nil)
 		Expect(o).To(Equal(oomreport.Outcome{Died: true}))
 	})
 
 	It("CS-LNCH-088: a stream that ends without die is a detach, whatever ooms it saw", func() {
 		w, _ := watch(ev("oom", ""))
 		start := time.Now()
-		o := w.Await(time.Minute, oomreport.Died)
+		o, _ := w.Await(time.Minute, oomreport.Died, nil)
 		Expect(time.Since(start)).To(BeNumerically("<", time.Second), "the stream's end stops the wait")
 		Expect(o.Died).To(BeFalse())
 		Expect(oomreport.Primary(o)).To(Equal(oomreport.Quiet))
@@ -89,16 +91,72 @@ var _ = Describe("oomreport", func() {
 		w := oomreport.Start(openStream{&execx.Fake{}}, "cs-x", time.Now())
 		defer w.Stop()
 		start := time.Now()
-		o := w.Await(50*time.Millisecond, oomreport.Died)
+		o, _ := w.Await(50*time.Millisecond, oomreport.Died, nil)
 		Expect(time.Since(start)).To(BeNumerically(">=", 50*time.Millisecond))
 		Expect(o.Died).To(BeFalse())
 	})
 
-	It("CS-LNCH-088: a die with 137 but no oom yet is not done waiting; with one it is", func() {
-		Expect(oomreport.Died(oomreport.Outcome{Died: true, ExitCode: 137})).To(BeFalse())
-		Expect(oomreport.Died(oomreport.Outcome{Died: true, ExitCode: 137, OOMKills: 1})).To(BeTrue())
-		Expect(oomreport.Died(oomreport.Outcome{Died: true, ExitCode: 0})).To(BeTrue())
-		Expect(oomreport.Died(oomreport.Outcome{})).To(BeFalse())
+	It("CS-LNCH-088: a die with 137 and no oom waits only the short grace for a trailing oom", func() {
+		w := oomreport.Start(&scripted{lines: []string{ev("die", "137")}}, "cs-x", time.Now())
+		defer w.Stop()
+		start := time.Now()
+		o, stopped := w.AwaitDeath(nil)
+		Expect(stopped).To(BeFalse())
+		Expect(o).To(Equal(oomreport.Outcome{Died: true, ExitCode: 137}))
+		el := time.Since(start)
+		Expect(el).To(BeNumerically(">=", oomreport.OOMGrace))
+		Expect(el).To(BeNumerically("<", oomreport.DieWait), "never the full die wait")
+		Expect(oomreport.Primary(o)).To(Equal(oomreport.Quiet))
+	})
+
+	It("CS-LNCH-088: an oom that trails the die inside the grace still counts", func() {
+		w := oomreport.Start(&scripted{lines: []string{ev("die", "137")}, later: []string{ev("oom", "")}, delay: 30 * time.Millisecond}, "cs-x", time.Now())
+		defer w.Stop()
+		o, _ := w.AwaitDeath(nil)
+		Expect(o.OOMKills).To(Equal(1))
+		Expect(oomreport.Primary(o)).To(Equal(oomreport.Killed))
+	})
+
+	It("CS-LNCH-095: events of a container whose name merely starts with this one's are ignored", func() {
+		fake := &execx.Fake{}
+		other := strings.ReplaceAll(ev("oom", ""), `"name":"cs-x"`, `"name":"cs-x0"`) +
+			strings.ReplaceAll(ev("die", "137"), `"name":"cs-x"`, `"name":"cs-x0"`)
+		fake.On("docker events", other+ev("die", "0"), nil)
+		w := oomreport.Start(fake, "cs-x", time.Now())
+		o, _ := w.Await(time.Second, oomreport.Died, nil)
+		Expect(o).To(Equal(oomreport.Outcome{Died: true}))
+	})
+
+	It("CS-LNCH-098: the watcher is started to die with the launcher", func() {
+		_, fake := watch("")
+		Expect(fake.Calls[0].DieWithParent).To(BeTrue())
+	})
+
+	It("CS-LNCH-097: a signal on stop ends the wait at once and says so", func() {
+		w := oomreport.Start(openStream{&execx.Fake{}}, "cs-x", time.Now())
+		defer w.Stop()
+		stop := make(chan os.Signal, 1)
+		stop <- syscall.SIGTERM
+		start := time.Now()
+		_, stopped := w.AwaitDeath(stop)
+		Expect(stopped).To(BeTrue())
+		Expect(time.Since(start)).To(BeNumerically("<", 100*time.Millisecond))
+	})
+
+	It("CS-SESS-060: a joined 137 stops waiting at the container's die, then only the grace", func() {
+		w := oomreport.Start(&scripted{lines: []string{ev("die", "137")}}, "cs-x", time.Now())
+		defer w.Stop()
+		start := time.Now()
+		o, _ := w.AwaitJoined(137, nil)
+		Expect(time.Since(start)).To(BeNumerically("<", oomreport.DieWait))
+		Expect(oomreport.Joined(137, o)).To(Equal(oomreport.Quiet))
+	})
+
+	It("CS-SESS-060: a joined exit other than 137 waits the grace for ooms in flight", func() {
+		w := oomreport.Start(&scripted{later: []string{ev("oom", "")}, delay: 30 * time.Millisecond}, "cs-x", time.Now())
+		defer w.Stop()
+		o, _ := w.AwaitJoined(0, nil)
+		Expect(oomreport.Joined(0, o)).To(Equal(oomreport.Survived))
 	})
 
 	It("CS-LNCH-090: a die with another code after ooms is a survived kill; a die alone is quiet", func() {
@@ -177,3 +235,25 @@ type blockingProc struct{ done chan struct{} }
 func (p *blockingProc) Signal(os.Signal) error { return nil }
 func (p *blockingProc) Wait() error            { <-p.done; return nil }
 func (p *blockingProc) Pid() int               { return 1 }
+
+// scripted is a runner whose "docker events" publishes lines at once, then
+// later after delay, and stays open until signalled.
+type scripted struct {
+	execx.Fake
+	lines, later []string
+	delay        time.Duration
+}
+
+func (r *scripted) Start(c execx.Cmd) (execx.Process, error) {
+	p := &blockingProc{done: make(chan struct{})}
+	go func() {
+		for _, l := range r.lines {
+			io.WriteString(c.Stdout, l)
+		}
+		time.Sleep(r.delay)
+		for _, l := range r.later {
+			io.WriteString(c.Stdout, l)
+		}
+	}()
+	return p, nil
+}

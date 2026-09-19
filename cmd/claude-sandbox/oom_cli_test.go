@@ -7,20 +7,34 @@ package main
 // stream without die reads as a detach at once rather than after 2 s.
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/oomreport"
 )
 
-// dockerEvent renders one "docker events --format {{json .}}" line.
+// thisContainer stands for the subscribed container's name in dockerEvent
+// lines; events() substitutes it (the watcher matches names exactly,
+// CS-LNCH-095).
+const thisContainer = "{{CONTAINER}}"
+
+// dockerEvent renders one "docker events --format {{json .}}" line for the
+// subscribed container.
 func dockerEvent(action, exit string, labels ...string) string {
-	attrs := `"name":"cs-x"`
+	return namedEvent(thisContainer, action, exit, labels...)
+}
+
+// namedEvent renders one event line for the container called name.
+func namedEvent(name, action, exit string, labels ...string) string {
+	attrs := `"name":"` + name + `"`
 	if exit != "" {
 		attrs += `,"exitCode":"` + exit + `"`
 	}
@@ -46,13 +60,21 @@ func exists(p string) bool {
 	return err == nil
 }
 
-var _ = Describe("session child and OOM report (CS-LNCH-085..094)", func() {
+var _ = Describe("session child and OOM report (CS-LNCH-085..098)", func() {
 	var f *cliFixture
 	BeforeEach(func() { f = newCLIFixture() })
 
 	// events scripts the container's event stream.
 	events := func(lines ...string) {
-		f.fake.On("docker events", strings.Join(lines, ""), nil)
+		f.fake.OnFunc("docker events", func(c execx.Cmd) (string, error) {
+			name := ""
+			for _, a := range c.Args {
+				if v, ok := strings.CutPrefix(a, "container="); ok {
+					name = v
+				}
+			}
+			return strings.ReplaceAll(strings.Join(lines, ""), thisContainer, name), nil
+		})
 	}
 	// exits scripts the session child's status.
 	exits := func(pattern string, code int) {
@@ -69,9 +91,11 @@ var _ = Describe("session child and OOM report (CS-LNCH-085..094)", func() {
 		Expect(f.run()).To(Equal(0), f.errw.String())
 		name := nameOf(f.launched().Args)
 		lines := f.fake.CommandLines()
-		Expect(lines[len(lines)-2]).To(MatchRegexp(`^docker events --since \d+\.\d{9} --filter container=` + name +
+		Expect(lines[len(lines)-3]).To(MatchRegexp(`^docker events --since \d+\.\d{9} --filter container=` + name +
 			` --filter event=oom --filter event=die --format \{\{json \.\}\}$`))
-		Expect(lines[len(lines)-1]).To(Equal("docker start -ai --detach-keys=ctrl-q,ctrl-q " + name))
+		Expect(lines[len(lines)-2]).To(Equal("docker start -ai --detach-keys=ctrl-q,ctrl-q " + name))
+		// CS-LNCH-096: then whether the start ever ran the container.
+		Expect(lines[len(lines)-1]).To(HavePrefix("docker inspect --type container "))
 		Expect(f.fake.Session).NotTo(BeNil())
 	})
 
@@ -173,6 +197,77 @@ var _ = Describe("session child and OOM report (CS-LNCH-085..094)", func() {
 		Expect(exists(shadowDirOf(f.launched().Args))).To(BeTrue(), "left to a later launch's sweep")
 	})
 
+	It("CS-LNCH-092: on a terminal, the reset precedes the report and nothing else is reset", func() {
+		f.env.IsTerminal = func(w io.Writer) bool { return w == f.env.Err }
+		exits("docker start", 137)
+		events(dockerEvent("oom", ""), dockerEvent("die", "137"))
+		Expect(f.run()).To(Equal(137))
+		errs := f.errw.String()
+		reset := strings.Index(errs, oomreport.TerminalReset)
+		report := strings.Index(errs, "claude-sandbox: this session was killed")
+		Expect(reset).To(BeNumerically(">=", 0), "the reset is written on a terminal")
+		Expect(report).To(BeNumerically(">", reset), "before the report")
+		Expect(strings.Count(errs, "\x1b")).To(Equal(strings.Count(oomreport.TerminalReset, "\x1b")))
+	})
+
+	It("CS-LNCH-092: the soft note never resets the terminal, even on one", func() {
+		f.env.IsTerminal = func(io.Writer) bool { return true }
+		events(dockerEvent("oom", ""), dockerEvent("die", "0"))
+		Expect(f.run()).To(Equal(0))
+		Expect(f.errw.String()).To(ContainSubstring("claude-sandbox: note:"))
+		Expect(f.errw.String()).NotTo(ContainSubstring("\x1b"))
+	})
+
+	It("CS-LNCH-095: events of a container whose name only starts with this one's are ignored", func() {
+		exits("docker start", 0)
+		events(namedEvent(thisContainer+"0", "oom", ""), namedEvent(thisContainer+"0", "die", "137"), dockerEvent("die", "0"))
+		Expect(f.run()).To(Equal(0))
+		Expect(f.errw.String()).NotTo(ContainSubstring("OOM"))
+		Expect(exists(shadowDirOf(f.launched().Args))).To(BeFalse(), "our own die removed our directory")
+	})
+
+	It("CS-LNCH-095: another container's die never counts as ours, so the shadow directory stays", func() {
+		events(namedEvent(thisContainer+"0", "die", "0"))
+		Expect(f.run()).To(Equal(0))
+		Expect(exists(shadowDirOf(f.launched().Args))).To(BeTrue(), "our container may still run")
+	})
+
+	It("CS-LNCH-096: a start that never ran the container removes the reservation and the shadow directory at once", func() {
+		exits("docker start", 1)
+		f.fake.On("docker inspect --type container", "created 2026-09-19T00:00:00Z\n", nil)
+		start := time.Now()
+		Expect(f.run()).To(Equal(1))
+		Expect(time.Since(start)).To(BeNumerically("<", oomreport.DieWait), "no die wait")
+		name := nameOf(f.launched().Args)
+		Expect(f.fake.CommandLines()).To(ContainElement("docker rm " + name))
+		Expect(exists(shadowDirOf(f.launched().Args))).To(BeFalse())
+	})
+
+	It("CS-LNCH-096: a start that ran is not treated as never started", func() {
+		f.fake.On("docker inspect --type container", "running 2026-09-19T00:00:00Z\n", nil)
+		events()
+		Expect(f.run()).To(Equal(0))
+		Expect(f.fake.CommandLines()).NotTo(ContainElement(HavePrefix("docker rm ")))
+	})
+
+	It("CS-LNCH-097: a signal after the child returned ends the wait silently with the child's status", func() {
+		f.fake.LateSignal = syscall.SIGTERM
+		exits("docker start", 137)
+		events(dockerEvent("oom", ""))
+		start := time.Now()
+		Expect(f.run()).To(Equal(137))
+		Expect(time.Since(start)).To(BeNumerically("<", oomreport.DieWait))
+		Expect(f.errw.String()).NotTo(ContainSubstring("OOM"))
+		Expect(f.fake.Released).To(Equal(1), "handlers released once the launcher is done")
+	})
+
+	It("CS-LNCH-097: the handlers are released only after the report is written", func() {
+		exits("docker start", 137)
+		events(dockerEvent("oom", ""), dockerEvent("die", "137"))
+		Expect(f.run()).To(Equal(137))
+		Expect(f.fake.Released).To(Equal(1))
+	})
+
 	Describe("headless (CS-LNCH-060, CS-LNCH-091, CS-LNCH-092)", func() {
 		It("CS-LNCH-091: SIGTERM from an SDK client ends the launch at once with docker's status", func() {
 			f.fake.SessionSignal = syscall.SIGTERM
@@ -183,6 +278,8 @@ var _ = Describe("session child and OOM report (CS-LNCH-085..094)", func() {
 		})
 
 		It("CS-LNCH-092, CS-LNCH-060: an OOM report is plain lines on stderr, stdout stays claude's", func() {
+			// Even were stderr a terminal: headless never resets it.
+			f.env.IsTerminal = func(io.Writer) bool { return true }
 			exits("docker start", 137)
 			events(dockerEvent("oom", ""), dockerEvent("die", "137"))
 			Expect(f.run("headless", "--")).To(Equal(137))

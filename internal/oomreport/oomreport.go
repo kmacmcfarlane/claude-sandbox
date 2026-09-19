@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -46,10 +47,12 @@ const OOMExit = 128 + int(syscall.SIGKILL)
 // was detached, and no die comes at all.
 var DieWait = 2 * time.Second
 
-// JoinGrace is how long a joined session's exit waits for an oom event it
-// has not seen yet: the daemon publishes oom asynchronously, and the exec can
-// return first (CS-SESS-060). Exit 137 waits the full DieWait instead.
-var JoinGrace = 150 * time.Millisecond
+// OOMGrace is how long to wait for an oom event not seen yet once the wait
+// for die is over: the daemon publishes oom asynchronously, so a die with
+// exit 137 (or a joined exec's own 137, or its normal end) can arrive first
+// (CS-LNCH-088, CS-SESS-060). Far shorter than DieWait: a 137 without an oom
+// (docker kill, a stop timeout) must not hold the prompt for 2 s.
+var OOMGrace = 150 * time.Millisecond
 
 // Limit is the memory limit a container was created with and where in the
 // cascade it came from ("" when not recorded).
@@ -72,8 +75,9 @@ type Outcome struct {
 
 // Watch is a running "docker events" subscription for one container.
 type Watch struct {
-	proc execx.Process
-	pw   *io.PipeWriter
+	container string
+	proc      execx.Process
+	pw        *io.PipeWriter
 
 	mu      sync.Mutex
 	out     Outcome
@@ -83,7 +87,9 @@ type Watch struct {
 
 // EventsArgs is the subscription (CS-LNCH-087). --since replays anything the
 // daemon published between since and the moment the subscription connects,
-// so a container that dies at once is not missed.
+// so a container that dies at once is not missed. docker's container= filter
+// matches names by PREFIX, so read() also checks the exact name
+// (CS-LNCH-095).
 func EventsArgs(container string, since time.Time) []string {
 	return []string{"events",
 		"--since", fmt.Sprintf("%d.%09d", since.Unix(), since.Nanosecond()),
@@ -97,11 +103,14 @@ func EventsArgs(container string, since time.Time) []string {
 // whose stream has ended, so the session still runs and nothing is reported.
 func Start(r execx.Runner, container string, since time.Time) *Watch {
 	pr, pw := io.Pipe()
-	w := &Watch{pw: pw, changed: make(chan struct{}, 1), ended: make(chan struct{})}
+	w := &Watch{container: container, pw: pw, changed: make(chan struct{}, 1), ended: make(chan struct{})}
 	// The reader runs before Start: a runner may write its output
 	// synchronously, and an unread pipe would block it.
 	go w.read(pr)
-	proc, err := r.Start(execx.Cmd{Name: "docker", Args: EventsArgs(container, since), Stdout: pw})
+	// DieWithParent: a launcher killed outright must not leave the watcher
+	// running forever (CS-LNCH-098). Start's own process group keeps terminal
+	// signals away from it.
+	proc, err := r.Start(execx.Cmd{Name: "docker", Args: EventsArgs(container, since), Stdout: pw, DieWithParent: true})
 	if err != nil {
 		pw.Close()
 		return w
@@ -136,6 +145,10 @@ func (w *Watch) read(r io.Reader) {
 		if action == "" {
 			action = e.Status
 		}
+		// CS-LNCH-095: "container=cs-otter-2" also matches cs-otter-20.
+		if e.Actor.Attributes["name"] != w.container {
+			continue
+		}
 		w.mu.Lock()
 		switch action {
 		case "oom":
@@ -161,23 +174,52 @@ func (w *Watch) read(r io.Reader) {
 }
 
 // Await waits until done reports true for what has arrived, the stream ends,
-// or timeout passes, and returns what has arrived by then.
-func (w *Watch) Await(timeout time.Duration, done func(Outcome) bool) Outcome {
+// timeout passes, or a signal arrives on stop, and returns what has arrived
+// by then; stopped reports the signal (CS-LNCH-097). A nil stop never fires.
+func (w *Watch) Await(timeout time.Duration, done func(Outcome) bool, stop <-chan os.Signal) (o Outcome, stopped bool) {
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	for {
-		o := w.Snapshot()
+		o = w.Snapshot()
 		if done(o) {
-			return o
+			return o, false
 		}
 		select {
 		case <-w.changed:
 		case <-w.ended:
-			return w.Snapshot()
+			return w.Snapshot(), false
 		case <-timer.C:
-			return w.Snapshot()
+			return w.Snapshot(), false
+		case <-stop:
+			return w.Snapshot(), true
 		}
 	}
+}
+
+// AwaitDeath is the wait of a primary session (new, attach, headless): up to
+// DieWait for die, then — when the die says 137 and no oom has arrived —
+// OOMGrace more for the oom that may trail it (CS-LNCH-088).
+func (w *Watch) AwaitDeath(stop <-chan os.Signal) (Outcome, bool) {
+	o, stopped := w.Await(DieWait, Died, stop)
+	if stopped || !o.Died || o.ExitCode != OOMExit || o.OOMKills > 0 {
+		return o, stopped
+	}
+	return w.Await(OOMGrace, SawOOM, stop)
+}
+
+// AwaitJoined is the wait of a joined session that ended with status code
+// (CS-SESS-060). With 137, up to DieWait for an oom — ending early when the
+// container's die arrives, then OOMGrace more for a trailing oom; otherwise
+// OOMGrace for ooms still in flight.
+func (w *Watch) AwaitJoined(code int, stop <-chan os.Signal) (Outcome, bool) {
+	if code != OOMExit {
+		return w.Await(OOMGrace, Never, stop)
+	}
+	o, stopped := w.Await(DieWait, SawOOMOrDied, stop)
+	if stopped || o.OOMKills > 0 {
+		return o, stopped
+	}
+	return w.Await(OOMGrace, SawOOM, stop)
 }
 
 // Snapshot returns what has arrived so far.
@@ -194,17 +236,16 @@ func (w *Watch) Stop() {
 	}
 }
 
-// Died is the Await predicate of a primary session (new, attach, headless):
-// done once die has arrived — and, when it says 137, once at least one oom
-// has too, since the daemon may publish the oom after the die it caused.
-func Died(o Outcome) bool {
-	return o.Died && (o.ExitCode != OOMExit || o.OOMKills > 0)
-}
+// Died is the Await predicate for the container's die.
+func Died(o Outcome) bool { return o.Died }
 
-// SawOOM is the Await predicate of a joined session with exit 137.
+// SawOOM is the Await predicate for at least one oom.
 func SawOOM(o Outcome) bool { return o.OOMKills > 0 }
 
-// Never is the predicate that waits out the whole timeout (the join grace).
+// SawOOMOrDied is done at the first oom or at die.
+func SawOOMOrDied(o Outcome) bool { return o.OOMKills > 0 || o.Died }
+
+// Never is the predicate that waits out the whole timeout (a grace wait).
 func Never(Outcome) bool { return false }
 
 // Verdict classifies a finished session.

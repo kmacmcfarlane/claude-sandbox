@@ -221,17 +221,25 @@ func pidClassFrom(found []sessions.Session) string {
 // until the next launch's stale cleanup, so it is removed here first
 // (CS-LNCH-057), and the shadow directory with it (CS-LNCH-083) — but only once
 // the reservation is gone: a container that still exists may still mount it.
-// After a session, the directory goes once the container's die event was seen
-// (CS-LNCH-094); after a detach or a signal-initiated exit it stays, for a
-// later launch's sweep.
+// A "docker start" that returned while the container is still "created"
+// never ran it (a TTY, mount or OCI error, which docker has printed): the
+// reservation and the directory are removed the same way, at once
+// (CS-LNCH-096). After a session, the directory goes once the container's die
+// event was seen (CS-LNCH-094); after a detach or a signal-initiated exit it
+// stays, for a later launch's sweep.
 func startReserved(env *Env, plan *launch.Plan, headless bool) error {
-	lim := oomreport.Limit{Value: plan.MemoryLimit, Source: plan.MemoryLimitSource}
-	end, err := runSession(env, plan.StartCmd(), plan.ContainerName, primarySession, lim, headless)
-	if err != nil {
+	end, err := runSession(env, plan.StartCmd(), plan.ContainerName, sessionOpts{
+		kind:     reservedSession,
+		fallback: oomreport.Limit{Value: plan.MemoryLimit, Source: plan.MemoryLimitSource},
+		headless: headless,
+	})
+	if err != nil || end.neverStarted {
 		if sessions.RemoveReservation(env.Runner, plan.ContainerName) == nil && plan.ShadowDir != "" {
 			os.RemoveAll(plan.ShadowDir)
 		}
-		return err
+		if err != nil {
+			return err
+		}
 	}
 	if end.gone && plan.ShadowDir != "" {
 		os.RemoveAll(plan.ShadowDir)

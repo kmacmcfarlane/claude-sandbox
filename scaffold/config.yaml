@@ -17,7 +17,9 @@
 # model: opus
 
 # Container memory limit. Uses Docker memory notation (e.g. 512m, 8g, 16g).
-# Swap is disabled — the container is OOM-killed if it exceeds this limit.
+# Swap is disabled — past this limit the kernel's OOM killer kills the process
+# that allocated (a test binary, or claude itself, which ends the session);
+# the launcher reports it on exit, naming this limit and the file it came from.
 # The limit is PER CONTAINER, so several sessions in their own containers
 # multiply it; sessions joined into one container share its limit.
 # Default: 8g

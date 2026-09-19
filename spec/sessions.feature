@@ -591,7 +591,8 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
     # wait for.
     When the joined "docker exec" returns without a signal from the launcher
     Then with exit 137 the launcher waits up to 2 s for an oom event, and
-      with one prints the OOM report (CS-LNCH-089)
+      with one prints the OOM report (CS-LNCH-089); a die of the container
+      ends that wait early, leaving only 150 ms for an oom that trails it
     And with any other status it waits briefly (150 ms) for oom events that
       are still in flight, and prints the softer line (CS-LNCH-090) when
       there are any
