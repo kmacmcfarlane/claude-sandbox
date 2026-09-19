@@ -23,7 +23,7 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     When "claude-sandbox --resume" is run
     Then "--resume" and all subsequent args are appended to the container command
     # Pass-through allowlist: --resume --continue --verbose --output-format
-    # --allowedTools --disallowTools --permission-prompt-tool --mcp-config
+    # --allowedTools --disallowedTools --permission-prompt-tool --mcp-config
     # --permission-mode --append-system-prompt --system-prompt --max-turns
     # --print --input-format --model --fallback-model --name
     # (-n, the short form of --name, needs no allowlisting: single-dash args
@@ -762,6 +762,66 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     And join ("docker exec") and attach ("docker attach") are unchanged
     Given "docker start" cannot be executed
     Then the reserved container is removed before the error is reported
+
+  # ---- shadow directory lifecycle ----
+  # Every launch writes its shadow files (CLAUDE.md, .mcp.json, gitconfig) into
+  # one fresh "claude-sandbox<digits>" directory under the temp root and
+  # bind-mounts them. The launcher ends by exec'ing "docker start", so it can
+  # never remove its own directory after the session; a later launch does, once
+  # no container still uses it. Headless probes (Paseo's "--version" and
+  # "auth status") are full launches, so without this the directories pile up.
+
+  Scenario: CS-LNCH-080 The shadow directory is made under the lock and named on the container
+    When a new container is launched
+    Then its shadow directory is created after the launch lock is taken, so a
+      launch holding the lock never sees another launch's directory in the gap
+      before that launch's "docker create"
+    And the container carries the label "claude-sandbox.shadowdir=<absolute dir>"
+    And the label is not part of the config hash (two launches with different
+      shadow directories hash the same)
+
+  Scenario: CS-LNCH-081 A launch removes old shadow directories no container uses
+    Given directories under the temp root
+    When a launch holds the launch lock and has run its discovery
+    Then a directory is removed only if ALL of these hold:
+      its name is "claude-sandbox" followed by digits only,
+      it is a real directory (lstat; a symlink is never followed or removed),
+      it is owned by the invoking user,
+      it was last modified more than one hour ago (a lockless or older
+        launcher may still be between making it and "docker create"),
+      and no container on the host, in any state (created, running, paused,
+        exited, dead), names it in its claude-sandbox.shadowdir label or
+        bind-mounts a file from it (containers from launchers that predate the
+        label, or with no sandbox labels at all)
+    And the launch's own directory is never a candidate
+    And nothing is printed when directories are removed
+
+  Scenario: CS-LNCH-082 The shadow directory sweep never blocks a launch
+    Given no directory under the temp root is old enough to be a candidate
+    Then no docker call is made for the sweep
+    Given there are candidates
+    Then exactly one "docker ps -a --no-trunc" (no label or status filter) lists
+      every container's shadowdir label and mounts
+    Given that listing fails
+    Then nothing is removed, one warning is printed, and the launch proceeds
+    Given a directory cannot be removed or the temp root cannot be read
+    Then one warning is printed and the launch proceeds
+
+  Scenario: CS-LNCH-083 A launch that fails before its session removes its own shadow directory
+    Given "docker create" fails (any error other than a retried name conflict)
+      or the launch fails after the directory was made and before the create
+    Then the launch's shadow directory is removed before the error is reported
+    Given "docker start" cannot be executed and the reservation was removed
+    Then the shadow directory is removed too
+    But if removing the reservation failed, the container may still use the
+      directory, so it is kept (a later launch's sweep takes it)
+
+  Scenario: CS-LNCH-084 The drift check leaves no shadow directory behind
+    # attach, join and the launch-time session prompt compute the config hash a
+    # launch WOULD have, which writes the shadow files to hash their contents.
+    When the would-be config hash is computed
+    Then its shadow files are written to a private temporary directory that is
+      removed before returning
 
   # ---- headless mode: SDK clients (Paseo) ----
   # An SDK client (the Claude Agent SDK, as Paseo's daemon uses it) spawns the

@@ -1179,16 +1179,41 @@ create conflict retry above, but two concurrent launches from inside different c
 get the same pid class.
 Spec: `spec/sessions.feature` CS-SESS-048..054, `spec/launch.feature` CS-LNCH-057.
 
+#### Shadow directory cleanup
+
+Each launch writes its shadow files (the merged `CLAUDE.md`, `.mcp.json`, `gitconfig`) into one
+fresh `claude-sandbox<digits>` directory under the temp root (`$TMPDIR`, else `/tmp`) and
+bind-mounts them. The launcher ends by exec'ing `docker start`, so it cannot remove its own
+directory after the session; instead the container carries a `claude-sandbox.shadowdir` label
+naming it, and every later launch sweeps, under the launch lock and right after discovery, the
+directories nothing uses any more. A directory is removed only when its name is exactly
+`claude-sandbox` followed by digits, it is a real directory (symlinks are never followed or
+removed) owned by you, it has not been modified for an hour, and no container on the host — in
+any state, including exited ones kept without `--rm` and containers from older launchers that
+predate the label — names it in its label or mounts a file from it. The directory is made after
+the lock is taken, so a launch never sees another launch's directory before that launch has
+created its container; the hour covers launches that could not take the lock and older
+launchers. The sweep makes no docker call unless there is a candidate, never prints on success,
+and any failure (the container listing, a removal) is one warning; it never blocks a launch.
+A launch that fails before its session starts (a failed `docker create`, or a failed exec of
+`docker start` once the reservation is removed) removes its own directory, and the config-drift
+check behind `--attach`/`--join` uses a private directory it removes before returning. The
+label is not part of the config-drift hash. Headless probes such as Paseo's `--version` and
+`auth status` are full launches, so this is what keeps them from filling the temp root.
+Spec: `spec/launch.feature` CS-LNCH-080..084.
+
 ### Image layering
 
 Four images take part in a launch, and the container runs the last of them:
 
 | Image | Built from | Rebuilds when |
 |---|---|---|
-| `claude-sandbox` | `Dockerfile` — OS, toolchains, Docker CLI, Python venv, sandbox binary. **No Claude Code.** | `Dockerfile` or a baked source (`cmd/`, `internal/`, `go.mod`/`go.sum`, `assets.go`, `logstream/`, `entrypoint.sh`, `PROMPT_RALPH.md`, `mcp/`, `notification-hooks.json`; `_test.go` files excluded) is newer than the image |
-| `claude-sandbox-cli` | `Dockerfile.cli` — installs Claude Code, pinned to a version | `Dockerfile.cli` is newer, or you accept a Claude Code update |
-| `claude-sandbox-df-…` | your child `.claude-sandbox/Dockerfile`, `FROM claude-sandbox` | the child Dockerfile is newer, or the base was rebuilt |
-| `<base-or-child>:run` | a generated one-layer "cap": `FROM <base-or-child>` + `COPY --link` of the CLI from `claude-sandbox-cli` | either parent is newer than the cap |
+| `claude-sandbox` | `Dockerfile` — OS, toolchains, Docker CLI, Python venv, sandbox binary. **No Claude Code.** | the content of `Dockerfile` or of a baked source (`cmd/`, `internal/`, `go.mod`/`go.sum`, `assets.go`, `logstream/`, `entrypoint.sh`, `PROMPT_RALPH.md`, `mcp/`, `notification-hooks.json`; `_test.go` files excluded) changed |
+| `claude-sandbox-cli` | `Dockerfile.cli` — installs Claude Code, pinned to a version | the content of `Dockerfile.cli` changed, or you accept a Claude Code update |
+| `claude-sandbox-df-…` | your child `.claude-sandbox/Dockerfile`, `FROM claude-sandbox` | the child Dockerfile's content changed, or the base image ID did |
+| `<base-or-child>:run` | a generated one-layer "cap": `FROM <base-or-child>` + `COPY --link` of the CLI from `claude-sandbox-cli` | either parent's image ID changed |
+
+Each build stamps the image with a `claude-sandbox.build-inputs` label: a hash of exactly the inputs in the last column. The next launch recomputes that hash and rebuilds only on a mismatch, so touching a file, pulling without changes, or opening a fresh worktree (whose files are all newer than your images) rebuilds nothing. The launcher used to compare file mtimes with the image's creation time instead. A fully cached rebuild leaves the creation time unchanged, so once a file was newer than the image, every launch rebuilt it again. An image built before the label existed still uses that old time rule until its next build stamps it. Note that the label is part of the image config: when the base gets its first label, children built on the old base rebuild once. `docker image inspect -f '{{ index .Config.Labels "claude-sandbox.build-inputs" }}' <image>` shows an image's label.
 
 The point of the split is what a **Claude Code update costs**: previously the CLI was installed mid-way through the base Dockerfile, so every update invalidated the base from that layer down and — because every child's `FROM` ID changed — rebuilt every child image cold (minutes per project for a 13-second install). Now an update rebuilds the small CLI image once and a one-layer cap per project on its next launch; the base and children are untouched. The cap is built from a Dockerfile fed on stdin (no build context) and takes about a second when cached.
 

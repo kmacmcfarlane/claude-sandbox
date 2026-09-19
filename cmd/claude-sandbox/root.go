@@ -48,6 +48,10 @@ type Env struct {
 	// Now is the clock stale reservations are judged by (CS-SESS-052); nil
 	// means time.Now.
 	Now func() time.Time
+	// TempRoot is where shadow directories are made and swept
+	// (CS-LNCH-080..084); "" means os.TempDir(). Tests point it at a scratch
+	// directory so a test launch never sweeps the real temp root.
+	TempRoot string
 }
 
 // lookupEnv is Env.LookupEnv with the Getenv fallback.
@@ -309,7 +313,7 @@ type launchFlags struct {
 
 var knownPassthrough = map[string]bool{
 	"--resume": true, "--continue": true, "--verbose": true, "--output-format": true,
-	"--allowedTools": true, "--disallowTools": true, "--permission-prompt-tool": true,
+	"--allowedTools": true, "--disallowedTools": true, "--permission-prompt-tool": true,
 	"--mcp-config": true, "--permission-mode": true, "--append-system-prompt": true,
 	"--system-prompt": true, "--max-turns": true, "--print": true, "--input-format": true,
 	"--model": true, "--fallback-model": true,

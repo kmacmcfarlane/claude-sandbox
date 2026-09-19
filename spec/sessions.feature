@@ -237,9 +237,11 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
 
   Scenario: CS-SESS-020 The config hash covers the effective launch, not raw files
     # Hashing the docker argv would change every launch: the gitconfig, CLAUDE.md,
-    # settings.json, and .mcp.json shadow files are bind-mounted from a fresh temp
-    # directory each time. Hashing the RESOLVED inputs also means an upstream edit
-    # that is fully shadowed by a more-local override correctly does not count as drift.
+    # and .mcp.json shadow files are bind-mounted from a fresh temp directory each
+    # time (settings.json is not shadowed — it reaches the container via the
+    # read-write config-dir bind, so it is not one of these generated files).
+    # Hashing the RESOLVED inputs also means an upstream edit that is fully
+    # shadowed by a more-local override correctly does not count as drift.
     Then claude-sandbox.confighash is the first 12 hex of sha256 over:
       | input                                                             |
       | the merged cascade config, canonically serialized                 |

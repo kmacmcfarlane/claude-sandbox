@@ -27,11 +27,13 @@ Feature: Image build lifecycle (CS-IMG)
     # suspect must not quietly reuse cached downloads.
 
   Scenario: CS-IMG-003 Base rebuilds when the Dockerfile is newer than the image
+    # Unlabeled images only; a labeled image compares fingerprints (CS-IMG-033/035).
     Given the image exists with creation time T
     And the repo Dockerfile has mtime after T
     Then the base is rebuilt
 
   Scenario: CS-IMG-004 Base rebuilds when any baked source is newer than the image
+    # Unlabeled images only (CS-IMG-035); the set is also what the base fingerprint hashes (CS-IMG-034).
     Given any file under the baked source set has mtime after the image creation time
     Then the base is rebuilt with a message about changed baked sources
     # Baked source set after the Go rewrite: the Go source tree (cmd/, internal/,
@@ -69,6 +71,7 @@ Feature: Image build lifecycle (CS-IMG)
     # stable|latest|X.Y.Z), so the layer busts exactly when the version moves.
 
   Scenario: CS-IMG-022 CLI image rebuilds when Dockerfile.cli is newer than the image
+    # Unlabeled images only; a labeled image compares fingerprints (CS-IMG-033/035).
     Given the CLI image exists with creation time T
     And Dockerfile.cli has mtime after T
     Then the CLI image is rebuilt
@@ -155,6 +158,8 @@ Feature: Image build lifecycle (CS-IMG)
     Then the two child image tags differ
 
   Scenario Outline: CS-IMG-016 Child rebuild triggers
+    # Unlabeled child images only; a labeled child compares fingerprints, which
+    # cover the base image ID (CS-IMG-033..035).
     Given a child Dockerfile is in use
     Then the child rebuilds when <condition>
     Examples:
@@ -191,6 +196,8 @@ Feature: Image build lifecycle (CS-IMG)
     # it; a named --chown for a user absent from the parent silently yields root.
 
   Scenario Outline: CS-IMG-025 Cap rebuild triggers
+    # Unlabeled caps only; a labeled cap compares fingerprints, which cover
+    # both parents' image IDs (CS-IMG-033..035).
     Then the cap rebuilds when <condition>
     Examples:
       | condition                                        |
@@ -202,6 +209,62 @@ Feature: Image build lifecycle (CS-IMG)
   Scenario: CS-IMG-026 Fresh cap is not rebuilt
     Given the cap exists and is newer than both its parent and the CLI image
     Then no cap build runs and the cap is used
+
+  # ---- build-input fingerprints ----
+  # Staleness used to compare source mtimes (and parent Created times) with the
+  # image's Created time. A fully cached rebuild does NOT update Created, so once
+  # a source was newer than the image — a fresh checkout or worktree, a pull, a
+  # touch — every launch ran a no-op build (and, interactively, the ~6-8 s
+  # cache-budget check) forever. Every image now records what it was built from
+  # in a label, and staleness compares that record with the current inputs.
+
+  Scenario: CS-IMG-032 Every build stamps its input fingerprint as a label
+    Then every "docker build" of the base, the CLI image, the child and the cap
+      carries "--label claude-sandbox.build-inputs=<fingerprint>"
+    And that includes --rebuild builds and the update-check CLI rebuild
+    # A label, not a forced non-cached build: the fingerprint does not depend on
+    # Created, so a cached rebuild is as good as a cold one.
+
+  Scenario: CS-IMG-033 A labeled image is stale only when its fingerprint differs
+    Given the image carries a claude-sandbox.build-inputs label
+    Then it is rebuilt when, and only when, the label differs from the current fingerprint
+      (or --rebuild was given, CS-IMG-002)
+    And source mtimes and Created times play no part
+    And the base prints a message that its inputs changed when it rebuilds for this reason
+    # So a touched Dockerfile.cli, or a fresh worktree whose files are all
+    # newer than the images, rebuilds nothing, while any content change does.
+
+  Scenario: CS-IMG-034 What each fingerprint covers
+    Then the base fingerprint hashes the content of the repo Dockerfile and of every
+      file in the baked source set (CS-IMG-004), _test.go files excluded (CS-IMG-031)
+    And each baked file counts with its permission bits, and each symlink by its target
+      (COPY bakes the link itself; a dangling or directory link is still fingerprinted)
+    And the CLI fingerprint hashes the content of Dockerfile.cli
+    And the child fingerprint hashes the child Dockerfile path, its content, the build
+      context and the base image ID
+    And the cap fingerprint hashes the generated cap Dockerfile, the parent image ID
+      and the CLI image ID
+    # Parent IDs, not Created times: switching a checkout back to content built
+    # earlier yields a parent that is older than the cap yet different from the
+    # one the cap was built on, which a time comparison cannot see. It also means
+    # a base "rebuild" that reproduced the same image leaves a labeled child alone.
+    # Not inputs: the CLAUDE_SANDBOX_VERSION stamp (as before) and the Claude
+    # Code pin, which the update check owns (CS-IMG-006..009).
+
+  Scenario: CS-IMG-035 Unlabeled images keep the previous rules
+    Given the image has no claude-sandbox.build-inputs label, or a fingerprint cannot be computed
+    Then staleness falls back to the time-based triggers of CS-IMG-003, 004, 016, 022 and 025
+    And when the base fingerprint cannot be computed a warning says so, since the
+      fallback can bring back a rebuild on every launch
+    And the next build that runs stamps the label
+
+  Scenario: CS-IMG-036 A cached rebuild settles
+    Given an image was rebuilt because its sources are newer than its creation time
+    And the rebuild was fully cached, so its creation time did not change
+    When the next launch checks it with the inputs unchanged
+    Then no build runs
+    # The measured bug: in a fresh worktree every launch rebuilt the CLI image
+    # (cached, ~0.7 s) and then ran "docker system df" (~8 s).
 
   # ---- BuildKit ----
 

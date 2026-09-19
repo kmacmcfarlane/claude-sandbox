@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"time"
@@ -77,25 +78,40 @@ func (env *Env) now() time.Time {
 // reserveContainer runs the critical section and returns the plan of the
 // container it created. in carries everything but the per-session picks;
 // in.Instance is the noun picked before the image build (CS-SESS-054).
-func reserveContainer(env *Env, in launch.Inputs, wt worktreeChoice, ralph bool) (*launch.Plan, error) {
-	// One shadow directory across attempts, so a retry rewrites the same files
-	// instead of leaving a temp directory per attempt behind.
-	if in.TempDir == "" {
-		d, err := os.MkdirTemp("", "claude-sandbox")
-		if err != nil {
-			return nil, err
-		}
-		in.TempDir = d
-	}
-
+func reserveContainer(env *Env, in launch.Inputs, wt worktreeChoice, ralph bool) (plan *launch.Plan, err error) {
 	release := acquireLaunchLock(env, in.Home)
 	defer release()
+
+	// One shadow directory across attempts, so a retry rewrites the same files
+	// instead of leaving a temp directory per attempt behind. Made under the
+	// lock (CS-LNCH-080): a launch holding the lock then never sees another
+	// launch's directory before that launch's create, and so cannot sweep it.
+	if in.TempDir == "" {
+		d, derr := launch.NewShadowDir(env.TempRoot)
+		if derr != nil {
+			return nil, derr
+		}
+		in.TempDir = d
+		// CS-LNCH-083: a launch that fails before its container exists leaves
+		// nothing behind. A successful reservation keeps the directory: the
+		// container mounts it, and a later launch's sweep removes it.
+		defer func() {
+			if err != nil {
+				os.RemoveAll(d)
+			}
+		}()
+	}
 
 	instance := in.Instance
 	var lost []string // nouns a create conflict proved taken
 	reclaimed := false
 	for attempt := 1; ; attempt++ {
 		found := discoverForReservation(env)
+		if attempt == 1 {
+			// After discovery, so the directories of the stale reservations it
+			// just removed are already unreferenced.
+			pruneShadowDirs(env, in.TempDir)
+		}
 		project := sessions.ForProject(found, in.ProjectDir)
 
 		if !ralph {
@@ -121,7 +137,7 @@ func reserveContainer(env *Env, in launch.Inputs, wt worktreeChoice, ralph bool)
 			// Build's warnings and banners were printed on the first attempt.
 			in.Out, in.Err = io.Discard, io.Discard
 		}
-		plan, err := launch.Build(in)
+		plan, err = launch.Build(in)
 		if err != nil {
 			return nil, err
 		}
@@ -197,10 +213,26 @@ func pidClassFrom(found []sessions.Session) string {
 // startReserved hands the process over to "docker start -ai". Exec returns only
 // on failure, and the reservation would then sit as an orphan until the next
 // launch's stale cleanup, so it is removed here first (CS-LNCH-057).
+//
+// The shadow directory goes with it (CS-LNCH-083), but only once the
+// reservation is gone: a container that still exists may still mount it.
 func startReserved(env *Env, plan *launch.Plan) error {
 	err := plan.Start(env.Runner)
-	if err != nil {
-		sessions.RemoveReservation(env.Runner, plan.ContainerName)
+	if err != nil && sessions.RemoveReservation(env.Runner, plan.ContainerName) == nil && plan.ShadowDir != "" {
+		os.RemoveAll(plan.ShadowDir)
 	}
 	return err
+}
+
+// pruneShadowDirs removes the shadow directories of earlier launches that no
+// container uses any more (CS-LNCH-081). It runs under the launch lock and
+// never blocks the launch: every failure is one warning (CS-LNCH-082).
+func pruneShadowDirs(env *Env, own string) {
+	root := env.TempRoot
+	if root == "" {
+		root = filepath.Dir(own)
+	}
+	if _, err := launch.PruneShadowDirs(env.Runner, root, os.Getuid(), env.now(), launch.ShadowDirMinAge, own); err != nil {
+		fmt.Fprintf(env.Err, "Warning: could not clean up old shadow directories under %s: %v\n", root, err)
+	}
 }
