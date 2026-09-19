@@ -113,3 +113,11 @@ Ralph stores all runtime files under the resolved ralph directory — `.claude-s
 - `container-context.md` describes the base container environment and is merged into `~/.claude/CLAUDE.md` for all sessions (interactive and ralph). It covers base-image tools only; project-specific tools are discoverable at runtime. Keep it up to date when the base image changes.
 - `README.md` is the user-facing documentation. Keep it up to date whenever you add, remove, or change features, CLI flags, pipeline stages, or directory structure.
 - **Before considering any change done**, check whether `scaffold/config.yaml`, `scaffold/env.example`, or `README.md` need a corresponding update. Features, config keys, env vars, and behavioral changes should be reflected in all relevant places.
+
+## Librarian
+Scope: whole repo (except .claude-sandbox/ and .claude/)
+Checks:
+- go test ./...
+- scripts/check-spec-coverage.sh
+- npm test
+Push: main
