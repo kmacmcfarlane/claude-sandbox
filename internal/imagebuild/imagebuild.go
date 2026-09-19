@@ -98,6 +98,47 @@ var BakedSources = []string{
 	"logstream", "entrypoint.sh", "PROMPT_RALPH.md", "mcp", "notification-hooks.json",
 }
 
+// ModeBakedSources are the baked sources whose permission bits reach the
+// image: the final stage of the base Dockerfile COPYs them from the build
+// context without --chmod (CS-IMG-039). Every other baked source is compiled
+// or embedded into the binary, or COPYed with --chmod. A test parses the
+// Dockerfile so this cannot drift from it.
+var ModeBakedSources = []string{"logstream", "PROMPT_RALPH.md", "mcp/discord-notify"}
+
+// keepsMode reports whether a repo-relative, slash-separated baked path is
+// under ModeBakedSources.
+func keepsMode(rel string) bool {
+	for _, s := range ModeBakedSources {
+		if rel == s || strings.HasPrefix(rel, s+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// bakedRoot resolves a top-level baked source the way BuildKit's COPY does: a
+// source that is itself a symlink is followed, so what it points to is what
+// gets baked (CS-IMG-040). An error means the source is absent (or dangling).
+func bakedRoot(repoRoot, rel string) (root string, fi os.FileInfo, err error) {
+	root, err = filepath.EvalSymlinks(filepath.Join(repoRoot, rel))
+	if err != nil {
+		return "", nil, err
+	}
+	fi, err = os.Stat(root)
+	return root, fi, err
+}
+
+// bakedName names a walked entry under the baked source rel (resolved to
+// root) as the build context sees it: repo-relative, slash-separated, and
+// under rel's own name even when rel is a symlink to somewhere else.
+func bakedName(rel, root, path string) string {
+	if path == root {
+		return rel
+	}
+	r, _ := filepath.Rel(root, path)
+	return rel + "/" + filepath.ToSlash(r)
+}
+
 // bakedSkip reports whether a walked entry under a baked source directory is
 // not part of the image, so it is neither fingerprinted nor an mtime trigger.
 // rel is repo-relative with forward slashes. Go tests are not compiled in
@@ -825,7 +866,9 @@ func ImageID(r execx.Runner, name string) string {
 
 // fingerprintVersion prefixes every fingerprint so a change to what one covers
 // reads as a mismatch rather than silently matching an old label.
-const fingerprintVersion = "v1"
+//
+// v2: permission bits only where they reach the image (CS-IMG-039).
+const fingerprintVersion = "v2"
 
 // imageLabel reads one label of an image; "" when absent or unreadable.
 func imageLabel(r execx.Runner, name, key string) string {
@@ -897,9 +940,11 @@ func (f fingerprint) addFile(name, path string) bool {
 
 // addSource adds one baked source entry as a COPY would bake it: a symlink
 // by its target (COPY copies the link, and a dangling or directory link must
-// not make the fingerprint uncomputable), a regular file by its content and
-// permission bits. Anything else (sockets, devices) is skipped.
-func (f fingerprint) addSource(name, path string) bool {
+// not make the fingerprint uncomputable), a regular file by its content and,
+// when keepMode, its executable bits — the only mode bits that both reach the
+// image and do not depend on the checkout's umask (CS-IMG-039). Anything else
+// (sockets, devices) is skipped.
+func (f fingerprint) addSource(name, path string, keepMode bool) bool {
 	fi, err := os.Lstat(path)
 	if err != nil {
 		return false
@@ -918,7 +963,11 @@ func (f fingerprint) addSource(name, path string) bool {
 		if !f.addFile(name, path) {
 			return false
 		}
-		f.add(fi.Mode().Perm().String())
+		mode := "-"
+		if keepMode {
+			mode = fmt.Sprintf("x%03o", fi.Mode().Perm()&0o111)
+		}
+		f.add(mode)
 		return true
 	}
 	return true
@@ -934,15 +983,14 @@ func baseInputs(repoRoot string) (fp string, unreadable bool) {
 		return "", false
 	}
 	for _, rel := range BakedSources {
-		p := filepath.Join(repoRoot, rel)
-		fi, err := os.Stat(p)
+		p, fi, err := bakedRoot(repoRoot, rel)
 		if err != nil {
 			f.add(rel)
 			f.add("\x00absent") // a vanished source is a change too
 			continue
 		}
 		if !fi.IsDir() {
-			if !f.addSource(rel, p) {
+			if !f.addSource(rel, p, keepsMode(rel)) {
 				return "", true
 			}
 			continue
@@ -959,8 +1007,7 @@ func baseInputs(repoRoot string) (fp string, unreadable bool) {
 				ok = false
 				return nil
 			}
-			name, _ := filepath.Rel(repoRoot, path)
-			name = filepath.ToSlash(name)
+			name := bakedName(rel, p, path)
 			if path != p && bakedSkip(name, d) {
 				if d.IsDir() {
 					return filepath.SkipDir
@@ -970,7 +1017,7 @@ func baseInputs(repoRoot string) (fp string, unreadable bool) {
 			if d.IsDir() {
 				return nil
 			}
-			if !f.addSource(name, path) {
+			if !f.addSource(name, path, keepsMode(name)) {
 				ok = false
 			}
 			return nil
@@ -1046,8 +1093,8 @@ func mtimeAfter(path string, t time.Time) bool {
 
 func anyNewer(root string, rels []string, t time.Time) bool {
 	for _, rel := range rels {
-		p := filepath.Join(root, rel)
-		fi, err := os.Stat(p)
+		// Follow a symlinked source as COPY does (CS-IMG-040).
+		p, fi, err := bakedRoot(root, rel)
 		if err != nil {
 			continue
 		}
@@ -1064,7 +1111,7 @@ func anyNewer(root string, rels []string, t time.Time) bool {
 			}
 			// Tests and build-context debris cannot change the image
 			// (CS-IMG-031, CS-IMG-038).
-			if name, _ := filepath.Rel(root, path); path != p && bakedSkip(filepath.ToSlash(name), d) {
+			if path != p && bakedSkip(bakedName(rel, p, path), d) {
 				if d.IsDir() {
 					return filepath.SkipDir
 				}

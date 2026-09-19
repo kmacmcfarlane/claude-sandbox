@@ -258,8 +258,10 @@ Feature: Image build lifecycle (CS-IMG)
   Scenario: CS-IMG-034 What each fingerprint covers
     Then the base fingerprint hashes the content of the repo Dockerfile and of every
       file in the baked source set (CS-IMG-004), _test.go files excluded (CS-IMG-031)
-    And each baked file counts with its permission bits, and each symlink by its target
-      (COPY bakes the link itself; a dangling or directory link is still fingerprinted)
+    And each symlink under a baked directory counts by its target (COPY bakes the link
+      itself; a dangling or directory link is still fingerprinted)
+    And a baked file's permission bits count only where they reach the image (CS-IMG-039)
+    And a top-level baked source that is a symlink counts by what it points to (CS-IMG-040)
     And the CLI fingerprint hashes the content of Dockerfile.cli
     And the child fingerprint hashes the child Dockerfile path, its content, the build
       context and the base image ID
@@ -271,6 +273,29 @@ Feature: Image build lifecycle (CS-IMG)
     # a base "rebuild" that reproduced the same image leaves a labeled child alone.
     # Not inputs: the CLAUDE_SANDBOX_VERSION stamp (as before) and the Claude
     # Code pin, which the update check owns (CS-IMG-006..009).
+
+  Scenario: CS-IMG-039 Only permission bits that reach the image are fingerprinted
+    Given a regular file in the baked source set
+    Then its executable bits (0111) are a base fingerprint input when, and only when, the
+      final stage of the repo Dockerfile COPYs it from the build context without --chmod
+      (today logstream/, PROMPT_RALPH.md and mcp/discord-notify/)
+    And no other permission bit is an input
+    # Everything else is compiled or embedded into the binary (embed.FS has no
+    # modes) or COPYed with --chmod, so its mode cannot change the image. Hashing
+    # every file's full mode meant a checkout made under umask 002 (group-write)
+    # instead of 022 rebuilt the base, and so every child cold, for nothing.
+    # Only the exec bits: they are what a script needs, and they do not depend
+    # on the umask. A test parses the Dockerfile so a new plain COPY, or a
+    # --chmod dropped from an existing one, cannot be left out of the set.
+
+  Scenario: CS-IMG-040 A symlinked top-level baked source is followed
+    Given a path in the baked source set is itself a symlink
+    Then the base fingerprint and the time rule both read what it points to — the
+      files under a linked directory, the content of a linked file — under the
+      baked source's own name
+    # BuildKit's COPY follows a symlink named as a source, so the target's
+    # contents are what gets baked. Symlinks further down stay links (CS-IMG-034).
+    # A dangling top-level link counts as an absent source.
 
   Scenario: CS-IMG-035 Unlabeled images keep the previous rules
     Given the image has no claude-sandbox.build-inputs label, or a fingerprint cannot be computed

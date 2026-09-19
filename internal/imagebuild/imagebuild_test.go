@@ -725,10 +725,95 @@ var _ = Describe("image build lifecycle", func() {
 			Expect(baseStamp()).NotTo(Equal(a), "a retargeted link is a change")
 		})
 
-		It("CS-IMG-034: a permission change to a baked file is an input", func() {
+		It("CS-IMG-039: a checkout under umask 002 fingerprints like one under 022", func() {
+			files := []string{
+				"cmd/main.go", "entrypoint.sh", "notification-hooks.json", "scaffold/config.yaml",
+				"logstream/run-logger.js", "PROMPT_RALPH.md", "mcp/discord-notify/index.mjs",
+			}
+			for _, rel := range files {
+				touchAt(filepath.Join(repo, rel), old)
+				Expect(os.Chmod(filepath.Join(repo, rel), 0o644)).To(Succeed())
+			}
+			Expect(os.Chmod(filepath.Join(repo, "logstream", "run-logger.js"), 0o755)).To(Succeed())
 			a := baseStamp()
-			Expect(os.Chmod(filepath.Join(repo, "entrypoint.sh"), 0o755)).To(Succeed())
+			for _, rel := range files {
+				Expect(os.Chmod(filepath.Join(repo, rel), 0o664)).To(Succeed())
+			}
+			Expect(os.Chmod(filepath.Join(repo, "logstream", "run-logger.js"), 0o775)).To(Succeed())
+			Expect(baseStamp()).To(Equal(a), "group-write is a umask artifact, not an image change")
+		})
+
+		DescribeTable("CS-IMG-039: an exec-bit change is an input only where COPY preserves the mode",
+			func(rel string, input bool) {
+				p := filepath.Join(repo, rel)
+				touchAt(p, old)
+				Expect(os.Chmod(p, 0o644)).To(Succeed())
+				a := baseStamp()
+				Expect(os.Chmod(p, 0o755)).To(Succeed())
+				if input {
+					Expect(baseStamp()).NotTo(Equal(a), rel+" keeps its mode in the image")
+				} else {
+					Expect(baseStamp()).To(Equal(a), rel+" is compiled, embedded or COPY --chmod'd")
+				}
+			},
+			Entry("a logstream script", "logstream/run-logger.js", true),
+			Entry("PROMPT_RALPH.md", "PROMPT_RALPH.md", true),
+			Entry("the MCP server source", "mcp/discord-notify/index.mjs", true),
+			Entry("entrypoint.sh (--chmod=755)", "entrypoint.sh", false),
+			Entry("notification-hooks.json (--chmod=644)", "notification-hooks.json", false),
+			Entry("Go source", "cmd/main.go", false),
+			Entry("an embedded scaffold file", "scaffold-ralph/scripts/backlog/backlog.py", false),
+		)
+
+		It("CS-IMG-040: a symlinked top-level baked directory is fingerprinted by its target's contents", func() {
+			touchAt(filepath.Join(repo, "logstream", "run-logger.js"), old)
+			Expect(os.Chmod(filepath.Join(repo, "logstream", "run-logger.js"), 0o755)).To(Succeed())
+			a := baseStamp()
+
+			// The same tree, reached through a link from outside the repo.
+			ext := GinkgoT().TempDir()
+			touchAt(filepath.Join(ext, "run-logger.js"), old)
+			Expect(os.Chmod(filepath.Join(ext, "run-logger.js"), 0o755)).To(Succeed())
+			Expect(os.RemoveAll(filepath.Join(repo, "logstream"))).To(Succeed())
+			Expect(os.Symlink(ext, filepath.Join(repo, "logstream"))).To(Succeed())
+			Expect(baseStamp()).To(Equal(a), "COPY bakes the target's contents under the source's name")
+			Expect(errw.String()).NotTo(ContainSubstring("could not fingerprint"))
+
+			Expect(os.WriteFile(filepath.Join(ext, "run-logger.js"), []byte("edited\n"), 0o755)).To(Succeed())
+			b := baseStamp()
+			Expect(b).NotTo(Equal(a), "an edit behind the link is a change")
+			touchAt(filepath.Join(ext, "added.js"), old)
+			c := baseStamp()
+			Expect(c).NotTo(Equal(b), "a file added behind the link is a change")
+			Expect(os.Chmod(filepath.Join(ext, "added.js"), 0o755)).To(Succeed())
+			Expect(baseStamp()).NotTo(Equal(c), "the target's exec bits reach the image")
+		})
+
+		It("CS-IMG-040: a symlinked top-level baked file is fingerprinted by its target's content", func() {
+			touchAt(filepath.Join(repo, "PROMPT_RALPH.md"), old)
+			a := baseStamp()
+			ext := GinkgoT().TempDir()
+			touchAt(filepath.Join(ext, "prompt.md"), old)
+			Expect(os.Remove(filepath.Join(repo, "PROMPT_RALPH.md"))).To(Succeed())
+			Expect(os.Symlink(filepath.Join(ext, "prompt.md"), filepath.Join(repo, "PROMPT_RALPH.md"))).To(Succeed())
+			Expect(baseStamp()).To(Equal(a))
+			Expect(os.WriteFile(filepath.Join(ext, "prompt.md"), []byte("edited\n"), 0o644)).To(Succeed())
 			Expect(baseStamp()).NotTo(Equal(a))
+		})
+
+		It("CS-IMG-040: the time rule follows a symlinked top-level baked directory", func() {
+			ext := GinkgoT().TempDir()
+			touchAt(filepath.Join(ext, "run-logger.js"), old)
+			Expect(os.Symlink(ext, filepath.Join(repo, "logstream"))).To(Succeed())
+			images["claude-sandbox"] = &imgState{created: imgT}
+			fake.Calls = nil
+			rebuilt, err := imagebuild.EnsureBase(o)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rebuilt).To(BeFalse())
+			touchAt(filepath.Join(ext, "run-logger.js"), time.Now())
+			rebuilt, err = imagebuild.EnsureBase(o)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rebuilt).To(BeTrue(), "a newer file behind the link is a newer baked source")
 		})
 
 		It("CS-IMG-002: --rebuild rebuilds a labeled child even when the base image ID is unchanged", func() {
