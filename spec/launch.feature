@@ -71,6 +71,8 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       (the model is re-emitted on the container command and "--resume" starts the passthrough)
     When "claude-sandbox --model=" is run
     Then it exits 2, like "--model" with no value (CS-LNCH-005)
+    When "claude-sandbox --model==x" is run
+    Then it exits 2 naming the invalid value
     When "claude-sandbox --frobnicate=1" or "claude-sandbox --dangerous=true" is run
     Then it exits 2 with "unknown flag"
     # Only the part before the first "=" is looked up in the allowlist. Launcher

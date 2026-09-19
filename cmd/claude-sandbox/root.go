@@ -449,6 +449,9 @@ func scanArgs(args []string, headless bool) (*launchFlags, error) {
 				if !ok {
 					return nil, exitErr(2, "Error: --model requires a value")
 				}
+				if strings.HasPrefix(v, "=") {
+					return nil, exitErr(2, "Error: --model: invalid value '%s'", v)
+				}
 				f.Model = v
 				i++
 				continue
@@ -654,7 +657,9 @@ func validateBranch(f *launchFlags) error {
 		return exitErr(2, "Error: --branch conflicts with --join: branch forks a conversation into a new container")
 	}
 	if len(f.Passthrough) > 0 {
-		if p := f.Passthrough[0]; p == "--resume" || p == "--continue" {
+		// Compare the flag name, so --resume=ID is caught too (CS-LNCH-100).
+		p := f.Passthrough[0]
+		if name, _, _ := strings.Cut(p, "="); name == "--resume" || name == "--continue" {
 			return exitErr(2, "Error: --branch already implies a resume (--resume --fork-session); drop %s or use it without --branch", p)
 		}
 	}

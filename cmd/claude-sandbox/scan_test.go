@@ -165,6 +165,11 @@ var _ = Describe("scanLaunchArgs", func() {
 		Expect(err).To(HaveOccurred())
 		Expect(execx.ExitCode(err)).To(Equal(2))
 		Expect(err.Error()).To(ContainSubstring("--model requires a value"))
+
+		_, err = scanLaunchArgs([]string{"--model==x"})
+		Expect(err).To(HaveOccurred())
+		Expect(execx.ExitCode(err)).To(Equal(2))
+		Expect(err.Error()).To(ContainSubstring("invalid value '=x'"))
 	})
 
 	It("CS-LNCH-100: launcher =value flags keep their launcher meaning", func() {
