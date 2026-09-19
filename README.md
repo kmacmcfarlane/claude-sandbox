@@ -775,6 +775,14 @@ refresh there reaches them all. A project `.claude-sandbox/env` is for a genuine
 per-project override only — its keys override the same keys upstream, so a stale token
 copied into a project env silently hides the fresh one upstream.
 
+**Host variables the launcher forwards outrank the env file.** `docker create -e` beats
+`--env-file`, so a credential the launcher forwards from its own environment wins over the
+same key in any env file. The launcher forwards `ANTHROPIC_API_KEY` (and, with `--aws`, the
+AWS allowlist) only when it is set on the host: unset there, no `-e` is passed and the
+env-file value applies. Precedence, highest first: the launcher's environment (for
+`ANTHROPIC_API_KEY`, set even to empty; for the AWS allowlist, non-empty) > the env-file
+cascade (later file wins) > unset.
+
 `claude-sandbox init` never creates `.claude-sandbox/env`. It seeds
 `.claude-sandbox/env.example`, a commented template that the launcher never reads; copy it
 to `.claude-sandbox/env` only when a project needs its own values. `env.example` holds no
@@ -1040,7 +1048,7 @@ If no `.claude-sandbox/Dockerfile` is found anywhere up to `/`, the launcher war
 | Variable | Default | Description |
 |---|---|---|
 | `PROJECT_DIR` | `$(pwd)` | Project directory to mount. Either way the launcher uses the **physical** path (symlinks resolved) and prints `Project: <physical> (resolved from <logical>)` when that differs — see [Multiple sessions](#multiple-sessions) |
-| `ANTHROPIC_API_KEY` | (none) | Passed through to the container by name (a bare `-e ANTHROPIC_API_KEY`, which docker resolves from the launcher's environment), so the key never appears in the `docker create` argv visible to `ps`. Unset, the container gets it set and empty, as before |
+| `ANTHROPIC_API_KEY` | (none) | Passed through to the container by name (a bare `-e ANTHROPIC_API_KEY`, which docker resolves from the launcher's environment), so the key never appears in the `docker create` argv visible to `ps`. Forwarded only when set on the launcher host (even to empty, which then outranks any env file); unset, no `-e` is passed at all, so an `ANTHROPIC_API_KEY` from the `.claude-sandbox/env` cascade reaches the container — see [`.claude-sandbox/env`](#claude-sandboxenv) |
 | `CLAUDE_NOTIFICATION_WEBHOOK_URL` | (none) | Discord webhook for interactive notification hooks (permission prompts, idle) |
 | `CLAUDE_SANDBOX_HOST_ACCESS_SSH_ENABLED` | (unset) | Mount `~/.ssh/` read-only (equivalent to `--ssh`) |
 | `CLAUDE_SANDBOX_HOST_ACCESS_GIT_ENABLED` | (unset) | Mount `~/.gitconfig` read-only (equivalent to `--git`) |

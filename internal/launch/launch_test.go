@@ -1262,7 +1262,12 @@ var _ = Describe("launch.Build", func() {
 	})
 
 	It("CS-LNCH-029: container runtime environment flags", func() {
-		env["ANTHROPIC_API_KEY"] = ""
+		in.LookupEnv = func(k string) (string, bool) {
+			if k == "ANTHROPIC_API_KEY" {
+				return "", true
+			}
+			return "", false
+		}
 		p := build()
 		args := p.CreateArgs(proj)
 		Expect(args[0:4]).To(Equal([]string{"create", "-it", "--rm", "--init"}))
@@ -1273,7 +1278,7 @@ var _ = Describe("launch.Build", func() {
 			"HOST_HOME="+home,
 			"HOME="+home,
 			"DOCKER_GID=",
-			"ANTHROPIC_API_KEY=",
+			"ANTHROPIC_API_KEY",
 		))
 		// Every env flag is rendered as "-e <flag>" in the argv.
 		for _, e := range p.EnvFlags {
@@ -1313,10 +1318,32 @@ var _ = Describe("launch.Build", func() {
 			Expect(p.EnvFlags).NotTo(ContainElement("ANTHROPIC_API_KEY="))
 		})
 
-		It("CS-LNCH-102: an unset key keeps the explicit empty value", func() {
+		It("CS-LNCH-102, CS-LNCH-106: an unset key gets no -e in any form, so an env-file value applies", func() {
+			envFile := filepath.Join(proj, ".claude-sandbox", "env")
+			Expect(os.MkdirAll(filepath.Dir(envFile), 0o755)).To(Succeed())
+			Expect(os.WriteFile(envFile, []byte("ANTHROPIC_API_KEY="+secret+"\n"), 0o600)).To(Succeed())
+			in.EnvFiles = []string{envFile}
 			p := build()
-			Expect(p.EnvFlags).To(ContainElement("ANTHROPIC_API_KEY="))
-			Expect(p.EnvFlags).NotTo(ContainElement("ANTHROPIC_API_KEY"))
+			for _, e := range p.EnvFlags {
+				Expect(e).NotTo(HavePrefix("ANTHROPIC_API_KEY"))
+			}
+			args := p.CreateArgs(proj)
+			for _, a := range args {
+				Expect(a).NotTo(HavePrefix("ANTHROPIC_API_KEY"))
+				Expect(a).NotTo(ContainSubstring(secret))
+			}
+			Expect(args).To(ContainElements("--env-file", envFile))
+		})
+
+		It("CS-LNCH-106: a set key still outranks the env file with a bare -e NAME", func() {
+			lookup["ANTHROPIC_API_KEY"] = ""
+			envFile := filepath.Join(proj, ".claude-sandbox", "env")
+			Expect(os.MkdirAll(filepath.Dir(envFile), 0o755)).To(Succeed())
+			Expect(os.WriteFile(envFile, []byte("ANTHROPIC_API_KEY="+secret+"\n"), 0o600)).To(Succeed())
+			in.EnvFiles = []string{envFile}
+			p := build()
+			Expect(p.EnvFlags).To(ContainElement("ANTHROPIC_API_KEY"))
+			Expect(p.CreateArgs(proj)).To(ContainElements("--env-file", envFile))
 		})
 	})
 
