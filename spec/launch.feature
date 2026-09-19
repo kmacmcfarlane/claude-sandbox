@@ -25,9 +25,13 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     # Pass-through allowlist: --resume --continue --verbose --output-format
     # --allowedTools --disallowedTools --permission-prompt-tool --mcp-config
     # --permission-mode --append-system-prompt --system-prompt --max-turns
-    # --print --input-format --model --fallback-model --name
+    # --print --input-format --model --fallback-model --name, plus claude's
+    # kebab-case aliases --allowed-tools --disallowed-tools (CS-LNCH-101)
     # (-n, the short form of --name, needs no allowlisting: single-dash args
     # are positionals to the launcher grammar and already pass through)
+    # The allowlist only locates the passthrough boundary; claude validates
+    # its own arguments. A --flag=value spelling of an entry is matched by the
+    # part before "=" (CS-LNCH-100).
     #
     # --continue is the supported "resume the newest session for this directory"
     # path, and the launcher deliberately adds no flag of its own for it: a
@@ -56,6 +60,33 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
   Scenario: CS-LNCH-005 --model and --limit require values
     When "claude-sandbox --model" is run with no value
     Then it exits 2
+
+  Scenario: CS-LNCH-100 A known claude flag written as --flag=value starts the passthrough
+    When "claude-sandbox --disallowedTools=Bash --frobnicate" is run
+    Then "--disallowedTools=Bash" and all subsequent args are appended to the container command unmodified
+    When "claude-sandbox --resume=abc" is run
+    Then "--resume=abc" is appended to the container command
+    When "claude-sandbox --model=opus --resume" is run
+    Then the launcher consumes --model=opus exactly like "--model opus"
+      (the model is re-emitted on the container command and "--resume" starts the passthrough)
+    When "claude-sandbox --model=" is run
+    Then it exits 2, like "--model" with no value (CS-LNCH-005)
+    When "claude-sandbox --frobnicate=1" or "claude-sandbox --dangerous=true" is run
+    Then it exits 2 with "unknown flag"
+    # Only the part before the first "=" is looked up in the allowlist. Launcher
+    # flags are matched first and are never mistaken for passthrough:
+    # --worktree=NAME, --attach=N and --join=N keep their launcher meaning, and
+    # a launcher flag that takes no value is still unknown with "=value".
+    # --model is launcher-owned (CS-LNCH-005/023), so its "=" form is consumed
+    # too rather than smuggled past the launcher's model resolution.
+
+  Scenario: CS-LNCH-101 Claude's kebab-case aliases of allowlisted flags pass through
+    When "claude-sandbox --allowed-tools Bash" or "claude-sandbox --disallowed-tools=Bash" is run
+    Then the flag and all subsequent args are appended to the container command
+    # The aliases are exactly those "claude --help" lists beside an allowlisted
+    # flag (verified on Claude Code 2.1.277: "--allowedTools, --allowed-tools"
+    # and "--disallowedTools, --disallowed-tools"; no other allowlisted flag
+    # has one). Completion offers them as passed-through claude flags.
 
   Scenario: CS-LNCH-006 PROJECT_DIR overrides the working directory
     Given PROJECT_DIR=/other/proj is set

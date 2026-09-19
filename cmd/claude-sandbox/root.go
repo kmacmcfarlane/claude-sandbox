@@ -311,9 +311,16 @@ type launchFlags struct {
 	AllowConfigDrift bool
 }
 
+// knownPassthrough is the claude flag allowlist that locates the passthrough
+// boundary (CS-LNCH-002). It is matched on the part before any "=" so claude's
+// --flag=value spelling works too (CS-LNCH-100); claude validates the rest.
 var knownPassthrough = map[string]bool{
 	"--resume": true, "--continue": true, "--verbose": true, "--output-format": true,
 	"--allowedTools": true, "--disallowedTools": true, "--permission-prompt-tool": true,
+	// The kebab-case aliases "claude --help" lists beside allowlisted flags
+	// (verified on Claude Code 2.1.277; no other allowlisted flag has one).
+	// CS-LNCH-101.
+	"--allowed-tools": true, "--disallowed-tools": true,
 	"--mcp-config": true, "--permission-mode": true, "--append-system-prompt": true,
 	"--system-prompt": true, "--max-turns": true, "--print": true, "--input-format": true,
 	"--model": true, "--fallback-model": true,
@@ -435,6 +442,17 @@ func scanArgs(args []string, headless bool) (*launchFlags, error) {
 				i++
 				continue
 			}
+			// --model=MODEL is the launcher's --model (CS-LNCH-100): consumed,
+			// never passed through, so the launcher's model resolution sees it.
+			if strings.HasPrefix(a, "--model=") {
+				v, ok := flagValue(a, "--model")
+				if !ok {
+					return nil, exitErr(2, "Error: --model requires a value")
+				}
+				f.Model = v
+				i++
+				continue
+			}
 			// --worktree=NAME: validated here so a bad name fails with exit 2
 			// before any docker command runs (CS-LNCH-043).
 			if v, ok := flagValue(a, "--worktree"); ok {
@@ -467,7 +485,10 @@ func flagValue(arg, name string) (string, bool) {
 func scanTail(f *launchFlags, args []string, i int) (*launchFlags, error) {
 	a := args[i]
 	if strings.HasPrefix(a, "--") {
-		if knownPassthrough[a] {
+		// Match --flag=value by its name (CS-LNCH-100). Launcher flags never
+		// reach here: scanArgs consumes them, including their "=" forms.
+		name, _, _ := strings.Cut(a, "=")
+		if knownPassthrough[name] {
 			f.Passthrough = args[i:]
 			return f, nil
 		}

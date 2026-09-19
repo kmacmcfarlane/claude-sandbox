@@ -80,6 +80,8 @@ Feature: Shell completion (CS-COMP)
     Then no launcher flag is offered
     And the directive allows file completion
     # Everything past the boundary belongs to claude, which owns its own args.
+    # The boundary is the parser's (CS-LNCH-100/101), so "--disallowedTools=Bash"
+    # and "--allowed-tools" cross it too.
 
   Scenario: CS-COMP-011 after "--", the launcher flags are no longer offered
     When "claude-sandbox -- --" is completed
