@@ -286,6 +286,19 @@ var _ = Describe("init subcommand", func() {
 			Expect(r5.errOut.String()).To(ContainSubstring("new files there are being hidden from git NOW"))
 			Expect(r5.errOut.String()).NotTo(ContainSubstring("WARNING: trackInHost is true"))
 
+			By("tracked files under a children-only rule (.claude-sandbox/*): default stays false")
+			p7 := filepath.Join(tmp, "p7")
+			mkdir(p7)
+			children := &execx.Fake{}
+			children.On("--no-index", "", execx.Fail(1)) // the directory itself is not excluded (CS-LAY-021)
+			children.On("check-ignore", "", nil)         // but every child probe is ignored
+			children.On("ls-files -z -- .claude-sandbox", ".claude-sandbox/agent/PRD.md\x00", nil)
+			r7 := &run{fake: children, prompter: &prompt.Scripted{IsTTY: true, Answers: []string{""}}}
+			Expect(r7.init(p7, initcmd.Flags{})).To(Succeed())
+			Expect(r7.errOut.String()).To(ContainSubstring("[N] Keep out of the repo"))
+			Expect(read(filepath.Join(p7, ".claude-sandbox", "config.yaml"))).To(MatchRegexp(`(?m)^trackInHost: false$`))
+			Expect(r7.errOut.String()).To(ContainSubstring("new files there are being hidden from git NOW"))
+
 			By("tracked files with a sidecar .git: default stays false")
 			p6 := filepath.Join(tmp, "p6")
 			mkdir(filepath.Join(p6, ".claude-sandbox", ".git"))

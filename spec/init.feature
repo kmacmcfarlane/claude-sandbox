@@ -110,16 +110,20 @@ Feature: init subcommand (CS-INIT)
     And the CS-LAY-020 warning follows
     # No terminal and --yes take the prompt's default (CS-INIT-011/025), so
     # they resolve to true in this state as well.
-    Given the files are tracked BUT the host also ignores new files under
-      .claude-sandbox/ (git check-ignore of the child probe), or
-      .claude-sandbox/.git exists
+    Given the files are tracked BUT the host also hides new files under
+      .claude-sandbox/ — by any rule, whether it excludes the directory itself
+      ("/.claude-sandbox/") or only its children (".claude-sandbox/*"), i.e.
+      CS-LAY-020's child probes are all ignored — or .claude-sandbox/.git exists
     When "claude-sandbox init" is run and the user presses Enter
     Then the prompt's default stays false, with the ordinary preamble
     And the CS-LAY-020 warning is printed, including that new files there
-      are being hidden from git now when an ignore rule covers the directory
-    # True would only trade that warning for CS-LAY-018's, which does not say
-    # new files are being dropped and whose first remedy (trackInHost: false)
-    # leads back here. The check is CS-LAY-018's own (layout.HostTrackConflict).
+      are being hidden from git now when an ignore rule covers them
+    # True would trade that warning for CS-LAY-018's (a whole-dir rule or a
+    # sidecar), which does not say new files are being dropped, or — under a
+    # children-only rule (CS-LAY-021) — for no warning at all while every new
+    # file but config.yaml/Dockerfile stays hidden. The check is CS-LAY-020's
+    # "new files hidden" probe (layout.DirIgnored), which a whole-dir
+    # exclusion implies, plus the sidecar .git.
 
   @new
   Scenario: CS-INIT-032 Flags, an upstream value and an existing config keep their precedence over host-tracked files

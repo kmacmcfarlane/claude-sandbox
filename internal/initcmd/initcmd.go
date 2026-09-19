@@ -88,14 +88,14 @@ func Run(project string, f Flags, d Deps) error {
 	default:
 		// CS-INIT-031: the default follows what the host repo already does.
 		// Over host-tracked files a false default would land in the CS-LAY-020
-		// state, warned about on every launch. Not when true would hit
-		// CS-LAY-018 instead (the host ignores new files under the dir, or a
-		// sidecar .git exists): there CS-LAY-020's warning — new files are
-		// being hidden now — is the one the operator needs. Probed only here —
-		// flags, an existing config and an upstream value never consult it
-		// (CS-INIT-032).
+		// state, warned about on every launch. Not when the host hides new
+		// files under the dir (any ignore rule, children-only included — true
+		// would then write no warning while new files stay hidden) or a
+		// sidecar .git exists: there CS-LAY-020's warning is the one the
+		// operator needs. Probed only here — flags, an existing config and an
+		// upstream value never consult it (CS-INIT-032).
 		n := layout.HostTrackedCount(d.Runner, project)
-		if n > 0 && layout.HostTrackConflict(d.Runner, project) != "" {
+		if n > 0 && (layout.DirIgnored(d.Runner, project) || pathExists(filepath.Join(sb, ".git"))) {
 			n = 0
 		}
 		v := promptTrackInHost(d.Prompter, n)
@@ -325,6 +325,11 @@ func setTrackInHostHint(cfgPath string, val bool, source string) error {
 		content += fmt.Sprintf("\n%s\n", line)
 	}
 	return os.WriteFile(cfgPath, []byte(content), 0o644)
+}
+
+func pathExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
 }
 
 func fileExists(p string) bool {

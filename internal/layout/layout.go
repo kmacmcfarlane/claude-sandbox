@@ -208,14 +208,6 @@ func hostTrackConflict(r execx.Runner, project, sb string) string {
 	return ""
 }
 
-// HostTrackConflict is hostTrackConflict for the project's own
-// .claude-sandbox/: non-empty when trackInHost true would hit CS-LAY-018 (the
-// host ignores new files under the dir, or a sidecar .git exists). init's
-// greenfield prompt defaults to true only when it is empty (CS-INIT-031).
-func HostTrackConflict(r execx.Runner, project string) string {
-	return hostTrackConflict(r, project, paths.SandboxDir(project))
-}
-
 // HostTrackedCount returns how many files the host repo tracks under
 // .claude-sandbox/ (CS-LAY-020). A failed probe returns 0 (including a
 // project outside any git work tree), so behaviour is exactly as before: a
@@ -261,6 +253,14 @@ func dirExcluded(r execx.Runner, project string) bool {
 const ignoreProbe = ".claude-sandbox/ignore-probe"
 
 var ignoreProbes = []string{ignoreProbe, ignoreProbe + ".md"}
+
+// DirIgnored is dirIgnored for callers outside layout: init's greenfield
+// trackInHost prompt defaults to true only when new files under
+// .claude-sandbox/ are NOT hidden (CS-INIT-031). dirExcluded implies it, so
+// it also covers the whole-dir half of CS-LAY-018.
+func DirIgnored(r execx.Runner, project string) bool {
+	return dirIgnored(r, project)
+}
 
 // dirIgnored reports whether the host repo ignores new files under
 // .claude-sandbox/: true only when every ignoreProbes path is ignored.
