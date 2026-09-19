@@ -951,12 +951,26 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       | the git dir and the common dir differ                                   |
       | the git dir is <common dir>/worktrees/<name>                            |
       | <git dir>/gitdir (git's back-link) names <top-level>/.git                |
+      | the git dir and the common dir are not the top level or inside it       |
+      | the top level is not the common dir or inside it                        |
     # The back-link can only exist when the repository itself registered the
     # worktree ("git worktree add"). Without it, a crafted .git file in an
     # untrusted tree could name any other repository's git dir and have it
-    # mounted read-write (CS-LNCH-071).
+    # mounted read-write (CS-LNCH-071). The containment rows close the other
+    # half: a directory can declare ITSELF a git dir (HEAD, commondir,
+    # gitdir and a .git file naming itself) at <clone>/worktrees/<n> of a
+    # clone whose root holds objects/ and refs/; it passes the first three
+    # rows, and would get the clone's root — its .git/hooks included —
+    # mounted read-write. A real linked worktree's git dir lives in its
+    # repository, never inside the worktree, and the worktree never lives
+    # inside the repository's git dir.
+    And a relative back-link (git 2.48+ "worktree.useRelativePaths") is
+      resolved against the git dir before it is compared
     And the main checkout is the common dir's parent when the common dir is
-      named ".git"; a bare common dir has no main checkout (git dir mount only)
+      named ".git"; any other common dir (a bare repository, or one made with
+      --separate-git-dir, whose git dir does not record where its main
+      checkout is) has none: git dir mount only, and the banner names the
+      git dir rather than calling it bare
     And a failed or unverified detection launches exactly as a plain launch
     And a stale back-link (the worktree was moved) prints one warning naming
       "git worktree repair" and launches as a plain launch
@@ -969,7 +983,8 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     # This gives the session the same power over the main repository's .git
     # (hooks, refs, config) that a session in the main checkout already has.
     And it is omitted when a same-path mount (e.g. a cascade mounts: entry)
-      already covers the common dir
+      already covers the common dir; when that mount is read-only, one
+      warning names it and says git cannot write to the repository there
     And it is omitted when the launch is from a SUBDIRECTORY of the worktree:
       the worktree root is not mounted, so the git dir would not make git work
     And it enters the drift fingerprint through the normalized mount set (CS-SESS-020)

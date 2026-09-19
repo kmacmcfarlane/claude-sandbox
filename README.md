@@ -569,11 +569,18 @@ launched as part of its repository:
 One line says so: `Linked worktree: main checkout <main> (its .claude-sandbox/ config, env
 and Dockerfile apply); git dir <main>/.git mounted`. Detection is one
 `git rev-parse --git-dir --git-common-dir --show-toplevel`, and it is **verified** before
-anything is mounted: the git dir must be `<common>/worktrees/<name>` and the repository's own
-back-link (`<common>/worktrees/<name>/gitdir`) must name this worktree's `.git`. A crafted
-`.git` file in a downloaded tree therefore cannot get another repository's git dir mounted.
-A worktree that was moved without `git worktree repair` fails the check: the launch warns and
-proceeds as a plain project.
+anything is mounted: the git dir must be `<common>/worktrees/<name>`, the repository's own
+back-link (`<common>/worktrees/<name>/gitdir`, absolute or — git 2.48+
+`worktree.useRelativePaths` — relative to the git dir) must name this worktree's `.git`, and
+neither may contain the other (the git dir and common dir lie outside the worktree, the
+worktree outside the common dir). A crafted `.git` file in a downloaded tree therefore cannot
+get another repository's git dir mounted, and a tree cannot declare a directory of its own a
+git dir to get its whole root mounted. A worktree that was moved without
+`git worktree repair` fails the check: the launch warns and proceeds as a plain project.
+A repository whose common git dir is not named `.git` (bare, or `--separate-git-dir`) does
+not record where its main checkout is, so only the git dir is mounted and the cascade is
+unchanged. When a read-only same-path mount already covers the git dir, the launcher leaves
+it and warns that git cannot write to the repository.
 
 ## Ralph mode
 

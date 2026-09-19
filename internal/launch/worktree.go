@@ -94,7 +94,8 @@ type LinkedWorktree struct {
 	CommonDir string
 	// Main is the main checkout (CommonDir's parent when CommonDir is named
 	// ".git"), whose .claude-sandbox/ becomes the project level of the
-	// cascade (CS-CASC-031). "" for a bare repository.
+	// cascade (CS-CASC-031). "" for a bare repository or one made with
+	// --separate-git-dir: its git dir does not record the main checkout.
 	Main string
 }
 
@@ -144,11 +145,21 @@ func DetectLinkedWorktree(r execx.Runner, dir string) (lw *LinkedWorktree, warni
 	if filepath.Dir(gitDir) != filepath.Join(commonDir, "worktrees") {
 		return nil, ""
 	}
+	// Containment: a real linked worktree's git dir lives in its repository,
+	// never inside the worktree, and the worktree never lives inside the
+	// repository's git dir. Without this a directory can declare ITSELF a
+	// git dir (HEAD, commondir, gitdir, and a .git file naming itself) at
+	// <clone>/worktrees/<n> of an untrusted clone whose root holds objects/
+	// and refs/, pass every other check, and get the clone's root — its
+	// .git/hooks included — mounted read-write.
+	if within(gitDir, top) || within(commonDir, top) || within(top, commonDir) {
+		return nil, ""
+	}
 	back, err := os.ReadFile(filepath.Join(gitDir, "gitdir"))
 	if err != nil {
 		return nil, ""
 	}
-	if !sameGitFile(strings.TrimSpace(string(back)), filepath.Join(top, ".git")) {
+	if !sameGitFile(strings.TrimSpace(string(back)), gitDir, filepath.Join(top, ".git")) {
 		return nil, fmt.Sprintf("WARNING: %s is a git worktree of %s, but the repository's record of it (%s/gitdir) points elsewhere; "+
 			"launching without the main checkout's config or git dir. Run 'git worktree repair' in %s to fix the record.",
 			top, commonDir, gitDir, top)
@@ -160,11 +171,20 @@ func DetectLinkedWorktree(r execx.Runner, dir string) (lw *LinkedWorktree, warni
 	return lw, ""
 }
 
+// within reports whether path is dir or lies inside it.
+func within(path, dir string) bool {
+	return path == dir || strings.HasPrefix(path, dir+"/")
+}
+
 // sameGitFile compares the back-link with <top>/.git physically: the
-// back-link may have been written through a symlinked path.
-func sameGitFile(recorded, want string) bool {
-	if recorded == "" || !filepath.IsAbs(recorded) {
+// back-link may have been written through a symlinked path, and git 2.48+
+// writes it relative to the git dir under worktree.useRelativePaths.
+func sameGitFile(recorded, gitDir, want string) bool {
+	if recorded == "" {
 		return false
+	}
+	if !filepath.IsAbs(recorded) {
+		recorded = filepath.Join(gitDir, recorded)
 	}
 	if filepath.Clean(recorded) == want {
 		return true
@@ -181,7 +201,9 @@ func (lw *LinkedWorktree) Banner(mounted bool) string {
 	if lw.Main != "" {
 		fmt.Fprintf(&b, "Linked worktree: main checkout %s (its .claude-sandbox/ config, env and Dockerfile apply)", lw.Main)
 	} else {
-		fmt.Fprintf(&b, "Linked worktree: bare repository %s", lw.CommonDir)
+		// Bare, or --separate-git-dir: the git dir does not record where a
+		// main checkout is, so there is none to cascade from.
+		fmt.Fprintf(&b, "Linked worktree: repository git dir %s (no main checkout found)", lw.CommonDir)
 	}
 	if mounted {
 		fmt.Fprintf(&b, "; git dir %s mounted", lw.CommonDir)

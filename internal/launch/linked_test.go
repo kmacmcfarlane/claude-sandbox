@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -87,7 +88,7 @@ var _ = Describe("linked worktree detection (CS-LNCH-070)", func() {
 		Expect(lw).NotTo(BeNil())
 	})
 
-	It("CS-LNCH-070: a bare common dir has no main checkout", func() {
+	It("CS-LNCH-070: a bare (or --separate-git-dir) common dir has no main checkout, and the banner does not guess", func() {
 		bare := filepath.Join(base, "bare.git")
 		bgd := filepath.Join(bare, "worktrees", "feat")
 		write(filepath.Join(bgd, "gitdir"), wt+"/.git\n")
@@ -96,7 +97,7 @@ var _ = Describe("linked worktree detection (CS-LNCH-070)", func() {
 		lw, _ := launch.DetectLinkedWorktree(f, wt)
 		Expect(lw).NotTo(BeNil())
 		Expect(lw.Main).To(BeEmpty())
-		Expect(lw.Banner(true)).To(Equal("Linked worktree: bare repository " + bare + "; git dir " + bare + " mounted"))
+		Expect(lw.Banner(true)).To(Equal("Linked worktree: repository git dir " + bare + " (no main checkout found); git dir " + bare + " mounted"))
 	})
 
 	It("CS-LNCH-070: relative rev-parse output resolves against the directory", func() {
@@ -105,6 +106,65 @@ var _ = Describe("linked worktree detection (CS-LNCH-070)", func() {
 		lw, _ := launch.DetectLinkedWorktree(f, filepath.Join(base, "paseo"))
 		Expect(lw).NotTo(BeNil())
 		Expect(lw.CommonDir).To(Equal(common))
+	})
+
+	It("CS-LNCH-070: a directory that declares itself a git dir inside an untrusted clone is refused", func() {
+		// The reviewer's layout: <clone>/worktrees/proj holds HEAD, commondir
+		// (../..), gitdir (naming <self>/.git) and a .git file naming itself;
+		// the clone root holds objects/ and refs/. git answers git dir =
+		// top = <clone>/worktrees/proj, common dir = <clone>.
+		clone := filepath.Join(base, "clone")
+		self := filepath.Join(clone, "worktrees", "proj")
+		write(filepath.Join(self, "HEAD"), "ref: refs/heads/main\n")
+		write(filepath.Join(self, "commondir"), "../..\n")
+		write(filepath.Join(self, "gitdir"), self+"/.git\n")
+		write(filepath.Join(self, ".git"), "gitdir: "+self+"\n")
+		Expect(os.MkdirAll(filepath.Join(clone, "objects"), 0o755)).To(Succeed())
+		Expect(os.MkdirAll(filepath.Join(clone, "refs"), 0o755)).To(Succeed())
+		f := &execx.Fake{}
+		f.On(revParse, self+"\n"+clone+"\n"+self+"\n", nil)
+		lw, warn := launch.DetectLinkedWorktree(f, self)
+		Expect(lw).To(BeNil())
+		Expect(warn).To(BeEmpty())
+	})
+
+	It("CS-LNCH-070: a worktree inside its own common dir is refused (the git dir is a sibling, not inside the top)", func() {
+		clone := filepath.Join(base, "clone")
+		gd := filepath.Join(clone, "worktrees", "fake")
+		top := filepath.Join(clone, "worktrees", "proj")
+		write(filepath.Join(gd, "gitdir"), top+"/.git\n")
+		Expect(os.MkdirAll(top, 0o755)).To(Succeed())
+		f := &execx.Fake{}
+		f.On(revParse, gd+"\n"+clone+"\n"+top+"\n", nil)
+		lw, _ := launch.DetectLinkedWorktree(f, top)
+		Expect(lw).To(BeNil())
+	})
+
+	It("CS-LNCH-070: a common dir inside the worktree is refused", func() {
+		inner := filepath.Join(wt, "inner.git")
+		igd := filepath.Join(inner, "worktrees", "feat")
+		write(filepath.Join(igd, "gitdir"), wt+"/.git\n")
+		f := &execx.Fake{}
+		f.On(revParse, igd+"\n"+inner+"\n"+wt+"\n", nil)
+		lw, _ := launch.DetectLinkedWorktree(f, wt)
+		Expect(lw).To(BeNil())
+	})
+
+	It("CS-LNCH-070: a relative back-link (git worktree.useRelativePaths) resolves against the git dir", func() {
+		rel, err := filepath.Rel(gitDir, filepath.Join(wt, ".git"))
+		Expect(err).NotTo(HaveOccurred())
+		write(filepath.Join(gitDir, "gitdir"), rel+"\n")
+		lw, warn := launch.DetectLinkedWorktree(fake, wt)
+		Expect(warn).To(BeEmpty())
+		Expect(lw).NotTo(BeNil())
+		Expect(lw.CommonDir).To(Equal(common))
+	})
+
+	It("CS-LNCH-070: a relative back-link naming another place still warns", func() {
+		write(filepath.Join(gitDir, "gitdir"), "../../../../elsewhere/.git\n")
+		lw, warn := launch.DetectLinkedWorktree(fake, wt)
+		Expect(lw).To(BeNil())
+		Expect(warn).To(ContainSubstring("git worktree repair"))
 	})
 
 	Describe("the common git dir mount (CS-LNCH-071)", func() {
@@ -138,6 +198,27 @@ var _ = Describe("linked worktree detection (CS-LNCH-070)", func() {
 			p, err := launch.Build(inputs(wt, lw(), &cascade.Config{Mounts: []cascade.Mount{{Host: repo, Container: repo}}}))
 			Expect(err).NotTo(HaveOccurred())
 			Expect(p.Volumes).NotTo(ContainElement(common + ":" + common))
+		})
+
+		It("CS-LNCH-071: a read-only covering mount wins but warns that git cannot write", func() {
+			repo := filepath.Join(base, "repo")
+			in := inputs(wt, lw(), &cascade.Config{Mounts: []cascade.Mount{{Host: repo, Container: repo}}})
+			var errw strings.Builder
+			in.Err = &errw
+			p, err := launch.Build(in)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(p.Volumes).NotTo(ContainElement(common + ":" + common))
+			Expect(errw.String()).To(ContainSubstring("git dir " + common + " is under the read-only mount " + repo + ":" + repo + ":ro"))
+		})
+
+		It("CS-LNCH-071: a writable covering mount wins silently", func() {
+			repo := filepath.Join(base, "repo")
+			in := inputs(wt, lw(), &cascade.Config{Mounts: []cascade.Mount{{Host: repo, Container: repo, Writable: true}}})
+			var errw strings.Builder
+			in.Err = &errw
+			_, err := launch.Build(in)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(errw.String()).NotTo(ContainSubstring("read-only mount"))
 		})
 
 		It("CS-LNCH-071: a mount at another container path does not count as covering it", func() {
