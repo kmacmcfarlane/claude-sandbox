@@ -1145,6 +1145,29 @@ create conflict retry above, but two concurrent launches from inside different c
 get the same pid class.
 Spec: `spec/sessions.feature` CS-SESS-048..054, `spec/launch.feature` CS-LNCH-057.
 
+#### Shadow directory cleanup
+
+Each launch writes its shadow files (the merged `CLAUDE.md`, `.mcp.json`, `gitconfig`) into one
+fresh `claude-sandbox<digits>` directory under the temp root (`$TMPDIR`, else `/tmp`) and
+bind-mounts them. The launcher ends by exec'ing `docker start`, so it cannot remove its own
+directory after the session; instead the container carries a `claude-sandbox.shadowdir` label
+naming it, and every later launch sweeps, under the launch lock and right after discovery, the
+directories nothing uses any more. A directory is removed only when its name is exactly
+`claude-sandbox` followed by digits, it is a real directory (symlinks are never followed or
+removed) owned by you, it has not been modified for an hour, and no container on the host — in
+any state, including exited ones kept without `--rm` and containers from older launchers that
+predate the label — names it in its label or mounts a file from it. The directory is made after
+the lock is taken, so a launch never sees another launch's directory before that launch has
+created its container; the hour covers launches that could not take the lock and older
+launchers. The sweep makes no docker call unless there is a candidate, never prints on success,
+and any failure (the container listing, a removal) is one warning; it never blocks a launch.
+A launch that fails before its session starts (a failed `docker create`, or a failed exec of
+`docker start` once the reservation is removed) removes its own directory, and the config-drift
+check behind `--attach`/`--join` uses a private directory it removes before returning. The
+label is not part of the config-drift hash. Headless probes such as Paseo's `--version` and
+`auth status` are full launches, so this is what keeps them from filling the temp root.
+Spec: `spec/launch.feature` CS-LNCH-080..084.
+
 ### Image layering
 
 Four images take part in a launch, and the container runs the last of them:

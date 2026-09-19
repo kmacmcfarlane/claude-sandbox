@@ -61,6 +61,7 @@ type cliFixture struct {
 	home      string
 	proj      string
 	repo      string
+	tmp       string // Env.TempRoot: shadow directories are made and swept here
 }
 
 func newCLIFixture() *cliFixture {
@@ -73,8 +74,9 @@ func newCLIFixture() *cliFixture {
 		home: filepath.Join(base, "home"),
 		proj: filepath.Join(base, "proj"),
 		repo: filepath.Join(base, "repo"),
+		tmp:  filepath.Join(base, "tmp"),
 	}
-	for _, d := range []string{f.home, f.proj, f.repo} {
+	for _, d := range []string{f.home, f.proj, f.repo, f.tmp} {
 		Expect(os.MkdirAll(d, 0o755)).To(Succeed())
 	}
 	f.envmap = map[string]string{
@@ -94,6 +96,8 @@ func newCLIFixture() *cliFixture {
 		// is set-but-empty rather than unset (CS-CASC-027).
 		LookupEnv: func(k string) (string, bool) { v, ok := f.envmap[k]; return v, ok },
 		Lock:      f.lock,
+		// Never the real temp root: a launch sweeps it (CS-LNCH-081).
+		TempRoot: f.tmp,
 	}
 	return f
 }
