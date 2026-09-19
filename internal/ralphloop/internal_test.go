@@ -42,6 +42,8 @@ var _ = Describe("defaults (white-box)", func() {
 		Expect(o.RetryDelay).To(Equal(30))
 		Expect(o.QuotaPause).To(Equal(300))
 		Expect(o.QuotaMaxWait).To(Equal(18000))
+		Expect(o.CgroupDir).To(Equal("/sys/fs/cgroup"), "CS-RLP-023")
+		Expect(o.OOMBackoff).To(Equal(60*time.Second), "CS-RLP-026")
 	})
 })
 
@@ -261,5 +263,25 @@ var _ = Describe("runIterationReal", func() {
 		start := time.Now()
 		Expect(l.runIterationReal(1, false)).To(Equal(124))
 		Expect(time.Since(start)).To(BeNumerically("<", 10*time.Second))
+	})
+
+	It("CS-RLP-023: claude's own exit status is kept for OOM classification, 128+N for a signal death", func() {
+		// A shell that SIGKILLs itself stands in for an OOM-killed claude.
+		// The pipefail code the CS-RQT chain sees is unchanged (143 for any
+		// signal death); only the separate claude status says 137.
+		tmp := GinkgoT().TempDir()
+		script := filepath.Join(tmp, "killed-claude")
+		Expect(os.WriteFile(script, []byte("#!/bin/sh\nkill -KILL $$\n"), 0o755)).To(Succeed())
+		l := newLoop(tmp)
+		l.ClaudeBin = script
+		Expect(l.runIterationReal(1, false)).To(Equal(143))
+		Expect(l.claudeExit).To(Equal(137))
+
+		exit3 := filepath.Join(tmp, "exit3-claude")
+		Expect(os.WriteFile(exit3, []byte("#!/bin/sh\nexit 3\n"), 0o755)).To(Succeed())
+		l = newLoop(tmp)
+		l.ClaudeBin = exit3
+		Expect(l.runIterationReal(1, false)).To(Equal(3))
+		Expect(l.claudeExit).To(Equal(3))
 	})
 })

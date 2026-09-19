@@ -82,7 +82,7 @@ Ralph stores all runtime files under the resolved ralph directory — `.claude-s
 ```
 
 - **Stop the loop:** `touch .claude-sandbox/ralph/stop`
-- **Run metrics:** `<ralph-dir>/runlog.json` — array of runs with per-iteration duration, tokens, cost, story marker, and subagent details
+- **Run metrics:** `<ralph-dir>/runlog.json` — array of runs with per-iteration duration, tokens, cost, story marker, subagent details, and the loop's classified `outcome` (`ok`, `quota_exhausted`, `rate_limit`, `watchdog_timeout`, `iteration_timeout`, `error`, `oom`; CS-RLP-029). `oom` = claude exited 137 and the cgroup's `memory.events` `oom_kill` counter rose; ralph backs off 60 s and retries the iteration once, then stops (exit 137) and notifies on a second consecutive one (CS-RLP-023..028)
 - **Debug a run:** read the corresponding `<ralph-dir>/runlogs/rawlog_*` file for the full NDJSON stream
 - **Do not store persistent state in `<ralph-dir>/temp/`** — it is wiped at the start of every iteration
 - Prompt files live in the resolved agent directory — `.claude-sandbox/agent/`, e.g. `.claude-sandbox/agent/PROMPT.md` — these are inputs, not runtime outputs

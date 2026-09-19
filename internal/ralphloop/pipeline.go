@@ -59,6 +59,7 @@ func Terminate() { tracker.signal(syscall.SIGTERM) }
 // (CS-RLP-011..015) and returns the pipeline exit code (pipefail semantics,
 // 124 on hard timeout).
 func (l *Loop) runIterationReal(iter int, resume bool) int {
+	l.claudeExit = 0
 	promptBytes, err := l.promptData()
 	if err != nil {
 		fmt.Fprintln(l.Err, err)
@@ -154,8 +155,24 @@ func (l *Loop) runIterationReal(iter int, resume bool) int {
 			rc = code
 		}
 	}
+	// CS-RLP-023: claude's own status for OOM classification; a signal
+	// death is 128+N (SIGKILL -> 137) where ExitCode() would say -1.
+	l.claudeExit = claudeExitStatus(cmds[0])
 	if timedOut.Load() {
 		return 124
 	}
 	return rc
+}
+
+// claudeExitStatus is a finished command's exit status in shell terms:
+// 128+N when signal N killed it.
+func claudeExitStatus(c *exec.Cmd) int {
+	ps := c.ProcessState
+	if ps == nil {
+		return 1
+	}
+	if ws, ok := ps.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
+		return 128 + int(ws.Signal())
+	}
+	return ps.ExitCode()
 }

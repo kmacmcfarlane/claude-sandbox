@@ -26,14 +26,14 @@ type Options struct {
 	WorkDir  string // project root (defaults to cwd)
 	RepoRoot string // baked sandbox root (logstream stages); default /opt/claude-sandbox
 
-	Limit            int    // 0 -> 30
-	StopFile         string // "" -> <ralph-dir>/stop
-	PromptFile       string // "" -> <agent-dir>/PROMPT.md
-	ClaudeBin        string // "" -> claude
-	Interactive      bool
-	Model            string
-	SkipPermissions  bool
-	Resume           bool
+	Limit           int    // 0 -> 30
+	StopFile        string // "" -> <ralph-dir>/stop
+	PromptFile      string // "" -> <agent-dir>/PROMPT.md
+	ClaudeBin       string // "" -> claude
+	Interactive     bool
+	Model           string
+	SkipPermissions bool
+	Resume          bool
 	// Worktree names the Claude Code worktree every iteration runs in
 	// (`claude --worktree <name>`, CS-RLP-019); "" runs in the shared checkout
 	// with no flag (CS-RLP-021). One worktree per RUN: claude creates
@@ -48,6 +48,12 @@ type Options struct {
 	RetryDelay       int    // seconds; 0 -> 30
 	QuotaPause       int    // seconds; 0 -> 300
 	QuotaMaxWait     int    // seconds; 0 -> 18000
+	// CgroupDir holds the container's cgroup v2 memory.events / memory.max
+	// (CS-RLP-023); "" -> /sys/fs/cgroup. Tests point it at a temp dir.
+	CgroupDir string
+	// OOMBackoff is the fixed pause before an OOM-killed iteration's single
+	// retry (CS-RLP-026); 0 -> 60s.
+	OOMBackoff time.Duration
 
 	Runner execx.Runner
 	Out    io.Writer
@@ -74,6 +80,10 @@ type Loop struct {
 	StderrFile string
 	MarkerFile string
 	LockFile   string
+
+	// claudeExit is the last iteration's claude exit status (128+N for a
+	// signal), the input to OOM classification (CS-RLP-023).
+	claudeExit int
 
 	// ReserveClass replaces the pid-class burn before each iteration's claude
 	// (CS-PID-006); nil means the real one.
@@ -114,6 +124,12 @@ func (o *Options) withDefaults() error {
 	}
 	if o.QuotaMaxWait == 0 {
 		o.QuotaMaxWait = 18000
+	}
+	if o.CgroupDir == "" {
+		o.CgroupDir = DefaultCgroupDir
+	}
+	if o.OOMBackoff == 0 {
+		o.OOMBackoff = 60 * time.Second
 	}
 	if o.Out == nil {
 		o.Out = os.Stdout
@@ -314,6 +330,56 @@ func (l *Loop) initRunlog() error {
 	return os.WriteFile(l.RunlogFile, append(out, '\n'), 0o644)
 }
 
+// recordOutcome writes the classified outcome into runlog.json (CS-RLP-029):
+// onto run-logger's latest unannotated entry for iter in the current run, or
+// as a minimal entry when run-logger wrote none and the outcome is not ok.
+// Best-effort: a runlog it cannot read or write is left alone.
+func (l *Loop) recordOutcome(iter int, outcome Outcome, oomKills int) {
+	raw, err := os.ReadFile(l.RunlogFile)
+	if err != nil {
+		return
+	}
+	var runs []map[string]any
+	if json.Unmarshal(raw, &runs) != nil || len(runs) == 0 {
+		return
+	}
+	iters, _ := runs[0]["iterations"].([]any)
+	var entry map[string]any
+	for i := len(iters) - 1; i >= 0; i-- {
+		e, ok := iters[i].(map[string]any)
+		if !ok {
+			continue
+		}
+		if n, _ := e["iteration"].(float64); int(n) == iter {
+			if _, done := e["outcome"]; !done {
+				entry = e
+			}
+			break
+		}
+	}
+	if entry == nil {
+		if outcome == OutcomeOK {
+			return
+		}
+		entry = map[string]any{
+			"iteration": iter,
+			"endedAt":   time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
+		}
+		iters = append(iters, entry)
+		runs[0]["iterations"] = iters
+	}
+	entry["outcome"] = string(outcome)
+	if outcome == OutcomeOOM {
+		entry["claudeExit"] = oomExitCode
+		entry["oomKills"] = oomKills
+	}
+	out, err := json.MarshalIndent(runs, "", "  ")
+	if err != nil {
+		return
+	}
+	os.WriteFile(l.RunlogFile, append(out, '\n'), 0o644)
+}
+
 type lockInfo struct {
 	PID       int    `json:"pid"`
 	StartedAt string `json:"started_at"`
@@ -367,6 +433,7 @@ func (l *Loop) project() string { return filepath.Base(l.WorkDir) }
 // run is the iteration state machine (CS-RLP-009..018, CS-RQT-005..012).
 func (l *Loop) run() int {
 	retryCount := 0
+	oomStreak := 0 // consecutive oom outcomes (CS-RLP-026/027)
 	iter := 0
 	resume := l.Resume
 	for {
@@ -387,7 +454,9 @@ func (l *Loop) run() int {
 		os.Remove(l.StderrFile)
 		os.Remove(l.MarkerFile)
 
+		oomBefore := l.sampleOOM()
 		rc := l.runIteration(iter, resume)
+		oomAfter := l.sampleOOM()
 
 		if l.Interrupted() {
 			fmt.Fprintln(l.Out, "Interrupted. Exiting.")
@@ -395,8 +464,36 @@ func (l *Loop) run() int {
 			return 0
 		}
 
-		outcome := Classify(rc, l.QuotaFile, l.StderrFile, l.MarkerFile)
+		// CS-RLP-024: the oom check runs ahead of the unchanged CS-RQT chain —
+		// run-logger writes "ok" when claude's stdout merely closes.
+		var outcome Outcome
+		oomKills := 0
+		if IsOOM(l.claudeExit, oomBefore.n, oomBefore.ok, oomAfter.n, oomAfter.ok) {
+			outcome = OutcomeOOM
+			oomKills = oomAfter.n - oomBefore.n
+		} else {
+			outcome = Classify(rc, l.QuotaFile, l.StderrFile, l.MarkerFile)
+		}
+		l.recordOutcome(iter, outcome, oomKills) // CS-RLP-029
+		if outcome != OutcomeOOM {
+			oomStreak = 0
+		}
 		switch outcome {
+		case OutcomeOOM:
+			oomStreak++
+			msg := l.oomMessage(iter, oomKills)
+			if oomStreak > 1 {
+				// CS-RLP-027: a second consecutive oom stops the loop.
+				fmt.Fprintf(l.Out, "[oom] %s The retry was OOM-killed too. Exiting.\n", msg)
+				l.notify(fmt.Sprintf("⛔ **%s** — %s The retry was OOM-killed too. Loop stopped.", l.project(), msg))
+				return oomExitCode
+			}
+			// CS-RLP-026: back off, then re-run the same iteration once.
+			fmt.Fprintf(l.Out, "[oom] %s Retrying iteration %d once in %s.\n", msg, iter, FormatWait(int(l.OOMBackoff/time.Second)))
+			l.notify(fmt.Sprintf("⚠ **%s** — %s Retrying iteration %d once.", l.project(), msg, iter))
+			l.Sleep(l.OOMBackoff)
+			iter--
+
 		case OutcomeOK:
 			retryCount = 0
 
@@ -563,7 +660,10 @@ func (l *Loop) childEnv() []string {
 
 func (l *Loop) runIteration(iter int, resume bool) int {
 	if l.RunIter != nil {
-		return l.RunIter(l, iter)
+		// The seam returns claude's exit status; there is no pipeline.
+		rc := l.RunIter(l, iter)
+		l.claudeExit = rc
+		return rc
 	}
 	return l.runIterationReal(iter, resume)
 }
