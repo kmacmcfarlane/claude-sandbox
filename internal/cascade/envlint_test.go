@@ -198,3 +198,57 @@ var _ = Describe("env file linting", func() {
 		Expect(ws[0].Key).To(Equal("KEY"))
 	})
 })
+
+// Spec: spec/launch.feature (CS-LNCH-108) — EnvFilesDefine is the launcher's
+// "would docker set this key" check, on the shared reader.
+var _ = Describe("EnvFilesDefine", func() {
+	var tmp string
+	host := map[string]string{}
+	lookup := func(k string) (string, bool) { v, ok := host[k]; return v, ok }
+
+	BeforeEach(func() {
+		tmp = GinkgoT().TempDir()
+		for k := range host {
+			delete(host, k)
+		}
+	})
+
+	DescribeTable("CS-LNCH-108: reports a key docker would set from the files",
+		func(content string, hostSet, want bool) {
+			if hostSet {
+				host["K"] = ""
+			}
+			f := writeEnv(tmp, content)
+			Expect(cascade.EnvFilesDefine([]string{f}, "K", lookup)).To(Equal(want))
+		},
+		Entry("plain assignment", "K=v\n", false, true),
+		Entry("empty value", "K=\n", false, true),
+		Entry("indented", " \tK=v\n", false, true),
+		Entry("BOM on the first line", "\xEF\xBB\xBFK=v\n", false, true),
+		Entry("CRLF", "A=1\r\nK=v\r\n", false, true),
+		Entry("bare key, host sets it (even to \"\")", "K\n", true, true),
+		Entry("bare CRLF key, host sets it", "K\r\n", true, true),
+		Entry("bare key, host lacks it", "K\n", false, false),
+		Entry("bare key ending in \\r\\r", "K\r\r\n", true, false),
+		Entry("comment", "  # K=v\n", false, false),
+		Entry("blank before '='", "K =v\n", false, false),
+		Entry("another key only", "KK=v\nk=v\n", false, false),
+	)
+
+	It("CS-LNCH-108: a nil lookup never resolves a bare key", func() {
+		f := writeEnv(tmp, "K\n")
+		Expect(cascade.EnvFilesDefine([]string{f}, "K", nil)).To(BeFalse())
+	})
+
+	It("CS-LNCH-108: checks every file and skips unreadable ones", func() {
+		f := writeEnv(tmp, "K=v\n")
+		missing := filepath.Join(tmp, "missing")
+		Expect(cascade.EnvFilesDefine([]string{missing, f}, "K", nil)).To(BeTrue())
+	})
+
+	It("CS-LNCH-108: a key docker rejects never matches, even on its own line", func() {
+		f := writeEnv(tmp, "=v\nA B=v\n")
+		Expect(cascade.EnvFilesDefine([]string{f}, "", nil)).To(BeFalse())
+		Expect(cascade.EnvFilesDefine([]string{f}, "A B", nil)).To(BeFalse())
+	})
+})

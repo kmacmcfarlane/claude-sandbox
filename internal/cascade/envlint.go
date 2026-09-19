@@ -139,6 +139,40 @@ func validEnvKey(key string) bool {
 	return key != "" && !strings.ContainsAny(key, " \t")
 }
 
+// EnvFilesDefine reports whether docker, given files as --env-file flags, would
+// set key in the container (CS-LNCH-108). Files are read by readEnvAssignments,
+// so a BOM, leading whitespace and one trailing '\r' are handled as docker
+// handles them. A bare KEY line counts only when lookup finds KEY in the
+// launcher's environment (nil lookup: never), because docker passes that value
+// through and drops the line otherwise — the override notice's rule
+// (CS-CASC-027/028). Keys docker rejects never match; unreadable files are
+// skipped.
+func EnvFilesDefine(files []string, key string, lookup LookupEnv) bool {
+	if !validEnvKey(key) {
+		return false
+	}
+	for _, f := range files {
+		assigns, err := readEnvAssignments(f)
+		if err != nil {
+			continue
+		}
+		for _, a := range assigns {
+			if a.Key != key {
+				continue
+			}
+			if a.HasValue {
+				return true
+			}
+			if lookup != nil {
+				if _, set := lookup(key); set {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 // LintEnvFiles lints every file in the cascade and prints the findings.
 // Warn-only: unreadable files and findings alike never block the launch.
 func LintEnvFiles(w io.Writer, files []string) {
