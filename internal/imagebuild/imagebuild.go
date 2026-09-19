@@ -15,6 +15,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash"
 	"io"
@@ -90,12 +91,14 @@ type Options struct {
 // BakedSources are the paths (relative to RepoRoot) the base Dockerfile COPYs
 // from the build context: their contents are the base fingerprint (CS-IMG-034)
 // and, for an unlabeled image, their mtimes trigger a rebuild (CS-IMG-004). A
-// test parses the Dockerfile so a new COPY cannot be left out (CS-IMG-037).
+// test parses the Dockerfile so a new COPY cannot be left out (CS-IMG-037),
+// and so each entry is exactly a COPY source path: that is the level at which
+// BuildKit follows a symlinked source, and so does bakedRoot (CS-IMG-040).
 var BakedSources = []string{
 	"cmd", "internal", "go.mod", "go.sum", "assets.go",
 	// Embedded into the binary by assets.go.
 	"scaffold", "scaffold-ralph", "container-context.md", "mcp-servers.json",
-	"logstream", "entrypoint.sh", "PROMPT_RALPH.md", "mcp", "notification-hooks.json",
+	"logstream", "entrypoint.sh", "PROMPT_RALPH.md", "mcp/discord-notify", "notification-hooks.json",
 }
 
 // ModeBakedSources are the baked sources whose permission bits reach the
@@ -116,16 +119,33 @@ func keepsMode(rel string) bool {
 	return false
 }
 
-// bakedRoot resolves a top-level baked source the way BuildKit's COPY does: a
-// source that is itself a symlink is followed, so what it points to is what
-// gets baked (CS-IMG-040). An error means the source is absent (or dangling).
-func bakedRoot(repoRoot, rel string) (root string, fi os.FileInfo, err error) {
+// errOutsideContext marks a baked source that is a symlink resolving outside
+// the build context: BuildKit's COPY fails on it ("not found"), so there is
+// nothing to fingerprint and its target is never walked (CS-IMG-040).
+var errOutsideContext = errors.New("baked source resolves outside the build context")
+
+// bakedRoot resolves a baked source (a COPY source path) the way BuildKit's
+// COPY does: a source that is itself a symlink is followed when, and only
+// when, its target is inside the build context (the repo root), so what it
+// points to is what gets baked (CS-IMG-040). ctxRel is the resolved path
+// relative to the context, slash-separated — the path .dockerignore rules
+// see. errOutsideContext reports a target outside the context; any other
+// error means the source is absent (or dangling).
+func bakedRoot(repoRoot, rel string) (root, ctxRel string, fi os.FileInfo, err error) {
 	root, err = filepath.EvalSymlinks(filepath.Join(repoRoot, rel))
 	if err != nil {
-		return "", nil, err
+		return "", "", nil, err
+	}
+	ctx, cerr := filepath.EvalSymlinks(repoRoot)
+	if cerr != nil {
+		ctx = filepath.Clean(repoRoot)
+	}
+	r, rerr := filepath.Rel(ctx, root)
+	if rerr != nil || r == ".." || strings.HasPrefix(r, ".."+string(filepath.Separator)) || filepath.IsAbs(r) {
+		return "", "", nil, errOutsideContext
 	}
 	fi, err = os.Stat(root)
-	return root, fi, err
+	return root, filepath.ToSlash(r), fi, err
 }
 
 // bakedName names a walked entry under the baked source rel (resolved to
@@ -141,7 +161,9 @@ func bakedName(rel, root, path string) string {
 
 // bakedSkip reports whether a walked entry under a baked source directory is
 // not part of the image, so it is neither fingerprinted nor an mtime trigger.
-// rel is repo-relative with forward slashes. Go tests are not compiled in
+// rel is the entry's real path relative to the build context, with forward
+// slashes — behind a followed symlink, the target's path, since that is what
+// .dockerignore filters (bakedName is the name the image sees). Go tests are not compiled in
 // (CS-IMG-031); the rest mirrors the .dockerignore debris lines that keep
 // files out of the build context (CS-IMG-038). For a directory, true means
 // skip the whole subtree.
@@ -983,7 +1005,13 @@ func baseInputs(repoRoot string) (fp string, unreadable bool) {
 		return "", false
 	}
 	for _, rel := range BakedSources {
-		p, fi, err := bakedRoot(repoRoot, rel)
+		p, ctxRel, fi, err := bakedRoot(repoRoot, rel)
+		if err == errOutsideContext {
+			// Unbuildable, and possibly huge: never walked (CS-IMG-040).
+			f.add(rel)
+			f.add("\x00outside-context")
+			continue
+		}
 		if err != nil {
 			f.add(rel)
 			f.add("\x00absent") // a vanished source is a change too
@@ -1008,7 +1036,7 @@ func baseInputs(repoRoot string) (fp string, unreadable bool) {
 				return nil
 			}
 			name := bakedName(rel, p, path)
-			if path != p && bakedSkip(name, d) {
+			if path != p && bakedSkip(bakedName(ctxRel, p, path), d) {
 				if d.IsDir() {
 					return filepath.SkipDir
 				}
@@ -1094,7 +1122,7 @@ func mtimeAfter(path string, t time.Time) bool {
 func anyNewer(root string, rels []string, t time.Time) bool {
 	for _, rel := range rels {
 		// Follow a symlinked source as COPY does (CS-IMG-040).
-		p, fi, err := bakedRoot(root, rel)
+		p, ctxRel, fi, err := bakedRoot(root, rel)
 		if err != nil {
 			continue
 		}
@@ -1111,7 +1139,7 @@ func anyNewer(root string, rels []string, t time.Time) bool {
 			}
 			// Tests and build-context debris cannot change the image
 			// (CS-IMG-031, CS-IMG-038).
-			if path != p && bakedSkip(bakedName(rel, p, path), d) {
+			if path != p && bakedSkip(bakedName(ctxRel, p, path), d) {
 				if d.IsDir() {
 					return filepath.SkipDir
 				}

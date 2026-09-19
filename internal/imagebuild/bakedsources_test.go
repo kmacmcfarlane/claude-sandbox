@@ -132,4 +132,16 @@ var _ = Describe("baked sources", func() {
 			{path: "a.go"}, {path: "e.sh", chmod: true, finalStage: true}, {path: "l", finalStage: true},
 		}))
 	})
+
+	It("CS-IMG-040: each baked source is exactly a COPY source path, the level BuildKit follows a symlink at", func() {
+		seen := map[string]bool{}
+		var srcs []string
+		for _, s := range contextSources(repoFile("Dockerfile")) {
+			if !seen[s] {
+				seen[s] = true
+				srcs = append(srcs, s)
+			}
+		}
+		Expect(imagebuild.BakedSources).To(ConsistOf(srcs))
+	})
 })

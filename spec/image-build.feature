@@ -40,7 +40,7 @@ Feature: Image build lifecycle (CS-IMG)
     # the Go source tree (cmd/, internal/, go.mod/go.sum, assets.go), the trees
     # assets.go embeds into the binary (scaffold/, scaffold-ralph/,
     # container-context.md, mcp-servers.json), logstream/, entrypoint.sh,
-    # PROMPT_RALPH.md, mcp/, notification-hooks.json (baked as managed settings,
+    # PROMPT_RALPH.md, mcp/discord-notify/, notification-hooks.json (baked as managed settings,
     # CS-LNCH-068). scaffold/, scaffold-ralph/, container-context.md and
     # mcp-servers.json were COPYed but missing from the set, so editing them
     # rebuilt nothing and the running binary kept seeding the old files.
@@ -261,7 +261,8 @@ Feature: Image build lifecycle (CS-IMG)
     And each symlink under a baked directory counts by its target (COPY bakes the link
       itself; a dangling or directory link is still fingerprinted)
     And a baked file's permission bits count only where they reach the image (CS-IMG-039)
-    And a top-level baked source that is a symlink counts by what it points to (CS-IMG-040)
+    And a baked source that is itself a symlink counts by what it points to, when that is
+      inside the build context (CS-IMG-040)
     And the CLI fingerprint hashes the content of Dockerfile.cli
     And the child fingerprint hashes the child Dockerfile path, its content, the build
       context and the base image ID
@@ -288,14 +289,23 @@ Feature: Image build lifecycle (CS-IMG)
     # on the umask. A test parses the Dockerfile so a new plain COPY, or a
     # --chmod dropped from an existing one, cannot be left out of the set.
 
-  Scenario: CS-IMG-040 A symlinked top-level baked source is followed
+  Scenario: CS-IMG-040 A symlinked baked source is followed only inside the build context
     Given a path in the baked source set is itself a symlink
+    When its resolved target is inside the build context (the repo root)
     Then the base fingerprint and the time rule both read what it points to — the
       files under a linked directory, the content of a linked file — under the
       baked source's own name
-    # BuildKit's COPY follows a symlink named as a source, so the target's
-    # contents are what gets baked. Symlinks further down stay links (CS-IMG-034).
-    # A dangling top-level link counts as an absent source.
+    And .dockerignore debris rules (CS-IMG-038) apply to the target's real path
+    When its resolved target is outside the build context
+    Then the target is never walked: the fingerprint records only that the source
+      resolves outside the context, and it is no time-rule trigger
+    # BuildKit's COPY follows a symlink named as a source, but only to a target
+    # inside the context — an absolute or ../ target fails the build with
+    # '"/<src>": not found', and walking it (a link aimed at $HOME, say) would
+    # cost every launch. Each baked source is exactly a COPY source path
+    # (mcp/discord-notify, not mcp), since that is the level BuildKit follows a
+    # link at; a test pins the set to the Dockerfile. Symlinks further down stay
+    # links (CS-IMG-034). A dangling link counts as an absent source.
 
   Scenario: CS-IMG-035 Unlabeled images keep the previous rules
     Given the image has no claude-sandbox.build-inputs label, or a fingerprint cannot be computed
