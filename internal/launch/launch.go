@@ -31,7 +31,7 @@ type Inputs struct {
 	// Getenv is the environment seam (defaults to os.Getenv).
 	Getenv func(string) string
 
-	// TempDir hosts the shadow files (defaults to os.MkdirTemp base).
+	// TempDir hosts the shadow files; "" makes a fresh one (NewShadowDir).
 	TempDir string
 
 	RalphMode       bool
@@ -138,6 +138,9 @@ type Plan struct {
 	DetachKeys    string   // --detach-keys sequence, for docker start only
 	// Headless renders create with -i but no -t (CS-LNCH-059).
 	Headless bool
+	// ShadowDir is the directory holding this launch's shadow files, also
+	// recorded as the claude-sandbox.shadowdir label (CS-LNCH-080).
+	ShadowDir string
 
 	// ConfigHash identifies the effective configuration this container was
 	// launched with; ConfigInputs records the contributing files so drift can
@@ -409,6 +412,12 @@ func Build(in Inputs) (*Plan, error) {
 		p.Labels = append(p.Labels, "claude-sandbox.pidclass="+in.PIDClass)
 		p.EnvFlags = append(p.EnvFlags, "CLAUDE_SANDBOX_PID_CLASS="+in.PIDClass)
 	}
+	// CS-LNCH-080: name the shadow directory, so a later launch's sweep knows
+	// this container still uses it. Labels are outside the config hash.
+	if in.TempDir != "" {
+		p.ShadowDir = in.TempDir
+		p.Labels = append(p.Labels, LabelShadowDir+"="+in.TempDir)
+	}
 
 	return p, nil
 }
@@ -524,7 +533,7 @@ func (p *Plan) Start(r execx.Runner) error {
 func (in *Inputs) tempFile(name string, content []byte) (string, error) {
 	dir := in.TempDir
 	if dir == "" {
-		d, err := os.MkdirTemp("", "claude-sandbox")
+		d, err := NewShadowDir("")
 		if err != nil {
 			return "", err
 		}

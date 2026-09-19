@@ -7,6 +7,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"time"
 
@@ -380,9 +381,17 @@ func wouldBeFingerprint(env *Env, projectDir string, f *launchFlags, cfg *cascad
 	image := imagebuild.CapImageName(parent)
 	id := imagebuild.ImageID(env.Runner, image)
 
+	// CS-LNCH-084: Build writes the shadow files to hash their contents; give
+	// it a private directory and remove it, or every drift check leaks one.
+	shadow, err := launch.NewShadowDir(env.TempRoot)
+	if err != nil {
+		return "", nil
+	}
+	defer os.RemoveAll(shadow)
+
 	uid, gid, uname, home := hostIdentity(env.Getenv)
 	plan, err := launch.Build(launch.Inputs{
-		ProjectDir: projectDir, Home: home,
+		ProjectDir: projectDir, Home: home, TempDir: shadow,
 		HostUID: uid, HostGID: gid, HostUser: uname,
 		Getenv:    env.Getenv,
 		RalphMode: f.Ralph, Limit: f.Limit, SkipPermissions: f.Dangerous,
