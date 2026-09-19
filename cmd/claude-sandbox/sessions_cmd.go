@@ -17,6 +17,7 @@ import (
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/imagebuild"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/launch"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/oomreport"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/sessions"
 )
 
@@ -54,6 +55,9 @@ func newSessionsCmd(env *Env) *cobra.Command {
 			}
 			// Reservations are launches in flight, not sessions (CS-SESS-051).
 			found = sessions.Live(found)
+			// One batched inspect for State.OOMKilled, which docker ps cannot
+			// read; a failure just leaves the rows unmarked (CS-SESS-061/062).
+			sessions.MarkOOM(env.Runner, found)
 			if asJSON {
 				b, merr := sessions.MarshalJSON(found)
 				if merr != nil {
@@ -86,6 +90,7 @@ func printSessionTable(env *Env, found []sessions.Session, all bool, projectDir 
 		header = append(header, "PROJECT")
 	}
 	rows := [][]string{header}
+	anyOOM := false
 	for _, s := range found {
 		instance := s.Instance
 		if instance == "" {
@@ -99,7 +104,14 @@ func printSessionTable(env *Env, found []sessions.Session, all bool, projectDir 
 		if worktree == "" {
 			worktree = "-"
 		}
-		row := []string{mark + instance, worktree, s.Name, s.Mode, uptime(s.Status), fmt.Sprint(s.Count)}
+		count := fmt.Sprint(s.Count)
+		if s.OOMKilled {
+			// A suffix rather than a column: the condition is rare, and a
+			// column would print "-" on nearly every row (CS-SESS-061).
+			count += oomSuffix
+			anyOOM = true
+		}
+		row := []string{mark + instance, worktree, s.Name, s.Mode, uptime(s.Status), count}
 		if all {
 			row = append(row, s.Project)
 		}
@@ -123,9 +135,34 @@ func printSessionTable(env *Env, found []sessions.Session, all bool, projectDir 
 		}
 		fmt.Fprintln(env.Out, strings.TrimRight(b.String(), " "))
 	}
-	if all {
-		fmt.Fprintln(env.Out, "\n* = this project")
+	if all || anyOOM {
+		fmt.Fprintln(env.Out)
 	}
+	if all {
+		fmt.Fprintln(env.Out, "* = this project")
+	}
+	if anyOOM {
+		fmt.Fprintln(env.Out, strings.TrimSpace(oomSuffix)+" = a process in this container was killed by the OOM killer; see memoryLimit")
+	}
+}
+
+// oomSuffix marks a container whose State.OOMKilled is true in the SESSIONS
+// column (CS-SESS-061).
+const oomSuffix = " (OOM)"
+
+// noteEarlierOOM prints one note when the container about to be attached to
+// or joined has had a process OOM-killed (CS-SESS-063). docker's
+// State.OOMKilled is sticky, so this surfaces a kill nobody was attached to
+// see. It never prompts; an inspect that fails prints nothing.
+func noteEarlierOOM(env *Env, s sessions.Session) {
+	t := []sessions.Session{s}
+	sessions.MarkOOM(env.Runner, t)
+	if !t[0].OOMKilled {
+		return
+	}
+	lim := oomreport.Limit{Value: s.MemoryLimit, Source: s.MemoryLimitSource}
+	fmt.Fprintf(env.Err, "Note: an earlier process in this container (session '%s') was killed by the OOM killer; memoryLimit: %s.\n",
+		s.Instance, oomreport.DescribeLimit(lim))
 }
 
 // uptime trims docker's "Up 2 hours (healthy)" to "2 hours".
@@ -331,6 +368,8 @@ func joinExistingSession(env *Env, projectDir string, f *launchFlags, cfg *casca
 	if model == "" {
 		model = cfg.Model
 	}
+
+	noteEarlierOOM(env, d.Target)
 
 	wantHash, wantInputs := wouldBeFingerprint(env, projectDir, f, cfg, envFiles, linked)
 	proceed, newContainer, err := confirmDrift(env, d.Target, wantHash, wantInputs, f)
