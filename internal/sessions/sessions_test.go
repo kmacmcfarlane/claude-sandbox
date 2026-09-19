@@ -401,3 +401,69 @@ var _ = Describe("headless containers (CS-SESS-055)", func() {
 		Expect(sessions.ModeHeadless).To(Equal("headless"))
 	})
 })
+
+var _ = Describe("the OOM marker (CS-SESS-061..063)", func() {
+	var fake *execx.Fake
+	BeforeEach(func() { fake = &execx.Fake{} })
+
+	It("CS-SESS-061: one batched inspect marks the containers docker reports as OOM-killed", func() {
+		fake.On("docker inspect", "/a false\n/b true\n/c false\n", nil)
+		all := []sessions.Session{{Name: "a"}, {Name: "b"}, {Name: "c"}}
+		sessions.MarkOOM(fake, all)
+		Expect(fake.CommandLines()).To(Equal([]string{
+			"docker inspect --type container --format {{.Name}} {{.State.OOMKilled}} a b c",
+		}), "one inspect across every listed container, never one per container")
+		Expect([]bool{all[0].OOMKilled, all[1].OOMKilled, all[2].OOMKilled}).To(Equal([]bool{false, true, false}))
+	})
+
+	It("CS-SESS-061: an empty list runs no inspect", func() {
+		sessions.MarkOOM(fake, nil)
+		Expect(fake.CommandLines()).To(BeEmpty())
+	})
+
+	It("CS-SESS-061: --json carries oomKilled only when true, and the recorded limit", func() {
+		b, err := sessions.MarshalJSON([]sessions.Session{{Name: "a", OOMKilled: true, MemoryLimit: "16g", MemoryLimitSource: "default"}, {Name: "b"}})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(string(b)).To(ContainSubstring(`"memoryLimit": "16g"`))
+		Expect(string(b)).To(ContainSubstring(`"memoryLimitSource": "default"`))
+		Expect(string(b)).To(ContainSubstring(`"oomKilled": true`))
+		Expect(strings.Count(string(b), "oomKilled")).To(Equal(1))
+	})
+
+	It("CS-SESS-062: an inspect that fails with no output marks nothing", func() {
+		fake.On("docker inspect", "", execx.Fail(1))
+		all := []sessions.Session{{Name: "a"}, {Name: "b"}}
+		sessions.MarkOOM(fake, all)
+		Expect(all[0].OOMKilled).To(BeFalse())
+		Expect(all[1].OOMKilled).To(BeFalse())
+	})
+
+	It("CS-SESS-062: a partial failure keeps the marks docker printed before failing", func() {
+		// docker prints the containers it found, then fails on the missing
+		// one ("No such container", exit 1).
+		fake.On("docker inspect", "/a true\n/c false\n", execx.Fail(1))
+		all := []sessions.Session{{Name: "a"}, {Name: "gone"}, {Name: "c"}}
+		sessions.MarkOOM(fake, all)
+		Expect([]bool{all[0].OOMKilled, all[1].OOMKilled, all[2].OOMKilled}).To(Equal([]bool{true, false, false}))
+	})
+
+	It("CS-SESS-061: a successful inspect with fewer lines than names marks only what it reported", func() {
+		fake.On("docker inspect", "/b true\n", nil)
+		all := []sessions.Session{{Name: "a"}, {Name: "b"}, {Name: "c"}}
+		sessions.MarkOOM(fake, all)
+		Expect([]bool{all[0].OOMKilled, all[1].OOMKilled, all[2].OOMKilled}).To(Equal([]bool{false, true, false}))
+	})
+
+	It("CS-SESS-063: discovery reads the create-time memoryLimit labels from the same ps output", func() {
+		fields := []string{"a", "Up 1 minute", "/p", "claude", "otter", "v1", "", "", "", "1", "", "running", "",
+			"16g", "/ws/.claude-sandbox/config.yaml"}
+		fake.On("docker ps", strings.Join(fields, sep)+"\n", nil)
+		got, err := sessions.DiscoverAllUncounted(fake)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(got[0].MemoryLimit).To(Equal("16g"))
+		Expect(got[0].MemoryLimitSource).To(Equal("/ws/.claude-sandbox/config.yaml"))
+		Expect(fake.CommandLines()[0]).To(ContainSubstring(`{{.Label "claude-sandbox.memorylimit"}}`))
+		Expect(fake.CommandLines()[0]).To(ContainSubstring(`{{.Label "claude-sandbox.memorylimitsource"}}`))
+		Expect(strings.Join(fake.CommandLines(), "\n")).NotTo(ContainSubstring("docker inspect"))
+	})
+})

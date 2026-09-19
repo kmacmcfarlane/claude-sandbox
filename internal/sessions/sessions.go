@@ -18,6 +18,7 @@ import (
 
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/launch"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/oomreport"
 )
 
 // Label keys written by the launcher (CS-LNCH-032).
@@ -35,6 +36,11 @@ const (
 	// LabelWorktree records the worktree the session was launched into
 	// (CS-LNCH-044); empty when it runs in the shared checkout.
 	LabelWorktree = "claude-sandbox.worktree"
+	// LabelMemoryLimit and LabelMemoryLimitSource record the memoryLimit a
+	// container was created with and its cascade source (CS-LNCH-093), read
+	// back for the attach/join OOM note (CS-SESS-063).
+	LabelMemoryLimit       = oomreport.LabelMemoryLimit
+	LabelMemoryLimitSource = oomreport.LabelMemoryLimitSource
 )
 
 // ModeRalph marks a ralph loop container.
@@ -62,6 +68,14 @@ type Session struct {
 	// claude's --worktree, "" for a shared-checkout session (or a container
 	// from a launcher that predates worktree mode).
 	Worktree string `json:"worktree,omitempty"`
+	// MemoryLimit and MemoryLimitSource are the create-time memoryLimit
+	// labels (CS-LNCH-093); "" on a container from an older launcher.
+	MemoryLimit       string `json:"memoryLimit,omitempty"`
+	MemoryLimitSource string `json:"memoryLimitSource,omitempty"`
+	// OOMKilled is docker's State.OOMKilled, which is sticky: true once any
+	// process in the container was OOM-killed. Discovery never sets it; only
+	// MarkOOM does (CS-SESS-061).
+	OOMKilled bool `json:"oomKilled,omitempty"`
 
 	// Count is the number of live claude processes, so joined sessions are
 	// visible and not just the container that hosts them.
@@ -106,9 +120,12 @@ var psFormat = strings.Join([]string{
 	`{{.Label "` + LabelInputs + `"}}`,
 	`{{.Label "` + LabelPIDClass + `"}}`,
 	`{{.Label "` + LabelWorktree + `"}}`,
-	// Optional trailing fields (CS-SESS-050/052): rows without them still parse.
+	// Optional trailing fields (CS-SESS-050/052, CS-SESS-063): rows without
+	// them still parse.
 	"{{.State}}",
 	"{{.CreatedAt}}",
+	`{{.Label "` + LabelMemoryLimit + `"}}`,
+	`{{.Label "` + LabelMemoryLimitSource + `"}}`,
 }, fieldSep)
 
 // psFieldCount is the minimum a row must carry; State and CreatedAt follow.
@@ -201,6 +218,9 @@ func list(r execx.Runner, filter string, count bool) ([]Session, error) {
 		if len(f) > 12 {
 			s.CreatedAt = parseCreatedAt(f[12])
 		}
+		if len(f) > 14 {
+			s.MemoryLimit, s.MemoryLimitSource = f[13], f[14]
+		}
 		// A reservation has no processes to count, and docker top fails on a
 		// container that is not running (CS-SESS-051).
 		if count && !s.Reserved() {
@@ -266,6 +286,39 @@ func Attachable(r execx.Runner, name string) (int, error) {
 		return 0, err
 	}
 	return strconv.Atoi(strings.TrimSpace(out))
+}
+
+// oomFormat is the batched OOM inspect's per-container line. docker renders
+// {{.Name}} with a leading "/".
+const oomFormat = "{{.Name}} {{.State.OOMKilled}}"
+
+// MarkOOM sets OOMKilled on each session whose container docker reports as
+// OOM-killed, with ONE "docker inspect" across all of them — "docker ps
+// --format" cannot read State.OOMKilled (CS-SESS-061). Nothing runs for an
+// empty list. The marker is informational, so a failure is never an error
+// (CS-SESS-062). The output is parsed even when docker exits non-zero:
+// docker prints the lines of the containers it found before failing on a
+// missing one (a --rm container removed since the ps), so a partial failure
+// keeps the marks it got; containers it did not report stay unmarked.
+func MarkOOM(r execx.Runner, all []Session) {
+	if len(all) == 0 {
+		return
+	}
+	args := []string{"inspect", "--type", "container", "--format", oomFormat}
+	for _, s := range all {
+		args = append(args, s.Name)
+	}
+	out, _ := r.Output(execx.Cmd{Name: "docker", Args: args, Stderr: io.Discard})
+	killed := map[string]bool{}
+	for _, line := range strings.Split(out, "\n") {
+		f := strings.Fields(line)
+		if len(f) == 2 && f[1] == "true" {
+			killed[strings.TrimPrefix(f[0], "/")] = true
+		}
+	}
+	for i := range all {
+		all[i].OOMKilled = killed[all[i].Name]
+	}
 }
 
 // ByInstance finds a session by its instance noun.

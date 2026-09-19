@@ -27,7 +27,9 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
       and --filter status=created --filter status=running --filter status=paused
       (see CS-SESS-050)
     And the container name, status, and each claude-sandbox.* label are read from
-      the same --format output, with no per-container "docker inspect"
+      the same --format output, with no per-container "docker inspect" (the
+      "sessions" subcommand adds ONE batched inspect for the OOM marker,
+      CS-SESS-061; discovery itself never inspects)
     And container names are never parsed to recover the project directory
 
   Scenario: CS-SESS-002 Discovery across all projects
@@ -599,3 +601,54 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
     And exit 137 with no oom event prints nothing (the process was killed some
       other way)
     And the launcher exits with docker exec's status
+
+  # ---- the OOM marker on running containers ----
+  #
+  # A session OOM-killed while nobody was attached (a detached primary, a
+  # joined session) prints no exit report (CS-LNCH-089 needs a waiting
+  # launcher). Docker's State.OOMKilled is sticky: once any process inside a
+  # container is OOM-killed it stays true for as long as the container runs.
+  # "docker ps --format" cannot read it, so the marker costs one inspect.
+
+  Scenario: CS-SESS-061 "sessions" marks containers whose State.OOMKilled is true
+    Given the listed containers include one whose State.OOMKilled is true
+    When "claude-sandbox sessions" (with or without --all) is run
+    Then ONE "docker inspect --type container --format '{{.Name}} {{.State.OOMKilled}}'"
+      runs with every listed container name, never one inspect per container
+    And that row's SESSIONS column carries the suffix " (OOM)", e.g. "1 (OOM)"
+      # A suffix, not a column: a column would print "-" on nearly every row
+      # for a rare condition, and SESSIONS is where the killed processes were.
+    And a legend line "(OOM) = a process in this container was killed by the
+      OOM killer; see memoryLimit" follows the table, only when a row is marked
+    And "sessions --json" carries "oomKilled": true on that object, and omits
+      the key when false; each object also carries "memoryLimit" and
+      "memoryLimitSource" when the container recorded them (CS-LNCH-093)
+    And with no containers listed the inspect does not run
+
+  Scenario: CS-SESS-062 A failing OOM inspect leaves "sessions" as it was
+    Given the batched "docker inspect" exits non-zero
+    When "claude-sandbox sessions" is run
+    Then no error is printed and the exit status is 0
+    And a total failure (no output) lists every container without a marker
+    And a partial failure keeps the marks it did get: docker prints the lines
+      of the containers it found before failing on a missing one (a --rm
+      container removed between "docker ps" and the inspect), and only the
+      containers it did not report stay unmarked
+
+  Scenario: CS-SESS-063 A note before attach or join into an OOM-killed container
+    Given the container chosen for attach or join has State.OOMKilled true
+    When the target is chosen by the session decision ([a]/[j]) or by
+      --attach[=NAME] / --join[=NAME]
+    Then ONE "docker inspect" of that container runs, and before the drift
+      check and the attach or join, one note goes to stderr:
+      "Note: an earlier process in this container (session '<instance>') was
+      killed by the OOM killer; memoryLimit: <limit>."
+    And <limit> is rendered from the container's create-time labels
+      claude-sandbox.memorylimit and claude-sandbox.memorylimitsource
+      (CS-LNCH-093) exactly as the exit report renders it: "16g (from <file>)",
+      "<value> (the default; ...)", or "not recorded on this container" when
+      the labels are absent (a container from an older launcher)
+    And the note never prompts and never blocks: the attach or join proceeds
+    And with State.OOMKilled false, or an inspect that fails, nothing is printed
+    And the decision flow, the exit-3 no-terminal behaviour (CS-SESS-019) and
+      the bypass flags (CS-SESS-028) are unchanged

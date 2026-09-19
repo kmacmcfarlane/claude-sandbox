@@ -311,7 +311,7 @@ const TerminalReset = "\x1b[?2026l" + // synchronized update off
 func KilledReport(kills int, lim Limit) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "claude-sandbox: this session was killed by the container's OOM killer (exit %d; %s).\n", OOMExit, plural(kills, "OOM kill"))
-	fmt.Fprintf(&b, "  memoryLimit: %s; swap is off by design.\n", describe(lim))
+	fmt.Fprintf(&b, "  memoryLimit: %s; swap is off by design.\n", DescribeLimit(lim))
 	fmt.Fprintf(&b, "  Remedies: %s, or cap build/test parallelism (e.g. ginkgo --procs=N, go test -p N, make -jN).\n", remedy(lim))
 	return b.String()
 }
@@ -320,7 +320,7 @@ func KilledReport(kills int, lim Limit) string {
 // (CS-LNCH-090).
 func SurvivedReport(kills int, lim Limit) string {
 	return fmt.Sprintf("claude-sandbox: note: the container's OOM killer killed %s during this session (memoryLimit %s); the session itself was not killed.\n",
-		plural(kills, "process"), describe(lim))
+		plural(kills, "process"), DescribeLimit(lim))
 }
 
 func plural(n int, noun string) string {
@@ -333,8 +333,10 @@ func plural(n int, noun string) string {
 	return fmt.Sprintf("%d %ss", n, noun)
 }
 
-// describe renders the limit and its source.
-func describe(lim Limit) string {
+// DescribeLimit renders the limit and its source, as the exit report and the
+// attach/join note name it (CS-LNCH-089, CS-SESS-063); "not recorded on this
+// container" when the create-time labels are absent.
+func DescribeLimit(lim Limit) string {
 	switch {
 	case lim.Value == "":
 		return "not recorded on this container"
