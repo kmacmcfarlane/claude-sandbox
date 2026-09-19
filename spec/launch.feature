@@ -23,7 +23,7 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     When "claude-sandbox --resume" is run
     Then "--resume" and all subsequent args are appended to the container command
     # Pass-through allowlist: --resume --continue --verbose --output-format
-    # --allowedTools --disallowTools --permission-prompt-tool --mcp-config
+    # --allowedTools --disallowedTools --permission-prompt-tool --mcp-config
     # --permission-mode --append-system-prompt --system-prompt --max-turns
     # --print --input-format --model --fallback-model --name
     # (-n, the short form of --name, needs no allowlisting: single-dash args

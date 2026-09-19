@@ -107,6 +107,15 @@ var _ = Describe("scanLaunchArgs", func() {
 		}
 	})
 
+	It("CS-LNCH-002: --disallowedTools (Claude Code's real spelling) passes through", func() {
+		// Iterating knownPassthrough cannot catch a misspelled entry: the list
+		// once held "--disallowTools", so the real flag exited 2 as unknown.
+		f, err := scanLaunchArgs([]string{"--disallowedTools", "Bash", "--frobnicate"})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(f.Passthrough).To(Equal([]string{"--disallowedTools", "Bash", "--frobnicate"}))
+		Expect(knownPassthrough).NotTo(HaveKey("--disallowTools"))
+	})
+
 	It("CS-LNCH-002: launcher flags before the passthrough boundary are still consumed", func() {
 		f, err := scanLaunchArgs([]string{"--dangerous", "--resume", "--rebuild"})
 		Expect(err).NotTo(HaveOccurred())

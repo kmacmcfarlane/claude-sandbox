@@ -309,7 +309,7 @@ type launchFlags struct {
 
 var knownPassthrough = map[string]bool{
 	"--resume": true, "--continue": true, "--verbose": true, "--output-format": true,
-	"--allowedTools": true, "--disallowTools": true, "--permission-prompt-tool": true,
+	"--allowedTools": true, "--disallowedTools": true, "--permission-prompt-tool": true,
 	"--mcp-config": true, "--permission-mode": true, "--append-system-prompt": true,
 	"--system-prompt": true, "--max-turns": true, "--print": true, "--input-format": true,
 	"--model": true, "--fallback-model": true,
