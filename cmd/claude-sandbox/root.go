@@ -666,17 +666,8 @@ func runHeadless(env *Env, args []string) error {
 	if err != nil {
 		return err
 	}
-	switch {
-	case f.Ralph:
-		return exitErr(2, "Error: --ralph is not valid with headless")
-	case f.Limit != "":
-		return exitErr(2, "Error: --limit is not valid with headless")
-	case f.Attach:
-		return exitErr(2, "Error: --attach is not valid with headless: a headless launch is always a new container")
-	case f.Join:
-		return exitErr(2, "Error: --join is not valid with headless: a headless launch is always a new container")
-	case f.Branch:
-		return exitErr(2, "Error: --branch is not valid with headless; pass claude's own --resume/--fork-session after --")
+	if err := headlessRejection(f); err != nil {
+		return err
 	}
 	// CS-LNCH-061: a decision would need a person, so there is none.
 	f.NewSession = true
@@ -690,6 +681,25 @@ func runHeadless(env *Env, args []string) error {
 	h.Prompter = &prompt.Fixed{Out: env.Err}
 	rr := repoRoot(h.Getenv)
 	return launchWith(&h, f, rr, imagebuild.Version(h.Runner, rr), true)
+}
+
+// headlessRejection reports the launcher flags a headless launch refuses. It is
+// the single source for both runHeadless and headless completion (CS-COMP-025),
+// which derives the flags it offers from it.
+func headlessRejection(f *launchFlags) error {
+	switch {
+	case f.Ralph:
+		return exitErr(2, "Error: --ralph is not valid with headless")
+	case f.Limit != "":
+		return exitErr(2, "Error: --limit is not valid with headless")
+	case f.Attach:
+		return exitErr(2, "Error: --attach is not valid with headless: a headless launch is always a new container")
+	case f.Join:
+		return exitErr(2, "Error: --join is not valid with headless: a headless launch is always a new container")
+	case f.Branch:
+		return exitErr(2, "Error: --branch is not valid with headless; pass claude's own --resume/--fork-session after --")
+	}
+	return nil
 }
 
 func newHeadlessCmd(env *Env) *cobra.Command {
@@ -709,6 +719,9 @@ func newHeadlessCmd(env *Env) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runHeadless(env, args)
 		},
+		// DisableFlagParsing leaves cobra unaware of the launcher flags here
+		// too, so headless completes its own command line (CS-COMP-025/026).
+		ValidArgsFunction: completeHeadless,
 	}
 }
 

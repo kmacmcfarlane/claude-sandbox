@@ -112,6 +112,28 @@ Feature: Shell completion (CS-COMP)
     When "claude-sandbox ralph --model ''" is completed
     Then the completions are opus, sonnet, and haiku
 
+  Scenario: CS-COMP-025 headless completes the launcher flags valid for headless, and "--"
+    When "claude-sandbox headless --" is completed
+    Then the completions include every documented launcher flag except --ralph,
+      --limit, --attach, --join, and --branch, each with its launch-usage description
+    And they include "--"
+    And they exclude --help, -h, and --version, which belong to claude after headless
+    And the directive suppresses file completion
+    When "claude-sandbox headless --model ''" is completed
+    Then the completions are opus, sonnet, and haiku
+    # headless bypasses cobra when it runs (CS-LNCH-058), but its cobra command
+    # sets DisableFlagParsing, so without its own ValidArgsFunction every TAB
+    # fell back to file names. The generated bash and zsh scripts both ask
+    # "__complete headless ...", so one answer serves every shell.
+
+  Scenario: CS-COMP-026 headless offers nothing launcher-specific past "--" or after a rejected flag
+    When "claude-sandbox headless -- --" is completed
+    Then no launcher flag is offered and the directive allows file completion
+    When "claude-sandbox headless --ralph --" is completed
+    Then there are no completions and the directive suppresses file completion
+    # --ralph, --limit, --attach, --join and --branch make runHeadless exit 2;
+    # like CS-COMP-013, suggesting more on an invalid line would mislead.
+
   # ---- drift guards ----
 
   Scenario: CS-COMP-020 the completion flag table agrees with the launcher parser

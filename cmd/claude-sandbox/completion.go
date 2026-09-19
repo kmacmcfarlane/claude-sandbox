@@ -238,6 +238,62 @@ func completeLaunchWith(env *Env, args []string, toComplete string) ([]cobra.Com
 	return comps, cobra.ShellCompDirectiveNoFileComp
 }
 
+// completeHeadless is the headless command's ValidArgsFunction
+// (CS-COMP-025/026). The grammar is scanArgs(args, true): --help, -h and
+// --version belong to claude there, and headlessRejection refuses a few more.
+// Instance nouns are never completed — --attach/--join are refused.
+func completeHeadless(_ *cobra.Command, args []string, toComplete string) ([]cobra.Completion, cobra.ShellCompDirective) {
+	if len(args) > 0 {
+		if s, ok := lookupLaunchFlag(args[len(args)-1]); ok {
+			switch s.Value {
+			case valueModel:
+				return prefixed(modelAliases, toComplete), cobra.ShellCompDirectiveNoFileComp
+			case valueOpaque:
+				return nil, cobra.ShellCompDirectiveNoFileComp
+			}
+		}
+	}
+
+	f, err := scanArgs(args, true)
+	if err != nil || headlessRejection(f) != nil {
+		// runHeadless would exit 2 on this line; offer nothing. CS-COMP-026.
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	if f.Passthrough != nil {
+		// Past "--" (or a claude flag, or a positional) the args are claude's.
+		return nil, cobra.ShellCompDirectiveDefault
+	}
+	if toComplete != "" && !strings.HasPrefix(toComplete, "-") {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+
+	var comps []cobra.Completion
+	for _, s := range launchFlagSpecs {
+		if s.alias() || !strings.HasPrefix(s.Name, toComplete) || !validForHeadless(s) {
+			continue
+		}
+		comps = append(comps, cobra.CompletionWithDesc(s.Name, s.Desc))
+	}
+	if strings.HasPrefix("--", toComplete) {
+		comps = append(comps, cobra.CompletionWithDesc("--", "End of launcher flags; the rest reaches claude verbatim"))
+	}
+	slices.Sort(comps)
+	return comps, cobra.ShellCompDirectiveNoFileComp
+}
+
+// validForHeadless replays the flag alone through the headless grammar, so the
+// offered set cannot drift from what runHeadless accepts: a flag that starts
+// the passthrough (claude's --help/--version) or that headlessRejection
+// refuses is not a headless launcher flag.
+func validForHeadless(s launchFlagSpec) bool {
+	args := []string{s.Name}
+	if s.Value != valueNone {
+		args = append(args, "x")
+	}
+	f, err := scanArgs(args, true)
+	return err == nil && f.Passthrough == nil && headlessRejection(f) == nil
+}
+
 func prefixed(candidates []string, toComplete string) []cobra.Completion {
 	var out []cobra.Completion
 	for _, c := range candidates {
