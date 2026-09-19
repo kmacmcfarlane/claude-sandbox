@@ -461,6 +461,20 @@ Then run `paseo reload`.
 - Anyone who can reach the daemon can start a session with the sandbox's host access (the
   Docker socket, where enabled, is root-equivalent). Keep the daemon on loopback and reach it
   over SSH.
+- **Run the daemon from an empty directory**, as a service (for example a systemd user unit with
+  `WorkingDirectory=` an empty dir and linger enabled), never from `~` or `~/.paseo`. Paseo runs
+  its provider probes in the daemon's cwd, and each probe is a full sandbox launch that mounts
+  that directory as the project.
+- **The cascade's `dangerous` decides the permission mode.** `--dangerously-skip-permissions`
+  outranks the `--permission-mode` Paseo passes, so in a tree with `dangerous: true` Paseo's
+  mode picker has no effect at launch.
+- **Expect SDK-mode limits, not sandbox ones.** Measured on Claude Code 2.1.277, the sandboxed
+  and native providers list the same commands, skills and plugins. Some features are missing
+  because Paseo drives Claude Code over stream-json, and the native provider lacks them too:
+  - the status line (Paseo has its own context meter; `/usage` and `/context` return text);
+  - `/resume` (use Paseo's session import);
+  - `/btw`, `/fork` and `/branch` (Paseo's `/rewind` forks from an earlier message);
+  - terminal-only UI: keybindings, vim mode, `/config` dialogs.
 
 Spec: `spec/launch.feature` CS-LNCH-058..067, `spec/sessions.feature` CS-SESS-055.
 
