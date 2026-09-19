@@ -940,3 +940,78 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       --dangerously-skip-permissions, so the client's permission mode applies
     But CLAUDE_SANDBOX_DANGEROUS=0 does NOT turn it off: dangerous is an OR of the
       flag, the env var and the config, and a falsy env value falls through
+
+  # --- Linked git worktrees (CS-LNCH-070..075) ---------------------------
+
+  Scenario: CS-LNCH-070 A linked worktree is detected with one git call and verified
+    When a launch resolves its project directory
+    Then it runs "git -C <project> rev-parse --git-dir --git-common-dir --show-toplevel"
+    And the project is a linked worktree only when all hold:
+      | check                                                                   |
+      | the git dir and the common dir differ                                   |
+      | the git dir is <common dir>/worktrees/<name>                            |
+      | <git dir>/gitdir (git's back-link) names <top-level>/.git                |
+      | the git dir and the common dir are not the top level or inside it       |
+      | the top level is not the common dir or inside it                        |
+    # The back-link can only exist when the repository itself registered the
+    # worktree ("git worktree add"). Without it, a crafted .git file in an
+    # untrusted tree could name any other repository's git dir and have it
+    # mounted read-write (CS-LNCH-071). The containment rows close the other
+    # half: a directory can declare ITSELF a git dir (HEAD, commondir,
+    # gitdir and a .git file naming itself) at <clone>/worktrees/<n> of a
+    # clone whose root holds objects/ and refs/; it passes the first three
+    # rows, and would get the clone's root — its .git/hooks included —
+    # mounted read-write. A real linked worktree's git dir lives in its
+    # repository, never inside the worktree, and the worktree never lives
+    # inside the repository's git dir.
+    And a relative back-link (git 2.48+ "worktree.useRelativePaths") is
+      resolved against the git dir before it is compared
+    And the main checkout is the common dir's parent when the common dir is
+      named ".git"; any other common dir (a bare repository, or one made with
+      --separate-git-dir, whose git dir does not record where its main
+      checkout is) has none: git dir mount only, and the banner names the
+      git dir rather than calling it bare
+    And a failed or unverified detection launches exactly as a plain launch
+    And a stale back-link (the worktree was moved) prints one warning naming
+      "git worktree repair" and launches as a plain launch
+
+  Scenario: CS-LNCH-071 The common git dir is mounted read-write at its own path
+    Given the project is a verified linked worktree whose top level is the project directory
+    When the launch is assembled
+    Then "-v <common dir>:<common dir>" is added after the cascade mounts
+    # Read-write: git writes objects, refs and the worktree's own index there.
+    # This gives the session the same power over the main repository's .git
+    # (hooks, refs, config) that a session in the main checkout already has.
+    And it is omitted when a same-path mount (e.g. a cascade mounts: entry)
+      already covers the common dir; when that mount is read-only, one
+      warning names it and says git cannot write to the repository there
+    And it is omitted when the launch is from a SUBDIRECTORY of the worktree:
+      the worktree root is not mounted, so the git dir would not make git work
+    And it enters the drift fingerprint through the normalized mount set (CS-SESS-020)
+
+  Scenario: CS-LNCH-072 One banner line names the main checkout
+    Given the project is a verified linked worktree
+    When it launches (interactive, ralph or headless)
+    Then exactly one line starting "Linked worktree:" is printed, naming the
+      main checkout (or the bare repository) and the git dir mounted
+    # Headless prints it on stderr, like every launcher message (CS-LNCH-060).
+    And a plain launch prints no such line
+
+  Scenario: CS-LNCH-073 Identity stays with the worktree
+    Given the project is a verified linked worktree
+    Then the container name, project slug, claude-sandbox.project label, -w,
+      the noun pool and CLAUDE_SANDBOX_PROJECT_DIR all use the worktree path
+    # The main checkout is not mounted, so CLAUDE_SANDBOX_PROJECT_DIR naming it
+    # would point in-container tooling at a path that does not exist there.
+
+  Scenario: CS-LNCH-074 Attach and join compare against the linked launch
+    Given a container launched from a verified linked worktree
+    When --attach or --join computes the would-be fingerprint
+    Then it resolves the same cascade, child Dockerfile and git dir mount,
+      so an unchanged configuration is not reported as drift
+
+  Scenario: CS-LNCH-075 Ralph and headless launches get the same treatment
+    Given the project is a verified linked worktree
+    When "claude-sandbox --ralph" or "claude-sandbox headless" launches
+    Then the linked cascade (CS-CASC-031), child Dockerfile (CS-CASC-033) and
+      git dir mount (CS-LNCH-071) apply exactly as for an interactive launch

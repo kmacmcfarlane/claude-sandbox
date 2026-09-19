@@ -979,6 +979,51 @@ var _ = Describe("image build lifecycle", func() {
 			Expect(buildLines(fake)).To(BeEmpty())
 		})
 
+		Describe("a linked worktree (CS-CASC-033)", func() {
+			var main, wt string
+			BeforeEach(func() {
+				base := filepath.Dir(proj)
+				main = filepath.Join(base, "ws", "repo")
+				wt = filepath.Join(base, "paseo", "abc", "feat")
+				Expect(os.MkdirAll(main, 0o755)).To(Succeed())
+				Expect(os.MkdirAll(wt, 0o755)).To(Succeed())
+			})
+
+			It("CS-CASC-033: resolves the main checkout's Dockerfile with the main checkout as context — the same image tag", func() {
+				df := filepath.Join(main, ".claude-sandbox", "Dockerfile")
+				touchAt(df, old)
+				spec := resolve(imagebuild.ChildInputs{ProjectDir: wt, MainCheckout: main})
+				Expect(spec.Use).To(BeTrue())
+				Expect(spec.Dockerfile).To(Equal(df))
+				Expect(spec.Context).To(Equal(main))
+				Expect(spec.ImageName).To(Equal(resolve(imagebuild.ChildInputs{ProjectDir: main}).ImageName))
+				Expect(out.String()).To(ContainSubstring("Found Dockerfile in main checkout: " + main))
+			})
+
+			It("CS-CASC-033: without the main checkout the physical walk never reaches it", func() {
+				touchAt(filepath.Join(main, ".claude-sandbox", "Dockerfile"), old)
+				Expect(resolve(imagebuild.ChildInputs{ProjectDir: wt}).Use).To(BeFalse())
+			})
+
+			It("CS-CASC-033: the worktree's own Dockerfile still wins, with the worktree as context", func() {
+				touchAt(filepath.Join(main, ".claude-sandbox", "Dockerfile"), old)
+				own := filepath.Join(wt, ".claude-sandbox", "Dockerfile")
+				touchAt(own, old)
+				spec := resolve(imagebuild.ChildInputs{ProjectDir: wt, MainCheckout: main})
+				Expect(spec.Dockerfile).To(Equal(own))
+				Expect(spec.Context).To(Equal(wt))
+			})
+
+			It("CS-CASC-033: a dockerfile name without dockerfileDir is searched along the same chain", func() {
+				df := filepath.Join(main, "Dockerfile.sandbox")
+				touchAt(df, old)
+				spec := resolve(imagebuild.ChildInputs{ProjectDir: wt, MainCheckout: main, Dockerfile: "Dockerfile.sandbox"})
+				Expect(spec.Use).To(BeTrue())
+				Expect(spec.Dockerfile).To(Equal(df))
+				Expect(spec.Context).To(Equal(main))
+			})
+		})
+
 		It("CS-IMG-014: missing child Dockerfile warns but proceeds on the base image", func() {
 			spec := resolve(imagebuild.ChildInputs{})
 			Expect(spec.Use).To(BeFalse())

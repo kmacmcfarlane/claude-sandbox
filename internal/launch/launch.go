@@ -53,6 +53,11 @@ type Inputs struct {
 	// Version stamps the claude-sandbox.version label.
 	Version string
 
+	// Linked is the verified linked git worktree the project lies in, nil
+	// otherwise (CS-LNCH-070). Its common git dir is mounted read-write at
+	// its own path so git works in the container (CS-LNCH-071).
+	Linked *LinkedWorktree
+
 	// PIDClass is the container's pid class (CS-PID-004), rendered as the
 	// claude-sandbox.pidclass label and CLAUDE_SANDBOX_PID_CLASS. Empty
 	// emits neither. Like Instance it is excluded from the fingerprint.
@@ -250,6 +255,21 @@ func Build(in Inputs) (*Plan, error) {
 			p.Volumes = append(p.Volumes, fmt.Sprintf("%s:%s", m.Host, m.Container))
 		} else {
 			p.Volumes = append(p.Volumes, fmt.Sprintf("%s:%s:ro", m.Host, m.Container))
+		}
+	}
+
+	// CS-LNCH-071: a linked worktree's .git file names a git dir inside the
+	// repository's common dir, outside the project mount. Read-write — git
+	// writes objects, refs and the worktree's index there — which is the
+	// power over that .git (hooks, refs, config) a session in the main
+	// checkout already has. After the cascade mounts, so a same-path entry
+	// that already covers it wins; the normalized mount set carries it into
+	// the fingerprint.
+	if in.Linked.MountsCommonDir(in.ProjectDir) {
+		if cover, ok := samePathMountOf(p.Volumes, in.Linked.CommonDir); !ok {
+			p.Volumes = append(p.Volumes, fmt.Sprintf("%s:%s", in.Linked.CommonDir, in.Linked.CommonDir))
+		} else if strings.HasSuffix(cover, ":ro") {
+			fmt.Fprintf(in.Err, "WARNING: git dir %s is under the read-only mount %s; git cannot write to the repository in this session.\n", in.Linked.CommonDir, cover)
 		}
 	}
 
@@ -1007,6 +1027,13 @@ func underAnyMount(volumes []string, path string) bool {
 // different question (is this visible in the container at all) and must not be
 // substituted for it when the answer is used to create something on the host.
 func underSamePathMount(volumes []string, path string) bool {
+	_, ok := samePathMountOf(volumes, path)
+	return ok
+}
+
+// samePathMountOf returns the first same-path -v spec that covers path, as
+// underSamePathMount decides it.
+func samePathMountOf(volumes []string, path string) (string, bool) {
 	path = filepath.Clean(path)
 	for _, v := range volumes {
 		parts := strings.Split(v, ":")
@@ -1015,10 +1042,10 @@ func underSamePathMount(volumes []string, path string) bool {
 		}
 		dst := filepath.Clean(parts[1])
 		if path == dst || strings.HasPrefix(path, dst+"/") {
-			return true
+			return v, true
 		}
 	}
-	return false
+	return "", false
 }
 
 // envFilesDefine reports whether any env file assigns the key. Parsed with

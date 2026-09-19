@@ -547,7 +547,7 @@ func currentHash(f *cliFixture) string {
 	cfg, err := cascade.Load(configFiles)
 	Expect(err).NotTo(HaveOccurred())
 
-	hash, _ := wouldBeFingerprint(f.env, f.proj, fl, cfg, envFiles)
+	hash, _ := wouldBeFingerprint(f.env, f.proj, fl, cfg, envFiles, nil)
 	Expect(hash).NotTo(BeEmpty())
 	return hash
 }

@@ -732,16 +732,30 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 		fmt.Fprintf(env.Out, "Project: %s (resolved from %s)\n", projectDir, givenDir)
 	}
 
+	// A linked git worktree (CS-LNCH-070) cascades from its main checkout
+	// (CS-CASC-031..033) and gets the common git dir mounted (CS-LNCH-071).
+	// Identity — slug, labels, -w, noun pool — stays on projectDir (CS-LNCH-073).
+	linked, lwWarn := launch.DetectLinkedWorktree(env.Runner, projectDir)
+	if lwWarn != "" {
+		fmt.Fprintln(env.Err, lwWarn)
+	}
+	mainCheckout := ""
+	if linked != nil {
+		mainCheckout = linked.Main
+		fmt.Fprintln(env.Out, linked.Banner(linked.MountsCommonDir(projectDir)))
+	}
+	chain := paths.Chain(projectDir, mainCheckout)
+
 	// Config + env cascade (CS-CASC, CS-LNCH-024).
-	configFiles, err := paths.CollectUp(projectDir, paths.Config)
+	configFiles, err := paths.CollectChain(chain, paths.Config)
 	if err != nil {
 		return err
 	}
-	envFiles, err := paths.CollectUp(projectDir, paths.Env)
+	envFiles, err := paths.CollectChain(chain, paths.Env)
 	if err != nil {
 		return err
 	}
-	cascade.PrintReport(env.Out, projectDir)
+	cascade.PrintReportChain(env.Out, chain)
 	// Name env keys a more-local file shadows — names only (CS-CASC-021..029).
 	cascade.PrintEnvOverrides(env.Out, envFiles, env.lookupEnv)
 	cfg, err := cascade.Load(configFiles)
@@ -773,7 +787,7 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 	case actionQuit:
 		return nil
 	case actionAttach, actionJoin:
-		done, aerr := joinExistingSession(env, projectDir, f, cfg, envFiles, decision, wt)
+		done, aerr := joinExistingSession(env, projectDir, f, cfg, envFiles, decision, wt, linked)
 		if aerr != nil {
 			return aerr
 		}
@@ -866,8 +880,8 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 		dfName = cfg.Dockerfile
 	}
 	spec := imagebuild.ResolveChild(imagebuild.ChildInputs{
-		ProjectDir: projectDir,
-		BaseOnly:   baseOnly, DockerfileDir: dfDir, Dockerfile: dfName,
+		ProjectDir: projectDir, MainCheckout: mainCheckout,
+		BaseOnly: baseOnly, DockerfileDir: dfDir, Dockerfile: dfName,
 	}, env.Out)
 	parent, childBuilt, err := imagebuild.EnsureChild(imgOpts, spec, baseRebuilt, baseOnly)
 	if err != nil {
@@ -900,6 +914,7 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 		ImageID:  imagebuild.ImageID(env.Runner, image),
 		Instance: instance,
 		Worktree: worktree,
+		Linked:   linked,
 		Version:  version,
 		Headless: headless, LookupEnv: env.lookupEnv,
 		Out: env.Out, Err: env.Err,

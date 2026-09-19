@@ -71,6 +71,13 @@ one-time setup (idempotent). Use `setup-lsp-plugins --check` to verify status.
   the `ralph/stop` file), which are routine and go through Bash because the
   harness blocks Edit/Write to the main checkout from inside a worktree.
   Interactive sessions work in the shared checkout by default.
+- **A linked git worktree works as a project.** When the launch directory is a
+  git worktree whose repository lives elsewhere (e.g. a Paseo worktree under
+  `~/.paseo/worktrees/`), the repository's `.git` directory is mounted
+  read-write at its real path, so `git` works normally — and commits, refs and
+  hooks you change there are the main repository's. The main checkout's files
+  and its `.claude-sandbox/` are NOT mounted; `$CLAUDE_SANDBOX_PROJECT_DIR`
+  is the worktree.
 - `/home/claude` is symlinked to the host user's home directory (e.g. `/home/rt`). Both paths work. Build-time files from the Dockerfile are relocated here automatically.
 - **The scratchpad survives the container.** The launcher points
   `CLAUDE_CODE_TMPDIR` inside the host-mounted Claude config directory, so the

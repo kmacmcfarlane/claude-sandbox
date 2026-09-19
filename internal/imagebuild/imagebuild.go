@@ -338,6 +338,29 @@ type ChildInputs struct {
 	BaseOnly      bool
 	DockerfileDir string // env CLAUDE_SANDBOX_DOCKERFILE_DIR > config dockerfileDir
 	Dockerfile    string // env CLAUDE_SANDBOX_DOCKERFILE > config dockerfile
+	// MainCheckout is the main checkout of a linked git worktree project
+	// ("" otherwise). The nearest-wins search then walks paths.Chain(ProjectDir,
+	// MainCheckout) instead of the physical parents (CS-CASC-033).
+	MainCheckout string
+}
+
+// above drops the chain's first (the start) directory, which the callers have
+// already checked; an empty chain ("/" or ".") stays empty.
+func above(chain []string) []string {
+	if len(chain) == 0 {
+		return nil
+	}
+	return chain[1:]
+}
+
+// foundIn reports where a Dockerfile found above the project was found:
+// "parent directory" for an ancestor of the project, "main checkout" for a
+// level reached only through a linked worktree's main checkout.
+func foundIn(project, dir string) string {
+	if dir == project || strings.HasPrefix(project, dir+"/") {
+		return "parent directory"
+	}
+	return "main checkout"
 }
 
 // used builds a ChildSpec for a resolved Dockerfile. The image name is derived
@@ -375,9 +398,14 @@ func ResolveChild(in ChildInputs, out io.Writer) ChildSpec {
 			// Honored verbatim: context stays the override directory.
 			return used(df, dir)
 		}
-		// Walk parents for the exact override filename.
-		if found := paths.FindUpFile(filepath.Dir(dir), name); found != "" {
-			fmt.Fprintf(out, "Found %s in parent directory: %s\n", name, filepath.Dir(found))
+		// Walk parents for the exact override filename — along the linked
+		// chain when the directory is the (linked worktree) project itself.
+		chain := paths.Chain(dir, "")
+		if in.DockerfileDir == "" {
+			chain = paths.Chain(dir, in.MainCheckout)
+		}
+		if found := paths.FindChainFile(above(chain), name); found != "" {
+			fmt.Fprintf(out, "Found %s in %s: %s\n", name, foundIn(dir, filepath.Dir(found)), filepath.Dir(found))
 			return used(found, filepath.Dir(found))
 		}
 		spec.Dockerfile = df
@@ -389,9 +417,12 @@ func ResolveChild(in ChildInputs, out io.Writer) ChildSpec {
 	if fileExists(df) {
 		return used(df, in.ProjectDir)
 	}
-	if found, _ := paths.FindUp(filepath.Dir(in.ProjectDir), paths.Dockerfile); found != "" {
+	// Nearest wins along the search chain minus the project itself (checked
+	// above): the physical parents, or a linked worktree's chain through its
+	// main checkout (CS-CASC-033).
+	if found, _ := paths.FindChain(above(paths.Chain(in.ProjectDir, in.MainCheckout)), paths.Dockerfile); found != "" {
 		ctx := filepath.Dir(filepath.Dir(found)) // parent of the .claude-sandbox/ dir
-		fmt.Fprintf(out, "Found %s in parent directory: %s\n", filepath.Base(found), ctx)
+		fmt.Fprintf(out, "Found %s in %s: %s\n", filepath.Base(found), foundIn(in.ProjectDir, ctx), ctx)
 		// Every project resolving to this same shared Dockerfile gets the same
 		// context and therefore the same image tag — one build, not one per
 		// project (CS-IMG-018).

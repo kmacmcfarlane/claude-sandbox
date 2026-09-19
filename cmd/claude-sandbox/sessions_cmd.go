@@ -326,13 +326,13 @@ func selectInstance(env *Env, candidates []sessions.Session, verb string) (sessi
 // Neither path runs the image staleness check, the image build, mount assembly,
 // or shadow-file injection — the container is already configured. That is
 // exactly why config drift is reported instead (CS-SESS-033).
-func joinExistingSession(env *Env, projectDir string, f *launchFlags, cfg *cascade.Config, envFiles []string, d sessionDecision, wt worktreeChoice) (bool, error) {
+func joinExistingSession(env *Env, projectDir string, f *launchFlags, cfg *cascade.Config, envFiles []string, d sessionDecision, wt worktreeChoice, linked *launch.LinkedWorktree) (bool, error) {
 	model := f.Model
 	if model == "" {
 		model = cfg.Model
 	}
 
-	wantHash, wantInputs := wouldBeFingerprint(env, projectDir, f, cfg, envFiles)
+	wantHash, wantInputs := wouldBeFingerprint(env, projectDir, f, cfg, envFiles, linked)
 	proceed, newContainer, err := confirmDrift(env, d.Target, wantHash, wantInputs, f)
 	if err != nil {
 		return false, err
@@ -356,8 +356,14 @@ func joinExistingSession(env *Env, projectDir string, f *launchFlags, cfg *casca
 // wouldBeFingerprint computes the config hash a launch would produce right now,
 // without building anything. The image ID is read from the resolved image if it
 // already exists; when it does not, the empty ID is itself a difference, which
-// is correct — the launch would have built a new image.
-func wouldBeFingerprint(env *Env, projectDir string, f *launchFlags, cfg *cascade.Config, envFiles []string) (string, []launch.InputDigest) {
+// is correct — the launch would have built a new image. A linked worktree
+// resolves its child Dockerfile and git dir mount as the launch does
+// (CS-LNCH-074).
+func wouldBeFingerprint(env *Env, projectDir string, f *launchFlags, cfg *cascade.Config, envFiles []string, linked *launch.LinkedWorktree) (string, []launch.InputDigest) {
+	mainCheckout := ""
+	if linked != nil {
+		mainCheckout = linked.Main
+	}
 	baseOnly := cfg.BaseOnly || envTrue(env.Getenv("CLAUDE_SANDBOX_BASE_ONLY"))
 	dfDir := env.Getenv("CLAUDE_SANDBOX_DOCKERFILE_DIR")
 	if dfDir == "" {
@@ -368,8 +374,8 @@ func wouldBeFingerprint(env *Env, projectDir string, f *launchFlags, cfg *cascad
 		dfName = cfg.Dockerfile
 	}
 	spec := imagebuild.ResolveChild(imagebuild.ChildInputs{
-		ProjectDir: projectDir,
-		BaseOnly:   baseOnly, DockerfileDir: dfDir, Dockerfile: dfName,
+		ProjectDir: projectDir, MainCheckout: mainCheckout,
+		BaseOnly: baseOnly, DockerfileDir: dfDir, Dockerfile: dfName,
 	}, io.Discard)
 
 	parent := spec.ImageName
@@ -400,7 +406,8 @@ func wouldBeFingerprint(env *Env, projectDir string, f *launchFlags, cfg *cascad
 		CLIPackageCaches: f.PackageCaches,
 		Cfg:              cfg, EnvFiles: envFiles,
 		ImageName: image, ImageID: id,
-		Out: io.Discard, Err: io.Discard,
+		Linked: linked,
+		Out:    io.Discard, Err: io.Discard,
 	})
 	if err != nil {
 		// Without a comparable hash, drift cannot be judged; confirmDrift treats
