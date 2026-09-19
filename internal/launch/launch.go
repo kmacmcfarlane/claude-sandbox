@@ -135,7 +135,7 @@ type Plan struct {
 	Image         string
 	ContainerName string
 	Volumes       []string // -v specs
-	EnvFlags      []string // -e KEY=VAL specs
+	EnvFlags      []string // -e KEY=VAL, or bare KEY read from the launcher env (CS-LNCH-102)
 	EnvFiles      []string // --env-file paths
 	MemoryLimit   string
 	Command       []string // command + args inside the container
@@ -336,11 +336,22 @@ func Build(in Inputs) (*Plan, error) {
 		fmt.Sprintf("HOST_HOME=%s", in.Home),
 		fmt.Sprintf("HOME=%s", in.Home),
 		fmt.Sprintf("DOCKER_GID=%s", dockerGID),
-		fmt.Sprintf("ANTHROPIC_API_KEY=%s", in.getenv("ANTHROPIC_API_KEY")),
 		// CS-LNCH-047: a session inside .claude/worktrees/<name> cannot
 		// otherwise tell where the project root (and .claude-sandbox/) is.
 		"CLAUDE_SANDBOX_PROJECT_DIR="+in.ProjectDir,
 	)
+	// CS-LNCH-102: a credential is forwarded as a bare "-e NAME", never
+	// "-e NAME=value" — argv is world-readable through ps and /proc while
+	// docker create runs. The docker client resolves a bare name from the
+	// environment it inherits from the launcher (execx.System leaves Env
+	// nil), so the container sees the same value. Unset keeps the explicit
+	// empty value it always had: no secret in it, and it still takes
+	// precedence over an env file exactly as before.
+	if in.lookupEnv("ANTHROPIC_API_KEY") {
+		p.EnvFlags = append(p.EnvFlags, "ANTHROPIC_API_KEY")
+	} else {
+		p.EnvFlags = append(p.EnvFlags, "ANTHROPIC_API_KEY=")
+	}
 	if d := in.getenv("CLAUDE_CONFIG_DIR"); d != "" {
 		p.EnvFlags = append(p.EnvFlags, "CLAUDE_CONFIG_DIR="+d)
 	}
@@ -674,9 +685,13 @@ func (in *Inputs) assembleAWS(p *Plan) {
 		p.Volumes = append(p.Volumes, fmt.Sprintf("%s:%s:ro", awsDir, awsDir))
 		mounted[awsDir] = true
 	}
+	// CS-LNCH-103: bare "-e NAME" for the whole allowlist, so the key id,
+	// secret and session token never reach argv; docker reads each value from
+	// the launcher's environment. Every name is inherited unchanged, so the
+	// non-secret ones go bare too rather than splitting the list by judgement.
 	for _, v := range awsEnvAllowlist {
-		if val := in.getenv(v); val != "" {
-			p.EnvFlags = append(p.EnvFlags, v+"="+val)
+		if in.getenv(v) != "" {
+			p.EnvFlags = append(p.EnvFlags, v)
 		}
 	}
 	// Path-valued vars: bind-mount each file's PARENT DIRECTORY read-only so

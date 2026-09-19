@@ -236,7 +236,7 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
   Scenario: CS-LNCH-018 AWS directory mount and env forwarding
     Given aws access is enabled and ~/.aws exists
     Then "-v ~/.aws:~/.aws:ro" is added
-    And each set variable from the allowlist is forwarded with -e:
+    And each set variable from the allowlist is forwarded as a bare -e NAME (CS-LNCH-103):
       AWS_PROFILE AWS_DEFAULT_PROFILE AWS_REGION AWS_DEFAULT_REGION
       AWS_SHARED_CREDENTIALS_FILE AWS_CONFIG_FILE AWS_ACCESS_KEY_ID
       AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_ROLE_ARN
@@ -406,8 +406,39 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
   Scenario: CS-LNCH-029 Container runtime environment
     Then docker create receives: -it --rm --init,
       -e HOST_UID/HOST_GID/HOST_USER/HOST_HOME of the calling user,
-      -e HOME=$HOME, -e DOCKER_GID, -e ANTHROPIC_API_KEY (empty when unset),
+      -e HOME=$HOME, -e DOCKER_GID, -e ANTHROPIC_API_KEY (CS-LNCH-102),
       -e CLAUDE_SANDBOX_PROJECT_DIR (CS-LNCH-047)
+
+  Scenario: CS-LNCH-102 ANTHROPIC_API_KEY is forwarded by name, never by value
+    # argv is readable by any local user through ps and /proc while docker
+    # create runs. A bare "-e NAME" makes the docker client read the value from
+    # the environment it inherits from the launcher, so the container sees the
+    # same value and argv never carries it (the CS-LNCH-063 technique).
+    Given ANTHROPIC_API_KEY is set in the launcher's environment, even to ""
+    Then docker create receives a bare "-e ANTHROPIC_API_KEY"
+    And its value appears nowhere in the docker create argv
+    Given ANTHROPIC_API_KEY is unset
+    Then docker create receives "-e ANTHROPIC_API_KEY=" as before
+    # The empty value carries no secret and keeps today's container behaviour:
+    # the variable is set and empty, and -e still outranks an env file.
+
+  Scenario: CS-LNCH-103 AWS allowlist variables are forwarded by name, never by value
+    Given aws access is enabled
+    Then each allowlist variable set to a non-empty value is passed as a bare "-e NAME"
+    And no AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY or AWS_SESSION_TOKEN value
+      appears in the docker create argv
+    # Every allowlist name is inherited unchanged, so the non-secret ones go
+    # bare too: one rule, no per-name judgement to get wrong later.
+
+  Scenario: CS-LNCH-104 Forwarding by name does not change the drift fingerprint
+    Given two launches that differ only in the values of ANTHROPIC_API_KEY
+      and the AWS allowlist variables
+    Then both carry the same confighash
+    # Forwarded values were never hashed (only the aws host-access switch is),
+    # and the fingerprint must not start hashing secrets now. Values the
+    # launcher computes or that name paths (CLAUDE_CONFIG_DIR,
+    # CLAUDE_CODE_TMPDIR, CLAUDE_SANDBOX_PID_CLASS, XDG_RUNTIME_DIR, the
+    # package-cache vars) stay NAME=value: they are not credentials.
 
   Scenario: CS-LNCH-033 The primary session gets the configured detach keys
     # Omitting the flag does not mean "no detach keys" — it means docker's own
