@@ -541,6 +541,40 @@ Uncomment a key locally only to set or override it for that project. The one exc
 `trackInHost`: `init` writes it explicitly (flag or prompt) *unless* an upstream config
 already defines it — then it's inherited and the local line stays commented.
 
+#### Linked git worktrees (Paseo worktrees, `git worktree add` elsewhere)
+
+A project directory that is a **linked git worktree** — its `.git` is a file naming
+`<main>/.git/worktrees/<name>`, as for Paseo's `~/.paseo/worktrees/<id>/<name>` — is
+launched as part of its repository:
+
+- **Cascade:** the main checkout's `.claude-sandbox/` is the project level. The search
+  walks the worktree's own parents that are not also parents of the main checkout, then the
+  main checkout and its parents, so the levels read (root-first) workspace → main checkout →
+  anything only the worktree sits under → the worktree's own `.claude-sandbox/`, and no level
+  appears twice. A worktree inside the repository (`.claude/worktrees/<name>`) already had
+  exactly these levels and is unchanged.
+- **Child Dockerfile:** nearest-wins along the same chain. One found in the main checkout
+  builds with the main checkout as context — the same image the main checkout uses, so no
+  per-worktree build; its `COPY` lines see the main checkout's files.
+- **Git:** the repository's common git dir (`<main>/.git`) is mounted **read-write** at its
+  own path, so `git` works in the container. Read-write because git writes objects, refs and
+  the worktree's index there — which gives the session the same power over that `.git`
+  (hooks, refs, config) a session launched in the main checkout already has. Skipped when a
+  same-path `mounts:` entry already covers it, and when launching from a subdirectory of the
+  worktree (its root, and the `.git` file, are not in the container then).
+- **Identity** stays with the worktree: container name, slug, `-w`, sessions and
+  `CLAUDE_SANDBOX_PROJECT_DIR` all use the worktree path (the main checkout itself is not
+  mounted).
+
+One line says so: `Linked worktree: main checkout <main> (its .claude-sandbox/ config, env
+and Dockerfile apply); git dir <main>/.git mounted`. Detection is one
+`git rev-parse --git-dir --git-common-dir --show-toplevel`, and it is **verified** before
+anything is mounted: the git dir must be `<common>/worktrees/<name>` and the repository's own
+back-link (`<common>/worktrees/<name>/gitdir`) must name this worktree's `.git`. A crafted
+`.git` file in a downloaded tree therefore cannot get another repository's git dir mounted.
+A worktree that was moved without `git worktree repair` fails the check: the launch warns and
+proceeds as a plain project.
+
 ## Ralph mode
 
 Pass `--ralph` to `claude-sandbox` to launch the ralph loop runner instead of interactive claude. Ralph re-invokes Claude as a new process each iteration, giving it fresh context every time. In [worktree mode](#worktree-mode) (the default) the launcher hands the loop `--worktree ralph` — one worktree per run, `.claude/worktrees/ralph` on branch `worktree-ralph`, `--worktree=NAME` to rename it, `--no-worktree` for the shared checkout.
@@ -983,7 +1017,7 @@ See `scaffold/Dockerfile.example` in this repo for a commented template (`claude
 
 ### Parent directory search
 
-The config, Dockerfile, and env files (under `.claude-sandbox/`) are all resolved by walking parent directories from the project root (like direnv) — the **physical** root, symlinks resolved, so the parents climbed are those of the real checkout, not of a symlink it was reached through (see [Multiple sessions](#multiple-sessions)). `config.yaml` and `env` **cascade** — every file found from the root down to the project is merged/layered, more-local values winning (see [Config cascade](#config-cascade-monorepo--workspace-defaults)). The child `Dockerfile` is **nearest-wins** — the closest one up the tree is used wholesale.
+The config, Dockerfile, and env files (under `.claude-sandbox/`) are all resolved by walking parent directories from the project root (like direnv) — the **physical** root, symlinks resolved, so the parents climbed are those of the real checkout, not of a symlink it was reached through (see [Multiple sessions](#multiple-sessions)). A linked git worktree walks its main checkout's parents too (see [Linked git worktrees](#linked-git-worktrees-paseo-worktrees-git-worktree-add-elsewhere)). `config.yaml` and `env` **cascade** — every file found from the root down to the project is merged/layered, more-local values winning (see [Config cascade](#config-cascade-monorepo--workspace-defaults)). The child `Dockerfile` is **nearest-wins** — the closest one up the tree is used wholesale.
 
 If no `.claude-sandbox/Dockerfile` is found anywhere up to `/`, the launcher warns and uses the base image directly. Set `baseOnly: true` in `.claude-sandbox/config.yaml` (or `CLAUDE_SANDBOX_BASE_ONLY=1`) to suppress the warning and skip the search.
 

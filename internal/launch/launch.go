@@ -53,6 +53,11 @@ type Inputs struct {
 	// Version stamps the claude-sandbox.version label.
 	Version string
 
+	// Linked is the verified linked git worktree the project lies in, nil
+	// otherwise (CS-LNCH-070). Its common git dir is mounted read-write at
+	// its own path so git works in the container (CS-LNCH-071).
+	Linked *LinkedWorktree
+
 	// PIDClass is the container's pid class (CS-PID-004), rendered as the
 	// claude-sandbox.pidclass label and CLAUDE_SANDBOX_PID_CLASS. Empty
 	// emits neither. Like Instance it is excluded from the fingerprint.
@@ -248,6 +253,17 @@ func Build(in Inputs) (*Plan, error) {
 		} else {
 			p.Volumes = append(p.Volumes, fmt.Sprintf("%s:%s:ro", m.Host, m.Container))
 		}
+	}
+
+	// CS-LNCH-071: a linked worktree's .git file names a git dir inside the
+	// repository's common dir, outside the project mount. Read-write — git
+	// writes objects, refs and the worktree's index there — which is the
+	// power over that .git (hooks, refs, config) a session in the main
+	// checkout already has. After the cascade mounts, so a same-path entry
+	// that already covers it wins; the normalized mount set carries it into
+	// the fingerprint.
+	if in.Linked.MountsCommonDir(in.ProjectDir) && !underSamePathMount(p.Volumes, in.Linked.CommonDir) {
+		p.Volumes = append(p.Volumes, fmt.Sprintf("%s:%s", in.Linked.CommonDir, in.Linked.CommonDir))
 	}
 
 	// CS-LNCH-069: a symlinked settings.json keeps working. After the cascade

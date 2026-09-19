@@ -348,3 +348,43 @@ Feature: Config cascade and env stacking (CS-CASC)
     Then no env override line is printed
     # docker refuses such a file outright ("no variable name", "variable
     # contains whitespaces"); the notice names only keys docker would set.
+
+  # --- Linked git worktrees (CS-CASC-031..033) ---------------------------
+  # A linked worktree's .git is a FILE naming <main>/.git/worktrees/<name>.
+  # When it lies outside the main checkout (Paseo puts every worktree under
+  # ~/.paseo/worktrees/<id>/<name>) its physical parents never reach the main
+  # checkout, whose .claude-sandbox/ is usually a gitignored sidecar and so
+  # absent from the worktree. Detection and its verification: CS-LNCH-070.
+
+  Scenario: CS-CASC-031 A linked worktree cascades from its main checkout
+    Given the project /home/you/.paseo/worktrees/abc/feat is a verified linked
+      worktree whose main checkout is /home/you/ws/repo
+    And .claude-sandbox/ levels exist at /home/you, /home/you/ws,
+      /home/you/ws/repo and /home/you/.paseo
+    When the config and env cascades are collected
+    Then the levels are, root-first: /home/you, /home/you/ws, /home/you/ws/repo,
+      /home/you/.paseo, then the worktree itself when it has a .claude-sandbox/
+    # The search chain, most-local first, is the worktree's own ancestors
+    # that are not ancestors of the main checkout, then the main checkout and
+    # its ancestors. No level appears twice: /home/you is reached once, as an
+    # ancestor of the main checkout.
+    And a harness worktree /home/you/ws/repo/.claude/worktrees/x gets exactly
+      the levels its physical parents already gave it
+    And a launch that is not a linked worktree walks its physical parents as before
+
+  Scenario: CS-CASC-032 The cascade report lists the linked chain
+    Given the linked worktree of CS-CASC-031
+    When the launcher prints the cascade
+    Then the "Sandbox config cascade" lines follow the same root-first order,
+      including the main checkout's level
+
+  Scenario: CS-CASC-033 The child Dockerfile is nearest-wins along the linked chain
+    Given the linked worktree of CS-CASC-031 has no .claude-sandbox/Dockerfile of its own
+    And /home/you/ws/repo/.claude-sandbox/Dockerfile exists
+    When the child Dockerfile is resolved
+    Then it is /home/you/ws/repo/.claude-sandbox/Dockerfile with build context /home/you/ws/repo
+    # Same Dockerfile and context as a launch from the main checkout, so the
+    # same image tag (CS-IMG-018): no second build per worktree. COPY lines
+    # therefore see the main checkout's files, not the worktree's.
+    And a worktree's own .claude-sandbox/Dockerfile still wins, with the worktree as context
+    And with dockerfile set but no dockerfileDir, the named file is searched along the same chain

@@ -22,12 +22,19 @@ import (
 // Prints nothing when no level contributes. Used by both launch and init
 // (CS-LNCH-024, CS-INIT-019).
 func PrintReport(w io.Writer, project string) {
+	PrintReportChain(w, paths.Chain(project, ""))
+}
+
+// PrintReportChain is PrintReport over an explicit search chain (most-local
+// first, paths.Chain) — a linked worktree's includes its main checkout
+// (CS-CASC-032).
+func PrintReportChain(w io.Writer, chain []string) {
 	type line struct {
 		dir   string
 		files []string
 	}
 	var lines []line
-	for _, lvl := range paths.SandboxLevels(project) {
+	for _, lvl := range paths.SandboxLevelsChain(chain) {
 		sb := paths.SandboxDir(lvl)
 		var has []string
 		if fileExists(filepath.Join(sb, "config.yaml")) {
