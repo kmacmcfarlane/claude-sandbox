@@ -237,6 +237,8 @@ Feature: Image build lifecycle (CS-IMG)
   Scenario: CS-IMG-034 What each fingerprint covers
     Then the base fingerprint hashes the content of the repo Dockerfile and of every
       file in the baked source set (CS-IMG-004), _test.go files excluded (CS-IMG-031)
+    And each baked file counts with its permission bits, and each symlink by its target
+      (COPY bakes the link itself; a dangling or directory link is still fingerprinted)
     And the CLI fingerprint hashes the content of Dockerfile.cli
     And the child fingerprint hashes the child Dockerfile path, its content, the build
       context and the base image ID
@@ -252,6 +254,8 @@ Feature: Image build lifecycle (CS-IMG)
   Scenario: CS-IMG-035 Unlabeled images keep the previous rules
     Given the image has no claude-sandbox.build-inputs label, or a fingerprint cannot be computed
     Then staleness falls back to the time-based triggers of CS-IMG-003, 004, 016, 022 and 025
+    And when the base fingerprint cannot be computed a warning says so, since the
+      fallback can bring back a rebuild on every launch
     And the next build that runs stamps the label
 
   Scenario: CS-IMG-036 A cached rebuild settles

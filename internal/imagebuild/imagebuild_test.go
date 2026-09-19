@@ -645,6 +645,35 @@ var _ = Describe("image build lifecycle", func() {
 			Expect(baseStamp()).NotTo(Equal(b), "the Dockerfile is an input")
 		})
 
+		It("CS-IMG-034: symlinks count by their target, so directory and dangling links still fingerprint", func() {
+			Expect(os.Symlink("../internal", filepath.Join(repo, "cmd", "dirlink"))).To(Succeed())
+			Expect(os.Symlink("nowhere", filepath.Join(repo, "cmd", "dangling"))).To(Succeed())
+			a := baseStamp()
+			Expect(a).NotTo(BeEmpty())
+			Expect(errw.String()).NotTo(ContainSubstring("could not fingerprint"))
+			Expect(os.Remove(filepath.Join(repo, "cmd", "dangling"))).To(Succeed())
+			Expect(os.Symlink("elsewhere", filepath.Join(repo, "cmd", "dangling"))).To(Succeed())
+			Expect(baseStamp()).NotTo(Equal(a), "a retargeted link is a change")
+		})
+
+		It("CS-IMG-034: a permission change to a baked file is an input", func() {
+			a := baseStamp()
+			Expect(os.Chmod(filepath.Join(repo, "entrypoint.sh"), 0o755)).To(Succeed())
+			Expect(baseStamp()).NotTo(Equal(a))
+		})
+
+		It("CS-IMG-002: --rebuild rebuilds a labeled child even when the base image ID is unchanged", func() {
+			parents()
+			fp := childStamp()
+			images["claude-sandbox-proj"] = &imgState{created: imgT, inputs: fp}
+			o.ForceRebuild = true
+			fake.Calls = nil
+			_, built, err := imagebuild.EnsureChild(o, spec, false, false)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(built).To(BeTrue())
+			Expect(stampOf(fake, "claude-sandbox-proj")).To(Equal(fp))
+		})
+
 		It("CS-IMG-034: the version stamp is not a base input", func() {
 			a := baseStamp()
 			o.Version = "v9.9.9-dirty"
@@ -733,6 +762,21 @@ var _ = Describe("image build lifecycle", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(built).To(BeTrue())
 			Expect(stampOf(fake, "claude-sandbox-proj")).To(BeEmpty(), "nothing to stamp without a fingerprint")
+		})
+
+		It("CS-IMG-035: an uncomputable base fingerprint warns and keeps the time rule", func() {
+			if os.Geteuid() == 0 {
+				Skip("root reads unreadable directories")
+			}
+			locked := filepath.Join(repo, "internal", "locked")
+			touchAt(filepath.Join(locked, "x.go"), old)
+			Expect(os.Chmod(locked, 0o000)).To(Succeed())
+			DeferCleanup(func() { os.Chmod(locked, 0o755) })
+			images["claude-sandbox"] = &imgState{created: imgT, inputs: strings.Repeat("0", 64)}
+			rebuilt, err := imagebuild.EnsureBase(o)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rebuilt).To(BeFalse(), "nothing is newer than the image by the time rule")
+			Expect(errw.String()).To(ContainSubstring("could not fingerprint the base image inputs"))
 		})
 
 		It("CS-IMG-036: after a cached rebuild that kept Created, the next launch builds nothing", func() {

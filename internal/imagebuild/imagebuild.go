@@ -104,6 +104,10 @@ func Version(r execx.Runner, repoRoot string) string {
 // Returns whether a build happened.
 func EnsureBase(o Options) (rebuilt bool, err error) {
 	fp := baseInputs(o.RepoRoot)
+	if fp == "" {
+		fmt.Fprintln(o.Err, "WARNING: could not fingerprint the base image inputs (an unreadable file under the baked sources?);")
+		fmt.Fprintln(o.Err, "  falling back to comparing mtimes with the image creation time (CS-IMG-035).")
+	}
 	need := false
 	switch {
 	case o.ForceRebuild:
@@ -420,6 +424,9 @@ func EnsureChild(o Options, spec ChildSpec, baseRebuilt bool, baseOnly bool) (im
 		labeled, stale = labelVerdict(o.Runner, spec.ImageName, fp)
 	}
 	switch {
+	case o.ForceRebuild:
+		// --rebuild rebuilds the child too (CS-IMG-002), whatever the label says.
+		need = true
 	case !exists:
 		need = true
 	case labeled:
@@ -830,6 +837,35 @@ func (f fingerprint) addFile(name, path string) bool {
 	return true
 }
 
+// addSource adds one baked source entry as a COPY would bake it: a symlink
+// by its target (COPY copies the link, and a dangling or directory link must
+// not make the fingerprint uncomputable), a regular file by its content and
+// permission bits. Anything else (sockets, devices) is skipped.
+func (f fingerprint) addSource(name, path string) bool {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return false
+	}
+	switch {
+	case fi.Mode()&os.ModeSymlink != 0:
+		target, err := os.Readlink(path)
+		if err != nil {
+			return false
+		}
+		f.add(name)
+		f.add("\x00symlink")
+		f.add(target)
+		return true
+	case fi.Mode().IsRegular():
+		if !f.addFile(name, path) {
+			return false
+		}
+		f.add(fi.Mode().Perm().String())
+		return true
+	}
+	return true
+}
+
 // baseInputs fingerprints the repo Dockerfile and the baked source set, with
 // the same _test.go exclusion as the time-based rule (CS-IMG-034).
 func baseInputs(repoRoot string) string {
@@ -846,7 +882,7 @@ func baseInputs(repoRoot string) string {
 			continue
 		}
 		if !fi.IsDir() {
-			if !f.addFile(rel, p) {
+			if !f.addSource(rel, p) {
 				return ""
 			}
 			continue
@@ -854,14 +890,20 @@ func baseInputs(repoRoot string) string {
 		ok := true
 		// WalkDir visits in lexical order, so the fingerprint is stable.
 		filepath.WalkDir(p, func(path string, d os.DirEntry, err error) error {
-			if err != nil || !ok {
+			if !ok {
+				return nil
+			}
+			if err != nil {
+				// An unreadable entry leaves the fingerprint undefined; the
+				// caller falls back to the time rule and says so.
+				ok = false
 				return nil
 			}
 			if d.IsDir() || strings.HasSuffix(d.Name(), "_test.go") {
 				return nil
 			}
 			name, _ := filepath.Rel(repoRoot, path)
-			if !f.addFile(filepath.ToSlash(name), path) {
+			if !f.addSource(filepath.ToSlash(name), path) {
 				ok = false
 			}
 			return nil
