@@ -80,7 +80,7 @@ func Setup(project string, trackInHost bool, opts Options) error {
 	// trackInHost is false. Probed only in that mode; a failed probe is 0.
 	hostTracked := 0
 	if !trackInHost && hostIsGit {
-		hostTracked = hostTrackedCount(opts.Runner, project)
+		hostTracked = HostTrackedCount(opts.Runner, project)
 	}
 
 	// CS-LAY-002: seed once, never overwrite. Not in the CS-LAY-020 conflict
@@ -206,10 +206,12 @@ func hostTrackConflict(r execx.Runner, project, sb string) string {
 	return ""
 }
 
-// hostTrackedCount returns how many files the host repo tracks under
-// .claude-sandbox/ (CS-LAY-020). A failed probe returns 0, so behaviour is
-// exactly as before: a probe failure never counts as "tracked".
-func hostTrackedCount(r execx.Runner, project string) int {
+// HostTrackedCount returns how many files the host repo tracks under
+// .claude-sandbox/ (CS-LAY-020). A failed probe returns 0 (including a
+// project outside any git work tree), so behaviour is exactly as before: a
+// probe failure never counts as "tracked". init shares it to default its
+// greenfield trackInHost prompt to true in that state (CS-INIT-031).
+func HostTrackedCount(r execx.Runner, project string) int {
 	out, err := r.Output(execx.Cmd{Name: "git", Args: []string{"-C", project, "ls-files", "-z", "--", ".claude-sandbox"}, Stderr: io.Discard})
 	if err != nil {
 		return 0
