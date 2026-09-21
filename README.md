@@ -863,7 +863,7 @@ model: claude-opus-4-8
 
 #### Dangerous mode
 
-Skip Claude Code permission prompts on every launch — passes `--dangerously-skip-permissions` to claude (and ralph), the same as the `--dangerous` flag or `CLAUDE_SANDBOX_DANGEROUS=1`. Any of the three enables it; the cascade lets a more-local `dangerous: false` override an upstream config that turns it on.
+Skip Claude Code permission prompts on every launch — passes `--dangerously-skip-permissions` to claude (and ralph, and a session started with `--join`), the same as the `--dangerous` flag or `CLAUDE_SANDBOX_DANGEROUS=1`. Any of the three enables it; the cascade lets a more-local `dangerous: false` override an upstream config that turns it on.
 
 ```yaml
 dangerous: true

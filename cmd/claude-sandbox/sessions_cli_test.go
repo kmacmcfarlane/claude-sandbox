@@ -175,6 +175,14 @@ var _ = Describe("sessions (CS-SESS)", func() {
 			Expect(f.out.String()).To(ContainSubstring("cannot be reattached"))
 		})
 
+		It("CS-SESS-064: [j] honours a cascade dangerous: true", func() {
+			writeFile(filepath.Join(f.proj, ".claude-sandbox", "config.yaml"), "dangerous: true\n")
+			running(psRow("cs-a", "Up 1 hour", f.proj, "otter"))
+			tty("j")
+			Expect(f.run()).To(Equal(0))
+			Expect(f.sessionLine()).To(HaveSuffix(" pidslot -- claude --dangerously-skip-permissions"))
+		})
+
 		It("CS-SESS-036: all three docker paths carry the same detach keys", func() {
 			// Docker applies its own ctrl-p,ctrl-q to any invocation that omits
 			// the flag, so a path missing it is silently wrong rather than
@@ -272,6 +280,30 @@ var _ = Describe("sessions (CS-SESS)", func() {
 		It("--join=INSTANCE joins with no terminal", func() {
 			Expect(f.run("--join=otter")).To(Equal(0))
 			Expect(f.sessionLine()).To(ContainSubstring("docker exec"))
+		})
+
+		It("CS-SESS-064: --join honours a cascade dangerous: true", func() {
+			writeFile(filepath.Join(f.proj, ".claude-sandbox", "config.yaml"), "dangerous: true\n")
+			Expect(f.run("--join=otter")).To(Equal(0))
+			Expect(f.sessionLine()).To(HaveSuffix(" pidslot -- claude --dangerously-skip-permissions"))
+		})
+
+		It("CS-SESS-064: --join honours CLAUDE_SANDBOX_DANGEROUS=1", func() {
+			f.envmap["CLAUDE_SANDBOX_DANGEROUS"] = "1"
+			Expect(f.run("--join=otter")).To(Equal(0))
+			Expect(f.sessionLine()).To(HaveSuffix(" pidslot -- claude --dangerously-skip-permissions"))
+		})
+
+		It("CS-SESS-064: --join still honours the --dangerous flag", func() {
+			Expect(f.run("--join=otter", "--dangerous")).To(Equal(0))
+			Expect(f.sessionLine()).To(HaveSuffix(" pidslot -- claude --dangerously-skip-permissions"))
+		})
+
+		It("CS-SESS-064: a more-local dangerous: false keeps a join out of dangerous mode", func() {
+			writeFile(filepath.Join(filepath.Dir(f.proj), ".claude-sandbox", "config.yaml"), "dangerous: true\n")
+			writeFile(filepath.Join(f.proj, ".claude-sandbox", "config.yaml"), "dangerous: false\n")
+			Expect(f.run("--join=otter")).To(Equal(0))
+			Expect(f.sessionLine()).NotTo(ContainSubstring("--dangerously-skip-permissions"))
 		})
 
 		It("bare --attach is unambiguous with a single candidate", func() {

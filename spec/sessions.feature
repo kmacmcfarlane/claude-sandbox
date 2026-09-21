@@ -426,6 +426,18 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
     # beyond recovery, so leaving docker's ctrl-p,ctrl-q default in place would
     # let a stray ctrl+p (which the TUI binds) begin losing the session.
 
+  Scenario: CS-SESS-064 Join resolves dangerous mode as a new container does
+    Given any of --dangerous, CLAUDE_SANDBOX_DANGEROUS=1, or "dangerous: true" in
+      the merged cascade config enables dangerous mode (CS-LNCH-038)
+    When join is chosen, by --join[=N] or by the session decision's [j]
+    Then the joined claude gets --dangerously-skip-permissions
+    Given the project's more-local config sets "dangerous: false" over an upstream true
+    Then the joined claude gets no --dangerously-skip-permissions
+    # One resolution, shared with the new-container launch. Join used to honour
+    # only the CLI flag, so a durable cascade setting was silently dropped and
+    # every joined session stopped on the MCP approval dialog. Attach is
+    # unaffected: it reaches the primary claude, whose flags were fixed at create.
+
   Scenario: CS-SESS-033 Attach and join skip the launch pipeline
     When attach or join is chosen
     Then no image staleness check, image build, mount assembly, or shadow-file
