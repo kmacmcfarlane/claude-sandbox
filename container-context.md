@@ -65,7 +65,14 @@ one-time setup (idempotent). Use `setup-lsp-plugins --check` to verify status.
   collisions for fixed-name sockets. The launcher prints a
   `Peer registry: shared (…)` line when it is on. That bridge REPLACES the
   per-tree registry rather than adding to it, so a bridged session sees only
-  the other sessions launched (or relaunched) with the key on.
+  the other sessions launched (or relaunched) with the key on. A plain host
+  `claude` (run outside any sandbox) never joins this bridge either way: its
+  record lands in the real `sessions/`, which this overmount hides inside
+  every bridged container, and its socket binds under the host's own runtime
+  dir (typically `/run/user/<uid>/cc-socks`), a path no container mounts. An
+  unbridged sandbox shares that real registry, so the host may list it —
+  messaging it is unverified — but the sandbox cannot reach the host's socket
+  either way. No config key changes this.
 - **You may be inside a worktree.** Ralph runs by default, and interactive
   sessions launched with `--worktree` (or config `worktree: true`), start
   `claude` with `--worktree <name>`, so your working directory is
