@@ -65,7 +65,11 @@ one-time setup (idempotent). Use `setup-lsp-plugins --check` to verify status.
   collisions for fixed-name sockets. The launcher prints a
   `Peer registry: shared (…)` line when it is on. That bridge REPLACES the
   per-tree registry rather than adding to it, so a bridged session sees only
-  the other sessions launched (or relaunched) with the key on.
+  the other sessions launched (or relaunched) with the key on. A plain host
+  `claude` (run outside any sandbox) never joins this bridge either way — its
+  record and socket land in the real `sessions/`/`/run/user/<uid>/cc-socks`,
+  which no container mounts — and even an unbridged sandbox is visible to it
+  only one way, host to sandbox, with no config key to change either case.
 - **You may be inside a worktree.** Ralph runs by default, and interactive
   sessions launched with `--worktree` (or config `worktree: true`), start
   `claude` with `--worktree <name>`, so your working directory is

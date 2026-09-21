@@ -335,6 +335,15 @@ to see must be opted in and **relaunched**. Sessions already running without the
 bridged ones. Turning the key on will therefore make `/peers` look *emptier* until the sessions
 you care about have been restarted with it.
 
+**A plain host `claude` can never join the bridge.** It writes its record to the real
+`<config dir>/sessions`, which the bridge's `sessions/` mount hides inside every bridged
+container, and it binds its inbox socket under the host's own runtime dir (typically
+`/run/user/<uid>/cc-socks`), a path no container mounts — so a host session and a bridged
+sandbox cannot see or message each other in either direction. An *unbridged* sandbox shares the
+real registry with the host, but that link is one-way at best: the host can list and message the
+sandbox, but the sandbox cannot reach the host's socket to reply or start a conversation. No
+config key changes this today.
+
 No collision handling is needed: [PID classes](#session-registry-and-pid-classes) are already
 allocated without replacement across **all** running sandboxes on the host, so two containers
 can never write the same `<pid>.json`.
@@ -899,6 +908,11 @@ puts its runtime files in this shared folder, which persists on the host and is 
 other bridged container.
 Both mounts must be writable because every session writes its own record and binds its own
 socket there (`bind()` under a read-only bind mount fails with `EROFS`).
+
+This is also why a plain host `claude` never shows up here: the `sessions/` mount hides the
+real `<config dir>/sessions` where a host session registers, and the host binds its socket
+under its own runtime dir (`/run/user/<uid>/cc-socks`), which no bridged container mounts. No
+`sharedPeerRegistry` setting bridges the host itself.
 
 The launcher creates `peers/`, `peers/sessions/` and `peers/cc-socks/` on the host as you,
 before `docker create`, and forces them to `0700` even if they already exist with a wider mode: Docker would otherwise create a missing bind source as root, and
