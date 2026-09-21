@@ -22,6 +22,8 @@
 #   this image at launch (a one-layer "cap" tagged <this-image>:run). A RUN
 #   step that invokes `claude` will fail. Anything needing the CLI (plugin
 #   registration, `setup-lsp-plugins`) belongs at runtime.
+#   Do not install the CLI here either: the installer leaves state in
+#   /home/claude/.claude, which the entrypoint moves into ~/.claude.
 #
 # CACHE MOUNTS — share the base image's download caches:
 #   The base declares BuildKit cache mounts with fixed ids. Reuse the same ids
