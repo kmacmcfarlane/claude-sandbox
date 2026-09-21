@@ -15,6 +15,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/imagebuild"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/sessions"
 )
 
@@ -167,17 +168,23 @@ var _ = Describe("headless mode (CS-LNCH-058..067)", func() {
 			return false
 		}
 
-		It("the post-build cache-budget check never runs; an interactive build still runs it", func() {
+		It("the post-build cache-budget check never runs or starts; an interactive build still starts it (CS-IMG-041)", func() {
+			// A pending result is neither printed nor consumed (CS-IMG-043).
+			result := filepath.Join(f.cache, imagebuild.CacheBudgetFile)
+			writeFile(result, `{"checkedAt":"2026-09-21T18:03:00Z","report":"\nNOTE: pending\n"}`)
 			f.fake.On("image inspect claude-sandbox:run", "", execx.Fail(1))
 			Expect(f.run("headless", "--", "--version")).To(Equal(0), f.errw.String())
 			lines := strings.Join(f.fake.CommandLines(), "\n")
 			Expect(lines).To(ContainSubstring("docker build "), "the test must exercise a build")
 			Expect(lines).NotTo(ContainSubstring("system df"))
+			Expect(lines).NotTo(ContainSubstring("cache-budget-check"))
+			Expect(f.errw.String()).NotTo(ContainSubstring("pending"))
+			Expect(result).To(BeAnExistingFile())
 
 			g := newCLIFixture()
 			g.fake.On("image inspect claude-sandbox:run", "", execx.Fail(1))
 			Expect(g.run()).To(Equal(0), g.errw.String())
-			Expect(g.fake.CommandLines()).To(ContainElement("docker system df --format {{json .}}"))
+			Expect(g.fake.CommandLines()).To(ContainElement("/fake/claude-sandbox cache-budget-check --dir " + g.cache))
 		})
 
 		It("is off by default", func() {
