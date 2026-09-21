@@ -330,19 +330,19 @@ banner — the key can arrive from a workspace-level config a session never aske
 
 **The bridge replaces, it does not union.** A bind mount hides whatever the destination held, so
 a bridged session no longer reads the real `<config dir>/sessions` at all: every session you want
-to see must be opted in and **relaunched**. Sessions already running without the bridge — and the
-`claude` you run directly on the host — neither appear in a bridged session's `/peers` nor see the
-bridged ones. Turning the key on will therefore make `/peers` look *emptier* until the sessions
-you care about have been restarted with it.
+to see must be opted in and **relaunched**. This is also why a plain host `claude` (run outside
+any sandbox) can never join it: the host reads and writes only the real `<config dir>/sessions`,
+never `peers/sessions` where bridged records live, and it binds its inbox socket under its own
+runtime dir (typically `/run/user/<uid>/cc-socks`), a path no container mounts — so a host
+session and a bridged sandbox cannot see each other in either direction. Turning the key on will
+therefore make `/peers` look *emptier* until the sessions you care about have been restarted with
+it.
 
-**A plain host `claude` can never join the bridge.** It writes its record to the real
-`<config dir>/sessions`, which the bridge's `sessions/` mount hides inside every bridged
-container, and it binds its inbox socket under the host's own runtime dir (typically
-`/run/user/<uid>/cc-socks`), a path no container mounts — so a host session and a bridged
-sandbox cannot see or message each other in either direction. An *unbridged* sandbox shares the
-real registry with the host, but that link is one-way at best: the host can list and message the
-sandbox, but the sandbox cannot reach the host's socket to reply or start a conversation. No
-config key changes this today.
+An *unbridged* sandbox shares the real registry with the host, so the host may list it — whether
+the host can also message it is unverified (Claude Code's reply-target check may refuse a socket
+outside the sender's own directory or its default locations). Either way the sandbox itself
+cannot reach the host's socket, so it cannot reply or start a conversation with the host. No
+config key changes this.
 
 No collision handling is needed: [PID classes](#session-registry-and-pid-classes) are already
 allocated without replacement across **all** running sandboxes on the host, so two containers
@@ -910,9 +910,11 @@ Both mounts must be writable because every session writes its own record and bin
 socket there (`bind()` under a read-only bind mount fails with `EROFS`).
 
 This is also why a plain host `claude` never shows up here: the `sessions/` mount hides the
-real `<config dir>/sessions` where a host session registers, and the host binds its socket
-under its own runtime dir (`/run/user/<uid>/cc-socks`), which no bridged container mounts. No
-`sharedPeerRegistry` setting bridges the host itself.
+real `<config dir>/sessions` where a host session registers, so a bridged container never reads
+it; the host, in turn, reads only that real directory and never `peers/sessions`, so it does not
+see bridged records either. The host binds its socket under its own runtime dir (typically
+`/run/user/<uid>/cc-socks`), which no bridged container mounts. No `sharedPeerRegistry` setting
+bridges the host itself.
 
 The launcher creates `peers/`, `peers/sessions/` and `peers/cc-socks/` on the host as you,
 before `docker create`, and forces them to `0700` even if they already exist with a wider mode: Docker would otherwise create a missing bind source as root, and
