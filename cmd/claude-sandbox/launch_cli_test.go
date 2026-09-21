@@ -280,6 +280,14 @@ var _ = Describe("launcher CLI (end-to-end argv)", func() {
 		It("CS-IMG-041: the checker subcommand is hidden from help and completion", func() {
 			Expect(f.run("--help")).To(Equal(0))
 			Expect(f.out.String()).NotTo(ContainSubstring("cache-budget-check"))
+
+			// Completion: the empty word offers subcommands, but not this one.
+			g := newCLIFixture()
+			all := g.complete("")
+			Expect(all.has("sessions")).To(BeTrue(), "the empty word must offer subcommands for this to mean anything")
+			Expect(all.has("cache-budget-check")).To(BeFalse())
+			h := newCLIFixture()
+			Expect(h.complete("cache").names).NotTo(ContainElement("cache-budget-check"))
 		})
 
 		It("CS-IMG-043: the result is read before this launch's own checker starts", func() {
