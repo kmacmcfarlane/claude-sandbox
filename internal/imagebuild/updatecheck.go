@@ -11,11 +11,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
+
+	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
 )
 
 const (
@@ -26,6 +31,10 @@ const (
 
 	// PrefetchSubcommand is the hidden subcommand the background build runs.
 	PrefetchSubcommand = "cli-prefetch"
+
+	// PrefetchTag is where the background build puts its image until it
+	// moves CLIImageName onto it (CS-IMG-045).
+	PrefetchTag = CLIImageName + ":prefetch"
 
 	// Files under Options.CacheDir.
 	VersionCacheFile   = "claude-version.json"
@@ -119,7 +128,10 @@ func cachedLatestVersion(o Options, fresh bool) (string, error) {
 	path := o.cacheFile(VersionCacheFile)
 	if !fresh {
 		var c versionCache
-		if readJSON(path, &c) == nil && semverRe.MatchString(c.Latest) && within(o.now(), c.Checked) {
+		// Anchored: a corrupt value such as "1.2.4 junk" would otherwise be
+		// printed and handed to a background build that rejects it, on every
+		// launch until the TTL ran out.
+		if readJSON(path, &c) == nil && exactVersionRe.MatchString(c.Latest) && within(o.now(), c.Checked) {
 			return c.Latest, nil
 		}
 	}
@@ -128,6 +140,38 @@ func cachedLatestVersion(o Options, fresh bool) (string, error) {
 		return "", nil // not cached: the next launch asks again
 	}
 	return v, writeJSON(path, versionCache{Latest: v, Checked: o.now()})
+}
+
+// newer reports whether version a is strictly newer than b, comparing
+// X.Y.Z numerically. Anything that is not an exact X.Y.Z is never newer, and
+// nothing is newer than a b that cannot be read.
+func newer(a, b string) bool {
+	pa, oka := parseVersion(a)
+	pb, okb := parseVersion(b)
+	if !oka || !okb {
+		return false
+	}
+	for i := range pa {
+		if pa[i] != pb[i] {
+			return pa[i] > pb[i]
+		}
+	}
+	return false
+}
+
+func parseVersion(v string) ([3]int, bool) {
+	var out [3]int
+	if !exactVersionRe.MatchString(v) {
+		return out, false
+	}
+	for i, part := range strings.Split(v, ".") {
+		n, err := strconv.Atoi(part)
+		if err != nil {
+			return out, false
+		}
+		out[i] = n
+	}
+	return out, true
 }
 
 // UpdateCheck compares the CLI image's pinned Claude Code version with the
@@ -149,12 +193,14 @@ func UpdateCheck(o Options, cliBuilt bool) bool {
 		return foregroundUpdate(o, pinned)
 	}
 
-	// CS-IMG-047: the last background build failed and the image still is not
-	// on that version. One line, every launch, until it is.
+	// CS-IMG-047: the last background build failed for a version the image
+	// has not reached. Only a NEWER one counts: an image already past it
+	// (built by --update, --rebuild or a later background build) makes the
+	// record moot. One line, every launch, until then.
 	var st prefetchStatus
 	failed := false
 	if o.CacheDir != "" && readJSON(o.cacheFile(PrefetchStatusFile), &st) == nil {
-		failed = !st.OK && st.Version != "" && st.Version != pinned
+		failed = !st.OK && newer(st.Version, pinned)
 	}
 	logPath := PrefetchLogPath(o.CacheDir)
 	if failed {
@@ -163,7 +209,9 @@ func UpdateCheck(o Options, cliBuilt bool) bool {
 	}
 
 	latest, cacheErr := cachedLatestVersion(o, false)
-	if latest == "" || latest == pinned {
+	if !newer(latest, pinned) {
+		// Same version, unreadable answer, or a registry behind the image:
+		// nothing to build, and never a downgrade.
 		if cacheErr != nil {
 			// CS-IMG-047: advisory; the version itself is good.
 			fmt.Fprintf(o.Err, "WARNING: could not write the Claude Code version cache (%v); the next launch asks the registry again.\n", cacheErr)
@@ -203,18 +251,24 @@ func UpdateCheck(o Options, cliBuilt bool) bool {
 // foregroundUpdate is --update (CS-IMG-009): ask the registry now and build
 // the CLI image now, pinned to its answer. The pin is a build arg, so the
 // install layer busts on its own; no --no-cache needed, and the base and
-// children are never touched.
+// children are never touched. A success is recorded like a background one,
+// so a stale failure record cannot outlive it (CS-IMG-047).
 func foregroundUpdate(o Options, pinned string) bool {
 	latest, cacheErr := cachedLatestVersion(o, true)
 	if cacheErr != nil {
 		fmt.Fprintf(o.Err, "WARNING: could not write the Claude Code version cache (%v).\n", cacheErr)
 	}
-	if latest == "" || latest == pinned {
+	if !newer(latest, pinned) {
 		return false
 	}
 	fmt.Fprintf(o.Out, "\nClaude Code update available: %s → %s\n", pinned, latest)
 	err := buildCLI(o, latest, false)
 	fmt.Fprintln(o.Out)
+	if err == nil && o.CacheDir != "" {
+		if rerr := recordPrefetch(o, latest, true); rerr != nil {
+			fmt.Fprintf(o.Err, "WARNING: could not record the Claude Code update in %s (%v).\n", o.cacheFile(PrefetchStatusFile), rerr)
+		}
+	}
 	return err == nil
 }
 
@@ -244,6 +298,12 @@ func tryPrefetchLock(path string) (release func(), busy bool, err error) {
 // is running (CS-IMG-045/046). The probe only avoids a pointless spawn: the
 // child takes the lock itself, so two launches racing past the probe still
 // build once.
+//
+// The child goes through Runner.Start with Cmd.Detach — its own session, no
+// parent-death signal, reaped in the background — so it outlives the
+// launcher and its terminal. stdin stays nil (/dev/null); stdout and stderr
+// are the log, opened for append and handed over as a real fd, so nothing in
+// the launcher has to drain a pipe.
 func startPrefetch(o Options, version string) error {
 	release, busy, err := tryPrefetchLock(o.cacheFile(PrefetchLockFile))
 	if err != nil {
@@ -256,18 +316,22 @@ func startPrefetch(o Options, version string) error {
 	if o.Self == "" {
 		return errors.New("the launcher's own path is unknown")
 	}
-	detach := o.Detach
-	if detach == nil {
-		detach = StartDetached
+	log, err := os.OpenFile(PrefetchLogPath(o.CacheDir), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
+	if err != nil {
+		return err
 	}
-	return detach(DetachedCmd{
-		Path: o.Self,
-		Args: []string{PrefetchSubcommand, version},
+	defer log.Close() // the child holds its own copy once started
+	_, err = o.Runner.Start(execx.Cmd{
+		Name: o.Self,
+		Args: []string{PrefetchSubcommand, "--dir", o.CacheDir, version},
 		// The child resolves the same checkout (Dockerfile.cli) as this
 		// launch, whatever its own location would suggest.
-		Env: []string{"CLAUDE_SANDBOX_REPO_ROOT=" + o.RepoRoot},
-		Log: PrefetchLogPath(o.CacheDir),
+		Env:    []string{"CLAUDE_SANDBOX_REPO_ROOT=" + o.RepoRoot},
+		Stdout: log,
+		Stderr: log,
+		Detach: true,
 	})
+	return err
 }
 
 // Prefetch is "claude-sandbox cli-prefetch <version>", the detached
@@ -275,6 +339,11 @@ func startPrefetch(o Options, version string) error {
 // builds ONLY the CLI image, pinned to version, through the same build as a
 // launch (CS-IMG-021), under the prefetch lock without waiting for it
 // (CS-IMG-046), and records the outcome for the next launch (CS-IMG-047).
+//
+// It never moves claude-sandbox-cli backwards: it skips unless version is
+// newer than the image's pin, builds under PrefetchTag, and checks again
+// before "docker tag" moves claude-sandbox-cli — a foreground --update to a
+// later version may have finished during the minutes the build took.
 func Prefetch(o Options, version string) error {
 	if !exactVersionRe.MatchString(version) {
 		return fmt.Errorf("%s: want a version X.Y.Z, got %q", PrefetchSubcommand, version)
@@ -283,35 +352,53 @@ func Prefetch(o Options, version string) error {
 		return fmt.Errorf("%s: no cache directory", PrefetchSubcommand)
 	}
 	stamp := func() string { return o.now().UTC().Format(time.RFC3339) }
+	logf := func(w io.Writer, format string, a ...any) {
+		fmt.Fprintf(w, "%s %s %s: %s\n", stamp(), PrefetchSubcommand, version, fmt.Sprintf(format, a...))
+	}
 	release, busy, err := tryPrefetchLock(o.cacheFile(PrefetchLockFile))
 	if err != nil {
 		return fmt.Errorf("%s: %w", PrefetchSubcommand, err)
 	}
 	if busy {
-		fmt.Fprintf(o.Out, "%s %s %s: another background CLI build holds %s; skipping.\n",
-			stamp(), PrefetchSubcommand, version, o.cacheFile(PrefetchLockFile))
+		logf(o.Out, "another background CLI build holds %s; skipping.", o.cacheFile(PrefetchLockFile))
 		return nil
 	}
 	defer release()
 	// The log holds the latest build only. The fd is O_APPEND, so writes
 	// after the truncation land at the new end.
 	_ = os.Truncate(PrefetchLogPath(o.CacheDir), 0)
-	fmt.Fprintf(o.Out, "%s %s %s: started (pid %d).\n", stamp(), PrefetchSubcommand, version, os.Getpid())
+	logf(o.Out, "started (pid %d).", os.Getpid())
 
-	if pinnedClaudeVersion(o) == version {
-		fmt.Fprintf(o.Out, "%s %s %s: %s is already pinned to %s; nothing to build.\n", stamp(), PrefetchSubcommand, version, CLIImageName, version)
+	if pinned := pinnedClaudeVersion(o); pinned != "" && !newer(version, pinned) {
+		logf(o.Out, "%s is already at %s; nothing to build.", CLIImageName, pinned)
 		return recordPrefetch(o, version, true)
 	}
-	buildErr := buildCLI(o, version, false)
+	buildErr := buildCLITagged(o, PrefetchTag, version, false)
+	if buildErr == nil {
+		if pinned := pinnedClaudeVersion(o); pinned != "" && !newer(version, pinned) {
+			logf(o.Out, "%s moved to %s during the build; leaving it there.", CLIImageName, pinned)
+			untagPrefetch(o)
+			return recordPrefetch(o, version, true)
+		}
+		buildErr = o.Runner.Run(execx.Cmd{Name: "docker", Args: []string{"tag", PrefetchTag, CLIImageName}, Stdout: o.Out, Stderr: o.Err})
+	}
+	untagPrefetch(o)
 	if err := recordPrefetch(o, version, buildErr == nil); err != nil {
-		fmt.Fprintf(o.Err, "%s %s %s: could not record the outcome: %v\n", stamp(), PrefetchSubcommand, version, err)
+		logf(o.Err, "could not record the outcome: %v", err)
 	}
 	if buildErr != nil {
-		fmt.Fprintf(o.Err, "%s %s %s: FAILED: %v\n", stamp(), PrefetchSubcommand, version, buildErr)
+		logf(o.Err, "FAILED: %v", buildErr)
 		return buildErr
 	}
-	fmt.Fprintf(o.Out, "%s %s %s: done; the next launch uses it.\n", stamp(), PrefetchSubcommand, version)
+	logf(o.Out, "done; %s is now %s and the next launch uses it.", CLIImageName, version)
 	return nil
+}
+
+// untagPrefetch removes the PrefetchTag name. Once claude-sandbox-cli points
+// at the same image this deletes only the name; otherwise the image goes
+// with it. Best effort: a leftover tag is overwritten by the next build.
+func untagPrefetch(o Options) {
+	_ = o.Runner.Run(execx.Cmd{Name: "docker", Args: []string{"rmi", PrefetchTag}, Stdout: io.Discard, Stderr: io.Discard})
 }
 
 func recordPrefetch(o Options, version string, ok bool) error {

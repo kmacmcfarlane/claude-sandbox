@@ -58,9 +58,6 @@ type Env struct {
 	// scratch directory: under go test the launch panics on the real temp
 	// root rather than sweep it (launch.shadowRoot).
 	TempRoot string
-	// Detach starts the background CLI build (CS-IMG-045); nil means
-	// imagebuild.StartDetached, which refuses to run under go test.
-	Detach imagebuild.Detacher
 	// CacheDir is where the detached cache-budget checker writes its result
 	// and the next launch reads it (CS-IMG-041..043); "" means
 	// $HOME/.cache/claude-sandbox. Tests point it at a scratch directory.
@@ -901,12 +898,11 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 	// cap. A Claude Code update never touches the base or the child, and
 	// without --update it is built in the background for the next launch
 	// (CS-IMG-045).
-	self, _ := os.Executable()
 	imgOpts := imagebuild.Options{
-		Runner: env.Runner, Prompter: env.Prompter, Out: env.Out, Err: env.Err,
+		Runner: env.Runner, Out: env.Out, Err: env.Err,
 		RepoRoot: rr, Version: version,
 		ForceRebuild: f.Rebuild, NoUpdateCheck: noUpdate, AutoUpdate: f.Update,
-		CacheDir: sandboxCacheDir(env), Now: env.Now, Detach: env.Detach, Self: self,
+		CacheDir: env.cacheDir(), Now: env.Now, Self: env.executable(),
 	}
 	if err := imagebuild.EnsureBuildKit(imgOpts); err != nil {
 		return exitErr(2, "%s", err.Error())
@@ -1080,12 +1076,18 @@ func hostIdentity(getenv func(string) string) (uid, gid int, username, home stri
 	return uid, gid, username, home
 }
 
-// sandboxCacheDir is ~/.cache/claude-sandbox, where the update check keeps
-// its version cache and the background CLI build its lock, log and status
-// (CS-IMG-044..047).
-func sandboxCacheDir(env *Env) string {
-	_, _, _, home := hostIdentity(env.Getenv)
-	return filepath.Join(home, launch.SandboxHomeRoot)
+// executable is the launcher's own binary via the Env.Executable seam; ""
+// when it cannot be found.
+func (e *Env) executable() string {
+	exe := e.Executable
+	if exe == nil {
+		exe = os.Executable
+	}
+	bin, err := exe()
+	if err != nil {
+		return ""
+	}
+	return bin
 }
 
 // newCLIPrefetchCmd is the hidden "claude-sandbox cli-prefetch <version>"
@@ -1093,20 +1095,23 @@ func sandboxCacheDir(env *Env) string {
 // when a newer Claude Code exists. Its stdout and stderr are the prefetch
 // log.
 func newCLIPrefetchCmd(env *Env) *cobra.Command {
-	return &cobra.Command{
-		Use:                imagebuild.PrefetchSubcommand + " <version>",
-		Short:              "Build the Claude Code CLI image in the background (started by a launch)",
-		Hidden:             true,
-		SilenceUsage:       true,
-		SilenceErrors:      true,
-		DisableFlagParsing: true,
+	var dir string
+	cmd := &cobra.Command{
+		Use:           imagebuild.PrefetchSubcommand + " [--dir DIR] <version>",
+		Short:         "Build the Claude Code CLI image in the background (started by a launch)",
+		Hidden:        true,
+		SilenceUsage:  true,
+		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) != 1 {
-				return exitErr(2, "Usage: claude-sandbox %s <version>", imagebuild.PrefetchSubcommand)
+				return exitErr(2, "Usage: claude-sandbox %s [--dir DIR] <version>", imagebuild.PrefetchSubcommand)
+			}
+			if dir == "" {
+				dir = env.cacheDir()
 			}
 			o := imagebuild.Options{
 				Runner: env.Runner, Out: env.Out, Err: env.Err,
-				RepoRoot: repoRoot(env.Getenv), CacheDir: sandboxCacheDir(env), Now: env.Now,
+				RepoRoot: repoRoot(env.Getenv), CacheDir: dir, Now: env.Now,
 			}
 			if err := imagebuild.Prefetch(o, args[0]); err != nil {
 				return exitErr(1, "Error: %v", err)
@@ -1114,6 +1119,8 @@ func newCLIPrefetchCmd(env *Env) *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().StringVar(&dir, "dir", "", "directory for the version cache, lock, log and status (default ~/.cache/claude-sandbox)")
+	return cmd
 }
 
 func newRalphCmd(env *Env) *cobra.Command {
