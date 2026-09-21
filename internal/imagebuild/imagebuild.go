@@ -85,7 +85,22 @@ type Options struct {
 	Version       string // git-describe version stamp
 	ForceRebuild  bool   // --rebuild
 	NoUpdateCheck bool   // --no-update-check / env / config
-	AutoUpdate    bool   // --update: auto-accept the update rebuild (CS-IMG-009)
+	AutoUpdate    bool   // --update: check and build now, in the foreground (CS-IMG-009)
+
+	// CacheDir holds the registry version cache and the background CLI
+	// build's lock, log and status (CS-IMG-044..047): ~/.cache/claude-sandbox
+	// for a launch. "" turns both off: every check asks the registry and an
+	// update is only reported.
+	CacheDir string
+	// Now is the clock the version cache and the prefetch back-off are judged
+	// by; nil means time.Now.
+	Now func() time.Time
+	// Detach starts the background CLI build (CS-IMG-045); nil means
+	// StartDetached. Tests inject a recorder.
+	Detach Detacher
+	// Self is the launcher binary the background build runs as
+	// "<Self> cli-prefetch <version>".
+	Self string
 }
 
 // BakedSources are the paths (relative to RepoRoot) the base Dockerfile COPYs
@@ -317,35 +332,6 @@ func pinnedClaudeVersion(o Options) string {
 		Stderr: io.Discard,
 	})
 	return semverRe.FindString(file)
-}
-
-// UpdateCheck compares the CLI image's pinned Claude Code version against the
-// npm registry and offers to rebuild the CLI image — only that image
-// (CS-IMG-006..009). cliBuilt skips the check: a fresh CLI image is already
-// current. Returns whether the CLI image was rebuilt here.
-func UpdateCheck(o Options, cliBuilt bool) bool {
-	if o.NoUpdateCheck || cliBuilt {
-		return false
-	}
-	pinned := pinnedClaudeVersion(o)
-	latest := latestClaudeVersion(o)
-	if pinned == "" || latest == "" || pinned == latest {
-		return false
-	}
-	fmt.Fprintf(o.Out, "\nClaude Code update available: %s → %s\n", pinned, latest)
-	accept := o.AutoUpdate
-	if !accept {
-		accept = o.Prompter.Confirm("", "Rebuild Claude Code image to update?", false, 5*time.Second)
-	}
-	if !accept {
-		fmt.Fprintln(o.Out)
-		return false
-	}
-	// The pin is a build arg, so the install layer busts on its own; no
-	// --no-cache needed, and the base and children are never touched.
-	err := buildCLI(o, latest, false)
-	fmt.Fprintln(o.Out)
-	return err == nil
 }
 
 // CapImageName is the run image for a base or child image (CS-IMG-024).

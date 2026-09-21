@@ -56,6 +56,9 @@ type Env struct {
 	// scratch directory: under go test the launch panics on the real temp
 	// root rather than sweep it (launch.shadowRoot).
 	TempRoot string
+	// Detach starts the background CLI build (CS-IMG-045); nil means
+	// imagebuild.StartDetached, which refuses to run under go test.
+	Detach imagebuild.Detacher
 }
 
 // lookupEnv is Env.LookupEnv with the Getenv fallback.
@@ -88,7 +91,7 @@ func Main(args []string) int {
 // path so "claude-sandbox --rebuild init" errors instead of routing to init.
 func isSubcommand(a string) bool {
 	switch a {
-	case "init", "init-ralph", "ralph", "help", "completion", "sessions", "pidslot", "headless":
+	case "init", "init-ralph", "ralph", "help", "completion", "sessions", "pidslot", "headless", imagebuild.PrefetchSubcommand:
 		return true
 	// CS-COMP-002/003: the hidden commands the generated completion scripts
 	// call on every keystroke. Without these they fall through to runLaunch,
@@ -164,7 +167,7 @@ func newRootCmd(env *Env) *cobra.Command {
 	}
 	ralphCmd := newRalphCmd(env)
 	registerRalphCompletions(ralphCmd)
-	root.AddCommand(newInitCmd(env, false), newInitCmd(env, true), ralphCmd, newSessionsCmd(env), newPidslotCmd(env), newHeadlessCmd(env))
+	root.AddCommand(newInitCmd(env, false), newInitCmd(env, true), ralphCmd, newSessionsCmd(env), newPidslotCmd(env), newHeadlessCmd(env), newCLIPrefetchCmd(env))
 	// CS-INIT-002: a rejected flag names itself and lists the command's valid
 	// options (inherited by init/init-ralph/ralph).
 	root.SetFlagErrorFunc(func(c *cobra.Command, err error) error {
@@ -232,7 +235,7 @@ Options:
   --dangerous               Skip permission prompts (--dangerously-skip-permissions)
   --rebuild                 Force rebuild of the base, Claude Code, child and run images
                             (--no-cache: also starts the shared package caches empty)
-  --update                  Auto-accept the Claude Code update prompt (rebuilds only the CLI image)
+  --update                  Check for a Claude Code update now and build it before launching (only the CLI image)
   --no-update-check         Skip Claude Code version check
   --docker-socket           Mount the host Docker socket into the container
   --aws                     Mount ~/.aws/ read-only into the container
@@ -871,11 +874,15 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 	}
 
 	// Images (CS-IMG). Order: base, CLI image, update check (CLI only), child,
-	// cap. A Claude Code update never touches the base or the child.
+	// cap. A Claude Code update never touches the base or the child, and
+	// without --update it is built in the background for the next launch
+	// (CS-IMG-045).
+	self, _ := os.Executable()
 	imgOpts := imagebuild.Options{
 		Runner: env.Runner, Prompter: env.Prompter, Out: env.Out, Err: env.Err,
 		RepoRoot: rr, Version: version,
 		ForceRebuild: f.Rebuild, NoUpdateCheck: noUpdate, AutoUpdate: f.Update,
+		CacheDir: sandboxCacheDir(env), Now: env.Now, Detach: env.Detach, Self: self,
 	}
 	if err := imagebuild.EnsureBuildKit(imgOpts); err != nil {
 		return exitErr(2, "%s", err.Error())
@@ -985,6 +992,42 @@ func hostIdentity(getenv func(string) string) (uid, gid int, username, home stri
 		}
 	}
 	return uid, gid, username, home
+}
+
+// sandboxCacheDir is ~/.cache/claude-sandbox, where the update check keeps
+// its version cache and the background CLI build its lock, log and status
+// (CS-IMG-044..047).
+func sandboxCacheDir(env *Env) string {
+	_, _, _, home := hostIdentity(env.Getenv)
+	return filepath.Join(home, launch.SandboxHomeRoot)
+}
+
+// newCLIPrefetchCmd is the hidden "claude-sandbox cli-prefetch <version>"
+// (CS-IMG-045..047): the background CLI image build a launch starts detached
+// when a newer Claude Code exists. Its stdout and stderr are the prefetch
+// log.
+func newCLIPrefetchCmd(env *Env) *cobra.Command {
+	return &cobra.Command{
+		Use:                imagebuild.PrefetchSubcommand + " <version>",
+		Short:              "Build the Claude Code CLI image in the background (started by a launch)",
+		Hidden:             true,
+		SilenceUsage:       true,
+		SilenceErrors:      true,
+		DisableFlagParsing: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) != 1 {
+				return exitErr(2, "Usage: claude-sandbox %s <version>", imagebuild.PrefetchSubcommand)
+			}
+			o := imagebuild.Options{
+				Runner: env.Runner, Out: env.Out, Err: env.Err,
+				RepoRoot: repoRoot(env.Getenv), CacheDir: sandboxCacheDir(env), Now: env.Now,
+			}
+			if err := imagebuild.Prefetch(o, args[0]); err != nil {
+				return exitErr(1, "Error: %v", err)
+			}
+			return nil
+		},
+	}
 }
 
 func newRalphCmd(env *Env) *cobra.Command {

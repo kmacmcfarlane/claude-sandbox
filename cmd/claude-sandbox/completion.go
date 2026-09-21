@@ -132,7 +132,7 @@ var launchFlagSpecs = []launchFlagSpec{
 	{Name: "--dangerous", Desc: "Skip permission prompts (--dangerously-skip-permissions)"},
 	{Name: "--dangerously-skip-permissions"},
 	{Name: "--rebuild", Desc: "Force rebuild of every image from scratch (also empties the shared package caches)"},
-	{Name: "--update", Desc: "Auto-accept the Claude Code update prompt (rebuilds only the CLI image)"},
+	{Name: "--update", Desc: "Check for a Claude Code update now and build it before launching (only the CLI image)"},
 	{Name: "--no-update-check", Desc: "Skip Claude Code version check"},
 	{Name: "--docker-socket", Desc: "Mount the host Docker socket into the container"},
 	{Name: "--host-access-docker-socket-enabled"},

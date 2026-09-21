@@ -100,31 +100,107 @@ Feature: Image build lifecycle (CS-IMG)
   Scenario: CS-IMG-023 Version resolution falls back to "latest" when npm is unreachable
     Given "npm view @anthropic-ai/claude-code version" fails or prints nothing
     Then the CLI image is built with CLAUDE_CODE_VERSION=latest
-    And no update prompt is shown
+    And no update notice is shown
 
   # ---- Claude Code update check ----
+  # The check never blocks a launch. It used to ask the npm registry on every
+  # interactive launch (0.3-0.6 s on the host, 5.3 s inside a sandbox, all DNS)
+  # and then hold a 5 s "Rebuild?" prompt that defaulted to no, so every launch
+  # paid that wait while an update was pending, which is most days. Accepting
+  # it put a CLI download of up to ~10 min on the interactive path. Now the
+  # registry answer is cached (CS-IMG-044) and a newer version is built in the
+  # background for the next launch (CS-IMG-045..047).
 
   Scenario: CS-IMG-006 Update check runs only when the CLI image was not just built
     Given the CLI image is fresh (not built this launch)
     Then the pinned version is read from the CLI image's claude-sandbox.claude-version label
-    And it is compared to the npm registry version
+    And it is compared to the registry version, read through the version cache (CS-IMG-044)
     # A label inspect, not a "docker run": no container is spawned to read a file.
 
   Scenario: CS-IMG-007 Update check is skippable
     Given --no-update-check, or CLAUDE_SANDBOX_NO_UPDATE_CHECK=1/true, or config disableUpdateCheck: true
     Then no version comparison happens
 
-  Scenario: CS-IMG-008 Update prompt defaults to no with a short timeout
-    Given the pinned and latest versions differ and a terminal is attached
-    Then a rebuild prompt is shown; Enter/timeout declines
-    And "y" rebuilds ONLY the CLI image, pinned to the latest version
-    And neither the base nor the child is rebuilt; the cap refreshes on its own staleness
+  Scenario: CS-IMG-008 An available update never prompts and never blocks the launch
+    Given the pinned and latest versions differ
+    And --update was not given
+    Then no prompt is shown, with or without a terminal
+    And no image is built in the foreground; the launch runs on the current CLI image
+    And a background build of the CLI image starts (CS-IMG-045)
+    # Replaces the 5 s "Rebuild Claude Code image to update?" prompt.
 
-  Scenario: CS-IMG-009 --update auto-accepts the update rebuild
+  Scenario: CS-IMG-009 --update checks and builds now, in the foreground
     Given the pinned and latest versions differ
     When "claude-sandbox --update" is run
-    Then the CLI image is rebuilt without prompting
-    # Pairs with --no-update-check per the uniform prompt-flag scheme.
+    Then the registry is asked now, bypassing the version cache, and the cache is rewritten
+    And the CLI image is rebuilt synchronously, pinned to the latest version, without prompting
+    And this launch's cap is rebuilt over the new CLI image
+    And neither the base nor the child is rebuilt
+    # Pairs with --no-update-check per the uniform prompt-flag scheme. Headless
+    # launches run the check only with --update (CS-LNCH-062), so this is the
+    # only update path an SDK client has.
+
+  Scenario: CS-IMG-044 The registry version is cached for 6 hours
+    Given the version cache file ~/.cache/claude-sandbox/claude-version.json
+    When it records a version checked less than 6 hours ago
+    Then the launch uses that version and does not run "npm view"
+    When it is missing, unreadable, or older than 6 hours
+    Then "npm view @anthropic-ai/claude-code version" runs and a version it prints is written
+      to the cache with the time of the check
+    And a failed or empty lookup is not cached, so the next launch asks again
+    # One small JSON file under the sandbox-only tree next to launch.lock. The
+    # cache holds the registry's answer only; the pinned version is always read
+    # from the image label, so a CLI image rebuilt in between is seen at once.
+
+  Scenario: CS-IMG-045 A newer Claude Code is built in the background for the next launch
+    Given the pinned and latest versions differ and --update was not given
+    And no background CLI build is running (CS-IMG-046)
+    Then the launcher starts "<launcher binary> cli-prefetch <latest>" detached: in its own
+      session (setsid), stdin from /dev/null, stdout and stderr appended to
+      ~/.cache/claude-sandbox/cli-prefetch.log, never waited on and not tied to the
+      launcher's lifetime, so it survives the launcher and the terminal
+    And it prints one line naming the two versions and the log
+    And "cli-prefetch <v>" builds ONLY the CLI image, through the same build as CS-IMG-021,
+      pinned to <v>, and skips the build when the image is already pinned to <v>
+    And this launch keeps the CLI image it already has; UpdateCheck reports no rebuild
+    And the next launch picks the new image up through the cap's own staleness: the cap
+      fingerprint covers the CLI image ID (CS-IMG-033), so the cap rebuilds and nothing else
+    # Moving the claude-sandbox-cli tag while sessions run is safe. A running
+    # container runs a cap, and a cap is built FROM an image ID; the COPY
+    # --from=claude-sandbox-cli lines are resolved when the cap is built, not
+    # when it runs. Retagging the CLI image changes neither the cap image nor
+    # any container started from it, and the old CLI image lingers untagged
+    # until pruned. A cap build racing the retag gets one or the other ID, and
+    # its fingerprint records which, so the next launch rebuilds it if needed.
+    # cli-prefetch is a hidden subcommand: it is not in help or completion.
+
+  Scenario: CS-IMG-046 At most one background CLI build runs at a time
+    Given a background CLI build holds the flock on ~/.cache/claude-sandbox/cli-prefetch.lock
+    When a launch finds an update
+    Then it starts no second build and prints one line saying a build is already running,
+      naming the log
+    And "cli-prefetch" itself takes the lock without waiting: when it is held, it logs that
+      and exits 0 without building
+    # The launcher's probe and the child's own non-blocking lock together mean
+    # two launches racing past the probe still produce one build. Nobody waits:
+    # a contended lock is a skip. A foreground --update build does not take this
+    # lock; two builds of the same pin produce the same image and the tag ends on
+    # one of them.
+
+  Scenario: CS-IMG-047 A failed background build never breaks a launch
+    Given the last background build of <v> failed
+    Then its log records the failure and ~/.cache/claude-sandbox/cli-prefetch.json records
+      the version, the outcome and the time
+    And the next launch runs on whatever claude-sandbox-cli currently is
+    And while the CLI image is not pinned to <v>, each launch prints one line naming <v>
+      and the log
+    And the same version is not retried in the background until 6 hours after the failure;
+      --update retries it at once in the foreground
+    And a launch that cannot start the background build, or cannot read or write any of the
+      cache files, warns at most once and launches anyway
+    # Without the back-off, an update that fails the same way every time (no
+    # network, a broken installer) would start a doomed multi-minute build on
+    # every launch.
 
   # ---- child Dockerfile resolution ----
 

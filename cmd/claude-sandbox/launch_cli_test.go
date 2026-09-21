@@ -429,6 +429,100 @@ var _ = Describe("launcher CLI (end-to-end argv)", func() {
 		})
 	})
 
+	Describe("background CLI prefetch (CS-IMG-044..047 through runLaunch)", func() {
+		var detached []imagebuild.DetachedCmd
+		cacheDir := func() string { return filepath.Join(f.home, ".cache", "claude-sandbox") }
+		cliBuilds := func() []string {
+			var out []string
+			for _, l := range f.fake.CommandLines() {
+				if strings.HasPrefix(l, "docker build -t claude-sandbox-cli ") {
+					out = append(out, l)
+				}
+			}
+			return out
+		}
+
+		BeforeEach(func() {
+			detached = nil
+			f.env.Detach = func(c imagebuild.DetachedCmd) error { detached = append(detached, c); return nil }
+			f.fake.On("claude-sandbox.claude-version", "1.2.3\n", nil)
+			f.fake.On("npm view @anthropic-ai/claude-code version", "1.2.4\n", nil)
+		})
+
+		It("CS-IMG-045: a newer version launches on the current image and starts cli-prefetch detached", func() {
+			Expect(f.run()).To(Equal(0), f.errw.String())
+			Expect(cliBuilds()).To(BeEmpty(), "nothing is built in the foreground")
+			Expect(f.launchLine()).To(ContainSubstring(" claude-sandbox:run "))
+			Expect(detached).To(HaveLen(1))
+			Expect(detached[0].Args).To(Equal([]string{"cli-prefetch", "1.2.4"}))
+			Expect(detached[0].Log).To(Equal(filepath.Join(cacheDir(), "cli-prefetch.log")))
+			Expect(detached[0].Env).To(ContainElement("CLAUDE_SANDBOX_REPO_ROOT=" + f.repo))
+			Expect(f.out.String()).To(ContainSubstring("1.2.3 → 1.2.4; building it in the background"))
+		})
+
+		It("CS-IMG-044: the version is cached under ~/.cache/claude-sandbox and the next launch skips npm", func() {
+			Expect(f.run()).To(Equal(0), f.errw.String())
+			_, err := os.Stat(filepath.Join(cacheDir(), "claude-version.json"))
+			Expect(err).NotTo(HaveOccurred())
+
+			f.fake.Calls = nil
+			Expect(f.run("--new")).To(Equal(0), f.errw.String())
+			for _, l := range f.fake.CommandLines() {
+				Expect(l).NotTo(ContainSubstring("npm view"))
+			}
+			Expect(detached).To(HaveLen(2), "the update is still pending, so the second launch prefetches too")
+		})
+
+		It("CS-IMG-009: --update builds the CLI image in the foreground and starts nothing in the background", func() {
+			Expect(f.run("--update")).To(Equal(0), f.errw.String())
+			Expect(cliBuilds()).To(HaveLen(1))
+			Expect(cliBuilds()[0]).To(ContainSubstring("CLAUDE_CODE_VERSION=1.2.4"))
+			Expect(detached).To(BeEmpty())
+		})
+
+		It("CS-IMG-045: cli-prefetch builds ONLY the CLI image and records the outcome under HOME", func() {
+			f.fake.Calls = nil
+			Expect(f.run("cli-prefetch", "1.2.4")).To(Equal(0), f.errw.String())
+			var builds []string
+			for _, l := range f.fake.CommandLines() {
+				if strings.HasPrefix(l, "docker build") {
+					builds = append(builds, l)
+				}
+			}
+			Expect(builds).To(HaveLen(1))
+			Expect(builds[0]).To(HavePrefix("docker build -t claude-sandbox-cli "))
+			Expect(builds[0]).To(ContainSubstring("CLAUDE_CODE_VERSION=1.2.4"))
+			Expect(builds[0]).To(ContainSubstring(filepath.Join(f.repo, "Dockerfile.cli")))
+			raw, err := os.ReadFile(filepath.Join(cacheDir(), "cli-prefetch.json"))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(string(raw)).To(ContainSubstring(`"ok":true`))
+			Expect(f.fake.Session).To(BeNil(), "cli-prefetch never launches a session")
+		})
+
+		It("CS-IMG-047: a failed cli-prefetch exits non-zero, and the next launch warns naming the log and still launches", func() {
+			f.fake.On("docker build -t claude-sandbox-cli", "", execx.Fail(1))
+			Expect(f.run("cli-prefetch", "1.2.4")).To(Equal(1))
+			f.errw.Reset()
+			Expect(f.run()).To(Equal(0), f.errw.String())
+			Expect(f.errw.String()).To(ContainSubstring("background build of Claude Code 1.2.4 failed"))
+			Expect(f.errw.String()).To(ContainSubstring(filepath.Join(cacheDir(), "cli-prefetch.log")))
+			Expect(detached).To(BeEmpty(), "the failed version is not retried within 6 h")
+			Expect(f.fake.Session).NotTo(BeNil())
+		})
+
+		It("CS-IMG-045: cli-prefetch wants exactly one X.Y.Z argument and is hidden from help", func() {
+			Expect(f.run("cli-prefetch")).To(Equal(2))
+			Expect(f.run("cli-prefetch", "latest")).To(Equal(1))
+			f.out.Reset()
+			Expect(f.run("help")).To(Equal(0))
+			Expect(f.out.String()).NotTo(ContainSubstring("cli-prefetch"))
+			f.out.Reset()
+			Expect(f.run("__complete", "")).To(Equal(0))
+			Expect(f.out.String()).To(ContainSubstring("sessions"), "the completion lists subcommands")
+			Expect(f.out.String()).NotTo(ContainSubstring("cli-prefetch"))
+		})
+	})
+
 	Describe("dangerous mode from config or environment (CS-LNCH-038)", func() {
 		It("CS-LNCH-038: config dangerous: true adds --dangerously-skip-permissions", func() {
 			writeFile(filepath.Join(f.proj, ".claude-sandbox", "config.yaml"), "dangerous: true\n")
