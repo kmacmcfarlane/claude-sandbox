@@ -116,9 +116,10 @@ Any of the three enables it (passes `--dangerously-skip-permissions` to claude/r
 - **YAML** (`.claude-sandbox/config.yaml`): `dangerous: true` — cascades, so a more-local `dangerous: false` overrides an upstream `true`
 
 ### Updating Claude Code
-On launch, the sandbox checks whether a newer Claude Code version is available on npm and prompts to rebuild (the prompt defaults to *no* and times out quickly).
+A launch never waits on an update. It compares the version pinned in the `claude-sandbox-cli` image with npm's latest, and caches npm's answer for 6 hours in `~/.cache/claude-sandbox/claude-version.json`. When npm has a newer version, the launch runs on the current image, prints one line, and starts a detached background build of the CLI image only (`claude-sandbox cli-prefetch`, logging to `~/.cache/claude-sandbox/cli-prefetch.log`). The next launch picks the new image up and rebuilds just the small run cap. One background build runs at a time. If it fails, launches print one warning naming the log, and that version is retried in the background after 6 hours.
 
-- `--update` — auto-accept the rebuild without prompting
+- `--update` — check npm now (ignoring the cache) and build the new CLI image in the foreground before launching; also the way to retry a failed background build at once, and the only way a `headless` launch checks
+- Background build stuck or failing: read `~/.cache/claude-sandbox/cli-prefetch.log`
 - `--no-update-check`, `CLAUDE_SANDBOX_NO_UPDATE_CHECK=1`, or `disableUpdateCheck: true` in config — skip the check entirely
 - `claude-sandbox --rebuild` — force a full `--no-cache` rebuild of base + child
 

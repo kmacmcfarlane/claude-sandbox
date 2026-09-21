@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -20,7 +21,6 @@ import (
 
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/imagebuild"
-	"github.com/kmacmcfarlane/claude-sandbox/internal/prompt"
 )
 
 // imgState scripts one image's docker inspect responses.
@@ -151,7 +151,7 @@ var _ = Describe("image build lifecycle", func() {
 		touchAt(filepath.Join(repo, "entrypoint.sh"), old)
 
 		o = imagebuild.Options{
-			Runner: fake, Prompter: &prompt.Scripted{}, Out: out, Err: errw,
+			Runner: fake, Out: out, Err: errw,
 			RepoRoot: repo, Version: "v1.2.3",
 		}
 	})
@@ -1030,7 +1030,22 @@ var _ = Describe("image build lifecycle", func() {
 	// ---- Claude Code update check ----
 
 	Describe("UpdateCheck", func() {
-		var scripted *prompt.Scripted
+		var (
+			cache string
+			now   time.Time
+		)
+
+		// detached returns the processes started through Runner.Start with
+		// Cmd.Detach — the background builds (CS-IMG-045).
+		detached := func() []execx.Cmd {
+			var out []execx.Cmd
+			for _, c := range fake.Calls {
+				if c.Detach {
+					out = append(out, c)
+				}
+			}
+			return out
+		}
 
 		cliBuild := func(v string) string {
 			return "docker build -t claude-sandbox-cli --build-arg CLAUDE_CODE_VERSION=" + v +
@@ -1042,10 +1057,57 @@ var _ = Describe("image build lifecycle", func() {
 			fake.On("npm view @anthropic-ai/claude-code version", latest+"\n", nil)
 		}
 
+		npmCalls := func() int {
+			n := 0
+			for _, l := range fake.CommandLines() {
+				if strings.Contains(l, "npm view") {
+					n++
+				}
+			}
+			return n
+		}
+
+		writeCache := func(name, body string) {
+			Expect(os.MkdirAll(cache, 0o755)).To(Succeed())
+			Expect(os.WriteFile(filepath.Join(cache, name), []byte(body), 0o644)).To(Succeed())
+		}
+		versionCacheAt := func(v string, checked time.Time) {
+			writeCache(imagebuild.VersionCacheFile, `{"latest":"`+v+`","checked":"`+checked.Format(time.RFC3339Nano)+`"}`)
+		}
+		statusAt := func(v string, ok bool, finished time.Time) {
+			okS := "false"
+			if ok {
+				okS = "true"
+			}
+			writeCache(imagebuild.PrefetchStatusFile, `{"version":"`+v+`","ok":`+okS+`,"finished":"`+finished.Format(time.RFC3339Nano)+`"}`)
+		}
+		readCache := func() (string, time.Time) {
+			raw, err := os.ReadFile(filepath.Join(cache, imagebuild.VersionCacheFile))
+			Expect(err).NotTo(HaveOccurred())
+			var c struct {
+				Latest  string    `json:"latest"`
+				Checked time.Time `json:"checked"`
+			}
+			Expect(json.Unmarshal(raw, &c)).To(Succeed())
+			return c.Latest, c.Checked
+		}
+		// holdLock takes the prefetch lock the way a running background build
+		// does: a flock on another open file description.
+		holdLock := func() func() {
+			Expect(os.MkdirAll(cache, 0o755)).To(Succeed())
+			fh, err := os.OpenFile(filepath.Join(cache, imagebuild.PrefetchLockFile), os.O_RDWR|os.O_CREATE, 0o600)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(syscall.Flock(int(fh.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)).To(Succeed())
+			return func() { fh.Close() }
+		}
+
 		BeforeEach(func() {
-			scripted = &prompt.Scripted{IsTTY: true}
-			o.Prompter = scripted
 			images["claude-sandbox"] = &imgState{created: imgT}
+			cache = filepath.Join(GinkgoT().TempDir(), ".cache", "claude-sandbox")
+			now = time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC)
+			o.CacheDir = cache
+			o.Now = func() time.Time { return now }
+			o.Self = "/opt/bin/claude-sandbox"
 		})
 
 		It("CS-IMG-006: compares the CLI image's label to the npm registry when the CLI image was not just built", func() {
@@ -1055,14 +1117,14 @@ var _ = Describe("image build lifecycle", func() {
 			Expect(lines).To(ContainElement(ContainSubstring(`docker image inspect -f {{ index .Config.Labels "claude-sandbox.claude-version" }} claude-sandbox-cli`)))
 			Expect(lines).NotTo(ContainElement(ContainSubstring("docker run")), "the label is read with an inspect, not by spawning a container")
 			Expect(lines).To(ContainElement(ContainSubstring("npm view @anthropic-ai/claude-code version")))
-			Expect(scripted.Asked).To(BeEmpty()) // equal versions: no prompt
+			Expect(detached()).To(BeEmpty())
 		})
 
 		It("CS-IMG-006: falls back to the version file when the image was pinned to \"latest\"", func() {
 			stubVersions("latest", "1.2.3")
 			fake.On("--entrypoint cat claude-sandbox-cli /opt/claude-sandbox/claude-version", "1.2.3 (Claude Code)\n", nil)
 			Expect(imagebuild.UpdateCheck(o, false)).To(BeFalse())
-			Expect(scripted.Asked).To(BeEmpty())
+			Expect(detached()).To(BeEmpty())
 		})
 
 		It("CS-IMG-006: skips the check entirely when the CLI image was just built", func() {
@@ -1076,32 +1138,372 @@ var _ = Describe("image build lifecycle", func() {
 			o.NoUpdateCheck = true
 			Expect(imagebuild.UpdateCheck(o, false)).To(BeFalse())
 			Expect(fake.CommandLines()).To(BeEmpty())
+			Expect(detached()).To(BeEmpty())
 		})
 
-		It("CS-IMG-008: prompt defaults to no — Enter/timeout declines, no rebuild", func() {
+		It("CS-IMG-008: an available update never prompts and builds nothing in the foreground", func() {
 			stubVersions("1.2.3", "1.2.4")
-			// No scripted answer: Ask returns "", Parse falls back to def=false.
-			Expect(imagebuild.UpdateCheck(o, false)).To(BeFalse())
-			Expect(scripted.Asked).To(HaveLen(1))
+			Expect(imagebuild.UpdateCheck(o, false)).To(BeFalse(), "this launch builds nothing itself")
 			Expect(buildLines(fake)).To(BeEmpty())
+			Expect(detached()).To(HaveLen(1))
+		})
+
+		It("CS-IMG-008: without a cache directory the update is only reported", func() {
+			stubVersions("1.2.3", "1.2.4")
+			o.CacheDir = ""
+			Expect(imagebuild.UpdateCheck(o, false)).To(BeFalse())
+			Expect(buildLines(fake)).To(BeEmpty())
+			Expect(detached()).To(BeEmpty())
 			Expect(out.String()).To(ContainSubstring("update available: 1.2.3 → 1.2.4"))
 		})
 
-		It("CS-IMG-008: answering \"y\" rebuilds ONLY the CLI image, pinned to the latest version", func() {
-			stubVersions("1.2.3", "1.2.4")
-			scripted.Answers = []string{"y"}
-			Expect(imagebuild.UpdateCheck(o, false)).To(BeTrue())
-			Expect(scripted.Asked[0]).To(ContainSubstring("Claude Code image"))
-			Expect(buildLines(fake)).To(ConsistOf(cliBuild("1.2.4")))
-			Expect(buildLines(fake)[0]).NotTo(ContainSubstring("-t claude-sandbox "), "the base is never rebuilt for a CLI update")
-		})
-
-		It("CS-IMG-009: --update auto-accepts the update rebuild without prompting", func() {
+		It("CS-IMG-009: --update checks now and rebuilds ONLY the CLI image in the foreground, without prompting", func() {
 			stubVersions("1.2.3", "1.2.4")
 			o.AutoUpdate = true
 			Expect(imagebuild.UpdateCheck(o, false)).To(BeTrue())
-			Expect(scripted.Asked).To(BeEmpty())
 			Expect(buildLines(fake)).To(ConsistOf(cliBuild("1.2.4")))
+			Expect(buildLines(fake)[0]).NotTo(ContainSubstring("-t claude-sandbox "), "the base is never rebuilt for a CLI update")
+			Expect(detached()).To(BeEmpty(), "--update builds in the foreground, not in the background")
+		})
+
+		It("CS-IMG-009: --update bypasses a fresh version cache and rewrites it", func() {
+			stubVersions("1.2.3", "1.2.5")
+			versionCacheAt("1.2.3", now.Add(-time.Minute))
+			o.AutoUpdate = true
+			Expect(imagebuild.UpdateCheck(o, false)).To(BeTrue())
+			Expect(npmCalls()).To(Equal(1))
+			Expect(buildLines(fake)).To(ConsistOf(cliBuild("1.2.5")))
+			v, checked := readCache()
+			Expect(v).To(Equal("1.2.5"))
+			Expect(checked).To(BeTemporally("==", now))
+		})
+
+		It("CS-IMG-044: a version checked less than 6 hours ago is used without asking npm", func() {
+			stubVersions("1.2.3", "9.9.9")
+			versionCacheAt("1.2.4", now.Add(-5*time.Hour-59*time.Minute))
+			Expect(imagebuild.UpdateCheck(o, false)).To(BeFalse())
+			Expect(npmCalls()).To(Equal(0))
+			Expect(detached()).To(HaveLen(1))
+			Expect(detached()[0].Args).To(Equal([]string{"cli-prefetch", "--dir", cache, "1.2.4"}), "the cached version, not the registry's")
+		})
+
+		It("CS-IMG-044: a cached version equal to the pinned one means no update, still without npm", func() {
+			stubVersions("1.2.3", "9.9.9")
+			versionCacheAt("1.2.3", now.Add(-time.Hour))
+			Expect(imagebuild.UpdateCheck(o, false)).To(BeFalse())
+			Expect(npmCalls()).To(Equal(0))
+			Expect(detached()).To(BeEmpty())
+			Expect(out.String()).To(BeEmpty())
+		})
+
+		It("CS-IMG-044: an expired, future-dated, corrupt or missing cache asks npm and rewrites the cache", func() {
+			for _, prep := range []func(){
+				func() { versionCacheAt("1.2.3", now.Add(-6*time.Hour)) },
+				func() { versionCacheAt("1.2.3", now.Add(time.Hour)) },
+				func() { writeCache(imagebuild.VersionCacheFile, "{not json") },
+				// Unanchored matching would accept this and start a doomed
+				// background build of "1.2.4 junk" on every launch.
+				func() {
+					writeCache(imagebuild.VersionCacheFile, `{"latest":"1.2.4 junk","checked":"`+now.Add(-time.Minute).Format(time.RFC3339Nano)+`"}`)
+				},
+				func() { os.RemoveAll(cache) },
+			} {
+				fake.Calls = nil
+				prep()
+				stubVersions("1.2.3", "1.2.3")
+				Expect(imagebuild.UpdateCheck(o, false)).To(BeFalse())
+				Expect(npmCalls()).To(Equal(1))
+				v, checked := readCache()
+				Expect(v).To(Equal("1.2.3"))
+				Expect(checked).To(BeTemporally("==", now))
+			}
+		})
+
+		It("CS-IMG-044: a failed or empty npm lookup is not cached", func() {
+			images["claude-sandbox-cli"] = &imgState{created: imgT, claudeVersion: "1.2.3"}
+			fake.On("npm view", "", execx.Fail(1))
+			Expect(imagebuild.UpdateCheck(o, false)).To(BeFalse())
+			_, err := os.Stat(filepath.Join(cache, imagebuild.VersionCacheFile))
+			Expect(os.IsNotExist(err)).To(BeTrue())
+			Expect(detached()).To(BeEmpty())
+		})
+
+		It("CS-IMG-045: a newer version starts one detached cli-prefetch of it and prints one line", func() {
+			stubVersions("1.2.3", "1.2.4")
+			Expect(os.MkdirAll(cache, 0o755)).To(Succeed())
+			log := filepath.Join(cache, imagebuild.PrefetchLogFile)
+			Expect(os.WriteFile(log, []byte("previous\n"), 0o600)).To(Succeed())
+			Expect(imagebuild.UpdateCheck(o, false)).To(BeFalse())
+			Expect(detached()).To(HaveLen(1))
+			c := detached()[0]
+			Expect(c.Name).To(Equal("/opt/bin/claude-sandbox"))
+			Expect(c.Args).To(Equal([]string{"cli-prefetch", "--dir", cache, "1.2.4"}))
+			Expect(c.Env).To(Equal([]string{"CLAUDE_SANDBOX_REPO_ROOT=" + repo}))
+			Expect(c.DieWithParent).To(BeFalse(), "it must outlive the launcher")
+			Expect(c.Stdin).To(BeNil(), "stdin is /dev/null")
+			// stdout and stderr are the log itself, a real fd opened for append.
+			for _, w := range []io.Writer{c.Stdout, c.Stderr} {
+				fh, ok := w.(*os.File)
+				Expect(ok).To(BeTrue(), "the log is handed over as a file, not a pipe")
+				Expect(fh.Name()).To(Equal(log))
+			}
+			raw, _ := os.ReadFile(log)
+			Expect(string(raw)).To(Equal("previous\n"), "the launcher appends, never truncates")
+			Expect(strings.Count(out.String(), "\n")).To(Equal(1))
+			Expect(out.String()).To(ContainSubstring("1.2.3 → 1.2.4"))
+			Expect(out.String()).To(ContainSubstring("in the background"))
+			Expect(out.String()).To(ContainSubstring(log))
+			Expect(errw.String()).To(BeEmpty())
+		})
+
+		It("CS-IMG-045: a registry version older than the image is never built", func() {
+			stubVersions("1.2.5", "1.2.4")
+			Expect(imagebuild.UpdateCheck(o, false)).To(BeFalse())
+			Expect(detached()).To(BeEmpty())
+			Expect(out.String()).To(BeEmpty())
+			o.AutoUpdate = true
+			Expect(imagebuild.UpdateCheck(o, false)).To(BeFalse())
+			Expect(buildLines(fake)).To(BeEmpty())
+		})
+
+		It("CS-IMG-045: a detach that cannot start warns once and the launch goes on", func() {
+			stubVersions("1.2.3", "1.2.4")
+			o.Self = "" // os.Executable failed: nothing to start
+			Expect(imagebuild.UpdateCheck(o, false)).To(BeFalse())
+			Expect(detached()).To(BeEmpty())
+			Expect(strings.Count(errw.String(), "WARNING")).To(Equal(1))
+			Expect(errw.String()).To(ContainSubstring("could not start"))
+			Expect(errw.String()).To(ContainSubstring("--update"))
+		})
+
+		It("CS-IMG-046: a running background build means no second one, and one line saying so", func() {
+			stubVersions("1.2.3", "1.2.4")
+			release := holdLock()
+			defer release()
+			Expect(imagebuild.UpdateCheck(o, false)).To(BeFalse())
+			Expect(detached()).To(BeEmpty())
+			Expect(strings.Count(out.String(), "\n")).To(Equal(1))
+			Expect(out.String()).To(ContainSubstring("already running"))
+			Expect(out.String()).To(ContainSubstring(imagebuild.PrefetchLogFile))
+		})
+
+		It("CS-IMG-046: the launcher's probe releases the lock, so the child can take it", func() {
+			stubVersions("1.2.3", "1.2.4")
+			Expect(imagebuild.UpdateCheck(o, false)).To(BeFalse())
+			release := holdLock() // fails the test if the probe still held it
+			release()
+		})
+
+		It("CS-IMG-047: a failed build of the latest version warns naming the log and is not retried within 6 h", func() {
+			stubVersions("1.2.3", "1.2.4")
+			statusAt("1.2.4", false, now.Add(-5*time.Hour))
+			Expect(imagebuild.UpdateCheck(o, false)).To(BeFalse())
+			Expect(detached()).To(BeEmpty())
+			Expect(buildLines(fake)).To(BeEmpty())
+			Expect(strings.Count(errw.String(), "\n")).To(Equal(1))
+			Expect(errw.String()).To(ContainSubstring("1.2.4 failed"))
+			Expect(errw.String()).To(ContainSubstring(filepath.Join(cache, imagebuild.PrefetchLogFile)))
+			Expect(out.String()).To(BeEmpty())
+		})
+
+		It("CS-IMG-047: after 6 h the failed version is retried in the background, still with the warning", func() {
+			stubVersions("1.2.3", "1.2.4")
+			statusAt("1.2.4", false, now.Add(-6*time.Hour))
+			Expect(imagebuild.UpdateCheck(o, false)).To(BeFalse())
+			Expect(detached()).To(HaveLen(1))
+			Expect(errw.String()).To(ContainSubstring("1.2.4 failed"))
+		})
+
+		It("CS-IMG-047: a failure of an older version does not hold back a newer one", func() {
+			stubVersions("1.2.3", "1.2.5")
+			statusAt("1.2.4", false, now.Add(-time.Minute))
+			Expect(imagebuild.UpdateCheck(o, false)).To(BeFalse())
+			Expect(detached()).To(HaveLen(1))
+			Expect(detached()[0].Args).To(Equal([]string{"cli-prefetch", "--dir", cache, "1.2.5"}))
+		})
+
+		It("CS-IMG-047: no warning once the image is on the failed version, nor after a success", func() {
+			stubVersions("1.2.4", "1.2.4")
+			statusAt("1.2.4", false, now.Add(-time.Minute))
+			Expect(imagebuild.UpdateCheck(o, false)).To(BeFalse())
+			Expect(errw.String()).To(BeEmpty())
+
+			errw.Reset()
+			statusAt("1.2.4", true, now.Add(-time.Minute))
+			images["claude-sandbox-cli"].claudeVersion = "1.2.3"
+			Expect(imagebuild.UpdateCheck(o, false)).To(BeFalse())
+			Expect(errw.String()).To(BeEmpty())
+		})
+
+		It("CS-IMG-047: a failure of a version OLDER than the image's pin never warns", func() {
+			// E1: v1.2.4 failed in the background, npm moved on, --update
+			// built 1.2.5. The record must not nag until the next release.
+			stubVersions("1.2.5", "1.2.5")
+			statusAt("1.2.4", false, now.Add(-time.Minute))
+			Expect(imagebuild.UpdateCheck(o, false)).To(BeFalse())
+			Expect(errw.String()).To(BeEmpty())
+			Expect(out.String()).To(BeEmpty())
+			Expect(detached()).To(BeEmpty())
+		})
+
+		It("CS-IMG-047: a successful --update records its version, clearing a failure record", func() {
+			stubVersions("1.2.3", "1.2.5")
+			statusAt("1.2.4", false, now.Add(-time.Minute))
+			o.AutoUpdate = true
+			Expect(imagebuild.UpdateCheck(o, false)).To(BeTrue())
+			raw, err := os.ReadFile(filepath.Join(cache, imagebuild.PrefetchStatusFile))
+			Expect(err).NotTo(HaveOccurred())
+			var st map[string]any
+			Expect(json.Unmarshal(raw, &st)).To(Succeed())
+			Expect(st["version"]).To(Equal("1.2.5"))
+			Expect(st["ok"]).To(BeTrue())
+
+			fake.On("docker build -t claude-sandbox-cli", "", execx.Fail(1))
+			statusAt("1.2.4", false, now.Add(-time.Minute))
+			images["claude-sandbox-cli"].claudeVersion = "1.2.3"
+			Expect(imagebuild.UpdateCheck(o, false)).To(BeFalse())
+			raw, _ = os.ReadFile(filepath.Join(cache, imagebuild.PrefetchStatusFile))
+			Expect(string(raw)).To(ContainSubstring(`"version":"1.2.4"`), "a failed --update leaves the record alone")
+		})
+
+		It("CS-IMG-047: --update retries a failed version at once, in the foreground", func() {
+			stubVersions("1.2.3", "1.2.4")
+			statusAt("1.2.4", false, now.Add(-time.Minute))
+			o.AutoUpdate = true
+			Expect(imagebuild.UpdateCheck(o, false)).To(BeTrue())
+			Expect(buildLines(fake)).To(ConsistOf(cliBuild("1.2.4")))
+		})
+
+		It("CS-IMG-047: an unusable cache directory warns once and the launch goes on", func() {
+			stubVersions("1.2.3", "1.2.4")
+			// A file where the directory should be: nothing under it can be
+			// created, read or locked.
+			Expect(os.MkdirAll(filepath.Dir(cache), 0o755)).To(Succeed())
+			Expect(os.WriteFile(cache, []byte("x"), 0o644)).To(Succeed())
+			Expect(imagebuild.UpdateCheck(o, false)).To(BeFalse())
+			Expect(detached()).To(BeEmpty())
+			Expect(strings.Count(errw.String(), "\n")).To(Equal(1), errw.String())
+			Expect(errw.String()).To(ContainSubstring("version cache"))
+			Expect(errw.String()).To(ContainSubstring("1.2.3 → 1.2.4"))
+
+			errw.Reset()
+			images["claude-sandbox-cli"].claudeVersion = "1.2.4"
+			Expect(imagebuild.UpdateCheck(o, false)).To(BeFalse())
+			Expect(strings.Count(errw.String(), "\n")).To(Equal(1), "no update: still one line about the cache")
+		})
+	})
+
+	Describe("Prefetch (cli-prefetch)", func() {
+		var (
+			cache string
+			now   time.Time
+		)
+		prefetchBuild := func(v string) string {
+			return "docker build -t claude-sandbox-cli:prefetch --build-arg CLAUDE_CODE_VERSION=" + v +
+				" -f " + filepath.Join(repo, "Dockerfile.cli") + " " + repo
+		}
+		docker := func(sub string) []string {
+			var out []string
+			for _, l := range fake.CommandLines() {
+				if strings.HasPrefix(l, "docker "+sub+" ") {
+					out = append(out, l)
+				}
+			}
+			return out
+		}
+		status := func() map[string]any {
+			raw, err := os.ReadFile(filepath.Join(cache, imagebuild.PrefetchStatusFile))
+			Expect(err).NotTo(HaveOccurred())
+			var m map[string]any
+			Expect(json.Unmarshal(raw, &m)).To(Succeed())
+			return m
+		}
+
+		BeforeEach(func() {
+			cache = filepath.Join(GinkgoT().TempDir(), "cache")
+			now = time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC)
+			o.CacheDir = cache
+			o.Now = func() time.Time { return now }
+			images["claude-sandbox-cli"] = &imgState{created: imgT, claudeVersion: "1.2.3"}
+		})
+
+		It("CS-IMG-045: builds ONLY the CLI image under a temporary tag, then moves claude-sandbox-cli onto it", func() {
+			Expect(os.MkdirAll(cache, 0o755)).To(Succeed())
+			log := filepath.Join(cache, imagebuild.PrefetchLogFile)
+			Expect(os.WriteFile(log, []byte("an older build's log\n"), 0o600)).To(Succeed())
+			Expect(imagebuild.Prefetch(o, "1.2.4")).To(Succeed())
+			Expect(buildLines(fake)).To(ConsistOf(prefetchBuild("1.2.4")))
+			Expect(docker("tag")).To(ConsistOf("docker tag claude-sandbox-cli:prefetch claude-sandbox-cli"))
+			Expect(docker("rmi")).To(ConsistOf("docker rmi claude-sandbox-cli:prefetch"), "only the temporary name goes")
+			// The pin is re-read after the build, before the tag moves.
+			tagAt, lastPin := -1, -1
+			for i, l := range fake.CommandLines() {
+				if strings.Contains(l, "claude-sandbox.claude-version") {
+					lastPin = i
+				}
+				if strings.HasPrefix(l, "docker tag ") {
+					tagAt = i
+				}
+			}
+			Expect(lastPin).To(BeNumerically("<", tagAt))
+			Expect(lastPin).To(BeNumerically(">", 0))
+			Expect(status()).To(Equal(map[string]any{"version": "1.2.4", "ok": true, "finished": now.Format(time.RFC3339)}))
+			raw, _ := os.ReadFile(log)
+			Expect(string(raw)).NotTo(ContainSubstring("an older build's log"), "the log holds the latest build only")
+		})
+
+		It("CS-IMG-045: skips the build unless the version is newer than the image's pin", func() {
+			for _, pinned := range []string{"1.2.4", "1.2.5", "2.0.0"} {
+				fake.Calls = nil
+				images["claude-sandbox-cli"].claudeVersion = pinned
+				Expect(imagebuild.Prefetch(o, "1.2.4")).To(Succeed())
+				Expect(buildLines(fake)).To(BeEmpty(), "pinned %s", pinned)
+				Expect(docker("tag")).To(BeEmpty())
+				Expect(status()["ok"]).To(BeTrue())
+			}
+		})
+
+		It("CS-IMG-045: never moves the tag back when a later version landed during the build", func() {
+			// A foreground --update to 1.2.5 finishes while the background
+			// 1.2.4 build runs: the second pin read sees it.
+			fake.OnFunc("docker build -t claude-sandbox-cli:prefetch", func(execx.Cmd) (string, error) {
+				images["claude-sandbox-cli"].claudeVersion = "1.2.5"
+				return "", nil
+			})
+			Expect(imagebuild.Prefetch(o, "1.2.4")).To(Succeed())
+			Expect(buildLines(fake)).To(ConsistOf(prefetchBuild("1.2.4")))
+			Expect(docker("tag")).To(BeEmpty())
+			Expect(docker("rmi")).To(ConsistOf("docker rmi claude-sandbox-cli:prefetch"))
+			Expect(out.String()).To(ContainSubstring("moved to 1.2.5 during the build"))
+			Expect(status()["ok"]).To(BeTrue(), "superseded is not a failure")
+		})
+
+		It("CS-IMG-045: rejects anything but an exact X.Y.Z version", func() {
+			for _, v := range []string{"latest", "1.2", "1.2.3; rm -rf /", ""} {
+				Expect(imagebuild.Prefetch(o, v)).NotTo(Succeed())
+			}
+			Expect(buildLines(fake)).To(BeEmpty())
+		})
+
+		It("CS-IMG-046: does not wait for a held lock; it logs the skip and succeeds without building", func() {
+			Expect(os.MkdirAll(cache, 0o755)).To(Succeed())
+			fh, err := os.OpenFile(filepath.Join(cache, imagebuild.PrefetchLockFile), os.O_RDWR|os.O_CREATE, 0o600)
+			Expect(err).NotTo(HaveOccurred())
+			defer fh.Close()
+			Expect(syscall.Flock(int(fh.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)).To(Succeed())
+			Expect(imagebuild.Prefetch(o, "1.2.4")).To(Succeed())
+			Expect(buildLines(fake)).To(BeEmpty())
+			Expect(out.String()).To(ContainSubstring("skipping"))
+			_, err = os.Stat(filepath.Join(cache, imagebuild.PrefetchStatusFile))
+			Expect(os.IsNotExist(err)).To(BeTrue(), "a skipped run records nothing")
+		})
+
+		It("CS-IMG-047: a failed build is logged, recorded as failed, and claude-sandbox-cli is left alone", func() {
+			fake.On("docker build -t claude-sandbox-cli:prefetch", "", execx.Fail(1))
+			Expect(imagebuild.Prefetch(o, "1.2.4")).NotTo(Succeed())
+			Expect(docker("tag")).To(BeEmpty())
+			Expect(errw.String()).To(ContainSubstring("FAILED"))
+			Expect(status()).To(Equal(map[string]any{"version": "1.2.4", "ok": false, "finished": now.Format(time.RFC3339)}))
 		})
 	})
 

@@ -29,7 +29,6 @@ import (
 
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/paths"
-	"github.com/kmacmcfarlane/claude-sandbox/internal/prompt"
 )
 
 const (
@@ -78,14 +77,25 @@ func EnsureBuildKit(o Options) error {
 // Options configures the image lifecycle for one launch.
 type Options struct {
 	Runner        execx.Runner
-	Prompter      prompt.Prompter
 	Out           io.Writer
 	Err           io.Writer
 	RepoRoot      string // sandbox repo checkout (Dockerfile, baked sources)
 	Version       string // git-describe version stamp
 	ForceRebuild  bool   // --rebuild
 	NoUpdateCheck bool   // --no-update-check / env / config
-	AutoUpdate    bool   // --update: auto-accept the update rebuild (CS-IMG-009)
+	AutoUpdate    bool   // --update: check and build now, in the foreground (CS-IMG-009)
+
+	// CacheDir holds the registry version cache and the background CLI
+	// build's lock, log and status (CS-IMG-044..047): ~/.cache/claude-sandbox
+	// for a launch. "" turns both off: every check asks the registry and an
+	// update is only reported.
+	CacheDir string
+	// Now is the clock the version cache and the prefetch back-off are judged
+	// by; nil means time.Now.
+	Now func() time.Time
+	// Self is the launcher binary the background build runs as
+	// "<Self> cli-prefetch <version>".
+	Self string
 }
 
 // BakedSources are the paths (relative to RepoRoot) the base Dockerfile COPYs
@@ -264,8 +274,15 @@ func resolveClaudeVersion(o Options) string {
 
 // buildCLI runs the CLI image build pinned to version (CS-IMG-021).
 func buildCLI(o Options, version string, noCache bool) error {
-	fmt.Fprintf(o.Out, "Building %s image (Claude Code %s)...\n", CLIImageName, version)
-	args := append([]string{"build", "-t", CLIImageName}, labelArgs(cliInputs(o.RepoRoot))...)
+	return buildCLITagged(o, CLIImageName, version, noCache)
+}
+
+// buildCLITagged is buildCLI under another tag: the background build builds
+// under PrefetchTag and moves CLIImageName only after a last check
+// (CS-IMG-045).
+func buildCLITagged(o Options, tag, version string, noCache bool) error {
+	fmt.Fprintf(o.Out, "Building %s image (Claude Code %s)...\n", tag, version)
+	args := append([]string{"build", "-t", tag}, labelArgs(cliInputs(o.RepoRoot))...)
 	args = append(args, "--build-arg", "CLAUDE_CODE_VERSION="+version)
 	if noCache {
 		args = append(args, "--no-cache")
@@ -319,35 +336,6 @@ func pinnedClaudeVersion(o Options) string {
 	return semverRe.FindString(file)
 }
 
-// UpdateCheck compares the CLI image's pinned Claude Code version against the
-// npm registry and offers to rebuild the CLI image — only that image
-// (CS-IMG-006..009). cliBuilt skips the check: a fresh CLI image is already
-// current. Returns whether the CLI image was rebuilt here.
-func UpdateCheck(o Options, cliBuilt bool) bool {
-	if o.NoUpdateCheck || cliBuilt {
-		return false
-	}
-	pinned := pinnedClaudeVersion(o)
-	latest := latestClaudeVersion(o)
-	if pinned == "" || latest == "" || pinned == latest {
-		return false
-	}
-	fmt.Fprintf(o.Out, "\nClaude Code update available: %s → %s\n", pinned, latest)
-	accept := o.AutoUpdate
-	if !accept {
-		accept = o.Prompter.Confirm("", "Rebuild Claude Code image to update?", false, 5*time.Second)
-	}
-	if !accept {
-		fmt.Fprintln(o.Out)
-		return false
-	}
-	// The pin is a build arg, so the install layer busts on its own; no
-	// --no-cache needed, and the base and children are never touched.
-	err := buildCLI(o, latest, false)
-	fmt.Fprintln(o.Out)
-	return err == nil
-}
-
 // CapImageName is the run image for a base or child image (CS-IMG-024).
 // Resolved in one place so the launch and the attach/join fingerprint cannot
 // disagree about which image a container runs (CS-SESS-038).
@@ -374,6 +362,11 @@ func capDockerfile(under string) string {
 // (CS-IMG-024..026). Returns the image to run and whether a build happened.
 func EnsureCap(o Options, under string) (image string, built bool, err error) {
 	cap := CapImageName(under)
+	// The IDs are read BEFORE "docker build" resolves COPY --from, so a
+	// background CLI build retagging claude-sandbox-cli in between (CS-IMG-045)
+	// leaves a cap whose label names the old CLI ID while it holds the new
+	// content. The next launch sees a mismatch and rebuilds the cap once:
+	// one wasted cap build, never a stale cap kept.
 	fp := capInputs(under, ImageID(o.Runner, under), ImageID(o.Runner, CLIImageName))
 	need := false
 	switch {
