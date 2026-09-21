@@ -93,7 +93,7 @@ These flags are consumed by the launcher and control the container environment. 
 | `--host-access-ssh-enabled` | `--ssh` | Mount `~/.ssh/` read-only |
 | `--host-access-package-caches-enabled` | `--package-caches` | Keep go/npm/pip downloads made inside sessions in `~/.cache/claude-sandbox/` on the host |
 | `--model MODEL` | | Model to use (alias like `opus` or full ID like `claude-opus-4-8`) |
-| `--dangerous` | | Pass `--dangerously-skip-permissions` to claude/ralph (durable alternatives: `dangerous: true` in config.yaml, or `CLAUDE_SANDBOX_DANGEROUS=1`) |
+| `--dangerous` | | Pass `--dangerously-skip-permissions` to claude/ralph and `--join` sessions (durable alternatives: `dangerous: true` in config.yaml, or `CLAUDE_SANDBOX_DANGEROUS=1`) |
 | `--rebuild` | | Force rebuild of every image — base, Claude Code, child, run (uses `--no-cache`) |
 | `--update` | | Check npm for a Claude Code update now and build it in the foreground before launching (only the CLI image; without it an update builds in the background for the next launch) |
 | `--no-update-check` | | Skip Claude Code version check at launch |

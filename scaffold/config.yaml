@@ -87,9 +87,9 @@
 # baseOnly: false
 
 # Skip Claude Code permission prompts — passes --dangerously-skip-permissions
-# to claude (and ralph). Same effect as launching with --dangerous or setting
-# CLAUDE_SANDBOX_DANGEROUS=1. The cascade applies: set `dangerous: false` here
-# to override an upstream config that enables it.
+# to claude (and ralph, and --join sessions). Same effect as launching with
+# --dangerous or setting CLAUDE_SANDBOX_DANGEROUS=1. The cascade applies: set
+# `dangerous: false` here to override an upstream config that enables it.
 # dangerous: false
 
 # Run sessions in their own Claude Code worktree (.claude/worktrees/<name> on

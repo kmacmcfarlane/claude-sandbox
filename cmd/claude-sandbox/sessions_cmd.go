@@ -449,7 +449,7 @@ func wouldBeFingerprint(env *Env, projectDir string, f *launchFlags, cfg *cascad
 		// against it, so without it the XDG_RUNTIME_DIR stand-down could differ
 		// and every attach would report false drift (CS-LNCH-108).
 		LookupEnv: env.lookupEnv,
-		RalphMode: f.Ralph, Limit: f.Limit, SkipPermissions: f.Dangerous,
+		RalphMode: f.Ralph, Limit: f.Limit, SkipPermissions: resolveDangerous(env, f, cfg),
 		CLIModel: f.Model, Passthrough: f.Passthrough,
 		CLISSH: f.SSH, CLIGit: f.Git, CLIDockerSocket: f.DockerSocket, CLIAWS: f.AWS,
 		CLIPackageCaches: f.PackageCaches,
