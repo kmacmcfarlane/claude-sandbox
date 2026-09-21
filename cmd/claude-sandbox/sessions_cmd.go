@@ -395,7 +395,7 @@ func joinExistingSession(env *Env, projectDir string, f *launchFlags, cfg *casca
 		return true, attachTo(env, d.Target, cfg.DetachKeys)
 	}
 	_, _, hostUser, _ := hostIdentity(env.Getenv)
-	return true, joinInto(env, d.Target, projectDir, hostUser, model, cfg.DetachKeys, f, wt)
+	return true, joinInto(env, d.Target, projectDir, hostUser, model, cfg.DetachKeys, resolveDangerous(env, f, cfg), f, wt)
 }
 
 // wouldBeFingerprint computes the config hash a launch would produce right now,
@@ -449,7 +449,7 @@ func wouldBeFingerprint(env *Env, projectDir string, f *launchFlags, cfg *cascad
 		// against it, so without it the XDG_RUNTIME_DIR stand-down could differ
 		// and every attach would report false drift (CS-LNCH-108).
 		LookupEnv: env.lookupEnv,
-		RalphMode: f.Ralph, Limit: f.Limit, SkipPermissions: f.Dangerous,
+		RalphMode: f.Ralph, Limit: f.Limit, SkipPermissions: resolveDangerous(env, f, cfg),
 		CLIModel: f.Model, Passthrough: f.Passthrough,
 		CLISSH: f.SSH, CLIGit: f.Git, CLIDockerSocket: f.DockerSocket, CLIAWS: f.AWS,
 		CLIPackageCaches: f.PackageCaches,
@@ -513,7 +513,7 @@ func attachTo(env *Env, s sessions.Session, configuredKeys string) error {
 
 // joinInto starts another claude inside a running container (CS-SESS-032), as
 // a session child the launcher waits on.
-func joinInto(env *Env, s sessions.Session, projectDir, hostUser, model, configuredKeys string, f *launchFlags, wt worktreeChoice) error {
+func joinInto(env *Env, s sessions.Session, projectDir, hostUser, model, configuredKeys string, dangerous bool, f *launchFlags, wt worktreeChoice) error {
 	detachKeys := launch.ResolveDetachKeys(configuredKeys)
 	fmt.Fprintf(env.Out, "Starting a new session inside %s.\n", s.Instance)
 	fmt.Fprintln(env.Out, "Note: this session ends if that container's primary session exits, and it cannot be reattached.")
@@ -531,7 +531,8 @@ func joinInto(env *Env, s sessions.Session, projectDir, hostUser, model, configu
 	// CS-PID-005); CLAUDE_SANDBOX_PID_CLASS is inherited from the container.
 	args := []string{"exec", "-it", "--detach-keys=" + detachKeys, "-u", hostUser, "-w", projectDir, s.Name,
 		"/opt/claude-sandbox/bin/claude-sandbox", "pidslot", "--", "claude"}
-	if f.Dangerous {
+	// CS-SESS-064: the resolved setting, not just the CLI flag.
+	if dangerous {
 		args = append(args, "--dangerously-skip-permissions")
 	}
 	// CS-SESS-046: a joined session gets its OWN worktree — bare --worktree

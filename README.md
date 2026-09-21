@@ -93,7 +93,7 @@ These flags are consumed by the launcher and control the container environment. 
 | `--host-access-ssh-enabled` | `--ssh` | Mount `~/.ssh/` read-only |
 | `--host-access-package-caches-enabled` | `--package-caches` | Keep go/npm/pip downloads made inside sessions in `~/.cache/claude-sandbox/` on the host |
 | `--model MODEL` | | Model to use (alias like `opus` or full ID like `claude-opus-4-8`) |
-| `--dangerous` | | Pass `--dangerously-skip-permissions` to claude/ralph (durable alternatives: `dangerous: true` in config.yaml, or `CLAUDE_SANDBOX_DANGEROUS=1`) |
+| `--dangerous` | | Pass `--dangerously-skip-permissions` to claude/ralph and `--join` sessions (durable alternatives: `dangerous: true` in config.yaml, or `CLAUDE_SANDBOX_DANGEROUS=1`) |
 | `--rebuild` | | Force rebuild of every image — base, Claude Code, child, run (uses `--no-cache`) |
 | `--update` | | Check npm for a Claude Code update now and build it in the foreground before launching (only the CLI image; without it an update builds in the background for the next launch) |
 | `--no-update-check` | | Skip Claude Code version check at launch |
@@ -863,7 +863,7 @@ model: claude-opus-4-8
 
 #### Dangerous mode
 
-Skip Claude Code permission prompts on every launch — passes `--dangerously-skip-permissions` to claude (and ralph), the same as the `--dangerous` flag or `CLAUDE_SANDBOX_DANGEROUS=1`. Any of the three enables it; the cascade lets a more-local `dangerous: false` override an upstream config that turns it on.
+Skip Claude Code permission prompts on every launch — passes `--dangerously-skip-permissions` to claude (and ralph, and a session started with `--join`), the same as the `--dangerous` flag or `CLAUDE_SANDBOX_DANGEROUS=1`. Any of the three enables it; the cascade lets a more-local `dangerous: false` override an upstream config that turns it on.
 
 ```yaml
 dangerous: true

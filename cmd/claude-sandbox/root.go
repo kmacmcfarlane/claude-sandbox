@@ -592,6 +592,14 @@ func resolveProjectDirFrom(getenv func(string) string, errw io.Writer) (dir, giv
 
 func envTrue(v string) bool { return v == "1" || v == "true" || v == "yes" }
 
+// resolveDangerous is the one dangerous-mode rule, shared by a new container
+// and a join (CS-LNCH-038, CS-SESS-064): durable via env var or config, not
+// just the flag. A more-local "dangerous: false" overrides an upstream true
+// through the ordinary cascade merge before this OR is evaluated.
+func resolveDangerous(env *Env, f *launchFlags, cfg *cascade.Config) bool {
+	return f.Dangerous || envTrue(env.Getenv("CLAUDE_SANDBOX_DANGEROUS")) || cfg.Dangerous
+}
+
 // worktreeChoice is the resolved worktree mode for this launch (CS-LNCH-041).
 type worktreeChoice struct {
 	// Enabled is the final answer after the tri-state precedence AND the git
@@ -880,10 +888,7 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 		noUpdate = true
 	}
 
-	// CS-LNCH-038: dangerous mode is durable via env var or config, not just
-	// the flag. A more-local "dangerous: false" overrides an upstream true
-	// through the ordinary cascade merge before this OR is evaluated.
-	dangerous := f.Dangerous || envTrue(env.Getenv("CLAUDE_SANDBOX_DANGEROUS")) || cfg.Dangerous
+	dangerous := resolveDangerous(env, f, cfg)
 
 	// The instance noun names the container AND its worktree, so it is picked
 	// here, before the banner, from the nouns neither running nor already
