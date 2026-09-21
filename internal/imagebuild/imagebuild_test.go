@@ -389,7 +389,7 @@ var _ = Describe("image build lifecycle", func() {
 		It("CS-IMG-028: warns with the prune command when the cache is at least 80% of the budget", func() {
 			fake.On("docker system df --format {{json .}}", dfOut, nil)
 			fake.On("docker buildx inspect", inspect("41GiB", "669.6GiB"), nil)
-			imagebuild.WarnCacheBudget(o)
+			imagebuild.WarnCacheBudget(o, errw)
 			Expect(errw.String()).To(ContainSubstring("625 GB of its 719 GB budget"))
 			Expect(errw.String()).To(ContainSubstring("docker builder prune -af"))
 			Expect(errw.String()).To(ContainSubstring("BuildKit cache"))
@@ -401,7 +401,7 @@ var _ = Describe("image build lifecycle", func() {
 			// Docker Desktop's out-of-box 20GB keep-storage resolves to this.
 			fake.On("docker system df --format {{json .}}", dfSize("10GB"), nil)
 			fake.On("docker buildx inspect", inspect("2.764GB", "669.6GiB"), nil)
-			imagebuild.WarnCacheBudget(o)
+			imagebuild.WarnCacheBudget(o, errw)
 			Expect(errw.String()).To(ContainSubstring("caps cache mounts at 3 GB"))
 			Expect(errw.String()).To(ContainSubstring("Pruning does not help"))
 			Expect(errw.String()).To(ContainSubstring("builder.gc policy"))
@@ -415,21 +415,21 @@ var _ = Describe("image build lifecycle", func() {
 			// cache-mount cap is a healthy host and must produce no output.
 			fake.On("docker system df --format {{json .}}", dfSize("147GB"), nil)
 			fake.On("docker buildx inspect", inspect("11.58GiB", "669.6GiB"), nil)
-			imagebuild.WarnCacheBudget(o)
+			imagebuild.WarnCacheBudget(o, errw)
 			Expect(errw.String()).To(BeEmpty())
 		})
 
 		It("CS-IMG-028: stays silent when the cache is comfortably under budget", func() {
 			fake.On("docker system df --format {{json .}}", dfSize("10GB"), nil)
 			fake.On("docker buildx inspect", inspect("41GiB", "300GB"), nil)
-			imagebuild.WarnCacheBudget(o)
+			imagebuild.WarnCacheBudget(o, errw)
 			Expect(errw.String()).To(BeEmpty())
 		})
 
 		It("CS-IMG-028: reports both conditions separately when both hold", func() {
 			fake.On("docker system df --format {{json .}}", dfOut, nil)
 			fake.On("docker buildx inspect", inspect("2.764GB", "669.6GiB"), nil)
-			imagebuild.WarnCacheBudget(o)
+			imagebuild.WarnCacheBudget(o, errw)
 			Expect(errw.String()).To(ContainSubstring("625 GB of its 719 GB budget"))
 			Expect(errw.String()).To(ContainSubstring("caps cache mounts at 3 GB"))
 		})
@@ -437,14 +437,14 @@ var _ = Describe("image build lifecycle", func() {
 		It("CS-IMG-028: stays silent when docker system df cannot be parsed", func() {
 			fake.On("docker system df", "not json\n", nil)
 			fake.On("docker buildx inspect", inspect("41GiB", "669.6GiB"), nil)
-			imagebuild.WarnCacheBudget(o)
+			imagebuild.WarnCacheBudget(o, errw)
 			Expect(errw.String()).To(BeEmpty())
 		})
 
 		It("CS-IMG-028: stays silent when docker buildx inspect fails", func() {
 			fake.On("docker system df --format {{json .}}", dfOut, nil)
 			fake.On("docker buildx inspect", "", execx.Fail(1))
-			imagebuild.WarnCacheBudget(o)
+			imagebuild.WarnCacheBudget(o, errw)
 			Expect(errw.String()).To(BeEmpty())
 		})
 

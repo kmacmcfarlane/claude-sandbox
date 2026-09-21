@@ -1054,7 +1054,7 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     And with --update it runs and, when an update exists, rebuilds without asking
     When a headless launch builds an image
     Then no build-cache budget check runs ("docker system df" is never called)
-    And an interactive launch that builds still runs it (CS-IMG-028)
+    And an interactive launch that builds still starts it, detached (CS-IMG-041)
 
   Scenario: CS-LNCH-063 Headless forwards an exact env allowlist, never a wildcard
     # The daemon's env can hold secrets such as PASEO_PASSWORD, so no prefix

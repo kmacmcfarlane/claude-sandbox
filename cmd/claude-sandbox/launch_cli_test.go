@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -62,21 +63,23 @@ type cliFixture struct {
 	proj      string
 	repo      string
 	tmp       string // Env.TempRoot: shadow directories are made and swept here
+	cache     string // Env.CacheDir: the cache-budget result file (CS-IMG-043)
 }
 
 func newCLIFixture() *cliFixture {
 	base, err := filepath.EvalSymlinks(GinkgoT().TempDir())
 	Expect(err).NotTo(HaveOccurred())
 	f := &cliFixture{
-		fake: &execx.Fake{},
-		out:  &bytes.Buffer{},
-		errw: &bytes.Buffer{},
-		home: filepath.Join(base, "home"),
-		proj: filepath.Join(base, "proj"),
-		repo: filepath.Join(base, "repo"),
-		tmp:  filepath.Join(base, "tmp"),
+		fake:  &execx.Fake{},
+		out:   &bytes.Buffer{},
+		errw:  &bytes.Buffer{},
+		home:  filepath.Join(base, "home"),
+		proj:  filepath.Join(base, "proj"),
+		repo:  filepath.Join(base, "repo"),
+		tmp:   filepath.Join(base, "tmp"),
+		cache: filepath.Join(base, "cache"),
 	}
-	for _, d := range []string{f.home, f.proj, f.repo, f.tmp} {
+	for _, d := range []string{f.home, f.proj, f.repo, f.tmp, f.cache} {
 		Expect(os.MkdirAll(d, 0o755)).To(Succeed())
 	}
 	f.envmap = map[string]string{
@@ -98,6 +101,10 @@ func newCLIFixture() *cliFixture {
 		Lock:      f.lock,
 		// Never the real temp root: a launch sweeps it (CS-LNCH-081).
 		TempRoot: f.tmp,
+		// Nor the real cache-budget result file (CS-IMG-043); the detached
+		// checker is recorded by the fake, never spawned (CS-IMG-041).
+		CacheDir:   f.cache,
+		Executable: func() (string, error) { return "/fake/claude-sandbox", nil },
 	}
 	return f
 }
@@ -170,17 +177,124 @@ var _ = Describe("launcher CLI (end-to-end argv)", func() {
 		Expect(strings.Join(f.fake.CommandLines(), "\n")).NotTo(ContainSubstring("docker build "))
 	})
 
-	It("CS-IMG-028: the cache-budget check runs only when a build happened this launch", func() {
-		// Everything fresh: no build, so no docker system df.
-		f.fake.On("{{.Created}}", time.Now().Format(time.RFC3339Nano)+"\n", nil)
-		Expect(f.run()).To(Equal(0))
-		Expect(strings.Join(f.fake.CommandLines(), "\n")).NotTo(ContainSubstring("docker system df"))
+	Describe("build-cache budget (CS-IMG-041, CS-IMG-043)", func() {
+		// detached returns the recorded starts of the detached checker.
+		detached := func(g *cliFixture) []execx.Cmd {
+			var out []execx.Cmd
+			for _, c := range g.fake.Calls {
+				if c.Detach {
+					out = append(out, c)
+				}
+			}
+			return out
+		}
+		noDockerDF := func(g *cliFixture) {
+			lines := strings.Join(g.fake.CommandLines(), "\n")
+			Expect(lines).NotTo(ContainSubstring("system df"))
+			Expect(lines).NotTo(ContainSubstring("buildx inspect"))
+		}
 
-		// The cap is missing on a second launch: a build happens and the check runs.
-		g := newCLIFixture()
-		g.fake.On("image inspect claude-sandbox:run", "", execx.Fail(1))
-		Expect(g.run()).To(Equal(0))
-		Expect(g.fake.CommandLines()).To(ContainElement("docker system df --format {{json .}}"))
+		It("CS-IMG-041: a launch that built starts the checker detached and runs no docker system df itself", func() {
+			f.fake.On("image inspect claude-sandbox:run", "", execx.Fail(1))
+			Expect(f.run()).To(Equal(0), f.errw.String())
+			Expect(f.fake.CommandLines()).To(ContainElement("docker build -t claude-sandbox:run -"))
+			starts := detached(f)
+			Expect(starts).To(HaveLen(1))
+			Expect(starts[0].Name).To(Equal("/fake/claude-sandbox"))
+			Expect(starts[0].Args).To(Equal([]string{"cache-budget-check", "--dir", f.cache}))
+			Expect(starts[0].DieWithParent).To(BeFalse(), "the checker must outlive the launcher")
+			Expect(starts[0].Stdout).To(BeNil())
+			Expect(starts[0].Stderr).To(BeNil())
+			noDockerDF(f)
+			Expect(f.fake.Session).NotTo(BeNil(), "the session still starts")
+		})
+
+		It("CS-IMG-041: no build, no checker", func() {
+			f.fake.On("{{.Created}}", time.Now().Format(time.RFC3339Nano)+"\n", nil)
+			Expect(f.run()).To(Equal(0), f.errw.String())
+			Expect(strings.Join(f.fake.CommandLines(), "\n")).NotTo(ContainSubstring("docker build "))
+			Expect(detached(f)).To(BeEmpty())
+			noDockerDF(f)
+		})
+
+		It("CS-IMG-041: --rebuild takes the same detached path", func() {
+			Expect(f.run("--rebuild")).To(Equal(0), f.errw.String())
+			Expect(detached(f)).To(HaveLen(1))
+			noDockerDF(f)
+		})
+
+		It("CS-IMG-041: a checker that cannot be started is ignored", func() {
+			f.env.Executable = func() (string, error) { return "", fmt.Errorf("no executable") }
+			f.fake.On("image inspect claude-sandbox:run", "", execx.Fail(1))
+			Expect(f.run()).To(Equal(0), f.errw.String())
+			Expect(detached(f)).To(BeEmpty())
+			Expect(f.fake.Session).NotTo(BeNil())
+		})
+
+		It("CS-IMG-043: the previous check's report prints once on stderr, before the container starts", func() {
+			writeFile(filepath.Join(f.cache, imagebuild.CacheBudgetFile),
+				`{"checkedAt":"2026-09-21T18:03:00Z","report":"\nWARNING: BuildKit build cache is 625 GB of its 719 GB budget.\n  Prune:  docker builder prune -af\n"}`)
+			var atStart string
+			f.fake.OnFunc("docker start", func(c execx.Cmd) (string, error) {
+				atStart = f.errw.String()
+				return "", nil
+			})
+			f.fake.On("{{.Created}}", time.Now().Format(time.RFC3339Nano)+"\n", nil)
+			Expect(f.run()).To(Equal(0), f.errw.String())
+			Expect(atStart).To(ContainSubstring("Build-cache check after the image build of"))
+			Expect(atStart).To(ContainSubstring("625 GB of its 719 GB budget"))
+			Expect(f.out.String()).NotTo(ContainSubstring("WARNING"), "stderr only")
+			Expect(filepath.Join(f.cache, imagebuild.CacheBudgetFile)).NotTo(BeAnExistingFile())
+			noDockerDF(f)
+
+			// Once: a second launch has nothing to print.
+			f.errw.Reset()
+			Expect(f.run()).To(Equal(0))
+			Expect(f.errw.String()).NotTo(ContainSubstring("Build-cache check"))
+		})
+
+		It("CS-IMG-042: the hidden checker subcommand writes the result file; on contention it skips without docker", func() {
+			dir := filepath.Join(f.tmp, "budget")
+			f.fake.On("docker system df --format {{json .}}", `{"Size":"10GB","Type":"Build Cache"}`+"\n", nil)
+			f.fake.On("docker buildx inspect", "GC Policy rule#0:\n All: false\n Filters: type==exec.cachemount\n Max Used Space: 2.764GB\n"+
+				"GC Policy rule#1:\n All: true\n Max Used Space: 669.6GiB\n", nil)
+			Expect(f.run("cache-budget-check", "--dir", dir)).To(Equal(0), f.errw.String())
+			data, err := os.ReadFile(filepath.Join(dir, imagebuild.CacheBudgetFile))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(string(data)).To(ContainSubstring("caps cache mounts at 3 GB"))
+			Expect(f.fake.Session).To(BeNil(), "the checker launches nothing")
+
+			// Another checker holds the lock: skip at once, run nothing.
+			held, err := os.OpenFile(filepath.Join(dir, imagebuild.CacheBudgetLockFile), os.O_RDWR, 0)
+			Expect(err).NotTo(HaveOccurred())
+			defer held.Close()
+			Expect(syscall.Flock(int(held.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)).To(Succeed())
+			Expect(os.Remove(filepath.Join(dir, imagebuild.CacheBudgetFile))).To(Succeed())
+			g := newCLIFixture()
+			Expect(g.run("cache-budget-check", "--dir", dir)).To(Equal(0), g.errw.String())
+			Expect(g.errw.String()).To(ContainSubstring("skipped"))
+			Expect(g.fake.CommandLines()).To(BeEmpty())
+			Expect(filepath.Join(dir, imagebuild.CacheBudgetFile)).NotTo(BeAnExistingFile())
+		})
+
+		It("CS-IMG-041: the checker subcommand is hidden from help and completion", func() {
+			Expect(f.run("--help")).To(Equal(0))
+			Expect(f.out.String()).NotTo(ContainSubstring("cache-budget-check"))
+		})
+
+		It("CS-IMG-043: the result is read before this launch's own checker starts", func() {
+			writeFile(filepath.Join(f.cache, imagebuild.CacheBudgetFile), `{"checkedAt":"2026-09-21T18:03:00Z","report":"\nNOTE: old\n"}`)
+			consumedBeforeStart := false
+			f.fake.OnFunc("cache-budget-check", func(c execx.Cmd) (string, error) {
+				_, err := os.Stat(filepath.Join(f.cache, imagebuild.CacheBudgetFile))
+				consumedBeforeStart = os.IsNotExist(err)
+				return "", nil
+			})
+			f.fake.On("image inspect claude-sandbox:run", "", execx.Fail(1))
+			Expect(f.run()).To(Equal(0), f.errw.String())
+			Expect(consumedBeforeStart).To(BeTrue())
+			Expect(f.errw.String()).To(ContainSubstring("NOTE: old"))
+		})
 	})
 
 	It("CS-LNCH-004: --limit without --ralph exits 2 with an explanation", func() {

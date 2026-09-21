@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -205,6 +206,35 @@ var _ = Describe("RunSession (CS-LNCH-085/086)", func() {
 		Eventually(func() bool { return gone(child) }, 3*time.Second, 20*time.Millisecond).Should(BeTrue())
 	})
 
+	It("CS-IMG-041: a process started with Detach leads its own session and survives the launcher's death", func() {
+		if runtime.GOOS != "linux" {
+			Skip("reads /proc")
+		}
+		// The child lets go of the helper's stdout pipe once it has reported,
+		// or waiting on the helper would wait out the sleep.
+		h, child := startHelper(`echo ready $$; exec sleep 30 >/dev/null`, helperDetach+"=1")
+		defer syscall.Kill(child, syscall.SIGKILL)
+		sid, err := procSID(child)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(sid).To(Equal(child), "setsid: the child is its own session leader")
+		Expect(h.cmd.Process.Signal(syscall.SIGKILL)).To(Succeed())
+		h.wait()
+		Consistently(func() bool { return gone(child) }, 500*time.Millisecond, 50*time.Millisecond).Should(BeFalse())
+	})
+
+	It("CS-IMG-041: a detached process with no streams set reads and writes /dev/null", func() {
+		if runtime.GOOS != "linux" {
+			Skip("reads /proc")
+		}
+		out := filepath.Join(GinkgoT().TempDir(), "fds")
+		p, err := execx.System{}.Start(execx.Cmd{Name: "sh", Args: []string{"-c", `fds=$(readlink /proc/$$/fd/0 /proc/$$/fd/1 /proc/$$/fd/2); echo $fds > "$0"`, out}, Detach: true})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(p.Wait()).To(Succeed())
+		data, err := os.ReadFile(out)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(strings.Fields(string(data))).To(Equal([]string{"/dev/null", "/dev/null", "/dev/null"}))
+	})
+
 	It("CS-LNCH-086: a launcher killed outright takes the child with it", func() {
 		if runtime.GOOS != "linux" {
 			Skip("parent-death signals are Linux-only")
@@ -277,3 +307,15 @@ var _ = Describe("Fake.RunSession", func() {
 		Expect(err).To(MatchError(io.ErrUnexpectedEOF))
 	})
 })
+
+// procSID reads the session id (field 6) of /proc/<pid>/stat.
+func procSID(pid int) (int, error) {
+	data, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+	if err != nil {
+		return 0, err
+	}
+	// The comm field (2) is parenthesised and may hold spaces.
+	rest := string(data[strings.LastIndexByte(string(data), ')')+2:])
+	f := strings.Fields(rest)
+	return strconv.Atoi(f[3])
+}

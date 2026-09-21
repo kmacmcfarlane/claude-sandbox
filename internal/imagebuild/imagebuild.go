@@ -656,27 +656,29 @@ const (
 // alongside the ephemeral figure and recommended a prune that could not
 // address the condition that had actually fired.
 //
-// Called only when a build ran this launch: the check costs two docker calls,
-// and the common no-build launch should not pay them. Silent when either
-// command cannot be parsed.
-func WarnCacheBudget(o Options) {
+// The check costs two docker calls ("docker system df" alone measured 6-13.5
+// s), so the launcher never runs it inline: a detached checker writes the
+// report to a result file and the next launch prints it (CS-IMG-041..043).
+// w receives the report; nothing is written when either command cannot be
+// parsed or both conditions are healthy.
+func WarnCacheBudget(o Options, w io.Writer) {
 	b, ok := readCacheBudget(o)
 	if !ok {
 		return
 	}
 	if b.AllBudget > 0 && float64(b.Size) >= cacheWarnRatio*float64(b.AllBudget) {
-		fmt.Fprintf(o.Err, "\nWARNING: BuildKit build cache is %s of its %s budget.\n",
+		fmt.Fprintf(w, "\nWARNING: BuildKit build cache is %s of its %s budget.\n",
 			humanSize(b.Size), humanSize(b.AllBudget))
-		fmt.Fprintf(o.Err, "  At this level the daemon evicts cache aggressively, including cache mounts.\n")
-		fmt.Fprintf(o.Err, "  Prune:  docker builder prune -af\n")
-		fmt.Fprintf(o.Err, "  Or raise the budget: see README.md, \"BuildKit cache\".\n\n")
+		fmt.Fprintf(w, "  At this level the daemon evicts cache aggressively, including cache mounts.\n")
+		fmt.Fprintf(w, "  Prune:  docker builder prune -af\n")
+		fmt.Fprintf(w, "  Or raise the budget: see README.md, \"BuildKit cache\".\n\n")
 	}
 	if b.Ephemeral > 0 && b.Ephemeral < ephemeralFloorSize {
-		fmt.Fprintf(o.Err, "\nNOTE: this daemon caps cache mounts at %s (build cache in use: %s of %s).\n",
+		fmt.Fprintf(w, "\nNOTE: this daemon caps cache mounts at %s (build cache in use: %s of %s).\n",
 			humanSize(b.Ephemeral), humanSize(b.Size), humanSize(b.AllBudget))
-		fmt.Fprintf(o.Err, "  Cache mounts above that are evicted between builds, so apt/pip/npm/go steps re-download.\n")
-		fmt.Fprintf(o.Err, "  Pruning does not help — the cap is a setting, not usage.\n")
-		fmt.Fprintf(o.Err, "  Raise it with a builder.gc policy in daemon.json: see README.md, \"BuildKit cache\".\n\n")
+		fmt.Fprintf(w, "  Cache mounts above that are evicted between builds, so apt/pip/npm/go steps re-download.\n")
+		fmt.Fprintf(w, "  Pruning does not help — the cap is a setting, not usage.\n")
+		fmt.Fprintf(w, "  Raise it with a builder.gc policy in daemon.json: see README.md, \"BuildKit cache\".\n\n")
 	}
 }
 

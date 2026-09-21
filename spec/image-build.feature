@@ -333,12 +333,15 @@ Feature: Image build lifecycle (CS-IMG)
     # builder, so the failure would otherwise be a confusing build error.
     And every "docker build" the launcher issues runs with DOCKER_BUILDKIT=1
 
-  Scenario: CS-IMG-028 Build-cache budget warning after a build ran this launch
+  Scenario: CS-IMG-028 Build-cache budget report
     # Two INDEPENDENT conditions with different fixes, so they are reported
     # separately. Reporting them as one message printed a healthy total
     # alongside the ephemeral figure and recommended a prune that could not
     # address the condition that had fired.
-    Given at least one image was built this launch
+    # The report is produced by the detached checker (CS-IMG-041/042) and
+    # printed by the next launch (CS-IMG-043), never inline in the launch
+    # that built.
+    Given the budget check runs
     And "docker system df --format {{json .}}" reports the Build Cache size
     And "docker buildx inspect" reports the GC policy rules
     Then a WARNING prints when the cache size is at least 80% of the all-records budget,
@@ -349,10 +352,47 @@ Feature: Image build lifecycle (CS-IMG)
       and pointing at a builder.gc policy in daemon.json
     And each condition prints on its own, so a host under the global budget with a small
       cache-mount cap is not told its total usage is a problem
-    And nothing prints when no build ran, or when either command cannot be parsed
+    And the report is empty when either command cannot be parsed
     And the daemon.json recipe the NOTE points at is valid, copy-pasteable JSON
       # daemon.json is strict JSON: a jsonc block with // comments renders fine
       # in the README and then fails to parse in the file it is written for.
+
+  Scenario: CS-IMG-041 The budget check runs detached after a build, never on the launch path
+    # "docker system df" measured 6.0-13.5 s on the operator's host, paid
+    # before the prompt by every launch that built anything (spike 431d #4).
+    Given an interactive or ralph launch built at least one image, --rebuild included
+    Then the launcher starts "claude-sandbox cache-budget-check --dir <cache-dir>"
+      (the running binary, <cache-dir> = ~/.cache/claude-sandbox) detached:
+      its own session (setsid), stdio on /dev/null, not tied to the launcher's life
+    And the launcher itself never runs "docker system df" or "docker buildx inspect"
+    And it does not wait for the checker, so nothing the checker does can print into
+      the session's terminal
+    And no checker starts when no image was built
+    And no checker starts in headless mode (CS-LNCH-062)
+    And a checker that cannot be started is ignored silently: the check is advisory
+
+  Scenario: CS-IMG-042 The checker writes one result file, one checker at a time
+    When "claude-sandbox cache-budget-check --dir <dir>" runs
+    Then it takes a non-blocking lock on <dir>/cache-budget.lock
+    And on contention it exits 0 at once, without running docker and without touching
+      the result file: another checker is already producing a fresh one
+    And holding the lock, it runs the CS-IMG-028 check and writes
+      <dir>/cache-budget.json atomically (temp file + rename), holding the time of the
+      check and the report text, empty when there is nothing to report
+    And the lock is a flock, so a checker that dies releases it
+
+  Scenario: CS-IMG-043 The next launch prints the result once, before the session starts
+    Given <cache-dir>/cache-budget.json exists
+    When an interactive or ralph launch reaches the point where it would start a container
+    Then it claims the file by renaming it, reads it and removes it, with no docker call
+    And a non-empty report prints on stderr once, headed by the time of the check,
+      before the container starts
+    And an empty report, or an unreadable file, prints nothing and is removed all the same
+    And a second launch prints nothing: the file is gone
+    And a headless launch neither prints nor consumes the file, so the next interactive
+      launch still reports it
+    And the file is read before this launch starts its own checker, so a report is
+      always the previous build's
 
   Scenario: CS-IMG-029 Base and CLI Dockerfiles declare the shared cache-mount ids
     Then Dockerfile and Dockerfile.cli use "--mount=type=cache,id=claude-sandbox-<name>" mounts

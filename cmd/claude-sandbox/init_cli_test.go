@@ -41,6 +41,10 @@ func newInitCLI(vars map[string]string) *initCLI {
 		// Never the real temp root either: a launch makes its shadow
 		// directory there and sweeps it (CS-LNCH-081/082).
 		TempRoot: GinkgoT().TempDir(),
+		// Nor the real cache-budget result file (CS-IMG-043), and never a
+		// real detached checker (CS-IMG-041).
+		CacheDir:   GinkgoT().TempDir(),
+		Executable: func() (string, error) { return "/fake/claude-sandbox", nil },
 	}
 	return c
 }
