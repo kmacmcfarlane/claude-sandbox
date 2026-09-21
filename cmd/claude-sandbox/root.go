@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"syscall"
+	"testing"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -59,6 +61,28 @@ type Env struct {
 	// Detach starts the background CLI build (CS-IMG-045); nil means
 	// imagebuild.StartDetached, which refuses to run under go test.
 	Detach imagebuild.Detacher
+	// CacheDir is where the detached cache-budget checker writes its result
+	// and the next launch reads it (CS-IMG-041..043); "" means
+	// $HOME/.cache/claude-sandbox. Tests point it at a scratch directory.
+	CacheDir string
+	// Executable is the binary the detached checker runs as; nil means
+	// os.Executable. The checker is started through Runner.Start with
+	// Cmd.Detach, so under execx.Fake nothing is spawned.
+	Executable func() (string, error)
+}
+
+// cacheDir resolves Env.CacheDir.
+func (e *Env) cacheDir() string {
+	if e.CacheDir != "" {
+		return e.CacheDir
+	}
+	if testing.Testing() {
+		// A forgotten fixture would consume (and delete) the operator's real
+		// result file, as launch.shadowRoot guards the real temp root.
+		panic("a test resolved the real cache dir; set Env.CacheDir to a scratch directory such as GinkgoT().TempDir()")
+	}
+	_, _, _, home := hostIdentity(e.Getenv)
+	return filepath.Join(home, launch.SandboxHomeRoot)
 }
 
 // lookupEnv is Env.LookupEnv with the Getenv fallback.
@@ -91,7 +115,7 @@ func Main(args []string) int {
 // path so "claude-sandbox --rebuild init" errors instead of routing to init.
 func isSubcommand(a string) bool {
 	switch a {
-	case "init", "init-ralph", "ralph", "help", "completion", "sessions", "pidslot", "headless", imagebuild.PrefetchSubcommand:
+	case "init", "init-ralph", "ralph", "help", "completion", "sessions", "pidslot", "headless", cacheBudgetCheckCmd, imagebuild.PrefetchSubcommand:
 		return true
 	// CS-COMP-002/003: the hidden commands the generated completion scripts
 	// call on every keystroke. Without these they fall through to runLaunch,
@@ -167,7 +191,7 @@ func newRootCmd(env *Env) *cobra.Command {
 	}
 	ralphCmd := newRalphCmd(env)
 	registerRalphCompletions(ralphCmd)
-	root.AddCommand(newInitCmd(env, false), newInitCmd(env, true), ralphCmd, newSessionsCmd(env), newPidslotCmd(env), newHeadlessCmd(env), newCLIPrefetchCmd(env))
+	root.AddCommand(newInitCmd(env, false), newInitCmd(env, true), ralphCmd, newSessionsCmd(env), newPidslotCmd(env), newHeadlessCmd(env), newCacheBudgetCheckCmd(env), newCLIPrefetchCmd(env))
 	// CS-INIT-002: a rejected flag names itself and lists the command's valid
 	// options (inherited by init/init-ralph/ralph).
 	root.SetFlagErrorFunc(func(c *cobra.Command, err error) error {
@@ -943,10 +967,17 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 	if err != nil {
 		return err
 	}
-	// CS-LNCH-062: never in headless mode. The check is advisory, and its
-	// "docker system df" alone can take longer than an SDK client's 5 s probe.
-	if (baseRebuilt || cliBuilt || childBuilt || capBuilt) && !headless {
-		imagebuild.WarnCacheBudget(imgOpts)
+	// Build-cache budget (CS-IMG-041..043): never inline. "docker system df"
+	// alone measured 6-13.5 s, so a build leaves a detached checker behind and
+	// the next launch prints what it found. Read before this launch starts its
+	// own checker, so a report is always an earlier build's. CS-LNCH-062:
+	// headless neither reads nor starts one; an SDK client has no one to read
+	// stderr, and the next interactive launch still gets the report.
+	if !headless {
+		imagebuild.ConsumeCacheBudget(env.cacheDir(), env.Err)
+		if baseRebuilt || cliBuilt || childBuilt || capBuilt {
+			startCacheBudgetCheck(env)
+		}
 	}
 
 	// Launch plan (CS-LNCH). Everything but the per-session picks is settled
@@ -978,6 +1009,61 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 		return err
 	}
 	return startReserved(env, plan, headless)
+}
+
+// cacheBudgetCheckCmd is the hidden subcommand the detached checker runs as
+// (CS-IMG-041/042).
+const cacheBudgetCheckCmd = "cache-budget-check"
+
+// startCacheBudgetCheck starts "<this binary> cache-budget-check --dir <dir>"
+// detached (CS-IMG-041): its own session, stdio on /dev/null, never waited on,
+// so it outlives the launcher and cannot print into the session. Advisory:
+// every failure is silent.
+func startCacheBudgetCheck(env *Env) {
+	exe := env.Executable
+	if exe == nil {
+		exe = os.Executable
+	}
+	bin, err := exe()
+	if err != nil || bin == "" {
+		return
+	}
+	env.Runner.Start(execx.Cmd{
+		Name:   bin,
+		Args:   []string{cacheBudgetCheckCmd, "--dir", env.cacheDir()},
+		Detach: true,
+	})
+}
+
+func newCacheBudgetCheckCmd(env *Env) *cobra.Command {
+	var dir string
+	cmd := &cobra.Command{
+		Use:           cacheBudgetCheckCmd,
+		Short:         "Check the BuildKit cache budget into a result file (internal)",
+		Hidden:        true,
+		Args:          cobra.NoArgs,
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if dir == "" {
+				dir = env.cacheDir()
+			}
+			o := imagebuild.Options{Runner: env.Runner, Out: env.Out, Err: env.Err}
+			err := imagebuild.RunCacheBudgetCheck(o, dir, env.Now)
+			switch {
+			case errors.Is(err, imagebuild.ErrCacheBudgetBusy):
+				// CS-IMG-042: another checker is producing the result.
+				fmt.Fprintf(env.Err, "%s: skipped, %v\n", cacheBudgetCheckCmd, err)
+				return nil
+			case err != nil:
+				return exitErr(1, "%s: %v", cacheBudgetCheckCmd, err)
+			}
+			fmt.Fprintf(env.Err, "%s: wrote %s\n", cacheBudgetCheckCmd, filepath.Join(dir, imagebuild.CacheBudgetFile))
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&dir, "dir", "", "directory for the result and lock files (default ~/.cache/claude-sandbox)")
+	return cmd
 }
 
 func hostIdentity(getenv func(string) string) (uid, gid int, username, home string) {

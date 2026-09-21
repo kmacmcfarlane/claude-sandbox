@@ -1344,12 +1344,15 @@ Pruning cannot fix the second one: it is a configured limit, not a usage figure.
 
 Before blaming either limit, check whether the builds that "lost" their cache used `--no-cache` — that explains far more cases than GC does.
 
-The launcher checks after any build it runs and reports the two conditions separately — a `WARNING` when total usage is at 80 % of the global budget, and a `NOTE` when the cache-mount cap is below what this project's caches need:
+After any build it runs (`--rebuild` included), the launcher starts a background check of these two limits and reports them separately — a `WARNING` when total usage is at 80 % of the global budget, and a `NOTE` when the cache-mount cap is below what this project's caches need. The check is never on the launch path: `docker system df` alone takes 6–13 s on a busy daemon, so the launcher starts it detached (its own session, output to `/dev/null`) and goes straight on to the session. The check writes its findings to `~/.cache/claude-sandbox/cache-budget.json`, and the next launch that starts a new container prints them once, before its session starts, then deletes the file (attaching to or joining a running session does not read it). Only one check runs at a time (a lock beside the file; a second one skips rather than waits). Headless launches never run the check and never consume the file, so the next interactive launch still shows it.
 
 ```
+Build-cache check after the image build of 2026-09-21 18:03:
 WARNING: BuildKit build cache is 625 GB of its 719 GB budget.
 NOTE: this daemon caps cache mounts at 3 GB (build cache in use: 10 GB of 719 GB).
 ```
+
+To run the check yourself, run `docker system df` and `docker buildx inspect` and compare them with the table above.
 
 **Fix for the first** — prune (images and containers are untouched; the next builds run cold):
 

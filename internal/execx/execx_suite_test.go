@@ -27,6 +27,9 @@ const (
 	// helperTether makes the helper Start the script with DieWithParent and
 	// then block forever (CS-LNCH-098).
 	helperTether = "EXECX_SESSION_HELPER_TETHER"
+	// helperDetach makes the helper Start the script with Detach and then
+	// block forever (CS-IMG-041).
+	helperDetach = "EXECX_SESSION_HELPER_DETACH"
 )
 
 func TestExecx(t *testing.T) {
@@ -40,6 +43,13 @@ func TestExecx(t *testing.T) {
 func runHelper(script string) int {
 	if os.Getenv(helperTether) == "1" {
 		if _, err := (execx.System{}).Start(execx.Cmd{Name: "sh", Args: []string{"-c", script}, Stdout: os.Stdout, DieWithParent: true}); err != nil {
+			fmt.Fprintln(os.Stderr, "start:", err)
+			return 99
+		}
+		select {}
+	}
+	if os.Getenv(helperDetach) == "1" {
+		if _, err := (execx.System{}).Start(execx.Cmd{Name: "sh", Args: []string{"-c", script}, Stdout: os.Stdout, Detach: true}); err != nil {
 			fmt.Fprintln(os.Stderr, "start:", err)
 			return 99
 		}

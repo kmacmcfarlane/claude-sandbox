@@ -218,11 +218,11 @@ func foregroundUpdate(o Options, pinned string) bool {
 	return err == nil
 }
 
-// tryLock takes an exclusive flock on path without waiting. busy reports a
+// tryPrefetchLock takes an exclusive flock on path without waiting. busy reports a
 // lock held elsewhere; release is nil unless the lock was taken. The fd is
 // close-on-exec (os.OpenFile always sets it), so a lock taken by the
 // launcher is never inherited by the processes it starts.
-func tryLock(path string) (release func(), busy bool, err error) {
+func tryPrefetchLock(path string) (release func(), busy bool, err error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, false, err
 	}
@@ -245,7 +245,7 @@ func tryLock(path string) (release func(), busy bool, err error) {
 // child takes the lock itself, so two launches racing past the probe still
 // build once.
 func startPrefetch(o Options, version string) error {
-	release, busy, err := tryLock(o.cacheFile(PrefetchLockFile))
+	release, busy, err := tryPrefetchLock(o.cacheFile(PrefetchLockFile))
 	if err != nil {
 		return err
 	}
@@ -283,7 +283,7 @@ func Prefetch(o Options, version string) error {
 		return fmt.Errorf("%s: no cache directory", PrefetchSubcommand)
 	}
 	stamp := func() string { return o.now().UTC().Format(time.RFC3339) }
-	release, busy, err := tryLock(o.cacheFile(PrefetchLockFile))
+	release, busy, err := tryPrefetchLock(o.cacheFile(PrefetchLockFile))
 	if err != nil {
 		return fmt.Errorf("%s: %w", PrefetchSubcommand, err)
 	}

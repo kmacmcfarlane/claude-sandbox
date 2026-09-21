@@ -27,6 +27,13 @@ type Cmd struct {
 	// even by SIGKILL (Linux parent-death signal; CS-LNCH-098). Start keeps
 	// its own process group either way, so terminal signals never reach it.
 	DieWithParent bool
+	// Detach asks Start for a process that outlives the launcher (the
+	// post-build cache-budget checker, CS-IMG-041): a new session (setsid),
+	// so it has no controlling terminal and no terminal signal or hangup
+	// reaches it, and no parent-death signal. Streams left nil are
+	// /dev/null. The process is reaped in the background; the caller need
+	// not Wait. Ignored when DieWithParent is set, which asks the opposite.
+	Detach bool
 }
 
 // Process is a started command that can be signalled and waited on.
@@ -140,6 +147,9 @@ func (s System) Start(c Cmd) (Process, error) {
 	if c.DieWithParent {
 		return s.startTethered(c)
 	}
+	if c.Detach {
+		return s.startDetached(c)
+	}
 	cmd := s.build(c)
 	// Own process group so the whole tree can be signalled together.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -147,6 +157,36 @@ func (s System) Start(c Cmd) (Process, error) {
 		return nil, err
 	}
 	return &sysProcess{cmd: cmd}, nil
+}
+
+// detachedProcess is a process started with Detach; a goroutine reaps it, so
+// Wait only reads the outcome.
+type detachedProcess struct {
+	cmd  *exec.Cmd
+	done chan struct{}
+	err  error
+}
+
+func (p *detachedProcess) Signal(sig os.Signal) error { return p.cmd.Process.Signal(sig) }
+func (p *detachedProcess) Wait() error                { <-p.done; return p.err }
+func (p *detachedProcess) Pid() int                   { return p.cmd.Process.Pid }
+
+// startDetached starts c as the leader of a new session. The launcher never
+// waits on it; the reaping goroutine only keeps it from lingering as a zombie
+// while the launcher lives, and when the launcher exits first the process is
+// reparented and carries on.
+func (s System) startDetached(c Cmd) (Process, error) {
+	cmd := s.build(c)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	p := &detachedProcess{cmd: cmd, done: make(chan struct{})}
+	go func() {
+		p.err = cmd.Wait()
+		close(p.done)
+	}()
+	return p, nil
 }
 
 // tetheredProcess is a process started with a parent-death signal; its Wait
