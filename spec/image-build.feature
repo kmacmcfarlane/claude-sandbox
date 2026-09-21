@@ -314,9 +314,9 @@ Feature: Image build lifecycle (CS-IMG)
     # build-time state there (install.sh hardcodes $HOME/.claude/downloads, and
     # `claude install` writes .claude.json backups to ~/.claude/backups since
     # CLAUDE_CONFIG_DIR is unset at build). The entrypoint moves /home/claude
-    # into the host home, so a baked ~/.claude surfaced in every container; with
-    # the config dir relocated via CLAUDE_CONFIG_DIR, ~/.claude is container
-    # layer and anything written there is lost at exit. The base installed the
+    # into the host home, so a baked ~/.claude surfaced in every container whose
+    # ~/.claude was not a mount (a relocated CLAUDE_CONFIG_DIR); there ~/.claude
+    # is container layer and anything written there is lost at exit. The base installed the
     # CLI itself until the cap split, which is where the stray ~/.claude/backups
     # and ~/.claude/downloads came from; the exact-Dockerfile assertion of this
     # scenario keeps them out.
