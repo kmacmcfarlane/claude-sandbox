@@ -899,10 +899,10 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 		fmt.Fprintln(env.Out, b)
 	}
 
-	// Images (CS-IMG). Order: base, CLI image, update check (CLI only), child,
-	// cap. A Claude Code update never touches the base or the child, and
-	// without --update it is built in the background for the next launch
-	// (CS-IMG-045).
+	// Images (CS-IMG). Order: base, tools image, CLI image, update check (CLI
+	// only), child, cap. Neither a Claude Code update nor a commit to a baked
+	// source touches the base or the child (CS-IMG-048); without --update a
+	// CLI update is built in the background for the next launch (CS-IMG-045).
 	imgOpts := imagebuild.Options{
 		Runner: env.Runner, Out: env.Out, Err: env.Err,
 		RepoRoot: rr, Version: version,
@@ -913,6 +913,10 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 		return exitErr(2, "%s", err.Error())
 	}
 	baseRebuilt, err := imagebuild.EnsureBase(imgOpts)
+	if err != nil {
+		return err
+	}
+	toolsBuilt, err := imagebuild.EnsureTools(imgOpts)
 	if err != nil {
 		return err
 	}
@@ -976,7 +980,7 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 	// stderr, and the next interactive launch still gets the report.
 	if !headless {
 		imagebuild.ConsumeCacheBudget(env.cacheDir(), env.Err)
-		if baseRebuilt || cliBuilt || childBuilt || capBuilt {
+		if baseRebuilt || toolsBuilt || cliBuilt || childBuilt || capBuilt {
 			startCacheBudgetCheck(env)
 		}
 	}

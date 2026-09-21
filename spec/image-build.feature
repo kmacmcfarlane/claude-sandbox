@@ -1,25 +1,32 @@
 Feature: Image build lifecycle (CS-IMG)
   Layered image model: the base image (claude-sandbox) provides sandbox
-  infrastructure WITHOUT the Claude Code CLI; an optional child Dockerfile adds
-  project tools on top of it; the CLI lives in its own small image
-  (claude-sandbox-cli); and the image a container actually runs is a generated
-  one-layer "cap" (<base-or-child>:run) that copies the CLI onto the base or
-  child. A Claude Code update therefore rebuilds the CLI image and the caps,
-  never the base or the children. All images auto-rebuild on staleness. Tests
-  assert on the docker build/inspect calls issued through the injected runner.
-  Go home: internal/imagebuild.
+  infrastructure (OS packages, Node, Docker CLI, Python venv) WITHOUT the
+  Claude Code CLI and WITHOUT the sandbox's own files; an optional child
+  Dockerfile adds project tools on top of it; the CLI lives in its own small
+  image (claude-sandbox-cli); the sandbox binary, entrypoint, logstream,
+  PROMPT_RALPH.md, the Discord MCP bundle, the managed-settings hooks and the
+  version stamp live in another (claude-sandbox-tools); and the image a
+  container actually runs is a generated one-layer "cap" (<base-or-child>:run)
+  that copies the tools and the CLI onto the base or child. A Claude Code
+  update or a commit to a baked source therefore rebuilds one small image and
+  the caps, never the base or the children. All images auto-rebuild on
+  staleness. Tests assert on the docker build/inspect calls issued through the
+  injected runner. Go home: internal/imagebuild.
 
   # ---- base image ----
 
   Scenario: CS-IMG-001 Base builds when the image is missing
     Given "docker image inspect claude-sandbox" fails
-    Then "docker build -t claude-sandbox --build-arg CLAUDE_SANDBOX_VERSION=<version> <repo-root>" runs
+    Then "docker build -t claude-sandbox <repo-root>" runs
+    # No version build arg: the stamp lives in the tools image (CS-IMG-005).
 
   Scenario: CS-IMG-002 --rebuild forces a full rebuild with --no-cache
     Given "claude-sandbox --rebuild"
     Then the base is rebuilt with --no-cache
+    And the tools image is rebuilt with --no-cache
     And the CLI image is rebuilt with --no-cache
     And the child (when in use) and the cap are rebuilt
+    # Five images in all.
     # --no-cache also starts every cache mount empty (BuildKit gives the build a
     # fresh mount rather than the shared one), so --rebuild discards the shared
     # apt/pip/npm/go caches and the next builds re-download. That is intended:
@@ -32,29 +39,31 @@ Feature: Image build lifecycle (CS-IMG)
     And the repo Dockerfile has mtime after T
     Then the base is rebuilt
 
-  Scenario: CS-IMG-004 Base rebuilds when any baked source is newer than the image
-    # Unlabeled images only (CS-IMG-035); the set is also what the base fingerprint hashes (CS-IMG-034).
-    Given any file under the baked source set has mtime after the image creation time
-    Then the base is rebuilt with a message about changed baked sources
-    # Baked source set: every repo path the base Dockerfile COPYs (CS-IMG-037) —
+  Scenario: CS-IMG-004 Tools image rebuilds when any baked source is newer than the image
+    # Unlabeled images only (CS-IMG-035); the set is also what the tools fingerprint hashes (CS-IMG-034).
+    Given any file under the baked source set, or Dockerfile.tools, has mtime after the
+      tools image creation time
+    Then the tools image is rebuilt with a message about changed baked sources
+    And the base is not rebuilt (CS-IMG-048)
+    # Baked source set: every repo path Dockerfile.tools COPYs (CS-IMG-037) —
     # the Go source tree (cmd/, internal/, go.mod/go.sum, assets.go), the trees
     # assets.go embeds into the binary (scaffold/, scaffold-ralph/,
     # container-context.md, mcp-servers.json), logstream/, entrypoint.sh,
     # PROMPT_RALPH.md, mcp/discord-notify/, notification-hooks.json (baked as managed settings,
-    # CS-LNCH-068). scaffold/, scaffold-ralph/, container-context.md and
+    # CS-LNCH-068). Until CS-IMG-048 the base COPYed them, so every commit rebuilt
+    # the base and, through its changed ID, every child. scaffold/, scaffold-ralph/, container-context.md and
     # mcp-servers.json were COPYed but missing from the set, so editing them
     # rebuilt nothing and the running binary kept seeding the old files.
     # (bash version: bin/, logstream/, entrypoint.sh, PROMPT_RALPH.md, mcp/)
 
   Scenario: CS-IMG-031 Go test files are not baked sources
     Given the only file under the baked source set with mtime after the image creation time ends in _test.go
-    Then the base is not rebuilt
+    Then the tools image is not rebuilt
     # Tests are not compiled into the binary, so a test-only edit cannot change
-    # the image — and a base rebuild is expensive, because it invalidates every
-    # child image built FROM it.
+    # the image — and a rebuild costs a Go build plus one cap per project.
 
-  Scenario: CS-IMG-037 Every source the base Dockerfile COPYs is a baked source
-    Given the repo-root Dockerfile's COPY and ADD instructions that read from the build
+  Scenario: CS-IMG-037 Every source Dockerfile.tools COPYs is a baked source
+    Given Dockerfile.tools' COPY and ADD instructions that read from the build
       context (not --from another stage or image)
     Then each source path is in the baked source set or under a directory in it
     # A test parses the Dockerfile, so adding a COPY without extending the set
@@ -64,14 +73,52 @@ Feature: Image build lifecycle (CS-IMG)
     Given a file under the baked source set that .dockerignore keeps out of the build
       context: anything under a __pycache__ or .pytest_cache directory, a *.pyc or *.pyo
       file, or a dot-entry under scaffold/ or scaffold-ralph/
-    Then it is neither an input to the base fingerprint nor a trigger of the time rule
+    Then it is neither an input to the tools fingerprint nor a trigger of the time rule
     # The image cannot contain it, so it cannot make the image stale; without this
-    # a pytest run under scaffold-ralph/scripts would rebuild the base (and every
-    # child) on the next launch.
+    # a pytest run under scaffold-ralph/scripts would rebuild the tools image
+    # (and every cap) on the next launch.
 
   Scenario: CS-IMG-005 Version stamp
-    Then the build arg CLAUDE_SANDBOX_VERSION carries "git describe --tags --always --dirty"
+    Then the tools image build arg CLAUDE_SANDBOX_VERSION carries "git describe --tags --always --dirty"
       of the repo checkout, or "unknown" outside a git repo
+    And the tools image bakes it into /opt/claude-sandbox/version and its
+      org.opencontainers.image.revision label
+    And the cap sets ENV CLAUDE_SANDBOX_VERSION to the tools image's revision label, so every
+      session (and a hook guarding on it) sees it; a label outside [A-Za-z0-9._+-] reads "unknown"
+    # An ENV cannot ride a COPY --from, so the cap carries it. The base has no
+    # version at all: a changed stamp must not change the base's ID.
+
+  # ---- sandbox tools image ----
+  # The sandbox's own files change with every commit; the base's OS layers do
+  # not. Baked into the base, each commit changed the base's ID and so re-ran
+  # every child Dockerfile's RUN layers (20-50 s per project per commit,
+  # measured 2026-09-04). They now ride the cap exactly as the CLI does.
+  # Rejected: bind-mounting the host-built binary at runtime (the container
+  # would depend on the checkout, a ralph iteration could see a changed binary
+  # mid-run, and the drift fingerprint would have to hash the binary).
+
+  Scenario: CS-IMG-048 The base image bakes no sandbox sources
+    Then the repo Dockerfile has no COPY or ADD that reads from the build context
+      and no CLAUDE_SANDBOX_VERSION
+    And the base fingerprint hashes the repo Dockerfile alone
+    And editing a baked source rebuilds the tools image and the caps, never the base or a child
+    And the base still declares ENTRYPOINT /opt/claude-sandbox/bin/entrypoint.sh and puts
+      /opt/claude-sandbox/bin on PATH; the file itself arrives with the cap
+    # A child Dockerfile's RUN steps therefore cannot call claude-sandbox, ralph
+    # or the entrypoint at build time, just as they cannot call claude
+    # (scaffold Dockerfile.example, README). Nothing the base or a child does at
+    # build time ever needed them.
+
+  Scenario: CS-IMG-049 Tools image builds when missing
+    Given "docker image inspect claude-sandbox-tools" fails
+    Then "docker build -t claude-sandbox-tools --build-arg CLAUDE_SANDBOX_VERSION=<version> -f <repo-root>/Dockerfile.tools <repo-root>" runs
+    And Dockerfile.tools produces, under /opt/claude-sandbox: bin/claude-sandbox (0755),
+      bin/ralph (a symlink to it), bin/entrypoint.sh (0755), logstream/, PROMPT_RALPH.md,
+      mcp/discord-notify/dist/index.mjs and version
+    And /etc/claude-code/managed-settings.d/10-claude-sandbox.json (CS-LNCH-068)
+    # The Discord MCP server is bundled with esbuild in a node stage; only the
+    # bundle ships, which is all mcp-servers.json runs. The Go binary is built
+    # in a golang stage as before.
 
   # ---- Claude Code CLI image ----
   # The CLI is deliberately NOT baked into the base: installing it mid-Dockerfile
@@ -293,16 +340,21 @@ Feature: Image build lifecycle (CS-IMG)
 
   # ---- run image (cap) ----
   # The container runs neither the base nor the child directly: it runs a
-  # generated one-layer image that copies the CLI from claude-sandbox-cli onto
-  # whichever of the two the project resolved. COPY --link makes the layer
+  # generated image that copies the sandbox tools from claude-sandbox-tools and
+  # the CLI from claude-sandbox-cli onto whichever of the two the project
+  # resolved. COPY --link makes each layer
   # independent of the parent's content, and the Dockerfile is fed on stdin so
   # no build context is sent.
 
   Scenario: CS-IMG-024 Run image is a cap over the base or child
     Given the project resolved image <under> (claude-sandbox, or the child image)
+    And the tools image's revision label reads <version> (CS-IMG-005)
     Then "docker build -t <under>:run -" runs with this Dockerfile on stdin:
       """
       FROM <under>
+      COPY --link --from=claude-sandbox-tools /opt/claude-sandbox/ /opt/claude-sandbox/
+      COPY --link --from=claude-sandbox-tools /etc/claude-code/managed-settings.d/10-claude-sandbox.json /etc/claude-code/managed-settings.d/10-claude-sandbox.json
+      ENV CLAUDE_SANDBOX_VERSION=<version>
       COPY --link --from=claude-sandbox-cli /home/claude/.local /home/claude/.local
       COPY --link --from=claude-sandbox-cli /opt/claude-sandbox/claude-version /opt/claude-sandbox/claude-version
       """
@@ -310,6 +362,10 @@ Feature: Image build lifecycle (CS-IMG)
     And the config fingerprint hashes the cap's image ID
     # No --chown: the CLI image installs as uid 1000 and COPY --link preserves
     # it; a named --chown for a user absent from the parent silently yields root.
+    # The tools directory is copied whole, so the bin/ralph symlink stays a
+    # symlink and the directory merges with the base's /opt/claude-sandbox/venv.
+    # The managed-settings file is copied by name, without --chmod, so the
+    # directories the link layer creates are 0755 and the file keeps its 0644.
 
   Scenario Outline: CS-IMG-025 Cap rebuild triggers
     # Unlabeled caps only; a labeled cap compares fingerprints, which cover
@@ -319,11 +375,12 @@ Feature: Image build lifecycle (CS-IMG)
       | condition                                        |
       | the cap image does not exist                     |
       | the parent image is newer than the cap           |
+      | the tools image is newer than the cap            |
       | the CLI image is newer than the cap              |
       | --rebuild was given                              |
 
   Scenario: CS-IMG-026 Fresh cap is not rebuilt
-    Given the cap exists and is newer than both its parent and the CLI image
+    Given the cap exists and is newer than its parent, the tools image and the CLI image
     Then no cap build runs and the cap is used
 
   # ---- build-input fingerprints ----
@@ -335,7 +392,7 @@ Feature: Image build lifecycle (CS-IMG)
   # in a label, and staleness compares that record with the current inputs.
 
   Scenario: CS-IMG-032 Every build stamps its input fingerprint as a label
-    Then every "docker build" of the base, the CLI image, the child and the cap
+    Then every "docker build" of the base, the tools image, the CLI image, the child and the cap
       carries "--label claude-sandbox.build-inputs=<fingerprint>"
     And that includes --rebuild builds and the update-check CLI rebuild
     # A label, not a forced non-cached build: the fingerprint does not depend on
@@ -346,12 +403,14 @@ Feature: Image build lifecycle (CS-IMG)
     Then it is rebuilt when, and only when, the label differs from the current fingerprint
       (or --rebuild was given, CS-IMG-002)
     And source mtimes and Created times play no part
-    And the base prints a message that its inputs changed when it rebuilds for this reason
+    And the base and the tools image print a message that their inputs changed when they
+      rebuild for this reason
     # So a touched Dockerfile.cli, or a fresh worktree whose files are all
     # newer than the images, rebuilds nothing, while any content change does.
 
   Scenario: CS-IMG-034 What each fingerprint covers
-    Then the base fingerprint hashes the content of the repo Dockerfile and of every
+    Then the base fingerprint hashes the content of the repo Dockerfile (CS-IMG-048)
+    And the tools fingerprint hashes the content of Dockerfile.tools and of every
       file in the baked source set (CS-IMG-004), _test.go files excluded (CS-IMG-031)
     And each symlink under a baked directory counts by its target (COPY bakes the link
       itself; a dangling or directory link is still fingerprinted)
@@ -361,8 +420,8 @@ Feature: Image build lifecycle (CS-IMG)
     And the CLI fingerprint hashes the content of Dockerfile.cli
     And the child fingerprint hashes the child Dockerfile path, its content, the build
       context and the base image ID
-    And the cap fingerprint hashes the generated cap Dockerfile, the parent image ID
-      and the CLI image ID
+    And the cap fingerprint hashes the generated cap Dockerfile, the parent image ID,
+      the tools image ID and the CLI image ID
     # Parent IDs, not Created times: switching a checkout back to content built
     # earlier yields a parent that is older than the cap yet different from the
     # one the cap was built on, which a time comparison cannot see. It also means
@@ -372,9 +431,9 @@ Feature: Image build lifecycle (CS-IMG)
 
   Scenario: CS-IMG-039 Only permission bits that reach the image are fingerprinted
     Given a regular file in the baked source set
-    Then its executable bits (0111) are a base fingerprint input when, and only when, the
-      final stage of the repo Dockerfile COPYs it from the build context without --chmod
-      (today logstream/, PROMPT_RALPH.md and mcp/discord-notify/)
+    Then its executable bits (0111) are a tools fingerprint input when, and only when, the
+      final stage of Dockerfile.tools COPYs it from the build context without --chmod
+      (today logstream/ and PROMPT_RALPH.md; mcp/discord-notify/ is only bundled, CS-IMG-049)
     And no other permission bit is an input
     # Everything else is compiled or embedded into the binary (embed.FS has no
     # modes) or COPYed with --chmod, so its mode cannot change the image. Hashing
@@ -387,7 +446,7 @@ Feature: Image build lifecycle (CS-IMG)
   Scenario: CS-IMG-040 A symlinked baked source is followed only inside the build context
     Given a path in the baked source set is itself a symlink
     When its resolved target is inside the build context (the repo root)
-    Then the base fingerprint and the time rule both read what it points to — the
+    Then the tools fingerprint and the time rule both read what it points to — the
       files under a linked directory, the content of a linked file — under the
       baked source's own name
     And .dockerignore debris rules (CS-IMG-038) apply to the target's real path
@@ -405,7 +464,7 @@ Feature: Image build lifecycle (CS-IMG)
   Scenario: CS-IMG-035 Unlabeled images keep the previous rules
     Given the image has no claude-sandbox.build-inputs label, or a fingerprint cannot be computed
     Then staleness falls back to the time-based triggers of CS-IMG-003, 004, 016, 022 and 025
-    And when the base fingerprint cannot be computed a warning says so, since the
+    And when the tools fingerprint cannot be computed a warning says so, since the
       fallback can bring back a rebuild on every launch
     And the next build that runs stamps the label
 
@@ -489,14 +548,14 @@ Feature: Image build lifecycle (CS-IMG)
     And the file is read before this launch starts its own checker, so a report is
       always the previous build's
 
-  Scenario: CS-IMG-029 Base and CLI Dockerfiles declare the shared cache-mount ids
-    Then Dockerfile and Dockerfile.cli use "--mount=type=cache,id=claude-sandbox-<name>" mounts
+  Scenario: CS-IMG-029 Base, tools and CLI Dockerfiles declare the shared cache-mount ids
+    Then Dockerfile, Dockerfile.tools and Dockerfile.cli use "--mount=type=cache,id=claude-sandbox-<name>" mounts
     And the ids are apt, apt-lists, pip, npm, go-mod, go-build
     # Fixed ids (not the default target-path keys) so the base, the CLI image
     # and every child Dockerfile share one cache per package manager.
 
   Scenario: CS-IMG-030 No Dockerfile pins an external frontend
-    Then neither Dockerfile, Dockerfile.cli, the scaffold example nor the generated cap
+    Then neither Dockerfile, Dockerfile.tools, Dockerfile.cli, the scaffold example nor the generated cap
       Dockerfile contains a "# syntax=" directive
     # "# syntax=docker/dockerfile:1" makes BuildKit resolve that image from
     # Docker Hub on EVERY build (":1" is a moving tag), so an unreachable

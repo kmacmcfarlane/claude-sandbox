@@ -428,7 +428,8 @@ func wouldBeFingerprint(env *Env, projectDir string, f *launchFlags, cfg *cascad
 		parent = imagebuild.BaseImageName
 	}
 	// The container runs the cap, not its parent (CS-SESS-038): a CLI update
-	// changes the cap's ID while the parent's stays put.
+	// or a rebuilt tools image (CS-IMG-048) changes the cap's ID while the
+	// parent's stays put.
 	image := imagebuild.CapImageName(parent)
 	id := imagebuild.ImageID(env.Runner, image)
 

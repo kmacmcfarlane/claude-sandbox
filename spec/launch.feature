@@ -169,7 +169,7 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       live, so a host edit is seen by running containers and is not drift
 
   @new
-  Scenario: CS-LNCH-068 Notification hooks ship as managed settings in the base image
+  Scenario: CS-LNCH-068 Notification hooks ship as managed settings in the run image
     # Claude Code reads file-based managed settings on Linux from
     # /etc/claude-code/managed-settings.json plus every *.json under
     # /etc/claude-code/managed-settings.d/ (code.claude.com/docs/en/managed-settings).
@@ -178,7 +178,7 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     # Hook entries MERGE across settings levels rather than replacing each
     # other (code.claude.com/docs/en/hooks), so the host's own hooks in
     # settings.json run alongside these; verified against Claude Code 2.1.277.
-    Then the base Dockerfile copies notification-hooks.json to
+    Then Dockerfile.tools copies notification-hooks.json to
       /etc/claude-code/managed-settings.d/10-claude-sandbox.json, mode 0644
     And /etc/claude-code and managed-settings.d are created 0755 by a step of
       their own before that COPY, and the COPY does not use --link
@@ -190,9 +190,10 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     # image smoke build, not by a unit test.
     And notification-hooks.json is a JSON object whose only key is "hooks"
     And notification-hooks.json is a baked source (CS-IMG-004), so editing it
-      rebuilds the base image
-    And every image FROM claude-sandbox — child and cap — inherits the file,
-      so interactive, joined, branched and ralph sessions all get the hooks
+      rebuilds the tools image (and the caps), not the base
+    And the cap copies the file by name from the tools image without --chmod (CS-IMG-024),
+      so every run image — over the base or a child — carries it and
+      interactive, joined, branched and ralph sessions all get the hooks
       with no per-launch file and no claude argv
 
   @new
@@ -515,11 +516,12 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       # docker -e always beats --env-file, so setting the flag would silently
       # override the consumer's env-file value.
 
-  Scenario: CS-LNCH-030 --version reports host, base-image and CLI-image versions
+  Scenario: CS-LNCH-030 --version reports host, tools-image and CLI-image versions
     When "claude-sandbox --version" is run
-    Then it prints the host version (git describe) and the base image's baked revision label
+    Then it prints the host version (git describe) and the tools image's (claude-sandbox-tools)
+      baked revision label (CS-IMG-005)
     And notes a mismatch would auto-rebuild on next launch
-    And prints "(not built yet)" when the base image does not exist
+    And prints "(not built yet)" when the tools image does not exist
     And prints the Claude Code version pinned in the CLI image (claude-sandbox-cli),
       or "(not built yet)" when that image does not exist
 

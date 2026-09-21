@@ -147,6 +147,7 @@ var _ = Describe("image build lifecycle", func() {
 		repo = GinkgoT().TempDir()
 		touchAt(filepath.Join(repo, "Dockerfile"), old)
 		touchAt(filepath.Join(repo, "Dockerfile.cli"), old)
+		touchAt(filepath.Join(repo, "Dockerfile.tools"), old)
 		touchAt(filepath.Join(repo, "cmd", "main.go"), old)
 		touchAt(filepath.Join(repo, "entrypoint.sh"), old)
 
@@ -163,8 +164,7 @@ var _ = Describe("image build lifecycle", func() {
 			rebuilt, err := imagebuild.EnsureBase(o)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(rebuilt).To(BeTrue())
-			Expect(buildLines(fake)).To(ContainElement(
-				"docker build -t claude-sandbox --build-arg CLAUDE_SANDBOX_VERSION=v1.2.3 " + repo))
+			Expect(buildLines(fake)).To(ContainElement("docker build -t claude-sandbox " + repo))
 		})
 
 		It("CS-IMG-002: --rebuild forces a base rebuild with --no-cache", func() {
@@ -173,8 +173,18 @@ var _ = Describe("image build lifecycle", func() {
 			rebuilt, err := imagebuild.EnsureBase(o)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(rebuilt).To(BeTrue())
+			Expect(buildLines(fake)).To(ContainElement("docker build -t claude-sandbox --no-cache " + repo))
+		})
+
+		It("CS-IMG-002: --rebuild forces a tools rebuild with --no-cache", func() {
+			images["claude-sandbox-tools"] = &imgState{created: imgT}
+			o.ForceRebuild = true
+			rebuilt, err := imagebuild.EnsureTools(o)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rebuilt).To(BeTrue())
 			Expect(buildLines(fake)).To(ContainElement(
-				"docker build -t claude-sandbox --build-arg CLAUDE_SANDBOX_VERSION=v1.2.3 --no-cache " + repo))
+				"docker build -t claude-sandbox-tools --build-arg CLAUDE_SANDBOX_VERSION=v1.2.3 --no-cache -f " +
+					filepath.Join(repo, "Dockerfile.tools") + " " + repo))
 		})
 
 		It("CS-IMG-002: --rebuild also rebuilds the CLI image with --no-cache and the cap", func() {
@@ -269,9 +279,10 @@ var _ = Describe("image build lifecycle", func() {
 		})
 
 		It("CS-IMG-020: the base Dockerfile does not install the CLI; Dockerfile.cli does", func() {
-			base := repoFile("Dockerfile")
-			Expect(base).NotTo(ContainSubstring("install.sh"))
-			Expect(base).NotTo(ContainSubstring("claude-version"))
+			for _, name := range []string{"Dockerfile", "Dockerfile.tools"} {
+				Expect(repoFile(name)).NotTo(ContainSubstring("install.sh"), name)
+				Expect(repoFile(name)).NotTo(ContainSubstring("claude-version"), name)
+			}
 			cli := repoFile("Dockerfile.cli")
 			Expect(cli).To(ContainSubstring("https://claude.ai/install.sh"))
 			Expect(cli).To(ContainSubstring("ARG CLAUDE_CODE_VERSION"))
@@ -286,7 +297,7 @@ var _ = Describe("image build lifecycle", func() {
 				"claude-sandbox-npm": true, "claude-sandbox-go-mod": true, "claude-sandbox-go-build": true,
 			}
 			seen := map[string]bool{}
-			for _, name := range []string{"Dockerfile", "Dockerfile.cli"} {
+			for _, name := range []string{"Dockerfile", "Dockerfile.tools", "Dockerfile.cli"} {
 				for _, m := range idRe.FindAllStringSubmatch(repoFile(name), -1) {
 					Expect(allowed).To(HaveKey(m[1]), name+" uses an id outside the shared set")
 					seen[m[1]] = true
@@ -299,6 +310,7 @@ var _ = Describe("image build lifecycle", func() {
 			// docker/dockerfile:1 from Docker Hub (CS-IMG-030).
 			Expect(repoFile("Dockerfile")).NotTo(ContainSubstring("# syntax="))
 			Expect(repoFile("Dockerfile.cli")).NotTo(ContainSubstring("# syntax="))
+			Expect(repoFile("Dockerfile.tools")).NotTo(ContainSubstring("# syntax="))
 			Expect(repoFile(filepath.Join("scaffold", "Dockerfile.example"))).NotTo(ContainSubstring("# syntax="))
 		})
 	})
@@ -308,10 +320,11 @@ var _ = Describe("image build lifecycle", func() {
 	Describe("EnsureCap", func() {
 		BeforeEach(func() {
 			images["claude-sandbox-cli"] = &imgState{created: imgT.Add(-time.Hour)}
+			images["claude-sandbox-tools"] = &imgState{created: imgT.Add(-time.Hour), revision: "v1.2.3-4-gabc1234-dirty"}
 			images["claude-sandbox-proj"] = &imgState{created: imgT.Add(-time.Hour)}
 		})
 
-		It("CS-IMG-024: builds <under>:run from a stdin Dockerfile with two COPY --link lines", func() {
+		It("CS-IMG-024: builds <under>:run from a stdin Dockerfile copying the tools and the CLI", func() {
 			img, built, err := imagebuild.EnsureCap(o, "claude-sandbox-proj")
 			Expect(err).NotTo(HaveOccurred())
 			Expect(built).To(BeTrue())
@@ -319,10 +332,27 @@ var _ = Describe("image build lifecycle", func() {
 			Expect(buildLines(fake)).To(ConsistOf("docker build -t claude-sandbox-proj:run -"))
 			Expect(stdinOf(fake)).To(Equal(
 				"FROM claude-sandbox-proj\n" +
+					"COPY --link --from=claude-sandbox-tools /opt/claude-sandbox/ /opt/claude-sandbox/\n" +
+					"COPY --link --from=claude-sandbox-tools /etc/claude-code/managed-settings.d/10-claude-sandbox.json /etc/claude-code/managed-settings.d/10-claude-sandbox.json\n" +
+					"ENV CLAUDE_SANDBOX_VERSION=v1.2.3-4-gabc1234-dirty\n" +
 					"COPY --link --from=claude-sandbox-cli /home/claude/.local /home/claude/.local\n" +
 					"COPY --link --from=claude-sandbox-cli /opt/claude-sandbox/claude-version /opt/claude-sandbox/claude-version\n"))
 			Expect(stdinOf(fake)).NotTo(ContainSubstring("--chown"))
+			Expect(stdinOf(fake)).NotTo(ContainSubstring("--chmod"), "the managed-settings dirs must stay 0755 (CS-LNCH-068)")
 		})
+
+		DescribeTable("CS-IMG-005: the cap sets CLAUDE_SANDBOX_VERSION from the tools image's revision label",
+			func(label, want string) {
+				images["claude-sandbox-tools"].revision = label
+				_, _, err := imagebuild.EnsureCap(o, "claude-sandbox-proj")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(stdinOf(fake)).To(ContainSubstring("\nENV CLAUDE_SANDBOX_VERSION=" + want + "\n"))
+			},
+			Entry("a git describe stamp", "v2.0.0-1-gdeadbee", "v2.0.0-1-gdeadbee"),
+			Entry("no label", "", "unknown"),
+			Entry("docker's <no value>", "<no value>", "unknown"),
+			Entry("a value unsafe in an ENV line", "v1 && rm -rf /", "unknown"),
+		)
 
 		It("CS-IMG-030: the generated cap Dockerfile carries no # syntax= directive", func() {
 			_, _, err := imagebuild.EnsureCap(o, "claude-sandbox-proj")
@@ -348,6 +378,10 @@ var _ = Describe("image build lifecycle", func() {
 			Entry("the parent image is newer than the cap", func() {
 				images["claude-sandbox-proj:run"] = &imgState{created: imgT}
 				images["claude-sandbox-proj"] = &imgState{created: imgT.Add(time.Minute)}
+			}),
+			Entry("the tools image is newer than the cap", func() {
+				images["claude-sandbox-proj:run"] = &imgState{created: imgT}
+				images["claude-sandbox-tools"] = &imgState{created: imgT.Add(time.Minute)}
 			}),
 			Entry("the CLI image is newer than the cap", func() {
 				images["claude-sandbox-proj:run"] = &imgState{created: imgT}
@@ -479,29 +513,69 @@ var _ = Describe("image build lifecycle", func() {
 			Expect(buildLines(fake)).To(BeEmpty())
 		})
 
-		It("CS-IMG-004: rebuilds when any baked source is newer than the image", func() {
-			images["claude-sandbox"] = &imgState{created: imgT}
+		It("CS-IMG-004: the tools image rebuilds when any baked source is newer than it", func() {
+			images["claude-sandbox-tools"] = &imgState{created: imgT}
 			touchAt(filepath.Join(repo, "cmd", "main.go"), time.Now())
-			rebuilt, err := imagebuild.EnsureBase(o)
+			rebuilt, err := imagebuild.EnsureTools(o)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(rebuilt).To(BeTrue())
 			Expect(out.String()).To(ContainSubstring("Baked sources changed"))
+			Expect(buildLines(fake)).To(ConsistOf(
+				"docker build -t claude-sandbox-tools --build-arg CLAUDE_SANDBOX_VERSION=v1.2.3 -f " +
+					filepath.Join(repo, "Dockerfile.tools") + " " + repo))
 		})
 
-		It("CS-IMG-004: rebuilds when notification-hooks.json (baked as managed settings) is newer", func() {
+		It("CS-IMG-004: the tools image rebuilds when Dockerfile.tools is newer than it", func() {
+			images["claude-sandbox-tools"] = &imgState{created: imgT}
+			touchAt(filepath.Join(repo, "Dockerfile.tools"), time.Now())
+			rebuilt, err := imagebuild.EnsureTools(o)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rebuilt).To(BeTrue())
+		})
+
+		It("CS-IMG-048: a newer baked source does not rebuild the base", func() {
 			images["claude-sandbox"] = &imgState{created: imgT}
-			touchAt(filepath.Join(repo, "notification-hooks.json"), time.Now())
+			for _, rel := range []string{"cmd/main.go", "entrypoint.sh", "notification-hooks.json", "logstream/run-logger.js"} {
+				touchAt(filepath.Join(repo, rel), time.Now())
+			}
 			rebuilt, err := imagebuild.EnsureBase(o)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rebuilt).To(BeFalse())
+			Expect(buildLines(fake)).To(BeEmpty())
+		})
+
+		It("CS-IMG-049: builds the tools image when it is missing, stamped with the version", func() {
+			rebuilt, err := imagebuild.EnsureTools(o)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rebuilt).To(BeTrue())
+			Expect(buildLines(fake)).To(ConsistOf(
+				"docker build -t claude-sandbox-tools --build-arg CLAUDE_SANDBOX_VERSION=v1.2.3 -f " +
+					filepath.Join(repo, "Dockerfile.tools") + " " + repo))
+			Expect(buildEnvOf(fake)[0]).To(ContainElement("DOCKER_BUILDKIT=1"))
+		})
+
+		It("CS-IMG-049: a fresh tools image is not rebuilt", func() {
+			images["claude-sandbox-tools"] = &imgState{created: imgT}
+			rebuilt, err := imagebuild.EnsureTools(o)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rebuilt).To(BeFalse())
+			Expect(buildLines(fake)).To(BeEmpty())
+		})
+
+		It("CS-IMG-004: the tools image rebuilds when notification-hooks.json (baked as managed settings) is newer", func() {
+			images["claude-sandbox-tools"] = &imgState{created: imgT}
+			touchAt(filepath.Join(repo, "notification-hooks.json"), time.Now())
+			rebuilt, err := imagebuild.EnsureTools(o)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(rebuilt).To(BeTrue())
 			Expect(out.String()).To(ContainSubstring("Baked sources changed"))
 		})
 
-		DescribeTable("CS-IMG-004: rebuilds when a source embedded into the binary is newer",
+		DescribeTable("CS-IMG-004: the tools image rebuilds when a source embedded into the binary is newer",
 			func(rel string) {
-				images["claude-sandbox"] = &imgState{created: imgT}
+				images["claude-sandbox-tools"] = &imgState{created: imgT}
 				touchAt(filepath.Join(repo, rel), time.Now())
-				rebuilt, err := imagebuild.EnsureBase(o)
+				rebuilt, err := imagebuild.EnsureTools(o)
 				Expect(err).NotTo(HaveOccurred())
 				Expect(rebuilt).To(BeTrue())
 				Expect(out.String()).To(ContainSubstring("Baked sources changed"))
@@ -514,9 +588,9 @@ var _ = Describe("image build lifecycle", func() {
 
 		DescribeTable("CS-IMG-038: does not rebuild when only build-context debris is newer",
 			func(rel string) {
-				images["claude-sandbox"] = &imgState{created: imgT}
+				images["claude-sandbox-tools"] = &imgState{created: imgT}
 				touchAt(filepath.Join(repo, rel), time.Now())
-				rebuilt, err := imagebuild.EnsureBase(o)
+				rebuilt, err := imagebuild.EnsureTools(o)
 				Expect(err).NotTo(HaveOccurred())
 				Expect(rebuilt).To(BeFalse())
 				Expect(buildLines(fake)).To(BeEmpty())
@@ -529,9 +603,9 @@ var _ = Describe("image build lifecycle", func() {
 		)
 
 		It("CS-IMG-031: does not rebuild when only a Go test file is newer", func() {
-			images["claude-sandbox"] = &imgState{created: imgT}
+			images["claude-sandbox-tools"] = &imgState{created: imgT}
 			touchAt(filepath.Join(repo, "internal", "foo", "foo_test.go"), time.Now())
-			rebuilt, err := imagebuild.EnsureBase(o)
+			rebuilt, err := imagebuild.EnsureTools(o)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(rebuilt).To(BeFalse())
 			Expect(buildLines(fake)).To(BeEmpty())
@@ -562,6 +636,9 @@ var _ = Describe("image build lifecycle", func() {
 		baseStamp := func() string {
 			return stampAfter("claude-sandbox", func() { _, err := imagebuild.EnsureBase(o); Expect(err).NotTo(HaveOccurred()) })
 		}
+		toolsStamp := func() string {
+			return stampAfter("claude-sandbox-tools", func() { _, err := imagebuild.EnsureTools(o); Expect(err).NotTo(HaveOccurred()) })
+		}
 		cliStamp := func() string {
 			return stampAfter("claude-sandbox-cli", func() { _, err := imagebuild.EnsureCLI(o); Expect(err).NotTo(HaveOccurred()) })
 		}
@@ -580,12 +657,15 @@ var _ = Describe("image build lifecycle", func() {
 		parents := func() {
 			images["claude-sandbox"] = &imgState{created: imgT, id: "sha256:base1"}
 			images["claude-sandbox-cli"] = &imgState{created: imgT, id: "sha256:cli1"}
+			images["claude-sandbox-tools"] = &imgState{created: imgT, id: "sha256:tools1", revision: "v1.2.3"}
 			images["claude-sandbox-proj"] = &imgState{created: imgT, id: "sha256:child1"}
 		}
 
-		It("CS-IMG-032: every build of the base, CLI, child and cap carries the build-inputs label", func() {
+		It("CS-IMG-032: every build of the base, tools, CLI, child and cap carries the build-inputs label", func() {
 			parents()
 			Expect(baseStamp()).NotTo(BeEmpty())
+			Expect(toolsStamp()).NotTo(BeEmpty())
+			parents()
 			Expect(cliStamp()).NotTo(BeEmpty())
 			parents()
 			Expect(childStamp()).NotTo(BeEmpty())
@@ -599,11 +679,14 @@ var _ = Describe("image build lifecycle", func() {
 			o.ForceRebuild = true
 			_, err := imagebuild.EnsureBase(o)
 			Expect(err).NotTo(HaveOccurred())
+			_, err = imagebuild.EnsureTools(o)
+			Expect(err).NotTo(HaveOccurred())
 			_, err = imagebuild.EnsureCLI(o)
 			Expect(err).NotTo(HaveOccurred())
 			_, _, err = imagebuild.EnsureCap(o, "claude-sandbox-proj")
 			Expect(err).NotTo(HaveOccurred())
 			Expect(stampOf(fake, "claude-sandbox")).NotTo(BeEmpty())
+			Expect(stampOf(fake, "claude-sandbox-tools")).NotTo(BeEmpty())
 			Expect(stampOf(fake, "claude-sandbox-cli")).NotTo(BeEmpty())
 			Expect(stampOf(fake, "claude-sandbox-proj:run")).NotTo(BeEmpty())
 
@@ -639,10 +722,12 @@ var _ = Describe("image build lifecycle", func() {
 			Expect(stampOf(fake, "claude-sandbox-cli")).NotTo(Equal(fp))
 		})
 
-		It("CS-IMG-033: a labeled base with newer but unchanged sources is not rebuilt", func() {
+		It("CS-IMG-033: labeled base and tools images with newer but unchanged sources are not rebuilt", func() {
 			fp := baseStamp()
 			images["claude-sandbox"] = &imgState{created: imgT, inputs: fp}
-			for _, rel := range []string{"Dockerfile", "cmd/main.go", "entrypoint.sh"} {
+			tfp := toolsStamp()
+			images["claude-sandbox-tools"] = &imgState{created: imgT, inputs: tfp}
+			for _, rel := range []string{"Dockerfile", "Dockerfile.tools", "cmd/main.go", "entrypoint.sh"} {
 				p := filepath.Join(repo, rel)
 				Expect(os.Chtimes(p, time.Now(), time.Now())).To(Succeed())
 			}
@@ -650,13 +735,27 @@ var _ = Describe("image build lifecycle", func() {
 			rebuilt, err := imagebuild.EnsureBase(o)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(rebuilt).To(BeFalse())
+			rebuilt, err = imagebuild.EnsureTools(o)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rebuilt).To(BeFalse())
 			Expect(buildLines(fake)).To(BeEmpty())
 		})
 
-		It("CS-IMG-033: a labeled base rebuilds when a baked source's content changes, saying its inputs changed", func() {
+		It("CS-IMG-033: a labeled tools image rebuilds when a baked source's content changes, saying its inputs changed", func() {
+			fp := toolsStamp()
+			images["claude-sandbox-tools"] = &imgState{created: imgT, inputs: fp}
+			Expect(os.WriteFile(filepath.Join(repo, "cmd", "main.go"), []byte("package main // edited\n"), 0o644)).To(Succeed())
+			fake.Calls = nil
+			rebuilt, err := imagebuild.EnsureTools(o)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rebuilt).To(BeTrue())
+			Expect(out.String()).To(ContainSubstring("Tools image inputs changed"))
+		})
+
+		It("CS-IMG-033: a labeled base rebuilds when its Dockerfile's content changes, saying its inputs changed", func() {
 			fp := baseStamp()
 			images["claude-sandbox"] = &imgState{created: imgT, inputs: fp}
-			Expect(os.WriteFile(filepath.Join(repo, "cmd", "main.go"), []byte("package main // edited\n"), 0o644)).To(Succeed())
+			Expect(os.WriteFile(filepath.Join(repo, "Dockerfile"), []byte("FROM scratch\n"), 0o644)).To(Succeed())
 			fake.Calls = nil
 			rebuilt, err := imagebuild.EnsureBase(o)
 			Expect(err).NotTo(HaveOccurred())
@@ -664,32 +763,79 @@ var _ = Describe("image build lifecycle", func() {
 			Expect(out.String()).To(ContainSubstring("Base image inputs changed"))
 		})
 
-		It("CS-IMG-034: the base fingerprint covers the Dockerfile and baked sources but not _test.go files", func() {
-			touchAt(filepath.Join(repo, "internal", "foo", "foo.go"), old)
-			touchAt(filepath.Join(repo, "mcp", "discord-notify", "index.mjs"), old)
-			a := baseStamp()
-			touchAt(filepath.Join(repo, "internal", "foo", "foo_test.go"), time.Now())
-			Expect(baseStamp()).To(Equal(a), "a test file is not an input")
+		It("CS-IMG-048: the base fingerprint is the Dockerfile alone; baked sources feed only the tools fingerprint", func() {
+			a, t := baseStamp(), toolsStamp()
+			Expect(os.WriteFile(filepath.Join(repo, "cmd", "main.go"), []byte("package main // edited\n"), 0o644)).To(Succeed())
 			touchAt(filepath.Join(repo, "notification-hooks.json"), old)
-			b := baseStamp()
-			Expect(b).NotTo(Equal(a), "a new baked source is an input")
+			Expect(baseStamp()).To(Equal(a), "a baked source is not a base input")
+			Expect(toolsStamp()).NotTo(Equal(t), "it is a tools input")
+			t = toolsStamp()
 			Expect(os.WriteFile(filepath.Join(repo, "Dockerfile"), []byte("FROM scratch\n"), 0o644)).To(Succeed())
-			Expect(baseStamp()).NotTo(Equal(b), "the Dockerfile is an input")
+			Expect(baseStamp()).NotTo(Equal(a), "the Dockerfile is the base input")
+			Expect(toolsStamp()).To(Equal(t), "and not a tools input")
 		})
 
-		It("CS-IMG-004: the sources embedded into the binary are base fingerprint inputs", func() {
+		It("CS-IMG-048: a baked-source commit rebuilds the tools image and the cap, never the base or the child", func() {
+			// Every image labeled with its current fingerprint.
+			bfp, tfp := baseStamp(), toolsStamp()
+			parents()
+			cfp := childStamp()
+			parents()
+			capfp := capStamp()
+			parents()
+			images["claude-sandbox"].inputs = bfp
+			images["claude-sandbox-tools"].inputs = tfp
+			images["claude-sandbox-proj"].inputs = cfp
+			images["claude-sandbox-proj:run"] = &imgState{created: imgT, inputs: capfp}
+
+			Expect(os.WriteFile(filepath.Join(repo, "cmd", "main.go"), []byte("package main // commit\n"), 0o644)).To(Succeed())
+			fake.Calls = nil
+			baseRebuilt, err := imagebuild.EnsureBase(o)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(baseRebuilt).To(BeFalse())
+			toolsRebuilt, err := imagebuild.EnsureTools(o)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(toolsRebuilt).To(BeTrue())
+			images["claude-sandbox-tools"].id = "sha256:tools2" // the build produced a new image
+			parent, childBuilt, err := imagebuild.EnsureChild(o, spec, baseRebuilt, false)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(childBuilt).To(BeFalse())
+			_, capBuilt, err := imagebuild.EnsureCap(o, parent)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(capBuilt).To(BeTrue())
+			var tags []string
+			for _, l := range buildLines(fake) {
+				tags = append(tags, strings.Fields(l)[3])
+			}
+			Expect(tags).To(Equal([]string{"claude-sandbox-tools", "claude-sandbox-proj:run"}))
+		})
+
+		It("CS-IMG-034: the tools fingerprint covers Dockerfile.tools and baked sources but not _test.go files", func() {
+			touchAt(filepath.Join(repo, "internal", "foo", "foo.go"), old)
+			touchAt(filepath.Join(repo, "mcp", "discord-notify", "index.mjs"), old)
+			a := toolsStamp()
+			touchAt(filepath.Join(repo, "internal", "foo", "foo_test.go"), time.Now())
+			Expect(toolsStamp()).To(Equal(a), "a test file is not an input")
+			touchAt(filepath.Join(repo, "notification-hooks.json"), old)
+			b := toolsStamp()
+			Expect(b).NotTo(Equal(a), "a new baked source is an input")
+			Expect(os.WriteFile(filepath.Join(repo, "Dockerfile.tools"), []byte("FROM scratch\n"), 0o644)).To(Succeed())
+			Expect(toolsStamp()).NotTo(Equal(b), "Dockerfile.tools is an input")
+		})
+
+		It("CS-IMG-004: the sources embedded into the binary are tools fingerprint inputs", func() {
 			for _, rel := range []string{"scaffold/config.yaml", "scaffold-ralph/agent/PROMPT.md", "container-context.md", "mcp-servers.json"} {
 				touchAt(filepath.Join(repo, rel), old)
 			}
-			a := baseStamp()
+			a := toolsStamp()
 			for _, rel := range []string{"scaffold/config.yaml", "scaffold-ralph/agent/PROMPT.md", "container-context.md", "mcp-servers.json"} {
 				p := filepath.Join(repo, rel)
 				orig, err := os.ReadFile(p)
 				Expect(err).NotTo(HaveOccurred())
 				Expect(os.WriteFile(p, []byte("edited\n"), 0o644)).To(Succeed())
-				Expect(baseStamp()).NotTo(Equal(a), rel+" is an input")
+				Expect(toolsStamp()).NotTo(Equal(a), rel+" is an input")
 				Expect(os.WriteFile(p, orig, 0o644)).To(Succeed())
-				Expect(baseStamp()).To(Equal(a))
+				Expect(toolsStamp()).To(Equal(a))
 			}
 		})
 
@@ -698,7 +844,7 @@ var _ = Describe("image build lifecycle", func() {
 			touchAt(filepath.Join(repo, "scaffold", "config.yaml"), old)
 			touchAt(filepath.Join(repo, "internal", "foo", "foo.go"), old)
 			touchAt(filepath.Join(repo, "mcp", "discord-notify", "index.mjs"), old)
-			a := baseStamp()
+			a := toolsStamp()
 			for _, rel := range []string{
 				"scaffold-ralph/scripts/backlog/__pycache__/backlog.cpython-311.pyc",
 				"scaffold-ralph/scripts/.pytest_cache/v/cache/nodeids",
@@ -707,22 +853,22 @@ var _ = Describe("image build lifecycle", func() {
 				"scaffold-ralph/agent/.idea/workspace.xml",
 			} {
 				touchAt(filepath.Join(repo, rel), time.Now())
-				Expect(baseStamp()).To(Equal(a), rel+" is not an input")
+				Expect(toolsStamp()).To(Equal(a), rel+" is not an input")
 			}
 			// A dot-entry outside the scaffold trees is in the build context.
 			touchAt(filepath.Join(repo, "mcp", "discord-notify", ".npmrc"), old)
-			Expect(baseStamp()).NotTo(Equal(a))
+			Expect(toolsStamp()).NotTo(Equal(a))
 		})
 
 		It("CS-IMG-034: symlinks count by their target, so directory and dangling links still fingerprint", func() {
 			Expect(os.Symlink("../internal", filepath.Join(repo, "cmd", "dirlink"))).To(Succeed())
 			Expect(os.Symlink("nowhere", filepath.Join(repo, "cmd", "dangling"))).To(Succeed())
-			a := baseStamp()
+			a := toolsStamp()
 			Expect(a).NotTo(BeEmpty())
 			Expect(errw.String()).NotTo(ContainSubstring("could not fingerprint"))
 			Expect(os.Remove(filepath.Join(repo, "cmd", "dangling"))).To(Succeed())
 			Expect(os.Symlink("elsewhere", filepath.Join(repo, "cmd", "dangling"))).To(Succeed())
-			Expect(baseStamp()).NotTo(Equal(a), "a retargeted link is a change")
+			Expect(toolsStamp()).NotTo(Equal(a), "a retargeted link is a change")
 		})
 
 		It("CS-IMG-039: a checkout under umask 002 fingerprints like one under 022", func() {
@@ -735,12 +881,12 @@ var _ = Describe("image build lifecycle", func() {
 				Expect(os.Chmod(filepath.Join(repo, rel), 0o644)).To(Succeed())
 			}
 			Expect(os.Chmod(filepath.Join(repo, "logstream", "run-logger.js"), 0o755)).To(Succeed())
-			a := baseStamp()
+			a := toolsStamp()
 			for _, rel := range files {
 				Expect(os.Chmod(filepath.Join(repo, rel), 0o664)).To(Succeed())
 			}
 			Expect(os.Chmod(filepath.Join(repo, "logstream", "run-logger.js"), 0o775)).To(Succeed())
-			Expect(baseStamp()).To(Equal(a), "group-write is a umask artifact, not an image change")
+			Expect(toolsStamp()).To(Equal(a), "group-write is a umask artifact, not an image change")
 		})
 
 		DescribeTable("CS-IMG-039: an exec-bit change is an input only where COPY preserves the mode",
@@ -748,17 +894,17 @@ var _ = Describe("image build lifecycle", func() {
 				p := filepath.Join(repo, rel)
 				touchAt(p, old)
 				Expect(os.Chmod(p, 0o644)).To(Succeed())
-				a := baseStamp()
+				a := toolsStamp()
 				Expect(os.Chmod(p, 0o755)).To(Succeed())
 				if input {
-					Expect(baseStamp()).NotTo(Equal(a), rel+" keeps its mode in the image")
+					Expect(toolsStamp()).NotTo(Equal(a), rel+" keeps its mode in the image")
 				} else {
-					Expect(baseStamp()).To(Equal(a), rel+" is compiled, embedded or COPY --chmod'd")
+					Expect(toolsStamp()).To(Equal(a), rel+" is compiled, bundled, embedded or COPY --chmod'd")
 				}
 			},
 			Entry("a logstream script", "logstream/run-logger.js", true),
 			Entry("PROMPT_RALPH.md", "PROMPT_RALPH.md", true),
-			Entry("the MCP server source", "mcp/discord-notify/index.mjs", true),
+			Entry("the MCP server source (only its bundle ships)", "mcp/discord-notify/index.mjs", false),
 			Entry("entrypoint.sh (--chmod=755)", "entrypoint.sh", false),
 			Entry("notification-hooks.json (--chmod=644)", "notification-hooks.json", false),
 			Entry("Go source", "cmd/main.go", false),
@@ -768,7 +914,7 @@ var _ = Describe("image build lifecycle", func() {
 		It("CS-IMG-040: a symlinked top-level baked directory is fingerprinted by its in-context target's contents", func() {
 			touchAt(filepath.Join(repo, "logstream", "run-logger.js"), old)
 			Expect(os.Chmod(filepath.Join(repo, "logstream", "run-logger.js"), 0o755)).To(Succeed())
-			a := baseStamp()
+			a := toolsStamp()
 
 			// The same tree, reached through a relative link inside the repo.
 			tgt := filepath.Join(repo, "shared", "logstream")
@@ -776,28 +922,28 @@ var _ = Describe("image build lifecycle", func() {
 			Expect(os.Chmod(filepath.Join(tgt, "run-logger.js"), 0o755)).To(Succeed())
 			Expect(os.RemoveAll(filepath.Join(repo, "logstream"))).To(Succeed())
 			Expect(os.Symlink("shared/logstream", filepath.Join(repo, "logstream"))).To(Succeed())
-			Expect(baseStamp()).To(Equal(a), "COPY bakes the target's contents under the source's name")
+			Expect(toolsStamp()).To(Equal(a), "COPY bakes the target's contents under the source's name")
 			Expect(errw.String()).NotTo(ContainSubstring("could not fingerprint"))
 
 			Expect(os.WriteFile(filepath.Join(tgt, "run-logger.js"), []byte("edited\n"), 0o755)).To(Succeed())
-			b := baseStamp()
+			b := toolsStamp()
 			Expect(b).NotTo(Equal(a), "an edit behind the link is a change")
 			touchAt(filepath.Join(tgt, "added.js"), old)
-			c := baseStamp()
+			c := toolsStamp()
 			Expect(c).NotTo(Equal(b), "a file added behind the link is a change")
 			Expect(os.Chmod(filepath.Join(tgt, "added.js"), 0o755)).To(Succeed())
-			Expect(baseStamp()).NotTo(Equal(c), "the target's exec bits reach the image")
+			Expect(toolsStamp()).NotTo(Equal(c), "the target's exec bits reach the image")
 		})
 
 		It("CS-IMG-040: a symlinked top-level baked file is fingerprinted by its in-context target's content", func() {
 			touchAt(filepath.Join(repo, "PROMPT_RALPH.md"), old)
-			a := baseStamp()
+			a := toolsStamp()
 			touchAt(filepath.Join(repo, "docs", "prompt.md"), old)
 			Expect(os.Remove(filepath.Join(repo, "PROMPT_RALPH.md"))).To(Succeed())
 			Expect(os.Symlink("docs/prompt.md", filepath.Join(repo, "PROMPT_RALPH.md"))).To(Succeed())
-			Expect(baseStamp()).To(Equal(a))
+			Expect(toolsStamp()).To(Equal(a))
 			Expect(os.WriteFile(filepath.Join(repo, "docs", "prompt.md"), []byte("edited\n"), 0o644)).To(Succeed())
-			Expect(baseStamp()).NotTo(Equal(a))
+			Expect(toolsStamp()).NotTo(Equal(a))
 		})
 
 		It("CS-IMG-040: a symlink at a nested COPY source path (mcp/discord-notify) is followed", func() {
@@ -805,18 +951,18 @@ var _ = Describe("image build lifecycle", func() {
 			touchAt(filepath.Join(tgt, "index.mjs"), old)
 			Expect(os.MkdirAll(filepath.Join(repo, "mcp"), 0o755)).To(Succeed())
 			Expect(os.Symlink("../shared/discord-notify", filepath.Join(repo, "mcp", "discord-notify"))).To(Succeed())
-			a := baseStamp()
+			a := toolsStamp()
 			Expect(os.WriteFile(filepath.Join(tgt, "index.mjs"), []byte("edited\n"), 0o644)).To(Succeed())
-			Expect(baseStamp()).NotTo(Equal(a), "an MCP source edit behind the link is a change")
+			Expect(toolsStamp()).NotTo(Equal(a), "an MCP source edit behind the link is a change")
 		})
 
 		It("CS-IMG-040: behind a followed link, .dockerignore debris rules apply to the target's real path", func() {
 			tgt := filepath.Join(repo, "scaffold", "logstream")
 			touchAt(filepath.Join(tgt, "run-logger.js"), old)
 			Expect(os.Symlink("scaffold/logstream", filepath.Join(repo, "logstream"))).To(Succeed())
-			a := baseStamp()
+			a := toolsStamp()
 			touchAt(filepath.Join(tgt, ".DS_Store"), old)
-			Expect(baseStamp()).To(Equal(a), "scaffold/logstream/.DS_Store is outside the build context")
+			Expect(toolsStamp()).To(Equal(a), "scaffold/logstream/.DS_Store is outside the build context")
 		})
 
 		DescribeTable("CS-IMG-040: a symlinked baked source whose target is outside the build context is never walked",
@@ -824,17 +970,17 @@ var _ = Describe("image build lifecycle", func() {
 				ext := GinkgoT().TempDir()
 				touchAt(filepath.Join(ext, "run-logger.js"), old)
 				Expect(os.Symlink(link(ext), filepath.Join(repo, "logstream"))).To(Succeed())
-				a := baseStamp()
+				a := toolsStamp()
 				Expect(a).NotTo(BeEmpty())
 				Expect(errw.String()).NotTo(ContainSubstring("could not fingerprint"))
 				Expect(os.WriteFile(filepath.Join(ext, "run-logger.js"), []byte("edited\n"), 0o644)).To(Succeed())
 				touchAt(filepath.Join(ext, "more", "added.js"), time.Now())
-				Expect(baseStamp()).To(Equal(a), "COPY cannot read it, so its contents are not inputs")
+				Expect(toolsStamp()).To(Equal(a), "COPY cannot read it, so its contents are not inputs")
 
 				// Nor is it a time-rule trigger.
-				images["claude-sandbox"] = &imgState{created: imgT}
+				images["claude-sandbox-tools"] = &imgState{created: imgT}
 				fake.Calls = nil
-				rebuilt, err := imagebuild.EnsureBase(o)
+				rebuilt, err := imagebuild.EnsureTools(o)
 				Expect(err).NotTo(HaveOccurred())
 				Expect(rebuilt).To(BeFalse())
 			},
@@ -851,13 +997,13 @@ var _ = Describe("image build lifecycle", func() {
 			tgt := filepath.Join(repo, "shared", "logstream")
 			touchAt(filepath.Join(tgt, "run-logger.js"), old)
 			Expect(os.Symlink("shared/logstream", filepath.Join(repo, "logstream"))).To(Succeed())
-			images["claude-sandbox"] = &imgState{created: imgT}
+			images["claude-sandbox-tools"] = &imgState{created: imgT}
 			fake.Calls = nil
-			rebuilt, err := imagebuild.EnsureBase(o)
+			rebuilt, err := imagebuild.EnsureTools(o)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(rebuilt).To(BeFalse())
 			touchAt(filepath.Join(tgt, "run-logger.js"), time.Now())
-			rebuilt, err = imagebuild.EnsureBase(o)
+			rebuilt, err = imagebuild.EnsureTools(o)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(rebuilt).To(BeTrue(), "a newer file behind the link is a newer baked source")
 		})
@@ -874,10 +1020,11 @@ var _ = Describe("image build lifecycle", func() {
 			Expect(stampOf(fake, "claude-sandbox-proj")).To(Equal(fp))
 		})
 
-		It("CS-IMG-034: the version stamp is not a base input", func() {
-			a := baseStamp()
+		It("CS-IMG-034: the version stamp is not a base or tools input", func() {
+			a, t := baseStamp(), toolsStamp()
 			o.Version = "v9.9.9-dirty"
 			Expect(baseStamp()).To(Equal(a))
+			Expect(toolsStamp()).To(Equal(t))
 		})
 
 		It("CS-IMG-034: a labeled child rebuilds when the base image ID changes, even if the base is older than the child", func() {
@@ -935,6 +1082,9 @@ var _ = Describe("image build lifecycle", func() {
 			Entry("parent switched to an older-built, different image", func() {
 				images["claude-sandbox-proj"] = &imgState{created: imgT.Add(-time.Hour), id: "sha256:child0"}
 			}, true),
+			Entry("tools image changed", func() {
+				images["claude-sandbox-tools"].id = "sha256:tools2"
+			}, true),
 			Entry("CLI image changed", func() {
 				images["claude-sandbox-cli"].id = "sha256:cli2"
 			}, true),
@@ -964,7 +1114,7 @@ var _ = Describe("image build lifecycle", func() {
 			Expect(stampOf(fake, "claude-sandbox-proj")).To(BeEmpty(), "nothing to stamp without a fingerprint")
 		})
 
-		It("CS-IMG-035: an uncomputable base fingerprint warns and keeps the time rule", func() {
+		It("CS-IMG-035: an uncomputable tools fingerprint warns and keeps the time rule", func() {
 			if os.Geteuid() == 0 {
 				Skip("root reads unreadable directories")
 			}
@@ -972,11 +1122,11 @@ var _ = Describe("image build lifecycle", func() {
 			touchAt(filepath.Join(locked, "x.go"), old)
 			Expect(os.Chmod(locked, 0o000)).To(Succeed())
 			DeferCleanup(func() { os.Chmod(locked, 0o755) })
-			images["claude-sandbox"] = &imgState{created: imgT, inputs: strings.Repeat("0", 64)}
-			rebuilt, err := imagebuild.EnsureBase(o)
+			images["claude-sandbox-tools"] = &imgState{created: imgT, inputs: strings.Repeat("0", 64)}
+			rebuilt, err := imagebuild.EnsureTools(o)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(rebuilt).To(BeFalse(), "nothing is newer than the image by the time rule")
-			Expect(errw.String()).To(ContainSubstring("could not fingerprint the base image inputs"))
+			Expect(errw.String()).To(ContainSubstring("could not fingerprint the tools image inputs"))
 		})
 
 		It("CS-IMG-036: after a cached rebuild that kept Created, the next launch builds nothing", func() {
@@ -984,13 +1134,15 @@ var _ = Describe("image build lifecycle", func() {
 			parents()
 			// The cap predates a parent, so the time rule rebuilds it too.
 			images["claude-sandbox-proj:run"] = &imgState{created: imgT.Add(-time.Minute), id: "sha256:cap1"}
-			for _, rel := range []string{"Dockerfile", "Dockerfile.cli", "cmd/main.go", "entrypoint.sh"} {
+			for _, rel := range []string{"Dockerfile", "Dockerfile.tools", "Dockerfile.cli", "cmd/main.go", "entrypoint.sh"} {
 				Expect(os.Chtimes(filepath.Join(repo, rel), time.Now(), time.Now())).To(Succeed())
 			}
 			Expect(os.Chtimes(spec.Dockerfile, time.Now(), time.Now())).To(Succeed())
 			launch := func() []string {
 				fake.Calls = nil
 				baseRebuilt, err := imagebuild.EnsureBase(o)
+				Expect(err).NotTo(HaveOccurred())
+				_, err = imagebuild.EnsureTools(o)
 				Expect(err).NotTo(HaveOccurred())
 				_, err = imagebuild.EnsureCLI(o)
 				Expect(err).NotTo(HaveOccurred())
@@ -1000,9 +1152,9 @@ var _ = Describe("image build lifecycle", func() {
 				Expect(err).NotTo(HaveOccurred())
 				return buildLines(fake)
 			}
-			Expect(launch()).To(HaveLen(4))
+			Expect(launch()).To(HaveLen(5))
 			// Fully cached: IDs and Created unchanged; only the labels are new.
-			for _, name := range []string{"claude-sandbox", "claude-sandbox-cli", "claude-sandbox-proj", "claude-sandbox-proj:run"} {
+			for _, name := range []string{"claude-sandbox", "claude-sandbox-tools", "claude-sandbox-cli", "claude-sandbox-proj", "claude-sandbox-proj:run"} {
 				images[name].inputs = stampOf(fake, name)
 				Expect(images[name].inputs).NotTo(BeEmpty(), name)
 			}
@@ -1812,22 +1964,29 @@ var _ = Describe("image build lifecycle", func() {
 	// ---- --version report ----
 
 	Describe("PrintVersion", func() {
-		It("CS-LNCH-030: prints \"(not built yet)\" for both images when neither exists", func() {
+		It("CS-LNCH-030: prints \"(not built yet)\" for the tools and CLI images when neither exists", func() {
 			imagebuild.PrintVersion(o)
 			Expect(out.String()).To(ContainSubstring("claude-sandbox v1.2.3"))
 			Expect(strings.Count(out.String(), "(not built yet)")).To(Equal(2))
 		})
 
 		It("CS-LNCH-030: prints host and baked versions and notes a mismatch auto-rebuilds", func() {
-			images["claude-sandbox"] = &imgState{created: imgT, revision: "v0.9.0"}
+			images["claude-sandbox-tools"] = &imgState{created: imgT, revision: "v0.9.0"}
 			imagebuild.PrintVersion(o)
 			Expect(out.String()).To(ContainSubstring("claude-sandbox v1.2.3"))
-			Expect(out.String()).To(ContainSubstring("v0.9.0"))
+			Expect(out.String()).To(ContainSubstring("tools:        v0.9.0  (image claude-sandbox-tools"))
 			Expect(out.String()).To(ContainSubstring("auto-rebuild"))
 		})
 
+		It("CS-LNCH-030: the baked version is read from the tools image, not the base", func() {
+			images["claude-sandbox"] = &imgState{created: imgT, revision: "v0.1.0"}
+			imagebuild.PrintVersion(o)
+			Expect(out.String()).NotTo(ContainSubstring("v0.1.0"))
+			Expect(out.String()).To(ContainSubstring("tools:        (not built yet)"))
+		})
+
 		It("CS-LNCH-030: prints the Claude Code version pinned in the CLI image", func() {
-			images["claude-sandbox"] = &imgState{created: imgT, revision: "v1.2.3"}
+			images["claude-sandbox-tools"] = &imgState{created: imgT, revision: "v1.2.3"}
 			images["claude-sandbox-cli"] = &imgState{created: imgT, claudeVersion: "2.1.247"}
 			imagebuild.PrintVersion(o)
 			Expect(out.String()).To(ContainSubstring("claude:       2.1.247"))
@@ -1835,7 +1994,7 @@ var _ = Describe("image build lifecycle", func() {
 		})
 
 		It("CS-LNCH-030: prints no mismatch note when versions agree", func() {
-			images["claude-sandbox"] = &imgState{created: imgT, revision: "v1.2.3"}
+			images["claude-sandbox-tools"] = &imgState{created: imgT, revision: "v1.2.3"}
 			imagebuild.PrintVersion(o)
 			Expect(out.String()).NotTo(ContainSubstring("auto-rebuild"))
 		})

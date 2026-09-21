@@ -24,16 +24,19 @@ The launcher and the ralph runner are one Go binary (`cmd/claude-sandbox`, packa
 In-container, the same binary is invoked as `ralph` via an argv0 symlink at `/opt/claude-sandbox/bin/ralph`.
 
 Practical consequences:
-- Editing a Go source means the next `claude-sandbox` invocation rebuilds (a few seconds), then also rebuilds the base image (the binary is baked in).
+- Editing a Go source means the next `claude-sandbox` invocation rebuilds (a few seconds), then also rebuilds the `claude-sandbox-tools` image (the binary is baked in there) and each project's one-layer run cap — never the base or child images.
 - `bin/dist/` holds the built binary plus the Go build and module caches, and is gitignored — safe to delete; it just forces a rebuild (and a one-time re-download of dependencies).
 - Dependencies are plain Go modules; nothing is vendored.
 - There is **no external `yq` dependency** — config parsing and cascade merging are native.
 
-### Two-Layer Image System
-1. **Base image** (`claude-sandbox`): OS, build-essential, Node 22, Claude CLI, Docker CLI, Python venv, the sandbox binary (built in a multi-stage `golang` layer)
-2. **Child image** (`claude-sandbox-{project-slug}`): Project-specific tools via `.claude-sandbox/Dockerfile` extending `FROM claude-sandbox`
+### Layered Image System
+1. **Base image** (`claude-sandbox`): OS, build-essential, Node 22, Docker CLI, Python venv — no Claude CLI and no sandbox files; rebuilds only when `Dockerfile` changes
+2. **Child image** (`claude-sandbox-df-…`): Project-specific tools via `.claude-sandbox/Dockerfile` extending `FROM claude-sandbox`
+3. **Tools image** (`claude-sandbox-tools`, `Dockerfile.tools`): the sandbox binary (+ `ralph` link), `entrypoint.sh`, `logstream/`, `PROMPT_RALPH.md`, the Discord MCP bundle, the managed-settings hooks, the version stamp
+4. **CLI image** (`claude-sandbox-cli`, `Dockerfile.cli`): Claude Code, pinned to a version
+5. **Run cap** (`<base-or-child>:run`): a generated one-layer image copying the tools and the CLI onto the base or child — what the container runs
 
-The launcher auto-builds both layers. Base rebuilds trigger child rebuilds. The base also rebuilds when any baked source (`cmd/`, `internal/`, `go.mod`/`go.sum`, `assets.go`, `logstream/`, `entrypoint.sh`, `PROMPT_RALPH.md`, `mcp/`) is newer than the image.
+The launcher auto-builds all of them. Base rebuilds trigger child rebuilds. A commit to a baked source (`cmd/`, `internal/`, `go.mod`/`go.sum`, `assets.go`, `logstream/`, `entrypoint.sh`, `PROMPT_RALPH.md`, `mcp/`, …) rebuilds only the tools image and the caps. A child Dockerfile's `RUN` steps cannot call `claude`, `claude-sandbox` or `ralph`: they arrive with the cap.
 
 ### Home Directory Convention
 The base image provides `/home/claude` as the build-time home directory. Child Dockerfiles should always use `/home/claude` for any paths under the home dir — never hardcode a host-specific path like `/home/yourname`.
@@ -237,8 +240,9 @@ All paths are in the claude-sandbox repo.
 | `scripts/check-spec-coverage.sh` | CI check: every scenario ID must appear in a `*_test.go` |
 | `entrypoint.sh` | Container entrypoint (UID/GID remapping) — still bash, deliberately |
 | `logstream/*.js` | Ralph NDJSON pipeline stages — still Node, deliberately |
-| `Dockerfile` | Base image (multi-stage: builds the Go binary, then the runtime image) |
-| `notification-hooks.json` | Notification hooks, baked into the base image as a managed-settings drop-in (`/etc/claude-code/managed-settings.d/`); the host `settings.json` is live, not shadowed |
+| `Dockerfile` | Base image (OS packages and toolchains only; COPYs nothing from the repo) |
+| `Dockerfile.tools` | Tools image (multi-stage: builds the Go binary and the MCP bundle, then lays out `/opt/claude-sandbox`) |
+| `notification-hooks.json` | Notification hooks, baked into the tools image as a managed-settings drop-in (`/etc/claude-code/managed-settings.d/`); the host `settings.json` is live, not shadowed |
 | `container-context.md` | Injected into container's CLAUDE.md |
 | `scaffold/` | Base bootstrap seed for `init` (sparse config.yaml, env, Dockerfile.example) — embedded in the binary |
 | `scaffold-ralph/` | Ralph scaffolding seed for `init-ralph` (agent/ docs, scripts/ backlog tool) — embedded |

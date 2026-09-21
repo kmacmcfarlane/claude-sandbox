@@ -1,13 +1,15 @@
 // Package imagebuild manages the layered image lifecycle: base image staleness
-// + rebuild, the Claude Code CLI image and its update check, child Dockerfile
-// resolution + build, and the generated run image ("cap") that copies the CLI
-// onto the base or child. Spec: spec/image-build.feature (CS-IMG).
+// + rebuild, the sandbox tools image, the Claude Code CLI image and its update
+// check, child Dockerfile resolution + build, and the generated run image
+// ("cap") that copies the tools and the CLI onto the base or child. Spec:
+// spec/image-build.feature (CS-IMG).
 //
-// The CLI is deliberately kept out of the base and the children. Installed
-// mid-Dockerfile, every update invalidated the base from that layer down and
-// — because each child's FROM ID changed — rebuilt every child cold. Now an
-// update rebuilds one small image (claude-sandbox-cli) and a one-layer cap per
-// project; the base and children are untouched.
+// The CLI and the sandbox's own files are deliberately kept out of the base
+// and the children. Installed mid-Dockerfile, every update (or every commit to
+// a baked source) invalidated the base from that layer down and — because each
+// child's FROM ID changed — rebuilt every child cold. Now either rebuilds one
+// small image (claude-sandbox-cli or claude-sandbox-tools) and a one-layer cap
+// per project; the base and children are untouched.
 package imagebuild
 
 import (
@@ -46,6 +48,19 @@ const (
 	// CLIVersionFile is copied into the cap so the version is discoverable
 	// in-container as well.
 	CLIVersionFile = "/opt/claude-sandbox/claude-version"
+
+	// ToolsImageName holds the sandbox's own files — binary, entrypoint,
+	// logstream, PROMPT_RALPH.md, the Discord MCP bundle, the managed-settings
+	// hooks and the version stamp (CS-IMG-048/049). Built from ToolsDockerfile.
+	ToolsImageName  = "claude-sandbox-tools"
+	ToolsDockerfile = "Dockerfile.tools"
+
+	// RevisionLabel carries the version stamp (CS-IMG-005) on the tools image.
+	RevisionLabel = "org.opencontainers.image.revision"
+
+	// ManagedSettingsFile is the notification-hooks drop-in the cap copies
+	// from the tools image (CS-LNCH-068).
+	ManagedSettingsFile = "/etc/claude-code/managed-settings.d/10-claude-sandbox.json"
 
 	// CapTag suffixes the parent image name to form the run image (CS-IMG-024).
 	CapTag = "run"
@@ -98,10 +113,10 @@ type Options struct {
 	Self string
 }
 
-// BakedSources are the paths (relative to RepoRoot) the base Dockerfile COPYs
-// from the build context: their contents are the base fingerprint (CS-IMG-034)
+// BakedSources are the paths (relative to RepoRoot) Dockerfile.tools COPYs
+// from the build context: their contents are the tools fingerprint (CS-IMG-034)
 // and, for an unlabeled image, their mtimes trigger a rebuild (CS-IMG-004). A
-// test parses the Dockerfile so a new COPY cannot be left out (CS-IMG-037),
+// test parses Dockerfile.tools so a new COPY cannot be left out (CS-IMG-037),
 // and so each entry is exactly a COPY source path: that is the level at which
 // BuildKit follows a symlinked source, and so does bakedRoot (CS-IMG-040).
 var BakedSources = []string{
@@ -112,11 +127,11 @@ var BakedSources = []string{
 }
 
 // ModeBakedSources are the baked sources whose permission bits reach the
-// image: the final stage of the base Dockerfile COPYs them from the build
-// context without --chmod (CS-IMG-039). Every other baked source is compiled
-// or embedded into the binary, or COPYed with --chmod. A test parses the
-// Dockerfile so this cannot drift from it.
-var ModeBakedSources = []string{"logstream", "PROMPT_RALPH.md", "mcp/discord-notify"}
+// image: the final stage of Dockerfile.tools COPYs them from the build context
+// without --chmod (CS-IMG-039). Every other baked source is compiled, bundled
+// or embedded into the binary, or COPYed with --chmod. A test parses
+// Dockerfile.tools so this cannot drift from it.
+var ModeBakedSources = []string{"logstream", "PROMPT_RALPH.md"}
 
 // keepsMode reports whether a repo-relative, slash-separated baked path is
 // under ModeBakedSources.
@@ -200,14 +215,12 @@ func Version(r execx.Runner, repoRoot string) string {
 	return strings.TrimSpace(out)
 }
 
-// EnsureBase builds the base image when missing or stale.
+// EnsureBase builds the base image when missing or stale. Its only input is
+// the repo Dockerfile (CS-IMG-048): the baked sources belong to the tools
+// image, so a commit to them never changes the base's ID or its children.
 // Returns whether a build happened.
 func EnsureBase(o Options) (rebuilt bool, err error) {
-	fp, unreadable := baseInputs(o.RepoRoot)
-	if unreadable {
-		fmt.Fprintln(o.Err, "WARNING: could not fingerprint the base image inputs (an unreadable file under the baked sources?);")
-		fmt.Fprintln(o.Err, "  falling back to comparing mtimes with the image creation time (CS-IMG-035).")
-	}
+	fp := baseInputs(o.RepoRoot)
 	need := false
 	switch {
 	case o.ForceRebuild:
@@ -222,13 +235,56 @@ func EnsureBase(o Options) (rebuilt bool, err error) {
 			need = stale
 			break
 		}
-		// Unlabeled image: the time-based rule (CS-IMG-003/004, CS-IMG-035).
+		// Unlabeled image: the time-based rule (CS-IMG-003, CS-IMG-035).
 		created := imageCreated(o.Runner, BaseImageName)
+		if !created.IsZero() && mtimeAfter(filepath.Join(o.RepoRoot, "Dockerfile"), created) {
+			need = true
+		}
+	}
+	if !need {
+		return false, nil
+	}
+	fmt.Fprintf(o.Out, "Building %s base image...\n", BaseImageName)
+	args := append([]string{"build", "-t", BaseImageName}, labelArgs(fp)...)
+	if o.ForceRebuild {
+		args = append(args, "--no-cache")
+	}
+	args = append(args, o.RepoRoot)
+	err = o.Runner.Run(execx.Cmd{Name: "docker", Args: args, Env: buildEnv, Stdout: o.Out, Stderr: o.Err})
+	return true, err
+}
+
+// EnsureTools builds the sandbox tools image when missing or stale
+// (CS-IMG-004, CS-IMG-049): its inputs are Dockerfile.tools and the baked
+// sources, and it carries the version stamp (CS-IMG-005). Returns whether a
+// build happened.
+func EnsureTools(o Options) (rebuilt bool, err error) {
+	fp, unreadable := toolsInputs(o.RepoRoot)
+	if unreadable {
+		fmt.Fprintln(o.Err, "WARNING: could not fingerprint the tools image inputs (an unreadable file under the baked sources?);")
+		fmt.Fprintln(o.Err, "  falling back to comparing mtimes with the image creation time (CS-IMG-035).")
+	}
+	need := false
+	switch {
+	case o.ForceRebuild:
+		need = true
+	case !imageExists(o.Runner, ToolsImageName):
+		need = true
+	default:
+		if labeled, stale := labelVerdict(o.Runner, ToolsImageName, fp); labeled {
+			if stale {
+				fmt.Fprintln(o.Out, "Tools image inputs changed since last build — rebuilding tools image.")
+			}
+			need = stale
+			break
+		}
+		// Unlabeled image: the time-based rule (CS-IMG-004, CS-IMG-035).
+		created := imageCreated(o.Runner, ToolsImageName)
 		if !created.IsZero() {
-			if mtimeAfter(filepath.Join(o.RepoRoot, "Dockerfile"), created) {
+			if mtimeAfter(filepath.Join(o.RepoRoot, ToolsDockerfile), created) {
 				need = true
 			} else if anyNewer(o.RepoRoot, BakedSources, created) {
-				fmt.Fprintln(o.Out, "Baked sources changed since last build — rebuilding base image.")
+				fmt.Fprintln(o.Out, "Baked sources changed since last build — rebuilding tools image.")
 				need = true
 			}
 		}
@@ -236,13 +292,13 @@ func EnsureBase(o Options) (rebuilt bool, err error) {
 	if !need {
 		return false, nil
 	}
-	fmt.Fprintf(o.Out, "Building %s base image (%s)...\n", BaseImageName, o.Version)
-	args := append([]string{"build", "-t", BaseImageName}, labelArgs(fp)...)
+	fmt.Fprintf(o.Out, "Building %s image (%s)...\n", ToolsImageName, o.Version)
+	args := append([]string{"build", "-t", ToolsImageName}, labelArgs(fp)...)
 	args = append(args, "--build-arg", "CLAUDE_SANDBOX_VERSION="+o.Version)
 	if o.ForceRebuild {
 		args = append(args, "--no-cache")
 	}
-	args = append(args, o.RepoRoot)
+	args = append(args, "-f", filepath.Join(o.RepoRoot, ToolsDockerfile), o.RepoRoot)
 	err = o.Runner.Run(execx.Cmd{Name: "docker", Args: args, Env: buildEnv, Stdout: o.Out, Stderr: o.Err})
 	return true, err
 }
@@ -336,6 +392,20 @@ func pinnedClaudeVersion(o Options) string {
 	return semverRe.FindString(file)
 }
 
+// versionRe is what the cap accepts as a version stamp: git describe output
+// (tags, hashes, "-dirty"). Anything else would not be a safe ENV value.
+var versionRe = regexp.MustCompile(`^[A-Za-z0-9._+-]+$`)
+
+// toolsVersion is the version stamp baked into the tools image (its revision
+// label), or "unknown" (CS-IMG-005).
+func toolsVersion(r execx.Runner) string {
+	v := imageLabel(r, ToolsImageName, RevisionLabel)
+	if !versionRe.MatchString(v) {
+		return "unknown"
+	}
+	return v
+}
+
 // CapImageName is the run image for a base or child image (CS-IMG-024).
 // Resolved in one place so the launch and the attach/join fingerprint cannot
 // disagree about which image a container runs (CS-SESS-038).
@@ -344,16 +414,25 @@ func CapImageName(under string) string {
 }
 
 // capDockerfile is the generated Dockerfile fed to docker on stdin. COPY --link
-// makes the layer independent of the parent's content; no --chown because the
+// makes each layer independent of the parent's content; no --chown because the
 // CLI image installs as uid 1000 and --link preserves it (a named --chown for
 // a user absent from the parent would silently yield root).
+//
+// The tools directory is copied whole so bin/ralph stays a symlink and the
+// directory merges with the base's /opt/claude-sandbox/venv; the managed
+// settings file is copied by name without --chmod, so the directories the
+// link layer creates are 0755 and the file keeps its 0644 (CS-LNCH-068). An
+// ENV cannot ride a COPY, so the version stamp is set here (CS-IMG-005).
 //
 // Deliberately no "# syntax=docker/dockerfile:1" line: that directive makes
 // BuildKit resolve the frontend image from Docker Hub on every build, so an
 // unreachable registry fails the build before line 2. The daemon's built-in
 // frontend already supports --link and cache mounts.
-func capDockerfile(under string) string {
+func capDockerfile(under, version string) string {
 	return "FROM " + under + "\n" +
+		"COPY --link --from=" + ToolsImageName + " /opt/claude-sandbox/ /opt/claude-sandbox/\n" +
+		"COPY --link --from=" + ToolsImageName + " " + ManagedSettingsFile + " " + ManagedSettingsFile + "\n" +
+		"ENV CLAUDE_SANDBOX_VERSION=" + version + "\n" +
 		"COPY --link --from=" + CLIImageName + " /home/claude/.local /home/claude/.local\n" +
 		"COPY --link --from=" + CLIImageName + " " + CLIVersionFile + " " + CLIVersionFile + "\n"
 }
@@ -367,7 +446,8 @@ func EnsureCap(o Options, under string) (image string, built bool, err error) {
 	// leaves a cap whose label names the old CLI ID while it holds the new
 	// content. The next launch sees a mismatch and rebuilds the cap once:
 	// one wasted cap build, never a stale cap kept.
-	fp := capInputs(under, ImageID(o.Runner, under), ImageID(o.Runner, CLIImageName))
+	version := toolsVersion(o.Runner)
+	fp := capInputs(under, version, ImageID(o.Runner, under), ImageID(o.Runner, ToolsImageName), ImageID(o.Runner, CLIImageName))
 	need := false
 	switch {
 	case o.ForceRebuild:
@@ -384,21 +464,22 @@ func EnsureCap(o Options, under string) (image string, built bool, err error) {
 			need = true
 			break
 		}
-		if u := imageCreated(o.Runner, under); !u.IsZero() && u.After(capCreated) {
-			need = true
-		} else if c := imageCreated(o.Runner, CLIImageName); !c.IsZero() && c.After(capCreated) {
-			need = true
+		for _, parent := range []string{under, ToolsImageName, CLIImageName} {
+			if t := imageCreated(o.Runner, parent); !t.IsZero() && t.After(capCreated) {
+				need = true
+				break
+			}
 		}
 	}
 	if !need {
 		return cap, false, nil
 	}
-	fmt.Fprintf(o.Out, "Building %s run image (%s + Claude Code)...\n", cap, under)
+	fmt.Fprintf(o.Out, "Building %s run image (%s + sandbox tools + Claude Code)...\n", cap, under)
 	err = o.Runner.Run(execx.Cmd{
 		Name:   "docker",
 		Args:   append(append([]string{"build", "-t", cap}, labelArgs(fp)...), "-"),
 		Env:    buildEnv,
-		Stdin:  strings.NewReader(capDockerfile(under)),
+		Stdin:  strings.NewReader(capDockerfile(under, version)),
 		Stdout: o.Out, Stderr: o.Err,
 	})
 	if err != nil {
@@ -579,19 +660,15 @@ func EnsureChild(o Options, spec ChildSpec, baseRebuilt bool, baseOnly bool) (im
 // PrintVersion implements --version (CS-LNCH-030).
 func PrintVersion(o Options) {
 	fmt.Fprintf(o.Out, "claude-sandbox %s  (host: %s)\n", o.Version, o.RepoRoot)
-	if !imageExists(o.Runner, BaseImageName) {
-		fmt.Fprintln(o.Out, "  image:        (not built yet)")
+	// The version stamp lives in the tools image since CS-IMG-048/049.
+	if !imageExists(o.Runner, ToolsImageName) {
+		fmt.Fprintln(o.Out, "  tools:        (not built yet)")
 	} else {
-		baked, _ := o.Runner.Output(execx.Cmd{
-			Name:   "docker",
-			Args:   []string{"image", "inspect", "-f", `{{ index .Config.Labels "org.opencontainers.image.revision" }}`, BaseImageName},
-			Stderr: io.Discard,
-		})
-		baked = strings.TrimSpace(baked)
+		baked := imageLabel(o.Runner, ToolsImageName, RevisionLabel)
 		if baked == "" {
 			baked = "unknown"
 		}
-		fmt.Fprintf(o.Out, "  image:        %s  (built %s)\n", baked, createdDate(o, BaseImageName))
+		fmt.Fprintf(o.Out, "  tools:        %s  (image %s, built %s)\n", baked, ToolsImageName, createdDate(o, ToolsImageName))
 		if baked != "unknown" && baked != o.Version {
 			fmt.Fprintln(o.Out, "  note: image differs from host scripts — it will auto-rebuild on next launch (or run --rebuild).")
 		}
@@ -990,13 +1067,23 @@ func (f fingerprint) addSource(name, path string, keepMode bool) bool {
 	return true
 }
 
-// baseInputs fingerprints the repo Dockerfile and the baked source set, with
+// baseInputs fingerprints the repo Dockerfile, the base's only input
+// (CS-IMG-048). "" when it cannot be read; the build itself will say why.
+func baseInputs(repoRoot string) string {
+	f, sum := newFingerprint("base")
+	if !f.addFile("Dockerfile", filepath.Join(repoRoot, "Dockerfile")) {
+		return ""
+	}
+	return sum()
+}
+
+// toolsInputs fingerprints Dockerfile.tools and the baked source set, with
 // the same exclusions as the time-based rule (bakedSkip; CS-IMG-034/038). unreadable
 // reports a baked source that exists but could not be read — the case worth a
 // warning; a missing Dockerfile needs none, the build itself will say so.
-func baseInputs(repoRoot string) (fp string, unreadable bool) {
-	f, sum := newFingerprint("base")
-	if !f.addFile("Dockerfile", filepath.Join(repoRoot, "Dockerfile")) {
+func toolsInputs(repoRoot string) (fp string, unreadable bool) {
+	f, sum := newFingerprint("tools")
+	if !f.addFile(ToolsDockerfile, filepath.Join(repoRoot, ToolsDockerfile)) {
 		return "", false
 	}
 	for _, rel := range BakedSources {
@@ -1077,14 +1164,16 @@ func childInputs(spec ChildSpec, baseID string) string {
 	return sum()
 }
 
-// capInputs fingerprints the generated cap Dockerfile and both parents' IDs.
-func capInputs(under, underID, cliID string) string {
-	if underID == "" || cliID == "" {
+// capInputs fingerprints the generated cap Dockerfile and the IDs of the
+// three images it is built from.
+func capInputs(under, version, underID, toolsID, cliID string) string {
+	if underID == "" || toolsID == "" || cliID == "" {
 		return ""
 	}
 	f, sum := newFingerprint("cap")
-	f.add(capDockerfile(under))
+	f.add(capDockerfile(under, version))
 	f.add(underID)
+	f.add(toolsID)
 	f.add(cliID)
 	return sum()
 }

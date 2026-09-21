@@ -17,11 +17,15 @@
 #     image is portable across host users.
 #   - End with "USER root" so the entrypoint has the privileges it needs.
 #
-# THE CLAUDE CLI IS NOT HERE AT BUILD TIME:
-#   The base image does not contain Claude Code; the launcher copies it onto
-#   this image at launch (a one-layer "cap" tagged <this-image>:run). A RUN
-#   step that invokes `claude` will fail. Anything needing the CLI (plugin
-#   registration, `setup-lsp-plugins`) belongs at runtime.
+# THE CLAUDE CLI AND THE SANDBOX TOOLS ARE NOT HERE AT BUILD TIME:
+#   The base image contains neither Claude Code nor the sandbox's own files
+#   (/opt/claude-sandbox/bin — claude-sandbox, ralph, entrypoint.sh —
+#   logstream/, the Discord MCP bundle, the managed-settings hooks). The
+#   launcher copies them onto this image at launch, from the claude-sandbox-cli
+#   and claude-sandbox-tools images (a one-layer "cap" tagged <this-image>:run).
+#   A RUN step that invokes `claude`, `claude-sandbox` or `ralph` will fail.
+#   Anything needing them (plugin registration, `setup-lsp-plugins`) belongs at
+#   runtime. This is also why a sandbox update never rebuilds this image.
 #
 # CACHE MOUNTS — share the base image's download caches:
 #   The base declares BuildKit cache mounts with fixed ids. Reuse the same ids

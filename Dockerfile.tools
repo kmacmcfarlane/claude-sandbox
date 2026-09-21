@@ -1,0 +1,85 @@
+# Sandbox tools image (claude-sandbox-tools).
+#
+# Everything the sandbox itself contributes to a container, and nothing else:
+# the Go binary (launcher, in-container ralph runner, pidslot helper), its
+# ralph symlink, the entrypoint, logstream/, PROMPT_RALPH.md, the bundled
+# Discord MCP server, the managed-settings notification hooks and the version
+# stamp. It is never run. At launch the generated one-layer "cap" copies
+# /opt/claude-sandbox/ and the managed-settings drop-in from here onto the base
+# or child image the project runs (spec/image-build.feature, CS-IMG-024,
+# CS-IMG-048/049), exactly as it copies the CLI from claude-sandbox-cli.
+#
+# Why a separate image: these files change with every commit, the base's OS
+# layers do not. Baked into the base, each commit changed the base's ID and so
+# re-ran every child Dockerfile's RUN layers. Now a commit rebuilds this image
+# and one single-layer cap per project; the base and children stay put.
+#
+# Every COPY from the build context below is a baked source
+# (imagebuild.BakedSources; a test parses this file, CS-IMG-037).
+
+# Build the claude-sandbox Go binary (launcher + in-container ralph runner).
+FROM golang:1.25-bookworm AS builder
+WORKDIR /src
+# Dependencies first, in their own layer: this only re-downloads when go.mod or
+# go.sum changes, not on every source edit — and the module cache mount means
+# even that re-download is served from disk.
+COPY go.mod go.sum ./
+RUN --mount=type=cache,id=claude-sandbox-go-mod,target=/go/pkg/mod \
+    go mod download
+COPY assets.go ./
+COPY cmd/ cmd/
+COPY internal/ internal/
+COPY scaffold/ scaffold/
+COPY scaffold-ralph/ scaffold-ralph/
+COPY container-context.md mcp-servers.json PROMPT_RALPH.md ./
+RUN --mount=type=cache,id=claude-sandbox-go-mod,target=/go/pkg/mod \
+    --mount=type=cache,id=claude-sandbox-go-build,target=/root/.cache/go-build \
+    CGO_ENABLED=0 go build -o /out/claude-sandbox ./cmd/claude-sandbox
+
+# Bundle the Discord notification MCP server. Only the bundle ships
+# (mcp-servers.json runs dist/index.mjs with the base's Node 22); the sources
+# and node_modules stay in this stage.
+FROM node:22-bookworm-slim AS mcp
+WORKDIR /src
+COPY mcp/discord-notify/ ./
+RUN --mount=type=cache,id=claude-sandbox-npm,target=/root/.npm \
+    npm install --production=false \
+    && npx esbuild index.mjs --bundle --platform=node --format=esm --outfile=dist/index.mjs
+
+FROM debian:bookworm-slim
+
+RUN install -d -m 0755 /opt/claude-sandbox /opt/claude-sandbox/bin /opt/claude-sandbox/mcp/discord-notify/dist
+
+# COPY --link makes each layer independent of what came before, so a change
+# above does not force these to be re-copied.
+COPY --link --chmod=755 entrypoint.sh /opt/claude-sandbox/bin/entrypoint.sh
+
+# The Go binary serves as both the launcher and (via argv0) the ralph runner.
+# The cap copies /opt/claude-sandbox/ as a directory, so the link stays a link.
+COPY --link --chmod=755 --from=builder /out/claude-sandbox /opt/claude-sandbox/bin/claude-sandbox
+RUN ln -s /opt/claude-sandbox/bin/claude-sandbox /opt/claude-sandbox/bin/ralph
+COPY --link logstream/ /opt/claude-sandbox/logstream/
+COPY --link PROMPT_RALPH.md /opt/claude-sandbox/PROMPT_RALPH.md
+COPY --link --from=mcp /src/dist/index.mjs /opt/claude-sandbox/mcp/discord-notify/dist/index.mjs
+
+# Notification hooks as Claude Code MANAGED settings (CS-LNCH-068). Claude Code
+# reads /etc/claude-code/managed-settings.json plus every *.json in
+# managed-settings.d/ on Linux, and hook entries merge across settings levels,
+# so these run ALONGSIDE the host's own hooks in ~/.claude/settings.json —
+# which is live in the container, not shadowed (CS-LNCH-011). A drop-in rather
+# than managed-settings.json so a child image can ship its own policy file.
+# The directories get their own step, and the COPY has no --link: with --link,
+# --chmod=644 is applied to the parent dirs it creates as well, leaving them
+# untraversable by the non-root session user (Claude Code then cannot read
+# the policy; per its docs a claude.ai-authenticated session then exits).
+# The cap copies the file by name without --chmod, which keeps its 0644.
+RUN install -d -m 0755 /etc/claude-code /etc/claude-code/managed-settings.d
+COPY --chmod=644 notification-hooks.json /etc/claude-code/managed-settings.d/10-claude-sandbox.json
+
+# Stamp the claude-sandbox version (git describe, passed by the launcher) so it
+# is discoverable in-container (the version file; the cap turns the label into
+# $CLAUDE_SANDBOX_VERSION, CS-IMG-005) and on the host (image label). Placed
+# last so a changed version only rebuilds this layer.
+ARG CLAUDE_SANDBOX_VERSION=unknown
+RUN echo "$CLAUDE_SANDBOX_VERSION" > /opt/claude-sandbox/version
+LABEL org.opencontainers.image.revision=$CLAUDE_SANDBOX_VERSION
