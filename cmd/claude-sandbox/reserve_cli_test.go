@@ -186,7 +186,7 @@ var _ = Describe("launch reservation (CS-SESS-048..054, CS-LNCH-057)", func() {
 		h := newCLIFixture()
 		h.fake.On("docker ps", strings.Replace(row, f.proj, h.proj, 1)+"\n", nil)
 		Expect(h.run("sessions")).To(Equal(0))
-		Expect(h.out.String()).To(ContainSubstring("No running sandbox sessions for this project"))
+		Expect(h.out.String()).To(ContainSubstring("No sandbox sessions for this project"))
 	})
 
 	It("CS-SESS-052: stale reservations anywhere on the host are removed under the lock; young ones are left", func() {

@@ -177,12 +177,14 @@ claude-sandbox sessions --json
 ```
 
 ```
-INSTANCE  NAME                                            MODE    UP      SESSIONS
-otter     claude-sandbox-kmacmcfarlane-myproj-1de77a-otter  claude  2h14m   1
-heron     claude-sandbox-kmacmcfarlane-myproj-1de77a-heron  claude  11m     2
+INSTANCE  WORKTREE  NAME                                              MODE    STATE    UP     SESSIONS
+otter     -         claude-sandbox-kmacmcfarlane-myproj-1de77a-otter  claude  running  2h14m  1
+heron     -         claude-sandbox-kmacmcfarlane-myproj-1de77a-heron  claude  running  11m    2
 ```
 
 Each session gets a short **instance noun** (`otter`, `heron`) so it can be named by hand. `SESSIONS` counts the claude processes inside a container, so joined sessions are visible too. A container another launch has reserved but not yet started (see [Launch reservation](#launch-reservation)) is not listed: there is nothing in it to attach to yet. A container started by `claude-sandbox headless` is listed with `headless` in the `MODE` column, but it is never offered to `--attach`, `--join` or the launch-time prompt, and on its own it never triggers that prompt: its stdio is an SDK client's JSON stream ([Headless mode](#headless-mode-paseo-and-other-sdk-clients)).
+
+`STATE` is docker's container state (`running`, `paused`, `exited`, `restarting`); `--json` carries it as `"state"`, plus `"keep"` for a kept container. An ordinary session's container is created `--rm`, so it disappears when it stops and is only ever listed while it runs. A **kept** container — one carrying the `claude-sandbox.keep` label, which records its restart policy — outlives its claude process, so it is also listed while `exited` or `restarting`, with `-` under `UP` and a count of 0 (no `docker top` runs for a container that is not running). It keeps its instance noun and pid class for as long as it exists, so no new launch is handed either, but it is not offered to `--attach`, `--join` or the launch-time prompt and never triggers that prompt on its own: nothing runs in it to attach to. An exited container without the label is never listed. A launcher binary older than this change does not see exited kept containers and can re-issue one's pid class; upgrade every launcher on the host.
 
 A container in which the OOM killer has killed a process shows `(OOM)` after its `SESSIONS` count (and `"oomKilled": true` in `--json`), with a legend under the table. Docker keeps that flag for as long as the container runs, so it surfaces a kill nobody was attached to see: a detached primary, or a joined session. `--attach` and `--join` (and the `[a]`/`[j]` choices) print one note first, e.g. `Note: an earlier process in this container (session 'otter') was killed by the OOM killer; memoryLimit: 16g (from /ws/.claude-sandbox/config.yaml).` — the limit comes from the container's create-time labels, and reads `not recorded on this container` for one started by an older launcher. The note never prompts. The marker costs one batched `docker inspect` across the listed containers; if it fails, the listing is shown unmarked.
 

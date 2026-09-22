@@ -36,7 +36,7 @@ func newSessionsCmd(env *Env) *cobra.Command {
 	var all, asJSON bool
 	cmd := &cobra.Command{
 		Use:           "sessions",
-		Short:         "List running sandbox sessions",
+		Short:         "List sandbox sessions",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -66,11 +66,13 @@ func newSessionsCmd(env *Env) *cobra.Command {
 				fmt.Fprintln(env.Out, string(b))
 				return nil
 			}
+			// "sandbox sessions", not "running": an exited kept container is
+			// listed too (CS-SESS-013, CS-SESS-070).
 			if len(found) == 0 {
 				if all {
-					fmt.Fprintln(env.Out, "No running sandbox sessions.")
+					fmt.Fprintln(env.Out, "No sandbox sessions.")
 				} else {
-					fmt.Fprintln(env.Out, "No running sandbox sessions for this project.")
+					fmt.Fprintln(env.Out, "No sandbox sessions for this project.")
 				}
 				return nil
 			}
@@ -83,9 +85,9 @@ func newSessionsCmd(env *Env) *cobra.Command {
 	return cmd
 }
 
-// printSessionTable renders the human-readable listing (CS-SESS-010/011).
+// printSessionTable renders the human-readable listing (CS-SESS-010/011/074).
 func printSessionTable(env *Env, found []sessions.Session, all bool, projectDir string) {
-	header := []string{"INSTANCE", "WORKTREE", "NAME", "MODE", "UP", "SESSIONS"}
+	header := []string{"INSTANCE", "WORKTREE", "NAME", "MODE", "STATE", "UP", "SESSIONS"}
 	if all {
 		header = append(header, "PROJECT")
 	}
@@ -111,7 +113,16 @@ func printSessionTable(env *Env, found []sessions.Session, all bool, projectDir 
 			count += oomSuffix
 			anyOOM = true
 		}
-		row := []string{mark + instance, worktree, s.Name, s.Mode, uptime(s.Status), count}
+		state := s.State
+		if state == "" {
+			state = "-" // an older docker ps row (CS-SESS-074)
+		}
+		up := uptime(s.Status)
+		if s.Down() {
+			// docker's status reads "Exited (0) 3 hours ago": not an uptime.
+			up = "-"
+		}
+		row := []string{mark + instance, worktree, s.Name, s.Mode, state, up, count}
 		if all {
 			row = append(row, s.Project)
 		}
@@ -237,7 +248,7 @@ func decideSessions(env *Env, projectDir string, f *launchFlags) (sessionDecisio
 	// still reports what is running, which is the discoverability half of the
 	// problem (CS-SESS-034).
 	if f.Ralph {
-		if live := sessions.Live(found); len(live) > 0 {
+		if live := notDown(sessions.Live(found)); len(live) > 0 {
 			reportRunning(env, live)
 		}
 		return sessionDecision{Action: actionNew}, nil
@@ -313,6 +324,18 @@ func reportRunning(env *Env, found []sessions.Session) {
 		fmt.Fprintf(env.Err, "  %-10s up %-12s %d session(s)\n", label, uptime(s.Status), s.Count)
 	}
 	fmt.Fprintln(env.Err)
+}
+
+// notDown drops exited and restarting kept containers, for reports that
+// list what is running (CS-SESS-073).
+func notDown(all []sessions.Session) []sessions.Session {
+	out := make([]sessions.Session, 0, len(all))
+	for _, s := range all {
+		if !s.Down() {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // resolveTarget picks the session named by an explicit --attach/--join value,

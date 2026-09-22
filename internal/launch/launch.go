@@ -107,6 +107,13 @@ type Inputs struct {
 // (CS-LNCH-064); discovery keeps such containers out of attach and join.
 const ModeHeadless = "headless"
 
+// LabelKeep marks a kept container — one created without --rm, with a
+// restart policy — and records that policy. Discovery lists an exited or
+// restarting container only when it carries this label (CS-SESS-070); a --rm
+// container is only ever exited while docker removes it. Like every label it
+// is outside the config hash.
+const LabelKeep = "claude-sandbox.keep"
+
 // HeadlessEnv is the exact list of variables a headless launch forwards from
 // its own environment (CS-LNCH-063): what the Claude Agent SDK and Paseo set
 // for the claude process they spawn. It is a list of names, never a prefix: a
