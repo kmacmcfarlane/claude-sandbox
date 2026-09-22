@@ -55,31 +55,43 @@ fi
 TMP_FILES=()
 cleanup() { if ((${#TMP_FILES[@]})); then rm -f -- "${TMP_FILES[@]}"; fi; }
 trap cleanup EXIT
+# Turn the usual termination signals into an exit, so the EXIT trap runs.
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+# Real paths already backed up this run: the backup holds the contents from
+# before the run, not a mid-run state, and the NOTE prints once per file.
+declare -A BACKED_UP=()
 
 # replace_file FILE: replace FILE's contents with stdin, atomically where the
 # filesystem allows (see the header). FILE may be a symlink (its target is
 # replaced) or missing (it is created).
 replace_file() {
-  local file="$1" real dir tmp
+  local file="$1" real dir tmp beside=true
   real=$(readlink -f -- "$file")
   dir=$(dirname -- "$real")
   # The target's directory can be unwritable (docker creates a bind mount's
-  # parent directories as root); the temp file then lives in $TMPDIR and the
-  # rename below fails over to the write-through path.
-  tmp=$(mktemp "${dir}/.$(basename -- "$real").XXXXXX" 2>/dev/null) || tmp=$(mktemp)
+  # parent directories as root); the temp file then lives in $TMPDIR, and is
+  # never mv'd: across filesystems mv unlinks the live file before copying.
+  if ! tmp=$(mktemp "${dir}/.$(basename -- "$real").XXXXXX" 2>/dev/null); then
+    tmp=$(mktemp)
+    beside=false
+  fi
   TMP_FILES+=("$tmp")
   cat > "$tmp"
   if [[ -e "$real" ]]; then
     chmod --reference="$real" -- "$tmp" 2>/dev/null || true
   fi
-  if mv -f -- "$tmp" "$real" 2>/dev/null; then
+  if $beside && mv -f -- "$tmp" "$real" 2>/dev/null; then
     return 0
   fi
-  if [[ -e "$real" ]]; then
+  if [[ -e "$real" && -z "${BACKED_UP[$real]:-}" ]]; then
     local backup
     backup="${CLAUDE_DIR}/$(basename -- "$file").setup-lsp-plugins.bak"
     cp -p -- "$real" "$backup"
-    echo "NOTE: could not replace ${real} atomically; rewrote it in place (original saved as ${backup})" >&2
+    BACKED_UP[$real]=1
+    echo "NOTE: could not replace ${real} atomically; rewriting it in place (previous contents saved as ${backup})" >&2
   fi
   cat -- "$tmp" > "$real"
 }

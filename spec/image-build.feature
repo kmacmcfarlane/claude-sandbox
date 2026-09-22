@@ -130,11 +130,13 @@ Feature: Image build lifecycle (CS-IMG)
     And it replaces installed_plugins.json and settings.json atomically: jq's output is written
       to a temp file beside the real file (a symlink resolved first, so a settings.json that is a
       symlink stays one, CS-LNCH-069), given the file's mode and renamed over it
-    And only when that rename fails (the target is a single-file bind mount in the sandbox, or
-      its directory is unwritable) does it copy the original to
-      <config dir>/<name>.setup-lsp-plugins.bak and rewrite the file in place
+    And only when that rename fails (the target is a single-file bind mount in the sandbox), or
+      the temp file cannot be made beside the target (its directory is unwritable; a temp file in
+      $TMPDIR is never mv'd, since a cross-device mv unlinks the live file before copying), does
+      it rewrite the file in place, after copying the previous contents, once per file per run,
+      to <config dir>/<name>.setup-lsp-plugins.bak with a single NOTE
     And a dangling settings.json or installed_plugins.json symlink stops it, exit 1, before any write
-    And no temp file survives it, on any path
+    And no temp file survives it, on any normal exit or trapped signal
     # The script existed since the bash era (baked by "COPY bin/"); the Go
     # rewrite replaced that COPY with the builder's binary and silently dropped
     # it, while container-context.md, LSP_TOOLS.md and Dockerfile.example kept

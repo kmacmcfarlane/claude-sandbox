@@ -286,9 +286,13 @@ var _ = Describe("baked sources", func() {
 			expectNoTempFiles(cfg, filepath.Join(cfg, "plugins"), root)
 		})
 
-		It("CS-IMG-050: when the rename cannot work it saves a backup and rewrites in place", func() {
+		It("CS-IMG-050: when the rename cannot work it saves a backup once and rewrites in place", func() {
 			if os.Geteuid() == 0 {
 				Skip("root ignores the directory permissions this scenario relies on")
+			}
+			// All three servers: three writes to settings.json in one run.
+			for _, b := range []string{"typescript-language-server", "pyright"} {
+				Expect(os.WriteFile(filepath.Join(bindir, b), []byte("#!/bin/sh\n"), 0o755)).To(Succeed())
 			}
 			// An unwritable target directory stands in for the sandbox's
 			// single-file bind mount: no temp file beside it, no rename onto it.
@@ -298,13 +302,17 @@ var _ = Describe("baked sources", func() {
 
 			out, code := run()
 			Expect(code).To(Equal(0), out)
-			Expect(out).To(ContainSubstring("original saved as"))
+			Expect(strings.Count(out, "previous contents saved as")).To(Equal(1), out)
 
 			backup := filepath.Join(cfg, "settings.json.setup-lsp-plugins.bak")
-			Expect(os.ReadFile(backup)).To(Equal([]byte(`{"model":"opus"}`)))
+			Expect(os.ReadFile(backup)).To(Equal([]byte(`{"model":"opus"}`)), "the pre-run contents, not a mid-run state")
 			settings := readJSON(target)
 			Expect(settings).To(HaveKeyWithValue("model", "opus"))
-			Expect(settings["enabledPlugins"]).To(Equal(map[string]any{"gopls-lsp@claude-plugins-official": true}))
+			Expect(settings["enabledPlugins"]).To(Equal(map[string]any{
+				"gopls-lsp@claude-plugins-official":      true,
+				"typescript-lsp@claude-plugins-official": true,
+				"pyright-lsp@claude-plugins-official":    true,
+			}))
 			fi, err := os.Lstat(filepath.Join(cfg, "settings.json"))
 			Expect(err).NotTo(HaveOccurred())
 			Expect(fi.Mode() & os.ModeSymlink).NotTo(BeZero())
