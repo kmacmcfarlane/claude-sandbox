@@ -165,8 +165,8 @@ var _ = Describe("baked sources", func() {
 		// The script is bash + jq; run it against a scratch config dir, never a
 		// real one.
 		var (
-			root, cfg, target, bindir string
-			run                       func(args ...string) (string, int)
+			root, cfg, target, bindir, tmpdir, bash string
+			run                                     func(args ...string) (string, int)
 		)
 		BeforeEach(func() {
 			root = GinkgoT().TempDir()
@@ -178,7 +178,10 @@ var _ = Describe("baked sources", func() {
 			// server installed on the test machine cannot leak in. A missing
 			// tool fails the spec: the image ships all of them, and a skip
 			// would hide the script's only behavioral coverage.
-			bash, err := exec.LookPath("bash")
+			tmpdir = filepath.Join(root, "tmp") // the script's $TMPDIR, apart from every target
+			Expect(os.MkdirAll(tmpdir, 0o755)).To(Succeed())
+			var err error
+			bash, err = exec.LookPath("bash")
 			Expect(err).NotTo(HaveOccurred(), "bash is required for the CS-IMG-050 script tests")
 			for _, tool := range []string{"jq", "mktemp", "cat", "date", "mkdir", "rm", "readlink",
 				"dirname", "basename", "chmod", "mv", "cp", "flock"} {
@@ -201,7 +204,7 @@ var _ = Describe("baked sources", func() {
 					"HOME=" + filepath.Join(root, "home"), // must not be used
 					"CLAUDE_CONFIG_DIR=" + cfg,
 					"PATH=" + bindir,
-					"TMPDIR=" + root,
+					"TMPDIR=" + tmpdir,
 				}
 				out, err := cmd.CombinedOutput()
 				code := 0
@@ -226,8 +229,12 @@ var _ = Describe("baked sources", func() {
 			Expect(err).NotTo(HaveOccurred())
 			return uint64(fi.Sys().(*syscall.Stat_t).Ino)
 		}
-		// No temp file is left beside the files the script replaced.
+		// No temp file is left beside the files the script replaced, nor in
+		// its $TMPDIR.
 		expectNoTempFiles := func(dirs ...string) {
+			left, err := os.ReadDir(tmpdir)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(left).To(BeEmpty(), "temp file left in $TMPDIR")
 			for _, d := range dirs {
 				entries, err := os.ReadDir(d)
 				Expect(err).NotTo(HaveOccurred())
@@ -317,6 +324,57 @@ var _ = Describe("baked sources", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(fi.Mode() & os.ModeSymlink).NotTo(BeZero())
 			expectNoTempFiles(cfg, root)
+		})
+
+		It("CS-IMG-050: a temp file made outside the target's directory is never mv'd; the fallback rewrites in place", func() {
+			// The target's directory stays WRITABLE, so a stray mv from
+			// $TMPDIR would succeed (and, across devices, unlink the live file
+			// first): only the script's own guard keeps it out.
+			realMktemp, err := exec.LookPath("mktemp")
+			Expect(err).NotTo(HaveOccurred())
+			realMv, err := exec.LookPath("mv")
+			Expect(err).NotTo(HaveOccurred())
+			mvLog := filepath.Join(root, "mv.log")
+			for name, body := range map[string]string{
+				// Refuse the beside-the-target call (it passes a template).
+				"mktemp": "if [ $# -gt 0 ]; then exit 1; fi\nexec " + realMktemp + "\n",
+				"mv":     "printf '%s\\n' \"$*\" >> " + mvLog + "\nexec " + realMv + " \"$@\"\n",
+			} {
+				wrapper := filepath.Join(bindir, name)
+				Expect(os.Remove(wrapper)).To(Succeed())
+				Expect(os.WriteFile(wrapper, []byte("#!"+bash+"\n"+body), 0o755)).To(Succeed())
+			}
+			// All three servers: several writes to each file in one run.
+			for _, b := range []string{"typescript-language-server", "pyright"} {
+				Expect(os.WriteFile(filepath.Join(bindir, b), []byte("#!/bin/sh\n"), 0o755)).To(Succeed())
+			}
+
+			out, code := run()
+			Expect(code).To(Equal(0), out)
+
+			logged, err := os.ReadFile(mvLog)
+			if err == nil {
+				Expect(string(logged)).NotTo(ContainSubstring(tmpdir), "a temp file in $TMPDIR was mv'd")
+			} else {
+				Expect(os.IsNotExist(err)).To(BeTrue())
+			}
+			// installed_plugins.json is created in place by this run: nothing to back up.
+			Expect(strings.Count(out, "previous contents saved as")).To(Equal(1), out)
+			Expect(os.ReadFile(filepath.Join(cfg, "settings.json.setup-lsp-plugins.bak"))).To(Equal([]byte(`{"model":"opus"}`)))
+			Expect(filepath.Join(cfg, "installed_plugins.json.setup-lsp-plugins.bak")).NotTo(BeAnExistingFile())
+
+			ids := []string{"gopls-lsp@claude-plugins-official", "typescript-lsp@claude-plugins-official", "pyright-lsp@claude-plugins-official"}
+			settings := readJSON(target)
+			Expect(settings).To(HaveKeyWithValue("model", "opus"))
+			installed := readJSON(filepath.Join(cfg, "plugins", "installed_plugins.json"))
+			for _, id := range ids {
+				Expect(settings["enabledPlugins"]).To(HaveKeyWithValue(id, true))
+				Expect(installed["plugins"]).To(HaveKey(id))
+			}
+			fi, err := os.Lstat(filepath.Join(cfg, "settings.json"))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(fi.Mode() & os.ModeSymlink).NotTo(BeZero())
+			expectNoTempFiles(cfg, filepath.Join(cfg, "plugins"), filepath.Dir(target))
 		})
 
 		It("CS-IMG-050: a dangling settings.json symlink stops it before any write", func() {
