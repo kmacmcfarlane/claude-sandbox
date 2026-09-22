@@ -50,7 +50,7 @@ Feature: Image build lifecycle (CS-IMG)
     # assets.go embeds into the binary (scaffold/, scaffold-ralph/,
     # container-context.md, mcp-servers.json), logstream/, entrypoint.sh,
     # PROMPT_RALPH.md, mcp/discord-notify/, notification-hooks.json (baked as managed settings,
-    # CS-LNCH-068). Until CS-IMG-048 the base COPYed them, so every commit rebuilt
+    # CS-LNCH-068), bin/setup-lsp-plugins (CS-IMG-050). Until CS-IMG-048 the base COPYed them, so every commit rebuilt
     # the base and, through its changed ID, every child. scaffold/, scaffold-ralph/, container-context.md and
     # mcp-servers.json were COPYed but missing from the set, so editing them
     # rebuilt nothing and the running binary kept seeding the old files.
@@ -119,6 +119,36 @@ Feature: Image build lifecycle (CS-IMG)
     # The Discord MCP server is bundled with esbuild in a node stage; only the
     # bundle ships, which is all mcp-servers.json runs. The Go binary is built
     # in a golang stage as before.
+
+  Scenario: CS-IMG-050 The tools image ships setup-lsp-plugins
+    Then Dockerfile.tools copies bin/setup-lsp-plugins to /opt/claude-sandbox/bin/setup-lsp-plugins (0755),
+      so it is on PATH in every session (container-context.md tells sessions to run it)
+    And it registers and enables gopls-lsp, typescript-lsp and pyright-lsp from
+      claude-plugins-official for each whose language server is on PATH, in the config dir
+      ($CLAUDE_CONFIG_DIR, else ~/.claude), and skips a plugin already registered or enabled
+    And "setup-lsp-plugins --check" exits 0 only when all three are registered, enabled and on PATH
+    And it replaces installed_plugins.json and settings.json atomically: jq's output is written
+      to a temp file beside the real file (a symlink resolved first, so a settings.json that is a
+      symlink stays one, CS-LNCH-069), given the file's mode and renamed over it
+    And only when that rename fails (the target is a single-file bind mount in the sandbox), or
+      the temp file cannot be made beside the target (its directory is unwritable; a temp file in
+      $TMPDIR is never mv'd, since a cross-device mv unlinks the live file before copying), does
+      it rewrite the file in place, after copying the previous contents, once per file per run,
+      to <config dir>/<name>.setup-lsp-plugins.bak with a single NOTE
+    And a dangling settings.json or installed_plugins.json symlink stops it, exit 1, before any write
+    And no temp file survives it, on any normal exit or trapped signal
+    # The script existed since the bash era (baked by "COPY bin/"); the Go
+    # rewrite replaced that COPY with the builder's binary and silently dropped
+    # it, while container-context.md, LSP_TOOLS.md and Dockerfile.example kept
+    # naming it. settings.json is the live host file (CS-LNCH-011), so the old
+    # "mktemp + mv" replaced a dotfile symlink with a plain file on the host,
+    # and ~/.claude is not the config dir when CLAUDE_CONFIG_DIR relocates it.
+    # A write-through ("cat tmp > file") keeps the link but truncates the live
+    # file first: a concurrently starting session can read it empty, and a
+    # crash leaves it empty. Hence rename first, write-through only as a
+    # backed-up fallback. Concurrent runs are serialised with flock on
+    # <config dir>/.setup-lsp-plugins.lock (Claude Code does not take it).
+    # The base ships no language server; a child Dockerfile installs them.
 
   # ---- Claude Code CLI image ----
   # The CLI is deliberately NOT baked into the base: installing it mid-Dockerfile

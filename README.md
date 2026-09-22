@@ -1331,7 +1331,7 @@ Five images take part in a launch, and the container runs the last of them:
 | Image | Built from | Rebuilds when |
 |---|---|---|
 | `claude-sandbox` | `Dockerfile` — OS, toolchains, Docker CLI, Python venv. **No Claude Code and no sandbox files**: it `COPY`s nothing from the repo. | the content of `Dockerfile` changed |
-| `claude-sandbox-tools` | `Dockerfile.tools` — the sandbox binary (and its `ralph` link), `entrypoint.sh`, `logstream/`, `PROMPT_RALPH.md`, the bundled Discord MCP server, the managed-settings hooks and the version stamp | the content of `Dockerfile.tools` or of a baked source (`cmd/`, `internal/`, `go.mod`/`go.sum`, `assets.go`, the embedded `scaffold/`, `scaffold-ralph/`, `container-context.md` and `mcp-servers.json`, `logstream/`, `entrypoint.sh`, `PROMPT_RALPH.md`, `mcp/discord-notify/`, `notification-hooks.json` — every path `Dockerfile.tools` `COPY`s; `_test.go` files and build-context debris such as `__pycache__/` excluded) changed |
+| `claude-sandbox-tools` | `Dockerfile.tools` — the sandbox binary (and its `ralph` link), `entrypoint.sh`, `setup-lsp-plugins`, `logstream/`, `PROMPT_RALPH.md`, the bundled Discord MCP server, the managed-settings hooks and the version stamp | the content of `Dockerfile.tools` or of a baked source (`cmd/`, `internal/`, `go.mod`/`go.sum`, `assets.go`, the embedded `scaffold/`, `scaffold-ralph/`, `container-context.md` and `mcp-servers.json`, `logstream/`, `entrypoint.sh`, `PROMPT_RALPH.md`, `mcp/discord-notify/`, `notification-hooks.json`, `bin/setup-lsp-plugins` — every path `Dockerfile.tools` `COPY`s; `_test.go` files and build-context debris such as `__pycache__/` excluded) changed |
 | `claude-sandbox-cli` | `Dockerfile.cli` — installs Claude Code, pinned to a version | the content of `Dockerfile.cli` changed, or you accept a Claude Code update |
 | `claude-sandbox-df-…` | your child `.claude-sandbox/Dockerfile`, `FROM claude-sandbox` | the child Dockerfile's content changed, or the base image ID did |
 | `<base-or-child>:run` | a generated "cap": `FROM <base-or-child>` + `COPY --link` of `/opt/claude-sandbox/` and the managed-settings drop-in from `claude-sandbox-tools`, `ENV CLAUDE_SANDBOX_VERSION`, + `COPY --link` of the CLI from `claude-sandbox-cli` | any of the three parents' image IDs changed |
@@ -1483,6 +1483,7 @@ Dependencies are ordinary Go modules — nothing is vendored. The shim's `docker
 ```
 bin/
   claude-sandbox   Thin shim: builds the Go binary when stale, then execs it
+  setup-lsp-plugins  In-container helper: registers the gopls/typescript/pyright LSP plugins (shipped in the tools image)
   dist/            Built binary + build cache (gitignored)
 cmd/claude-sandbox/  Go CLI entry (launcher; doubles as the in-container ralph runner via argv0)
 internal/
@@ -1513,7 +1514,7 @@ logstream/
 mcp/
   discord-notify/       Discord notification MCP server — bundled into the tools image
 Dockerfile                          Base image: Debian + build-essential, Docker CLI/compose/buildx, Node.js 22 (no Claude Code, no sandbox files)
-Dockerfile.tools                    Sandbox tools image: Go binary, entrypoint, logstream, MCP bundle, hooks, version; copied onto the base/child by the run cap
+Dockerfile.tools                    Sandbox tools image: Go binary, entrypoint, setup-lsp-plugins, logstream, MCP bundle, hooks, version; copied onto the base/child by the run cap
 Dockerfile.cli                      Claude Code CLI image, pinned to a version; copied onto the base/child by the run cap
 entrypoint.sh                       Remaps container user UID/GID to match the host; grants Docker socket access
 notification-hooks.json             Notification hooks, baked into the tools image as a managed-settings drop-in

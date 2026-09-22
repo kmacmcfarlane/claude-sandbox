@@ -9,13 +9,28 @@
 # Safe to run multiple times — skips plugins that are already registered.
 # Requires a Claude Code session restart after first run.
 #
+# Shipped in the sandbox tools image at /opt/claude-sandbox/bin (CS-IMG-050).
+# In a sandbox the config dir (and so settings.json) is the host's own, live
+# file: the registration persists to the host, every other sandbox and host
+# (non-sandbox) sessions. Each write is atomic: jq's output goes to a temp file
+# beside the real file (a symlink is resolved first, so a settings.json linked
+# into a dotfiles repo stays a link, CS-LNCH-069) and is renamed over it, so a
+# concurrent reader never sees a truncated file. Only when that cannot work is
+# the file rewritten in place: the rename fails (the linked target is a
+# single-file bind mount in the sandbox: EBUSY), or no temp file can be made
+# beside the target (its directory is unwritable; a temp file elsewhere is
+# never mv'd, since a cross-device mv unlinks the live file before copying).
+# Before the first such rewrite of a file in a run, its previous contents are
+# saved as <name>.setup-lsp-plugins.bak in the config dir. jq re-serialises the JSON
+# (two-space indent, key order kept), so a hand-formatted file changes layout.
+#
 # Usage:
 #   setup-lsp-plugins            # register all plugins
 #   setup-lsp-plugins --check    # exit 0 if all registered, 1 if not
 
 set -euo pipefail
 
-CLAUDE_DIR="${HOME}/.claude"
+CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-${HOME}/.claude}"
 PLUGINS_DIR="${CLAUDE_DIR}/plugins"
 INSTALLED_FILE="${PLUGINS_DIR}/installed_plugins.json"
 CACHE_DIR="${PLUGINS_DIR}/cache/claude-plugins-official"
@@ -38,6 +53,69 @@ if ! command -v jq &>/dev/null; then
   echo "ERROR: jq is required but not found in PATH" >&2
   exit 1
 fi
+
+# Temp files still to remove, whatever path the script leaves by.
+TMP_FILES=()
+cleanup() { if ((${#TMP_FILES[@]})); then rm -f -- "${TMP_FILES[@]}"; fi; }
+trap cleanup EXIT
+# On the usual termination signals: clean up, then die of the same signal so
+# the caller sees the right wait status.
+on_signal() {
+  cleanup
+  trap - EXIT "$1"
+  kill -"$1" $$
+}
+trap 'on_signal HUP' HUP
+trap 'on_signal INT' INT
+trap 'on_signal TERM' TERM
+
+# Real paths already backed up this run: the backup holds the contents from
+# before the run, not a mid-run state, and the NOTE prints once per file.
+declare -A BACKED_UP=()
+
+# replace_file FILE: replace FILE's contents with stdin, atomically where the
+# filesystem allows (see the header). FILE may be a symlink (its target is
+# replaced) or missing (it is created).
+replace_file() {
+  local file="$1" real dir tmp beside=true
+  real=$(readlink -f -- "$file")
+  dir=$(dirname -- "$real")
+  # The target's directory can be unwritable (docker creates a bind mount's
+  # parent directories as root); the temp file then lives in $TMPDIR, and is
+  # never mv'd: across filesystems mv unlinks the live file before copying.
+  if ! { tmp=$(mktemp "${dir}/.$(basename -- "$real").XXXXXX" 2>/dev/null) && TMP_FILES+=("$tmp"); }; then
+    tmp=$(mktemp) && TMP_FILES+=("$tmp")
+    beside=false
+  fi
+  cat > "$tmp"
+  if [[ -e "$real" ]]; then
+    chmod --reference="$real" -- "$tmp" 2>/dev/null || true
+  fi
+  if $beside && mv -f -- "$tmp" "$real" 2>/dev/null; then
+    return 0
+  fi
+  # Back up once per file per run, before its first in-place rewrite. A file
+  # this run created in place has no previous contents, and a later rewrite
+  # must not save its mid-run state as if it were.
+  if [[ -z "${BACKED_UP[$real]:-}" ]]; then
+    BACKED_UP[$real]=1
+    if [[ -e "$real" ]]; then
+      local backup
+      backup="${CLAUDE_DIR}/$(basename -- "$file").setup-lsp-plugins.bak"
+      cp -p -- "$real" "$backup"
+      echo "NOTE: could not replace ${real} atomically; rewriting it in place (previous contents saved as ${backup})" >&2
+    fi
+  fi
+  cat -- "$tmp" > "$real"
+}
+
+# Apply a jq filter to a JSON file. A failed jq leaves the file untouched.
+jq_in_place() {
+  local file="$1" out
+  shift
+  out=$(jq "$@" "$file") || return 1
+  replace_file "$file" <<< "$out"
+}
 
 # Check if a plugin is already registered in installed_plugins.json
 is_registered() {
@@ -78,12 +156,28 @@ if $check_mode; then
   $all_ok && exit 0 || exit 1
 fi
 
+# A dangling symlink (e.g. a settings.json linked into a dotfiles repo that is
+# not mounted here) would be "created" through the link at a path that may not
+# persist: refuse before writing anything.
+for f in "$SETTINGS_FILE" "$INSTALLED_FILE"; do
+  if [[ -L "$f" && ! -e "$f" ]]; then
+    echo "ERROR: ${f} is a symlink to a missing file ($(readlink -- "$f")); nothing was changed" >&2
+    exit 1
+  fi
+done
+
 # Ensure directories exist
 mkdir -p "$PLUGINS_DIR" "$CACHE_DIR"
 
+# Serialise concurrent runs (Claude Code itself does not take this lock).
+if command -v flock &>/dev/null; then
+  exec 9>"${CLAUDE_DIR}/.setup-lsp-plugins.lock"
+  flock -w 30 9 || { echo "ERROR: another setup-lsp-plugins holds ${CLAUDE_DIR}/.setup-lsp-plugins.lock" >&2; exit 1; }
+fi
+
 # Create installed_plugins.json if it doesn't exist
 if [[ ! -f "$INSTALLED_FILE" ]]; then
-  echo '{"version": 2, "plugins": {}}' > "$INSTALLED_FILE"
+  replace_file "$INSTALLED_FILE" <<< '{"version": 2, "plugins": {}}'
 fi
 
 timestamp=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
@@ -110,8 +204,8 @@ for entry in "${PLUGINS[@]}"; do
     fi
 
     # Add the plugin entry
-    tmp=$(mktemp)
-    jq --arg id "$plugin_id" \
+    jq_in_place "$INSTALLED_FILE" \
+       --arg id "$plugin_id" \
        --arg path "$install_path" \
        --arg ver "$version" \
        --arg ts "$timestamp" \
@@ -122,8 +216,7 @@ for entry in "${PLUGINS[@]}"; do
          "installedAt": $ts,
          "lastUpdated": $ts,
          "gitCommitSha": ""
-       }]' "$INSTALLED_FILE" > "$tmp"
-    mv "$tmp" "$INSTALLED_FILE"
+       }]'
     echo "Registered ${plugin_id} in installed_plugins.json"
     changes_made=true
   else
@@ -133,11 +226,9 @@ for entry in "${PLUGINS[@]}"; do
   # Enable in settings.json if not already enabled
   if ! is_enabled "$name"; then
     if [[ ! -f "$SETTINGS_FILE" ]]; then
-      echo '{}' > "$SETTINGS_FILE"
+      replace_file "$SETTINGS_FILE" <<< '{}'
     fi
-    tmp=$(mktemp)
-    jq --arg id "$plugin_id" '.enabledPlugins[$id] = true' "$SETTINGS_FILE" > "$tmp"
-    mv "$tmp" "$SETTINGS_FILE"
+    jq_in_place "$SETTINGS_FILE" --arg id "$plugin_id" '.enabledPlugins[$id] = true'
     echo "Enabled ${plugin_id} in settings.json"
     changes_made=true
   else

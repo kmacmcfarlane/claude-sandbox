@@ -124,6 +124,8 @@ var BakedSources = []string{
 	// Embedded into the binary by assets.go.
 	"scaffold", "scaffold-ralph", "container-context.md", "mcp-servers.json",
 	"logstream", "entrypoint.sh", "PROMPT_RALPH.md", "mcp/discord-notify", "notification-hooks.json",
+	// Only this file of bin/: the rest is the host shim and its build output.
+	"bin/setup-lsp-plugins",
 }
 
 // ModeBakedSources are the baked sources whose permission bits reach the
