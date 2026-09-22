@@ -112,21 +112,25 @@ const (
 
 // Down reports whether the container is a kept container that is exited or
 // restarting: listed and holding its noun and pid class, but with nothing
-// to attach to or exec into (CS-SESS-073).
+// to attach to or exec into (CS-SESS-073). Like Reserved, a row without a
+// state falls back on docker's status text.
 func (s Session) Down() bool {
-	return s.State == StateExited || s.State == StateRestarting
+	if s.State != "" {
+		return s.State == StateExited || s.State == StateRestarting
+	}
+	return strings.HasPrefix(s.Status, "Exited") || strings.HasPrefix(s.Status, "Restarting")
 }
 
 // running reports whether docker counts the container as running — "paused"
 // included, since docker top works on a paused container. A row with no
 // state (an older format) is running unless its status says it is a
-// reservation (CS-SESS-071).
+// reservation, exited or restarting (CS-SESS-071).
 func (s Session) running() bool {
 	switch s.State {
 	case "running", "paused":
 		return true
 	case "":
-		return !s.Reserved()
+		return !s.Reserved() && !s.Down()
 	}
 	return false
 }

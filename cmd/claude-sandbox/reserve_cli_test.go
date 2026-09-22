@@ -196,6 +196,10 @@ var _ = Describe("launch reservation (CS-SESS-048..054, CS-LNCH-057)", func() {
 			reservedRow("orphan", "/elsewhere", "heron", "7", "created", now.Add(-61*time.Second)),
 			reservedRow("inflight", "/elsewhere", "wren", "8", "created", now.Add(-2*time.Second)),
 			reservedRow("old-running", "/elsewhere", "lynx", "9", "running", now.Add(-time.Hour)),
+			// A kept container that has exited is not a reservation, however old
+			// (CS-SESS-070): it must never be removed as stale.
+			strings.Join([]string{"kept-exited", "Exited (0) 2 hours ago", "/elsewhere", "claude", "moth", "v1", "", "", "", "10", "",
+				"exited", now.Add(-2 * time.Hour).Format("2006-01-02 15:04:05 -0700 MST"), "", "", "unless-stopped"}, psSep),
 		}, "\n")+"\n", nil)
 		f.fake.On("docker top", "PID  COMMAND\n1  claude\n", nil)
 		Expect(f.run("--no-session-check")).To(Equal(0), f.errw.String())
@@ -204,6 +208,7 @@ var _ = Describe("launch reservation (CS-SESS-048..054, CS-LNCH-057)", func() {
 		Expect(held).To(ContainElement("docker rm orphan"))
 		Expect(held).NotTo(ContainElement("docker rm inflight"))
 		Expect(held).NotTo(ContainElement("docker rm old-running"))
+		Expect(f.fake.CommandLines()).NotTo(ContainElement("docker rm kept-exited"))
 		Expect(f.errw.String()).To(ContainSubstring("Removed stale reservation orphan"))
 	})
 

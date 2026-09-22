@@ -349,6 +349,14 @@ var _ = Describe("reservations (CS-SESS-050..052)", func() {
 		Expect(s.Reserved()).To(BeFalse())
 	})
 
+	It("CS-SESS-073: Down falls back on Status when State is absent, like Reserved", func() {
+		Expect(sessions.Session{Status: "Exited (0) 3 hours ago"}.Down()).To(BeTrue())
+		Expect(sessions.Session{Status: "Restarting (1) 5 seconds ago"}.Down()).To(BeTrue())
+		Expect(sessions.Session{Status: "Up 2 hours"}.Down()).To(BeFalse())
+		Expect(sessions.Session{Status: "Created"}.Down()).To(BeFalse())
+		Expect(sessions.Session{State: "running", Status: "Exited (0) 1s ago"}.Down()).To(BeFalse(), "State wins when present")
+	})
+
 	It("CS-SESS-051: reservations are never candidates, never listed, and never docker-top'd", func() {
 		fake.On("docker ps", stateRow("a", "/p", "otter", "", "running", stamp(time.Hour))+"\n"+
 			stateRow("b", "/p", "heron", "", sessions.StateCreated, stamp(time.Second))+"\n", nil)
@@ -367,6 +375,7 @@ var _ = Describe("reservations (CS-SESS-050..052)", func() {
 			{Name: "young", State: sessions.StateCreated, CreatedAt: now.Add(-59 * time.Second)},
 			{Name: "unknown-age", State: sessions.StateCreated},
 			{Name: "running-old", State: "running", CreatedAt: now.Add(-time.Hour)},
+			{Name: "kept-exited", State: sessions.StateExited, Keep: "unless-stopped", CreatedAt: now.Add(-2 * time.Hour)},
 		}
 		stale := sessions.Stale(all, now, 60*time.Second)
 		Expect(stale).To(HaveLen(1))

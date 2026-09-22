@@ -163,7 +163,7 @@ The project directory is always the **physical** path: the launcher resolves sym
 
 By default interactive sessions share the checkout itself. With `--worktree` (or `worktree: true` in config) each container works in its **own worktree** named after its instance noun — container `…-otter`, worktree `.claude/worktrees/otter`, branch `worktree-otter` — so concurrent sessions stop editing the same files ([Worktree mode](#worktree-mode)). In that mode a joined session (`--join`) gets its own, claude-named worktree rather than sharing the primary's; attaching cannot change where a running session works, so `--attach` just reports it.
 
-### Listing what is running
+### Listing sessions
 
 ```bash
 # Sessions for this project:
