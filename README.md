@@ -843,7 +843,7 @@ Every run image includes a Discord notification MCP server at `/opt/claude-sandb
 
 ### Notification hooks
 
-Every run image ships a Claude Code `Notification` hook that posts to `CLAUDE_NOTIFICATION_WEBHOOK_URL` (when set in `.claude-sandbox/env`) whenever a session waits on a permission prompt or goes idle. It is installed as a Claude Code **managed settings** drop-in, `/etc/claude-code/managed-settings.d/10-claude-sandbox.json` (the image's copy of `notification-hooks.json`), so every session — interactive, joined, branched, ralph — gets it, in the base image and in every child image built `FROM claude-sandbox`.
+Every run image ships a Claude Code `Notification` hook that posts to `CLAUDE_NOTIFICATION_WEBHOOK_URL` (when set in `.claude-sandbox/env`) whenever a session waits on a permission prompt or goes idle. It is installed as a Claude Code **managed settings** drop-in, `/etc/claude-code/managed-settings.d/10-claude-sandbox.json` (the image's copy of `notification-hooks.json`), so every session — interactive, joined, branched, ralph — gets it, in every run image (the cap over the base or a child).
 
 Claude Code merges hook entries across settings levels, so these run **alongside** any hooks in your own `~/.claude/settings.json`; they do not replace them. That also means your host hooks now run inside every sandbox session: a hook that calls a binary or path that exists only on the host will fail there, so guard it (for example `command -v tool >/dev/null || exit 0`) or test for `$CLAUDE_SANDBOX_VERSION`, which is set only inside the sandbox. `/status` names the managed source in its "Setting sources" line ([settings docs](https://code.claude.com/docs/en/settings#check-what-your-organization-enforces)), and a user-level `disableAllHooks` does not turn managed hooks off ([hooks docs](https://code.claude.com/docs/en/hooks#disable-or-remove-hooks)). A child image can add its own `/etc/claude-code/managed-settings.json` or another drop-in without removing them.
 
@@ -1416,7 +1416,7 @@ claude-sandbox --version
 #   claude:       2.1.247  (image claude-sandbox-cli, built 2026-08-27)
 ```
 
-It prints the version of the **host checkout**, the **tools image** (warning if they differ) and the Claude Code version pinned in the **CLI image**. Before an image is built for the first time its line reads `(not built yet)`.
+It prints the version of the **host checkout**, the **tools image** (with a note if they differ — the stamp is not a build input, so the tools image catches up only when a baked source changes, or on `--rebuild`) and the Claude Code version pinned in the **CLI image**. Before an image is built for the first time its line reads `(not built yet)`.
 
 **Claude Code version check:** The check never holds up a launch. Each launch reads the version pinned in `claude-sandbox-cli` (an image label — no container is started) and compares it with the latest release on npm. The npm answer is cached for 6 hours in `~/.cache/claude-sandbox/claude-version.json`, so most launches make no network call at all (asking npm costs 0.3–0.6 s on a host and about 5 s inside a sandbox). When npm has a newer version (never an older one: nothing is ever downgraded), the launch prints one line and carries on with the image it has:
 

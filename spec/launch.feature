@@ -520,7 +520,9 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     When "claude-sandbox --version" is run
     Then it prints the host version (git describe) and the tools image's (claude-sandbox-tools)
       baked revision label (CS-IMG-005)
-    And notes a mismatch would auto-rebuild on next launch
+    And notes a mismatch, saying the tools image rebuilds when a baked source changes (or on
+      --rebuild): the version stamp is not a fingerprint input (CS-IMG-034), so a mismatch
+      alone rebuilds nothing
     And prints "(not built yet)" when the tools image does not exist
     And prints the Claude Code version pinned in the CLI image (claude-sandbox-cli),
       or "(not built yet)" when that image does not exist

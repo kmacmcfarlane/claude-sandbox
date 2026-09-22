@@ -198,7 +198,7 @@ that sessions Claude spawns itself (`claude --bg`, `/bg`) are not slotted. `ls
 
 ### Container won't start
 1. Check Docker daemon is running: `docker info`
-2. Check base image exists: `docker images claude-sandbox`
+2. Check the images exist: `docker images claude-sandbox`, `docker images claude-sandbox-tools`, `docker images claude-sandbox-cli` (and the project's `<base-or-child>:run` cap)
 3. Look for build errors in launcher output
 4. Verify `.claude-sandbox/Dockerfile` syntax if using child image
 

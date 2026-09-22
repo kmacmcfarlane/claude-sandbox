@@ -264,14 +264,20 @@ func EnsureTools(o Options) (rebuilt bool, err error) {
 		fmt.Fprintln(o.Err, "WARNING: could not fingerprint the tools image inputs (an unreadable file under the baked sources?);")
 		fmt.Fprintln(o.Err, "  falling back to comparing mtimes with the image creation time (CS-IMG-035).")
 	}
+	// One inspect answers both "does it exist" and "what does its label say":
+	// a headless probe pays for every docker call on the launch path.
+	have, exists := inspectFormat(o.Runner, ToolsImageName, `{{ index .Config.Labels "`+BuildInputsLabel+`" }}`)
+	if have == "<no value>" {
+		have = ""
+	}
 	need := false
 	switch {
 	case o.ForceRebuild:
 		need = true
-	case !imageExists(o.Runner, ToolsImageName):
+	case !exists:
 		need = true
 	default:
-		if labeled, stale := labelVerdict(o.Runner, ToolsImageName, fp); labeled {
+		if labeled, stale := fp != "" && have != "", have != fp; labeled {
 			if stale {
 				fmt.Fprintln(o.Out, "Tools image inputs changed since last build — rebuilding tools image.")
 			}
@@ -396,14 +402,20 @@ func pinnedClaudeVersion(o Options) string {
 // (tags, hashes, "-dirty"). Anything else would not be a safe ENV value.
 var versionRe = regexp.MustCompile(`^[A-Za-z0-9._+-]+$`)
 
-// toolsVersion is the version stamp baked into the tools image (its revision
-// label), or "unknown" (CS-IMG-005).
-func toolsVersion(r execx.Runner) string {
-	v := imageLabel(r, ToolsImageName, RevisionLabel)
-	if !versionRe.MatchString(v) {
-		return "unknown"
+// toolsIdentity reads the tools image's ID and the version stamp baked into
+// it (its revision label; "unknown" when absent or unsafe, CS-IMG-005) with
+// one inspect. id is "" when the image does not exist.
+func toolsIdentity(r execx.Runner) (id, version string) {
+	out, ok := inspectFormat(r, ToolsImageName, `{{.Id}}|{{ index .Config.Labels "`+RevisionLabel+`" }}`)
+	version = "unknown"
+	if !ok {
+		return "", version
 	}
-	return v
+	id, v, _ := strings.Cut(out, "|")
+	if versionRe.MatchString(v) {
+		version = v
+	}
+	return id, version
 }
 
 // CapImageName is the run image for a base or child image (CS-IMG-024).
@@ -446,8 +458,8 @@ func EnsureCap(o Options, under string) (image string, built bool, err error) {
 	// leaves a cap whose label names the old CLI ID while it holds the new
 	// content. The next launch sees a mismatch and rebuilds the cap once:
 	// one wasted cap build, never a stale cap kept.
-	version := toolsVersion(o.Runner)
-	fp := capInputs(under, version, ImageID(o.Runner, under), ImageID(o.Runner, ToolsImageName), ImageID(o.Runner, CLIImageName))
+	toolsID, version := toolsIdentity(o.Runner)
+	fp := capInputs(under, version, ImageID(o.Runner, under), toolsID, ImageID(o.Runner, CLIImageName))
 	need := false
 	switch {
 	case o.ForceRebuild:
@@ -670,7 +682,7 @@ func PrintVersion(o Options) {
 		}
 		fmt.Fprintf(o.Out, "  tools:        %s  (image %s, built %s)\n", baked, ToolsImageName, createdDate(o, ToolsImageName))
 		if baked != "unknown" && baked != o.Version {
-			fmt.Fprintln(o.Out, "  note: image differs from host scripts — it will auto-rebuild on next launch (or run --rebuild).")
+			fmt.Fprintln(o.Out, "  note: tools image differs from host scripts — it rebuilds when a baked source changes (or run --rebuild).")
 		}
 	}
 	if !imageExists(o.Runner, CLIImageName) {
@@ -1176,6 +1188,20 @@ func capInputs(under, version, underID, toolsID, cliID string) string {
 	f.add(toolsID)
 	f.add(cliID)
 	return sum()
+}
+
+// inspectFormat runs "docker image inspect -f tmpl name"; ok is false when the
+// image does not exist (or cannot be inspected).
+func inspectFormat(r execx.Runner, name, tmpl string) (out string, ok bool) {
+	out, err := r.Output(execx.Cmd{
+		Name:   "docker",
+		Args:   []string{"image", "inspect", "-f", tmpl, name},
+		Stderr: io.Discard,
+	})
+	if err != nil {
+		return "", false
+	}
+	return strings.TrimSpace(out), true
 }
 
 func imageExists(r execx.Runner, name string) bool {

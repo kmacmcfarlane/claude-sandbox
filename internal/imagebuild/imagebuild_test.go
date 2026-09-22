@@ -126,6 +126,9 @@ var _ = Describe("image build lifecycle", func() {
 				return "", execx.Fail(1)
 			}
 			joined := strings.Join(c.Args, " ")
+			if strings.Contains(joined, "{{.Id}}") && strings.Contains(joined, "image.revision") {
+				return st.id + "|" + st.revision + "\n", nil // the cap's one tools inspect
+			}
 			if strings.Contains(joined, "{{.Created}}") {
 				return st.created.Format(time.RFC3339Nano) + "\n", nil
 			}
@@ -339,6 +342,18 @@ var _ = Describe("image build lifecycle", func() {
 					"COPY --link --from=claude-sandbox-cli /opt/claude-sandbox/claude-version /opt/claude-sandbox/claude-version\n"))
 			Expect(stdinOf(fake)).NotTo(ContainSubstring("--chown"))
 			Expect(stdinOf(fake)).NotTo(ContainSubstring("--chmod"), "the managed-settings dirs must stay 0755 (CS-LNCH-068)")
+		})
+
+		It("CS-IMG-024: the cap reads the tools image's ID and version with one inspect", func() {
+			_, _, err := imagebuild.EnsureCap(o, "claude-sandbox-proj")
+			Expect(err).NotTo(HaveOccurred())
+			n := 0
+			for _, l := range fake.CommandLines() {
+				if strings.HasPrefix(l, "docker image inspect") && strings.HasSuffix(l, " claude-sandbox-tools") {
+					n++
+				}
+			}
+			Expect(n).To(Equal(1))
 		})
 
 		DescribeTable("CS-IMG-005: the cap sets CLAUDE_SANDBOX_VERSION from the tools image's revision label",
@@ -560,6 +575,24 @@ var _ = Describe("image build lifecycle", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(rebuilt).To(BeFalse())
 			Expect(buildLines(fake)).To(BeEmpty())
+		})
+
+		It("CS-IMG-049: a labeled tools image costs one inspect: existence and label together", func() {
+			rebuilt, err := imagebuild.EnsureTools(o)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rebuilt).To(BeTrue())
+			images["claude-sandbox-tools"] = &imgState{created: imgT, inputs: stampOf(fake, "claude-sandbox-tools")}
+			fake.Calls = nil
+			rebuilt, err = imagebuild.EnsureTools(o)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rebuilt).To(BeFalse())
+			var inspects []string
+			for _, l := range fake.CommandLines() {
+				if strings.HasPrefix(l, "docker image inspect") {
+					inspects = append(inspects, l)
+				}
+			}
+			Expect(inspects).To(HaveLen(1))
 		})
 
 		It("CS-IMG-004: the tools image rebuilds when notification-hooks.json (baked as managed settings) is newer", func() {
@@ -1970,12 +2003,13 @@ var _ = Describe("image build lifecycle", func() {
 			Expect(strings.Count(out.String(), "(not built yet)")).To(Equal(2))
 		})
 
-		It("CS-LNCH-030: prints host and baked versions and notes a mismatch auto-rebuilds", func() {
+		It("CS-LNCH-030: prints host and baked versions and notes a mismatch rebuilds only with a baked-source change", func() {
 			images["claude-sandbox-tools"] = &imgState{created: imgT, revision: "v0.9.0"}
 			imagebuild.PrintVersion(o)
 			Expect(out.String()).To(ContainSubstring("claude-sandbox v1.2.3"))
 			Expect(out.String()).To(ContainSubstring("tools:        v0.9.0  (image claude-sandbox-tools"))
-			Expect(out.String()).To(ContainSubstring("auto-rebuild"))
+			Expect(out.String()).To(ContainSubstring("rebuilds when a baked source changes"))
+			Expect(out.String()).NotTo(ContainSubstring("next launch"), "the stamp is not an input: a mismatch alone rebuilds nothing")
 		})
 
 		It("CS-LNCH-030: the baked version is read from the tools image, not the base", func() {
@@ -1996,7 +2030,7 @@ var _ = Describe("image build lifecycle", func() {
 		It("CS-LNCH-030: prints no mismatch note when versions agree", func() {
 			images["claude-sandbox-tools"] = &imgState{created: imgT, revision: "v1.2.3"}
 			imagebuild.PrintVersion(o)
-			Expect(out.String()).NotTo(ContainSubstring("auto-rebuild"))
+			Expect(out.String()).NotTo(ContainSubstring("rebuilds when"))
 		})
 	})
 })

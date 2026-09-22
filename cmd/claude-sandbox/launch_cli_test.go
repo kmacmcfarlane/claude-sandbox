@@ -169,6 +169,10 @@ var _ = Describe("launcher CLI (end-to-end argv)", func() {
 		Expect(f.fake.CommandLines()).To(ContainElement("docker build -t claude-sandbox:run -"))
 	})
 
+	// toolsMissing matches EnsureTools' single inspect of the tools image,
+	// which answers existence and the build-inputs label at once.
+	const toolsMissing = `build-inputs" }} claude-sandbox-tools`
+
 	// buildTags returns the image tag of every docker build, in order.
 	buildTags := func(g *cliFixture) []string {
 		var tags []string
@@ -181,7 +185,7 @@ var _ = Describe("launcher CLI (end-to-end argv)", func() {
 	}
 
 	It("CS-IMG-049: a launch builds a missing tools image after the base and before the cap copies it", func() {
-		f.fake.On("image inspect claude-sandbox-tools", "", execx.Fail(1))
+		f.fake.On(toolsMissing, "", execx.Fail(1))
 		f.fake.On("image inspect claude-sandbox:run", "", execx.Fail(1))
 		Expect(f.run()).To(Equal(0), f.errw.String())
 		Expect(buildTags(f)).To(Equal([]string{"claude-sandbox-tools", "claude-sandbox:run"}))
@@ -262,7 +266,7 @@ var _ = Describe("launcher CLI (end-to-end argv)", func() {
 
 		It("CS-IMG-041: a launch whose only build is the tools image starts the checker too", func() {
 			f.fake.On("{{.Created}}", time.Now().Format(time.RFC3339Nano)+"\n", nil)
-			f.fake.On("image inspect claude-sandbox-tools", "", execx.Fail(1))
+			f.fake.On(toolsMissing, "", execx.Fail(1))
 			Expect(f.run()).To(Equal(0), f.errw.String())
 			Expect(buildTags(f)).To(Equal([]string{"claude-sandbox-tools"}))
 			Expect(detached(f)).To(HaveLen(1))
@@ -540,7 +544,7 @@ var _ = Describe("launcher CLI (end-to-end argv)", func() {
 		out := f.out.String()
 		Expect(out).To(ContainSubstring("claude-sandbox v2.0.0"))
 		Expect(out).To(ContainSubstring("v1.9.0"))
-		Expect(out).To(ContainSubstring("auto-rebuild"))
+		Expect(out).To(ContainSubstring("rebuilds when a baked source changes"))
 		Expect(f.fake.Session).To(BeNil())
 	})
 
