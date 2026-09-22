@@ -223,7 +223,7 @@ const launchUsage = `Usage:
   claude-sandbox --package-caches         # keep go/npm/pip downloads on the host
   claude-sandbox --ralph [ralph-args]     # launch the ralph loop runner
   claude-sandbox --ralph --limit 5        # run ralph for 5 iterations
-  claude-sandbox sessions                 # list running sandbox sessions
+  claude-sandbox sessions                 # list sandbox sessions
   claude-sandbox --attach                 # reattach after losing a terminal
   claude-sandbox --branch                 # fork a conversation into a new container
   claude-sandbox --worktree               # work in a private worktree, not the shared checkout
@@ -234,7 +234,7 @@ const launchUsage = `Usage:
 Commands (bootstrap the project, then exit — launcher flags do not apply):
   init                      Bootstrap .claude-sandbox/ in the project (config, env, gitignore, sidecar)
   init-ralph                Like init, plus seed ralph agent/ + scripts/ scaffolding
-  sessions [--all] [--json] List running sandbox sessions (this project by default)
+  sessions [--all] [--json] List sandbox sessions (this project by default)
   headless [flags] -- ARGS  Launch claude for an SDK client such as Paseo: no TTY, stdout
                             carries only claude's output, never prompts, always a new
                             container; everything after -- goes to claude verbatim

@@ -1,5 +1,6 @@
-// Package sessions discovers sandbox containers — running ones, and the
-// "created" reservations of launches in flight — and names new ones.
+// Package sessions discovers sandbox containers — running ones, the
+// "created" reservations of launches in flight, and kept containers that have
+// exited or are restarting — and names new ones.
 // Spec: spec/sessions.feature (CS-SESS).
 //
 // Discovery is by container label, never by parsing container names. Names are
@@ -41,6 +42,9 @@ const (
 	// back for the attach/join OOM note (CS-SESS-063).
 	LabelMemoryLimit       = oomreport.LabelMemoryLimit
 	LabelMemoryLimitSource = oomreport.LabelMemoryLimitSource
+	// LabelKeep marks a kept container and records its restart policy
+	// (CS-SESS-070); an exited or restarting row is listed only with it.
+	LabelKeep = launch.LabelKeep
 )
 
 // ModeRalph marks a ralph loop container.
@@ -50,7 +54,8 @@ const ModeRalph = "ralph"
 // (CS-LNCH-064).
 const ModeHeadless = launch.ModeHeadless
 
-// Session is one running sandbox container.
+// Session is one sandbox container: running, paused, reserved (created), or
+// a kept container that has exited or is restarting.
 type Session struct {
 	Name       string               `json:"name"`
 	Project    string               `json:"project"`
@@ -81,10 +86,14 @@ type Session struct {
 	// visible and not just the container that hosts them.
 	Count int `json:"sessions"`
 
-	// State is docker's container state: "running", or "created" for a
+	// State is docker's container state: "running", "paused", "created" for a
 	// reservation made by a launch between "docker create" and "docker start"
-	// (CS-SESS-050). Empty when docker did not report it.
-	State string `json:"-"`
+	// (CS-SESS-050), or "exited"/"restarting" for a kept container
+	// (CS-SESS-070). Empty when docker did not report it (an older row).
+	State string `json:"state"`
+	// Keep is the claude-sandbox.keep label: the restart policy of a kept
+	// container, "" for a --rm one (CS-SESS-070/074).
+	Keep string `json:"keep,omitempty"`
 	// CreatedAt is when the container was created; zero when unparsable. Only
 	// reservations need it, to recognise orphans (CS-SESS-052).
 	CreatedAt time.Time `json:"-"`
@@ -93,6 +102,38 @@ type Session struct {
 // StateCreated is docker's state for a container that exists but has never
 // started — the reservation a launch holds between create and start.
 const StateCreated = "created"
+
+// States of a container that is not running and cannot be attached to or
+// joined; discovery lists them only for kept containers (CS-SESS-070).
+const (
+	StateExited     = "exited"
+	StateRestarting = "restarting"
+)
+
+// Down reports whether the container is a kept container that is exited or
+// restarting: listed and holding its noun and pid class, but with nothing
+// to attach to or exec into (CS-SESS-073). Like Reserved, a row without a
+// state falls back on docker's status text.
+func (s Session) Down() bool {
+	if s.State != "" {
+		return s.State == StateExited || s.State == StateRestarting
+	}
+	return strings.HasPrefix(s.Status, "Exited") || strings.HasPrefix(s.Status, "Restarting")
+}
+
+// running reports whether docker counts the container as running — "paused"
+// included, since docker top works on a paused container. A row with no
+// state (an older format) is running unless its status says it is a
+// reservation, exited or restarting (CS-SESS-071).
+func (s Session) running() bool {
+	switch s.State {
+	case "running", "paused":
+		return true
+	case "":
+		return !s.Reserved() && !s.Down()
+	}
+	return false
+}
 
 // Reserved reports whether the container is a reservation (created, never
 // started) rather than a live session.
@@ -126,6 +167,7 @@ var psFormat = strings.Join([]string{
 	"{{.CreatedAt}}",
 	`{{.Label "` + LabelMemoryLimit + `"}}`,
 	`{{.Label "` + LabelMemoryLimitSource + `"}}`,
+	`{{.Label "` + LabelKeep + `"}}`, // CS-SESS-070
 }, fieldSep)
 
 // psFieldCount is the minimum a row must carry; State and CreatedAt follow.
@@ -184,13 +226,20 @@ func DiscoverAllUncounted(r execx.Runner) ([]Session, error) {
 // because plain "docker ps" always listed them (their state is "paused", not
 // "running"): dropping them would hide a paused session from attach and hand
 // its pid class to the next launch, overwriting its peer-registry record once
-// it is unpaused. Exited containers stay out.
+// it is unpaused.
+//
+// Exited and restarting containers are asked for too, but kept only when
+// they carry the claude-sandbox.keep label (CS-SESS-070): a kept container
+// can be started again with its noun and pid class, so they must stay taken
+// (CS-SESS-072), while a --rm container is only ever exited while docker
+// removes it and stays out, as before.
 func list(r execx.Runner, filter string, count bool) ([]Session, error) {
 	out, err := r.Output(execx.Cmd{
 		Name: "docker",
 		Args: []string{"ps", "-a",
 			"--filter", "label=" + filter,
 			"--filter", "status=" + StateCreated, "--filter", "status=running", "--filter", "status=paused",
+			"--filter", "status=" + StateExited, "--filter", "status=" + StateRestarting,
 			"--format", psFormat},
 		Stderr: io.Discard,
 	})
@@ -221,9 +270,18 @@ func list(r execx.Runner, filter string, count bool) ([]Session, error) {
 		if len(f) > 14 {
 			s.MemoryLimit, s.MemoryLimitSource = f[13], f[14]
 		}
-		// A reservation has no processes to count, and docker top fails on a
-		// container that is not running (CS-SESS-051).
-		if count && !s.Reserved() {
+		if len(f) > 15 {
+			s.Keep = strings.TrimSpace(f[15])
+		}
+		// An exited or restarting container is listed only when kept: a --rm
+		// one is being removed (CS-SESS-070).
+		if s.Down() && s.Keep == "" {
+			continue
+		}
+		// A reservation or a stopped kept container has no processes to
+		// count, and docker top fails on a container that is not running
+		// (CS-SESS-051, CS-SESS-071).
+		if count && s.running() {
 			s.Count = countSessions(r, s.Name)
 		}
 		out2 = append(out2, s)
@@ -332,7 +390,8 @@ func ByInstance(all []Session, instance string) (Session, bool) {
 }
 
 // Instances lists the instance nouns in use, for noun selection and for error
-// messages that need to show what is available.
+// messages that need to show what is available. Every listed row counts,
+// stopped kept containers included (CS-SESS-072).
 func Instances(all []Session) []string {
 	out := make([]string, 0, len(all))
 	for _, s := range all {
@@ -344,6 +403,7 @@ func Instances(all []Session) []string {
 }
 
 // Classes lists the pid classes in use, for class allocation (CS-PID-004).
+// Every listed row counts, stopped kept containers included (CS-SESS-072).
 func Classes(all []Session) []string {
 	out := make([]string, 0, len(all))
 	for _, s := range all {
@@ -359,19 +419,22 @@ func Classes(all []Session) []string {
 // Reservations are excluded too (CS-SESS-051): until "docker start" runs there
 // is nothing to attach to or exec into. So are headless containers
 // (CS-SESS-055): their stdio is an SDK client's stream-json channel, and a
-// terminal attached to it would corrupt the stream.
+// terminal attached to it would corrupt the stream. So are exited and
+// restarting kept containers (CS-SESS-073): nothing runs in them to attach
+// to or exec into.
 func Interactive(all []Session) []Session {
 	out := make([]Session, 0, len(all))
 	for _, s := range all {
-		if s.Mode != ModeRalph && s.Mode != ModeHeadless && !s.Reserved() {
+		if s.Mode != ModeRalph && s.Mode != ModeHeadless && !s.Reserved() && !s.Down() {
 			out = append(out, s)
 		}
 	}
 	return out
 }
 
-// Live drops reservations, keeping running containers: what a person listing
-// sessions means by "running" (CS-SESS-051).
+// Live drops reservations, keeping running containers and kept containers
+// that are exited or restarting: what a person listing sessions wants to see
+// (CS-SESS-051, CS-SESS-074).
 func Live(all []Session) []Session {
 	out := make([]Session, 0, len(all))
 	for _, s := range all {

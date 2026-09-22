@@ -14,6 +14,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -23,6 +24,7 @@ import (
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/paths"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/prompt"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/sessions"
 )
 
 const psSep = "\x1f"
@@ -88,7 +90,7 @@ var _ = Describe("sessions (CS-SESS)", func() {
 		It("CS-SESS-013: exits 0 and says so when nothing is running", func() {
 			running()
 			Expect(f.run("sessions")).To(Equal(0))
-			Expect(f.out.String()).To(ContainSubstring("No running sandbox sessions for this project"))
+			Expect(f.out.String()).To(ContainSubstring("No sandbox sessions for this project"))
 		})
 	})
 
@@ -625,5 +627,113 @@ var _ = Describe("would-be fingerprint vs the launch (CS-LNCH-108)", func() {
 		got := launchHash()
 		Expect(f.out.String()).To(ContainSubstring("an env file sets XDG_RUNTIME_DIR"))
 		Expect(currentHash(f)).To(Equal(got))
+	})
+})
+
+// keptPsRow is a ps row carrying every trailing field through the
+// claude-sandbox.keep label (CS-SESS-070).
+func keptPsRow(name, project, instance, class, state, keep string) string {
+	status := map[string]string{
+		"running":    "Up 1 hour",
+		"exited":     "Exited (0) 3 hours ago",
+		"restarting": "Restarting (1) 5 seconds ago",
+	}[state]
+	return strings.Join([]string{name, status, project, "claude", instance, "v1", "", "", "", class, "",
+		state, "", "", "", keep}, psSep)
+}
+
+var _ = Describe("kept containers in discovery (CS-SESS-070..074)", func() {
+	var f *cliFixture
+	BeforeEach(func() { f = newCLIFixture() })
+
+	exitedKept := func(g *cliFixture, instance string) string {
+		return keptPsRow("cs-k", g.proj, instance, "5", sessions.StateExited, "unless-stopped")
+	}
+
+	It("CS-SESS-070, CS-SESS-074: sessions lists an exited kept container with its state; an unlabelled one stays out", func() {
+		f.fake.On("docker ps", strings.Join([]string{
+			keptPsRow("cs-a", f.proj, "heron", "1", "running", ""),
+			exitedKept(f, "otter"),
+			keptPsRow("cs-gone", f.proj, "wren", "2", sessions.StateExited, ""),
+		}, "\n")+"\n", nil)
+		f.fake.On("docker top", "PID  COMMAND\n1  claude\n", nil)
+		Expect(f.run("sessions")).To(Equal(0), f.errw.String())
+		out := f.out.String()
+		Expect(out).To(MatchRegexp(`INSTANCE\s+WORKTREE\s+NAME\s+MODE\s+STATE\s+UP\s+SESSIONS`))
+		Expect(out).To(MatchRegexp(`heron\s+-\s+cs-a\s+claude\s+running\s+1 hour\s+1`))
+		Expect(out).To(MatchRegexp(`otter\s+-\s+cs-k\s+claude\s+exited\s+-\s+0`))
+		Expect(out).NotTo(ContainSubstring("wren"))
+		for _, l := range f.fake.CommandLines() {
+			Expect(l).NotTo(HavePrefix("docker top cs-k"), "CS-SESS-071: nothing to count in a stopped container")
+		}
+	})
+
+	It("CS-SESS-074: an older row with no state shows '-' in STATE", func() {
+		f.fake.On("docker ps", psRow("cs-a", "Up 2 hours", f.proj, "otter")+"\n", nil)
+		f.fake.On("docker top", "PID  COMMAND\n1  claude\n", nil)
+		Expect(f.run("sessions")).To(Equal(0))
+		Expect(f.out.String()).To(MatchRegexp(`otter\s+-\s+cs-a\s+claude\s+-\s+2 hours\s+1`))
+	})
+
+	It("CS-SESS-074: --json carries state and keep", func() {
+		f.fake.On("docker ps", keptPsRow("cs-a", f.proj, "heron", "1", "running", "")+"\n"+exitedKept(f, "otter")+"\n", nil)
+		f.fake.On("docker top", "PID  COMMAND\n1  claude\n", nil)
+		Expect(f.run("sessions", "--json")).To(Equal(0))
+		out := f.out.String()
+		Expect(out).To(ContainSubstring(`"state": "running"`))
+		Expect(out).To(ContainSubstring(`"state": "exited"`))
+		Expect(out).To(ContainSubstring(`"keep": "unless-stopped"`))
+	})
+
+	It("CS-SESS-072: a stopped kept container's noun and pid class are never re-issued", func() {
+		// Every noun but one, and every class but one, is held by an exited or
+		// restarting kept container: the launch must get the remaining pair.
+		var rows []string
+		free := sessions.Nouns[len(sessions.Nouns)-1]
+		for i, n := range sessions.Nouns[:len(sessions.Nouns)-1] {
+			state := sessions.StateExited
+			if i%2 == 1 {
+				state = sessions.StateRestarting
+			}
+			rows = append(rows, keptPsRow("k-"+n, f.proj, n, strconv.Itoa(i), state, "unless-stopped"))
+		}
+		for k := len(sessions.Nouns) - 1; k < 255; k++ {
+			rows = append(rows, keptPsRow("e-"+strconv.Itoa(k), "/elsewhere", "", strconv.Itoa(k), sessions.StateExited, "always"))
+		}
+		f.fake.On("docker ps", strings.Join(rows, "\n")+"\n", nil)
+		f.env.Prompter = &prompt.Scripted{IsTTY: false}
+		Expect(f.run()).To(Equal(0), f.errw.String())
+		Expect(nameOf(f.launched().Args)).To(HaveSuffix("-" + free))
+		Expect(f.launched().Args).To(ContainElement("claude-sandbox.pidclass=255"))
+	})
+
+	It("CS-SESS-073: alone it never triggers the session decision, and ralph does not report it", func() {
+		f.fake.On("docker ps", exitedKept(f, "otter")+"\n", nil)
+		f.env.Prompter = &prompt.Scripted{IsTTY: false}
+		Expect(f.run()).To(Equal(0), f.errw.String())
+		Expect(f.errw.String()).NotTo(ContainSubstring("running session"))
+		Expect(nameOf(f.launched().Args)).NotTo(HaveSuffix("-otter"))
+
+		g := newCLIFixture()
+		g.fake.On("docker ps", exitedKept(g, "otter")+"\n", nil)
+		g.env.Prompter = &prompt.Scripted{IsTTY: false}
+		Expect(g.run("--ralph")).To(Equal(0), g.errw.String())
+		Expect(g.errw.String()).NotTo(ContainSubstring("otter"))
+	})
+
+	It("CS-SESS-073: --attach, --join and the completion do not offer it", func() {
+		f.fake.On("docker ps", exitedKept(f, "otter")+"\n", nil)
+		Expect(f.run("--attach=otter")).To(Equal(2))
+		Expect(f.errw.String()).To(ContainSubstring("no running sessions"))
+		Expect(f.fake.Session).To(BeNil())
+
+		g := newCLIFixture()
+		g.fake.On("docker ps", keptPsRow("cs-k", g.proj, "otter", "5", sessions.StateRestarting, "unless-stopped")+"\n", nil)
+		Expect(g.run("--join=otter")).To(Equal(2))
+		Expect(g.fake.Session).To(BeNil())
+
+		h := newCLIFixture()
+		h.fake.On("docker ps", exitedKept(h, "otter")+"\n", nil)
+		Expect(h.complete("--attach=").names).To(BeEmpty())
 	})
 })
