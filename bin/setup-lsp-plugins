@@ -9,13 +9,19 @@
 # Safe to run multiple times — skips plugins that are already registered.
 # Requires a Claude Code session restart after first run.
 #
+# Shipped in the sandbox tools image at /opt/claude-sandbox/bin (CS-IMG-050).
+# In a sandbox the config dir (and so settings.json) is the host's own, live
+# file: the registration persists to the host and every other sandbox. Writes
+# go through the file in place, never mv over it, so a settings.json that is a
+# symlink (e.g. into a dotfiles repo, CS-LNCH-069) stays one.
+#
 # Usage:
 #   setup-lsp-plugins            # register all plugins
 #   setup-lsp-plugins --check    # exit 0 if all registered, 1 if not
 
 set -euo pipefail
 
-CLAUDE_DIR="${HOME}/.claude"
+CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-${HOME}/.claude}"
 PLUGINS_DIR="${CLAUDE_DIR}/plugins"
 INSTALLED_FILE="${PLUGINS_DIR}/installed_plugins.json"
 CACHE_DIR="${PLUGINS_DIR}/cache/claude-plugins-official"
@@ -38,6 +44,23 @@ if ! command -v jq &>/dev/null; then
   echo "ERROR: jq is required but not found in PATH" >&2
   exit 1
 fi
+
+# Apply a jq filter to a JSON file in place: write through the existing file
+# (keeping a symlink a symlink, and its mode) instead of mv-ing a temp file
+# over it. A failed jq leaves the file untouched.
+jq_in_place() {
+  local file="$1"
+  shift
+  local tmp
+  tmp=$(mktemp)
+  if jq "$@" "$file" > "$tmp"; then
+    cat "$tmp" > "$file"
+    rm -f "$tmp"
+  else
+    rm -f "$tmp"
+    return 1
+  fi
+}
 
 # Check if a plugin is already registered in installed_plugins.json
 is_registered() {
@@ -110,8 +133,8 @@ for entry in "${PLUGINS[@]}"; do
     fi
 
     # Add the plugin entry
-    tmp=$(mktemp)
-    jq --arg id "$plugin_id" \
+    jq_in_place "$INSTALLED_FILE" \
+       --arg id "$plugin_id" \
        --arg path "$install_path" \
        --arg ver "$version" \
        --arg ts "$timestamp" \
@@ -122,8 +145,7 @@ for entry in "${PLUGINS[@]}"; do
          "installedAt": $ts,
          "lastUpdated": $ts,
          "gitCommitSha": ""
-       }]' "$INSTALLED_FILE" > "$tmp"
-    mv "$tmp" "$INSTALLED_FILE"
+       }]'
     echo "Registered ${plugin_id} in installed_plugins.json"
     changes_made=true
   else
@@ -135,9 +157,7 @@ for entry in "${PLUGINS[@]}"; do
     if [[ ! -f "$SETTINGS_FILE" ]]; then
       echo '{}' > "$SETTINGS_FILE"
     fi
-    tmp=$(mktemp)
-    jq --arg id "$plugin_id" '.enabledPlugins[$id] = true' "$SETTINGS_FILE" > "$tmp"
-    mv "$tmp" "$SETTINGS_FILE"
+    jq_in_place "$SETTINGS_FILE" --arg id "$plugin_id" '.enabledPlugins[$id] = true'
     echo "Enabled ${plugin_id} in settings.json"
     changes_made=true
   else

@@ -2,12 +2,13 @@
 #
 # Everything the sandbox itself contributes to a container, and nothing else:
 # the Go binary (launcher, in-container ralph runner, pidslot helper), its
-# ralph symlink, the entrypoint, logstream/, PROMPT_RALPH.md, the bundled
-# Discord MCP server, the managed-settings notification hooks and the version
-# stamp. It is never run. At launch the generated one-layer "cap" copies
-# /opt/claude-sandbox/ and the managed-settings drop-in from here onto the base
-# or child image the project runs (spec/image-build.feature, CS-IMG-024,
-# CS-IMG-048/049), exactly as it copies the CLI from claude-sandbox-cli.
+# ralph symlink, the entrypoint, setup-lsp-plugins, logstream/,
+# PROMPT_RALPH.md, the bundled Discord MCP server, the managed-settings
+# notification hooks and the version stamp. It is never run. At launch the
+# generated one-layer "cap" copies /opt/claude-sandbox/ and the
+# managed-settings drop-in from here onto the base or child image the project
+# runs (spec/image-build.feature, CS-IMG-024, CS-IMG-048/049), exactly as it
+# copies the CLI from claude-sandbox-cli.
 #
 # Why a separate image: these files change with every commit, the base's OS
 # layers do not. Baked into the base, each commit changed the base's ID and so
@@ -58,6 +59,9 @@ COPY --link --chmod=755 entrypoint.sh /opt/claude-sandbox/bin/entrypoint.sh
 # The cap copies /opt/claude-sandbox/ as a directory, so the link stays a link.
 COPY --link --chmod=755 --from=builder /out/claude-sandbox /opt/claude-sandbox/bin/claude-sandbox
 RUN ln -s /opt/claude-sandbox/bin/claude-sandbox /opt/claude-sandbox/bin/ralph
+# Registers the LSP plugins with Claude Code; container-context.md tells every
+# session to run it once language servers are installed (CS-IMG-050).
+COPY --link --chmod=755 bin/setup-lsp-plugins /opt/claude-sandbox/bin/setup-lsp-plugins
 COPY --link logstream/ /opt/claude-sandbox/logstream/
 COPY --link PROMPT_RALPH.md /opt/claude-sandbox/PROMPT_RALPH.md
 COPY --link --from=mcp /src/dist/index.mjs /opt/claude-sandbox/mcp/discord-notify/dist/index.mjs

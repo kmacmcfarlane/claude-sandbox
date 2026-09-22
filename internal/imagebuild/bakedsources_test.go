@@ -1,6 +1,10 @@
 package imagebuild_test
 
 import (
+	"encoding/json"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -145,6 +149,118 @@ var _ = Describe("baked sources", func() {
 		Expect(df).To(MatchRegexp(`(?m)^COPY mcp/discord-notify/ \./\s*$`))
 		// mcp-servers.json runs exactly the bundle the tools image ships.
 		Expect(repoFile("mcp-servers.json")).To(ContainSubstring(`"/opt/claude-sandbox/mcp/discord-notify/dist/index.mjs"`))
+	})
+
+	Describe("CS-IMG-050: setup-lsp-plugins", func() {
+		It("CS-IMG-050: Dockerfile.tools ships it executable on the session PATH", func() {
+			df := repoFile("Dockerfile.tools")
+			Expect(df).To(MatchRegexp(`(?m)^COPY --link --chmod=755 bin/setup-lsp-plugins /opt/claude-sandbox/bin/setup-lsp-plugins\s*$`))
+			Expect(imagebuild.BakedSources).To(ContainElement("bin/setup-lsp-plugins"))
+			// The base puts /opt/claude-sandbox/bin on PATH (CS-IMG-048), and the
+			// session is told to run it by name.
+			Expect(repoFile("container-context.md")).To(ContainSubstring("setup-lsp-plugins"))
+		})
+
+		// The script is bash + jq; run it against a scratch config dir.
+		var (
+			cfg, target, bindir string
+			run                 func(args ...string) (string, int)
+		)
+		BeforeEach(func() {
+			root := GinkgoT().TempDir()
+			cfg = filepath.Join(root, "config")
+			bindir = filepath.Join(root, "bin")
+			Expect(os.MkdirAll(cfg, 0o755)).To(Succeed())
+			Expect(os.MkdirAll(bindir, 0o755)).To(Succeed())
+			// A hermetic PATH: only the tools the script uses, so a language
+			// server installed on the test machine cannot leak in.
+			bash, err := exec.LookPath("bash")
+			if err != nil {
+				Skip("bash not on PATH")
+			}
+			for _, tool := range []string{"jq", "mktemp", "cat", "date", "mkdir", "rm"} {
+				p, err := exec.LookPath(tool)
+				if err != nil {
+					Skip(tool + " not on PATH")
+				}
+				Expect(os.Symlink(p, filepath.Join(bindir, tool))).To(Succeed())
+			}
+			// settings.json is a symlink into a dotfiles dir (CS-LNCH-069).
+			target = filepath.Join(root, "dotfiles", "settings.json")
+			Expect(os.MkdirAll(filepath.Dir(target), 0o755)).To(Succeed())
+			Expect(os.WriteFile(target, []byte(`{"model":"opus"}`), 0o600)).To(Succeed())
+			Expect(os.Symlink(target, filepath.Join(cfg, "settings.json"))).To(Succeed())
+			// Only gopls is "installed".
+			Expect(os.WriteFile(filepath.Join(bindir, "gopls"), []byte("#!/bin/sh\n"), 0o755)).To(Succeed())
+			script, err := filepath.Abs(filepath.Join("..", "..", "bin", "setup-lsp-plugins"))
+			Expect(err).NotTo(HaveOccurred())
+			run = func(args ...string) (string, int) {
+				cmd := exec.Command(bash, append([]string{script}, args...)...)
+				cmd.Env = []string{
+					"HOME=" + filepath.Join(root, "home"), // must not be used
+					"CLAUDE_CONFIG_DIR=" + cfg,
+					"PATH=" + bindir,
+					"TMPDIR=" + root,
+				}
+				out, err := cmd.CombinedOutput()
+				code := 0
+				if ee, ok := err.(*exec.ExitError); ok {
+					code = ee.ExitCode()
+				} else {
+					Expect(err).NotTo(HaveOccurred())
+				}
+				return string(out), code
+			}
+		})
+
+		readJSON := func(path string) map[string]any {
+			raw, err := os.ReadFile(path)
+			Expect(err).NotTo(HaveOccurred())
+			var m map[string]any
+			Expect(json.Unmarshal(raw, &m)).To(Succeed())
+			return m
+		}
+
+		It("CS-IMG-050: registers and enables the plugins whose server is on PATH, in CLAUDE_CONFIG_DIR, through a settings symlink", func() {
+			out, code := run()
+			Expect(code).To(Equal(0), out)
+
+			fi, err := os.Lstat(filepath.Join(cfg, "settings.json"))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(fi.Mode()&os.ModeSymlink).NotTo(BeZero(), "settings.json must stay a symlink")
+			settings := readJSON(target)
+			Expect(settings).To(HaveKeyWithValue("model", "opus"))
+			Expect(settings["enabledPlugins"]).To(Equal(map[string]any{"gopls-lsp@claude-plugins-official": true}))
+			tfi, err := os.Stat(target)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(tfi.Mode().Perm()).To(Equal(os.FileMode(0o600)), "rewritten in place, mode kept")
+
+			installed := readJSON(filepath.Join(cfg, "plugins", "installed_plugins.json"))
+			Expect(installed["plugins"]).To(HaveKey("gopls-lsp@claude-plugins-official"))
+			Expect(installed["plugins"]).NotTo(HaveKey("typescript-lsp@claude-plugins-official"))
+			Expect(filepath.Join(filepath.Dir(cfg), "home")).NotTo(BeADirectory(), "HOME/.claude is not the config dir")
+
+			// Idempotent.
+			out, code = run()
+			Expect(code).To(Equal(0), out)
+			Expect(out).To(ContainSubstring("Already registered: gopls-lsp@claude-plugins-official"))
+		})
+
+		It("CS-IMG-050: --check exits 0 only when all three are registered, enabled and on PATH", func() {
+			_, code := run()
+			Expect(code).To(Equal(0))
+			out, code := run("--check")
+			Expect(code).To(Equal(1), out)
+			Expect(out).To(ContainSubstring("gopls-lsp: registered=true enabled=true binary=true"))
+
+			for _, b := range []string{"typescript-language-server", "pyright"} {
+				Expect(os.WriteFile(filepath.Join(bindir, b), []byte("#!/bin/sh\n"), 0o755)).To(Succeed())
+			}
+			_, code = run()
+			Expect(code).To(Equal(0))
+			out, code = run("--check")
+			Expect(code).To(Equal(0), out)
+		})
 	})
 
 	It("CS-IMG-037: the parser skips multi-stage COPYs and joins continuations", func() {

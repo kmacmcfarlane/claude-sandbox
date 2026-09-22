@@ -50,7 +50,7 @@ Feature: Image build lifecycle (CS-IMG)
     # assets.go embeds into the binary (scaffold/, scaffold-ralph/,
     # container-context.md, mcp-servers.json), logstream/, entrypoint.sh,
     # PROMPT_RALPH.md, mcp/discord-notify/, notification-hooks.json (baked as managed settings,
-    # CS-LNCH-068). Until CS-IMG-048 the base COPYed them, so every commit rebuilt
+    # CS-LNCH-068), bin/setup-lsp-plugins (CS-IMG-050). Until CS-IMG-048 the base COPYed them, so every commit rebuilt
     # the base and, through its changed ID, every child. scaffold/, scaffold-ralph/, container-context.md and
     # mcp-servers.json were COPYed but missing from the set, so editing them
     # rebuilt nothing and the running binary kept seeding the old files.
@@ -119,6 +119,23 @@ Feature: Image build lifecycle (CS-IMG)
     # The Discord MCP server is bundled with esbuild in a node stage; only the
     # bundle ships, which is all mcp-servers.json runs. The Go binary is built
     # in a golang stage as before.
+
+  Scenario: CS-IMG-050 The tools image ships setup-lsp-plugins
+    Then Dockerfile.tools copies bin/setup-lsp-plugins to /opt/claude-sandbox/bin/setup-lsp-plugins (0755),
+      so it is on PATH in every session (container-context.md tells sessions to run it)
+    And it registers and enables gopls-lsp, typescript-lsp and pyright-lsp from
+      claude-plugins-official for each whose language server is on PATH, in the config dir
+      ($CLAUDE_CONFIG_DIR, else ~/.claude), and skips a plugin already registered or enabled
+    And "setup-lsp-plugins --check" exits 0 only when all three are registered, enabled and on PATH
+    And it rewrites installed_plugins.json and settings.json in place, so a settings.json that is
+      a symlink stays a symlink (CS-LNCH-069) and its target gets the change
+    # The script existed since the bash era (baked by "COPY bin/"); the Go
+    # rewrite replaced that COPY with the builder's binary and silently dropped
+    # it, while container-context.md, LSP_TOOLS.md and Dockerfile.example kept
+    # naming it. settings.json is the live host file (CS-LNCH-011), so the old
+    # "mktemp + mv" replaced a dotfile symlink with a plain file on the host,
+    # and ~/.claude is not the config dir when CLAUDE_CONFIG_DIR relocates it.
+    # The base ships no language server; a child Dockerfile installs them.
 
   # ---- Claude Code CLI image ----
   # The CLI is deliberately NOT baked into the base: installing it mid-Dockerfile
