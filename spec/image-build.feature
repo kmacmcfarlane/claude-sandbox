@@ -366,6 +366,17 @@ Feature: Image build lifecycle (CS-IMG)
     # symlink and the directory merges with the base's /opt/claude-sandbox/venv.
     # The managed-settings file is copied by name, without --chmod, so the
     # directories the link layer creates are 0755 and the file keeps its 0644.
+    # Only ~/.local crosses from the CLI image, never /home/claude/.claude: the
+    # install leaves build-time state there (install.sh hardcodes
+    # $HOME/.claude/downloads, and `claude install` writes .claude.json backups
+    # to ~/.claude/backups since CLAUDE_CONFIG_DIR is unset at build). The
+    # entrypoint moves /home/claude into the host home, so a baked ~/.claude
+    # surfaced in every container whose ~/.claude was not a mount (a relocated
+    # CLAUDE_CONFIG_DIR); there ~/.claude is container layer and anything
+    # written there is lost at exit. The base installed the CLI itself until
+    # the cap split, which is where the stray ~/.claude/backups and
+    # ~/.claude/downloads came from; the exact-Dockerfile assertion of this
+    # scenario keeps them out.
 
   Scenario Outline: CS-IMG-025 Cap rebuild triggers
     # Unlabeled caps only; a labeled cap compares fingerprints, which cover

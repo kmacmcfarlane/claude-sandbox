@@ -26,6 +26,9 @@
 #   A RUN step that invokes `claude`, `claude-sandbox` or `ralph` will fail.
 #   Anything needing them (plugin registration, `setup-lsp-plugins`) belongs at
 #   runtime. This is also why a sandbox update never rebuilds this image.
+#   Do not install the CLI here either: the installer leaves state in
+#   /home/claude/.claude, which the entrypoint moves into ~/.claude, and the
+#   cap's COPY --link onto /home/claude/.local replaces your install anyway.
 #
 # CACHE MOUNTS — share the base image's download caches:
 #   The base declares BuildKit cache mounts with fixed ids. Reuse the same ids
