@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -161,28 +162,28 @@ var _ = Describe("baked sources", func() {
 			Expect(repoFile("container-context.md")).To(ContainSubstring("setup-lsp-plugins"))
 		})
 
-		// The script is bash + jq; run it against a scratch config dir.
+		// The script is bash + jq; run it against a scratch config dir, never a
+		// real one.
 		var (
-			cfg, target, bindir string
-			run                 func(args ...string) (string, int)
+			root, cfg, target, bindir string
+			run                       func(args ...string) (string, int)
 		)
 		BeforeEach(func() {
-			root := GinkgoT().TempDir()
+			root = GinkgoT().TempDir()
 			cfg = filepath.Join(root, "config")
 			bindir = filepath.Join(root, "bin")
 			Expect(os.MkdirAll(cfg, 0o755)).To(Succeed())
 			Expect(os.MkdirAll(bindir, 0o755)).To(Succeed())
 			// A hermetic PATH: only the tools the script uses, so a language
-			// server installed on the test machine cannot leak in.
+			// server installed on the test machine cannot leak in. A missing
+			// tool fails the spec: the image ships all of them, and a skip
+			// would hide the script's only behavioral coverage.
 			bash, err := exec.LookPath("bash")
-			if err != nil {
-				Skip("bash not on PATH")
-			}
-			for _, tool := range []string{"jq", "mktemp", "cat", "date", "mkdir", "rm"} {
+			Expect(err).NotTo(HaveOccurred(), "bash is required for the CS-IMG-050 script tests")
+			for _, tool := range []string{"jq", "mktemp", "cat", "date", "mkdir", "rm", "readlink",
+				"dirname", "basename", "chmod", "mv", "cp", "flock"} {
 				p, err := exec.LookPath(tool)
-				if err != nil {
-					Skip(tool + " not on PATH")
-				}
+				Expect(err).NotTo(HaveOccurred(), "%s is required for the CS-IMG-050 script tests", tool)
 				Expect(os.Symlink(p, filepath.Join(bindir, tool))).To(Succeed())
 			}
 			// settings.json is a symlink into a dotfiles dir (CS-LNCH-069).
@@ -220,8 +221,24 @@ var _ = Describe("baked sources", func() {
 			Expect(json.Unmarshal(raw, &m)).To(Succeed())
 			return m
 		}
+		inode := func(path string) uint64 {
+			fi, err := os.Stat(path)
+			Expect(err).NotTo(HaveOccurred())
+			return uint64(fi.Sys().(*syscall.Stat_t).Ino)
+		}
+		// No temp file is left beside the files the script replaced.
+		expectNoTempFiles := func(dirs ...string) {
+			for _, d := range dirs {
+				entries, err := os.ReadDir(d)
+				Expect(err).NotTo(HaveOccurred())
+				for _, e := range entries {
+					Expect(e.Name()).NotTo(MatchRegexp(`^\.(settings|installed_plugins)\.json\.`), "temp file left in %s", d)
+				}
+			}
+		}
 
 		It("CS-IMG-050: registers and enables the plugins whose server is on PATH, in CLAUDE_CONFIG_DIR, through a settings symlink", func() {
+			before := inode(target)
 			out, code := run()
 			Expect(code).To(Equal(0), out)
 
@@ -233,17 +250,77 @@ var _ = Describe("baked sources", func() {
 			Expect(settings["enabledPlugins"]).To(Equal(map[string]any{"gopls-lsp@claude-plugins-official": true}))
 			tfi, err := os.Stat(target)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(tfi.Mode().Perm()).To(Equal(os.FileMode(0o600)), "rewritten in place, mode kept")
+			Expect(tfi.Mode().Perm()).To(Equal(os.FileMode(0o600)), "mode kept")
+			Expect(inode(target)).NotTo(Equal(before), "the link's target is replaced by a rename, not truncated")
+			Expect(filepath.Join(cfg, "settings.json.setup-lsp-plugins.bak")).NotTo(BeAnExistingFile())
 
 			installed := readJSON(filepath.Join(cfg, "plugins", "installed_plugins.json"))
 			Expect(installed["plugins"]).To(HaveKey("gopls-lsp@claude-plugins-official"))
 			Expect(installed["plugins"]).NotTo(HaveKey("typescript-lsp@claude-plugins-official"))
-			Expect(filepath.Join(filepath.Dir(cfg), "home")).NotTo(BeADirectory(), "HOME/.claude is not the config dir")
+			Expect(filepath.Join(root, "home")).NotTo(BeADirectory(), "HOME/.claude is not the config dir")
+			expectNoTempFiles(cfg, filepath.Join(cfg, "plugins"), filepath.Dir(target), root)
 
 			// Idempotent.
 			out, code = run()
 			Expect(code).To(Equal(0), out)
 			Expect(out).To(ContainSubstring("Already registered: gopls-lsp@claude-plugins-official"))
+		})
+
+		It("CS-IMG-050: a plain settings.json is replaced atomically by a rename", func() {
+			settingsPath := filepath.Join(cfg, "settings.json")
+			Expect(os.Remove(settingsPath)).To(Succeed())
+			Expect(os.WriteFile(settingsPath, []byte(`{"model":"opus"}`), 0o640)).To(Succeed())
+			before := inode(settingsPath)
+
+			out, code := run()
+			Expect(code).To(Equal(0), out)
+
+			fi, err := os.Lstat(settingsPath)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(fi.Mode().IsRegular()).To(BeTrue())
+			Expect(fi.Mode().Perm()).To(Equal(os.FileMode(0o640)), "mode kept")
+			Expect(inode(settingsPath)).NotTo(Equal(before), "renamed over, never truncated in place")
+			settings := readJSON(settingsPath)
+			Expect(settings).To(HaveKeyWithValue("model", "opus"))
+			Expect(settings["enabledPlugins"]).To(Equal(map[string]any{"gopls-lsp@claude-plugins-official": true}))
+			expectNoTempFiles(cfg, filepath.Join(cfg, "plugins"), root)
+		})
+
+		It("CS-IMG-050: when the rename cannot work it saves a backup and rewrites in place", func() {
+			if os.Geteuid() == 0 {
+				Skip("root ignores the directory permissions this scenario relies on")
+			}
+			// An unwritable target directory stands in for the sandbox's
+			// single-file bind mount: no temp file beside it, no rename onto it.
+			dir := filepath.Dir(target)
+			Expect(os.Chmod(dir, 0o555)).To(Succeed())
+			DeferCleanup(os.Chmod, dir, os.FileMode(0o755))
+
+			out, code := run()
+			Expect(code).To(Equal(0), out)
+			Expect(out).To(ContainSubstring("original saved as"))
+
+			backup := filepath.Join(cfg, "settings.json.setup-lsp-plugins.bak")
+			Expect(os.ReadFile(backup)).To(Equal([]byte(`{"model":"opus"}`)))
+			settings := readJSON(target)
+			Expect(settings).To(HaveKeyWithValue("model", "opus"))
+			Expect(settings["enabledPlugins"]).To(Equal(map[string]any{"gopls-lsp@claude-plugins-official": true}))
+			fi, err := os.Lstat(filepath.Join(cfg, "settings.json"))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(fi.Mode() & os.ModeSymlink).NotTo(BeZero())
+			expectNoTempFiles(cfg, root)
+		})
+
+		It("CS-IMG-050: a dangling settings.json symlink stops it before any write", func() {
+			Expect(os.Remove(target)).To(Succeed())
+
+			out, code := run()
+			Expect(code).To(Equal(1), out)
+			Expect(out).To(ContainSubstring("symlink to a missing file"))
+			Expect(target).NotTo(BeAnExistingFile())
+			entries, err := os.ReadDir(cfg)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(entries).To(HaveLen(1), "only the dangling link: no plugins dir, no lock, nothing written")
 		})
 
 		It("CS-IMG-050: --check exits 0 only when all three are registered, enabled and on PATH", func() {

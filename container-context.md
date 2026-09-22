@@ -31,8 +31,9 @@ gopls, typescript-language-server or pyright is installed, run
 `setup-lsp-plugins` (in `/opt/claude-sandbox/bin`) to register and enable the
 matching `claude-plugins-official` LSP plugin. It writes the config dir's
 `plugins/installed_plugins.json` and `settings.json`, which are the host's
-files, so this is a one-time setup shared by every sandbox (idempotent; restart
-Claude Code afterwards). Use `setup-lsp-plugins --check` to verify status.
+files, so this is a one-time setup shared by every sandbox, and the
+`enabledPlugins` entries also reach host (non-sandbox) sessions (idempotent;
+restart Claude Code afterwards). Use `setup-lsp-plugins --check` to verify status.
 
 ## Container Details
 

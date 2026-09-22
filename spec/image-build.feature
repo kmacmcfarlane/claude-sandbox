@@ -127,14 +127,25 @@ Feature: Image build lifecycle (CS-IMG)
       claude-plugins-official for each whose language server is on PATH, in the config dir
       ($CLAUDE_CONFIG_DIR, else ~/.claude), and skips a plugin already registered or enabled
     And "setup-lsp-plugins --check" exits 0 only when all three are registered, enabled and on PATH
-    And it rewrites installed_plugins.json and settings.json in place, so a settings.json that is
-      a symlink stays a symlink (CS-LNCH-069) and its target gets the change
+    And it replaces installed_plugins.json and settings.json atomically: jq's output is written
+      to a temp file beside the real file (a symlink resolved first, so a settings.json that is a
+      symlink stays one, CS-LNCH-069), given the file's mode and renamed over it
+    And only when that rename fails (the target is a single-file bind mount in the sandbox, or
+      its directory is unwritable) does it copy the original to
+      <config dir>/<name>.setup-lsp-plugins.bak and rewrite the file in place
+    And a dangling settings.json or installed_plugins.json symlink stops it, exit 1, before any write
+    And no temp file survives it, on any path
     # The script existed since the bash era (baked by "COPY bin/"); the Go
     # rewrite replaced that COPY with the builder's binary and silently dropped
     # it, while container-context.md, LSP_TOOLS.md and Dockerfile.example kept
     # naming it. settings.json is the live host file (CS-LNCH-011), so the old
     # "mktemp + mv" replaced a dotfile symlink with a plain file on the host,
     # and ~/.claude is not the config dir when CLAUDE_CONFIG_DIR relocates it.
+    # A write-through ("cat tmp > file") keeps the link but truncates the live
+    # file first: a concurrently starting session can read it empty, and a
+    # crash leaves it empty. Hence rename first, write-through only as a
+    # backed-up fallback. Concurrent runs are serialised with flock on
+    # <config dir>/.setup-lsp-plugins.lock (Claude Code does not take it).
     # The base ships no language server; a child Dockerfile installs them.
 
   # ---- Claude Code CLI image ----
