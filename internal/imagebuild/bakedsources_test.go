@@ -91,10 +91,10 @@ func contextCopies(dockerfile string) []copySource {
 }
 
 var _ = Describe("baked sources", func() {
-	It("CS-IMG-037: every source the base Dockerfile COPYs from the build context is a baked source", func() {
-		srcs := contextSources(repoFile("Dockerfile"))
+	It("CS-IMG-037: every source Dockerfile.tools COPYs from the build context is a baked source", func() {
+		srcs := contextSources(repoFile("Dockerfile.tools"))
 		Expect(srcs).To(ContainElements("scaffold", "scaffold-ralph", "container-context.md", "mcp-servers.json"),
-			"the parser found the Dockerfile's COPY lines")
+			"the parser found Dockerfile.tools' COPY lines")
 		for _, s := range srcs {
 			Expect(s).NotTo(BeElementOf("", "."), "a whole-context COPY cannot be tracked as a baked source")
 			covered := false
@@ -104,8 +104,47 @@ var _ = Describe("baked sources", func() {
 					break
 				}
 			}
-			Expect(covered).To(BeTrue(), "Dockerfile COPY source %q is not in imagebuild.BakedSources (CS-IMG-004)", s)
+			Expect(covered).To(BeTrue(), "Dockerfile.tools COPY source %q is not in imagebuild.BakedSources (CS-IMG-004)", s)
 		}
+	})
+
+	It("CS-IMG-048: the base Dockerfile COPYs nothing from the build context and carries no version stamp", func() {
+		df := repoFile("Dockerfile")
+		Expect(contextSources(df)).To(BeEmpty(),
+			"a baked source in the base would rebuild it, and every child, on each commit; put it in Dockerfile.tools")
+		Expect(df).NotTo(ContainSubstring("CLAUDE_SANDBOX_VERSION"))
+		Expect(df).NotTo(MatchRegexp(`(?m)^FROM\s+golang`), "the Go build belongs to Dockerfile.tools")
+		// The files arrive with the cap; the base only names them.
+		Expect(df).To(MatchRegexp(`(?m)^ENTRYPOINT \["/opt/claude-sandbox/bin/entrypoint\.sh"\]\s*$`))
+		Expect(df).To(MatchRegexp(`(?m)^ENV PATH="/opt/claude-sandbox/bin:\$PATH"\s*$`))
+	})
+
+	It("CS-IMG-048: the scaffold child Dockerfile says the sandbox binary is not there at build time", func() {
+		ex := repoFile("scaffold/Dockerfile.example")
+		Expect(ex).To(ContainSubstring("claude-sandbox-tools"))
+		Expect(ex).To(MatchRegexp(`(?s)RUN step that invokes.*claude-sandbox`))
+	})
+
+	It("CS-IMG-049: Dockerfile.tools lays out the files the cap copies", func() {
+		df := repoFile("Dockerfile.tools")
+		for _, re := range []string{
+			`(?m)^COPY --link --chmod=755 entrypoint\.sh /opt/claude-sandbox/bin/entrypoint\.sh\s*$`,
+			`(?m)^COPY --link --chmod=755 --from=builder /out/claude-sandbox /opt/claude-sandbox/bin/claude-sandbox\s*$`,
+			`(?m)^RUN ln -s /opt/claude-sandbox/bin/claude-sandbox /opt/claude-sandbox/bin/ralph\s*$`,
+			`(?m)^COPY --link logstream/ /opt/claude-sandbox/logstream/\s*$`,
+			`(?m)^COPY --link PROMPT_RALPH\.md /opt/claude-sandbox/PROMPT_RALPH\.md\s*$`,
+			`(?m)^COPY --link --from=mcp /src/dist/index\.mjs /opt/claude-sandbox/mcp/discord-notify/dist/index\.mjs\s*$`,
+			`(?m)^ARG CLAUDE_SANDBOX_VERSION=unknown\s*$`,
+			`(?m)^RUN echo "\$CLAUDE_SANDBOX_VERSION" > /opt/claude-sandbox/version\s*$`,
+			`(?m)^LABEL org\.opencontainers\.image\.revision=\$CLAUDE_SANDBOX_VERSION\s*$`,
+		} {
+			Expect(df).To(MatchRegexp(re))
+		}
+		// The MCP bundle is built in its own node stage from the COPYed source.
+		Expect(df).To(MatchRegexp(`(?m)^FROM node:22\S* AS mcp\s*$`))
+		Expect(df).To(MatchRegexp(`(?m)^COPY mcp/discord-notify/ \./\s*$`))
+		// mcp-servers.json runs exactly the bundle the tools image ships.
+		Expect(repoFile("mcp-servers.json")).To(ContainSubstring(`"/opt/claude-sandbox/mcp/discord-notify/dist/index.mjs"`))
 	})
 
 	It("CS-IMG-037: the parser skips multi-stage COPYs and joins continuations", func() {
@@ -115,7 +154,7 @@ var _ = Describe("baked sources", func() {
 
 	It("CS-IMG-039: the mode-keeping sources are exactly the final stage's COPYs without --chmod", func() {
 		var keep []string
-		for _, c := range contextCopies(repoFile("Dockerfile")) {
+		for _, c := range contextCopies(repoFile("Dockerfile.tools")) {
 			if c.finalStage && !c.chmod {
 				keep = append(keep, c.path)
 			}
@@ -123,7 +162,7 @@ var _ = Describe("baked sources", func() {
 		Expect(keep).To(ContainElement("logstream"), "the parser found the final stage's COPY lines")
 		Expect(imagebuild.ModeBakedSources).To(ConsistOf(keep),
 			"a baked source's mode reaches the image exactly when the final stage COPYs it without --chmod; "+
-				"update imagebuild.ModeBakedSources to match the Dockerfile")
+				"update imagebuild.ModeBakedSources to match Dockerfile.tools")
 	})
 
 	It("CS-IMG-039: the parser tracks --chmod and the final stage", func() {
@@ -136,7 +175,7 @@ var _ = Describe("baked sources", func() {
 	It("CS-IMG-040: each baked source is exactly a COPY source path, the level BuildKit follows a symlink at", func() {
 		seen := map[string]bool{}
 		var srcs []string
-		for _, s := range contextSources(repoFile("Dockerfile")) {
+		for _, s := range contextSources(repoFile("Dockerfile.tools")) {
 			if !seen[s] {
 				seen[s] = true
 				srcs = append(srcs, s)

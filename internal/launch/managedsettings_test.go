@@ -1,10 +1,12 @@
 package launch_test
 
 // Spec: spec/launch.feature CS-LNCH-068. The notification hooks are no longer a
-// launch-time injection: they ship in the base image as a Claude Code managed
-// settings drop-in. These tests pin the repo artifacts that make that true —
-// the base Dockerfile's COPY, the fragment's shape, and its place in the
-// baked-source set — since no docker build runs in unit tests.
+// launch-time injection: they ship in the tools image as a Claude Code managed
+// settings drop-in, which the cap copies into every run image (CS-IMG-024,
+// CS-IMG-048/049). These tests pin the repo artifacts that make that true —
+// Dockerfile.tools' COPY, the fragment's shape, and its place in the
+// baked-source set — since no docker build runs in unit tests. The cap's own
+// COPY line is pinned in internal/imagebuild (CS-IMG-024).
 //
 // That managed hooks COMBINE with the host's user-scope hooks (rather than
 // replacing them) is Claude Code behavior, not ours: documented at
@@ -42,20 +44,22 @@ func repoFile(name string) []byte {
 }
 
 var _ = Describe("notification hooks as managed settings", func() {
-	It("CS-LNCH-068: the base Dockerfile copies notification-hooks.json into a traversable managed-settings drop-in dir, mode 0644", func() {
-		df := string(repoFile("Dockerfile"))
-		copyLine := regexp.MustCompile(`(?m)^COPY\b[^\n]*--chmod=644[^\n]*\snotification-hooks\.json\s+/etc/claude-code/managed-settings\.d/10-claude-sandbox\.json\s*$`)
+	It("CS-LNCH-068: Dockerfile.tools copies notification-hooks.json into a traversable managed-settings drop-in dir, mode 0644", func() {
+		df := string(repoFile("Dockerfile.tools"))
+		copyLine := regexp.MustCompile(`(?m)^COPY\b[^\n]*--chmod=644[^\n]*\snotification-hooks\.json\s+` + regexp.QuoteMeta(imagebuild.ManagedSettingsFile) + `\s*$`)
 		Expect(copyLine.MatchString(df)).To(BeTrue(),
-			"Dockerfile must COPY --chmod=644 notification-hooks.json /etc/claude-code/managed-settings.d/10-claude-sandbox.json")
+			"Dockerfile.tools must COPY --chmod=644 notification-hooks.json /etc/claude-code/managed-settings.d/10-claude-sandbox.json")
 		// The parent dirs are made traversable in their own step, and the COPY
 		// avoids --link, which would apply --chmod=644 to the dirs it creates.
 		mk := regexp.MustCompile(`(?m)^RUN install -d -m 0755 /etc/claude-code /etc/claude-code/managed-settings\.d\s*$`)
 		loc := mk.FindStringIndex(df)
-		Expect(loc).NotTo(BeNil(), "Dockerfile must create /etc/claude-code{,/managed-settings.d} 0755")
+		Expect(loc).NotTo(BeNil(), "Dockerfile.tools must create /etc/claude-code{,/managed-settings.d} 0755")
 		Expect(loc[0]).To(BeNumerically("<", copyLine.FindStringIndex(df)[0]))
 		Expect(copyLine.FindString(df)).NotTo(ContainSubstring("--link"))
 		// Not managed-settings.json itself: a child image may ship its own.
 		Expect(df).NotTo(MatchRegexp(`(?m)^COPY\b.*/etc/claude-code/managed-settings\.json`))
+		// And the base no longer carries it: it rides the cap.
+		Expect(string(repoFile("Dockerfile"))).NotTo(ContainSubstring("notification-hooks.json"))
 	})
 
 	It("CS-LNCH-068: notification-hooks.json is a JSON object whose only key is hooks", func() {
@@ -68,7 +72,7 @@ var _ = Describe("notification hooks as managed settings", func() {
 		Expect(hooks).To(HaveKey("Notification"))
 	})
 
-	It("CS-LNCH-068: notification-hooks.json is a baked source, so editing it rebuilds the base (CS-IMG-004)", func() {
+	It("CS-LNCH-068: notification-hooks.json is a baked source, so editing it rebuilds the tools image (CS-IMG-004)", func() {
 		Expect(imagebuild.BakedSources).To(ContainElement("notification-hooks.json"))
 	})
 })

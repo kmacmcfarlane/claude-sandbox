@@ -169,6 +169,53 @@ var _ = Describe("launcher CLI (end-to-end argv)", func() {
 		Expect(f.fake.CommandLines()).To(ContainElement("docker build -t claude-sandbox:run -"))
 	})
 
+	// toolsMissing matches EnsureTools' single inspect of the tools image,
+	// which answers existence and the build-inputs label at once.
+	const toolsMissing = `build-inputs" }} claude-sandbox-tools`
+
+	// buildTags returns the image tag of every docker build, in order.
+	buildTags := func(g *cliFixture) []string {
+		var tags []string
+		for _, l := range g.fake.CommandLines() {
+			if strings.HasPrefix(l, "docker build -t ") {
+				tags = append(tags, strings.Fields(l)[3])
+			}
+		}
+		return tags
+	}
+
+	It("CS-IMG-049: a launch builds a missing tools image after the base and before the cap copies it", func() {
+		f.fake.On(toolsMissing, "", execx.Fail(1))
+		f.fake.On("image inspect claude-sandbox:run", "", execx.Fail(1))
+		Expect(f.run()).To(Equal(0), f.errw.String())
+		Expect(buildTags(f)).To(Equal([]string{"claude-sandbox-tools", "claude-sandbox:run"}))
+		var tools string
+		for _, l := range f.fake.CommandLines() {
+			if strings.HasPrefix(l, "docker build -t claude-sandbox-tools ") {
+				tools = l
+			}
+		}
+		Expect(tools).To(ContainSubstring(" -f " + filepath.Join(f.repo, "Dockerfile.tools") + " " + f.repo))
+		Expect(tools).To(ContainSubstring("--build-arg CLAUDE_SANDBOX_VERSION="))
+		Expect(f.launched().Args).To(ContainElement("claude-sandbox:run"))
+	})
+
+	It("CS-IMG-002: --rebuild rebuilds all five images, the base and the tools image with --no-cache", func() {
+		f.envmap["CLAUDE_SANDBOX_BASE_ONLY"] = ""
+		writeFile(filepath.Join(f.proj, ".claude-sandbox", "Dockerfile"), "FROM claude-sandbox\n")
+		Expect(f.run("--rebuild")).To(Equal(0), f.errw.String())
+		tags := buildTags(f)
+		Expect(tags).To(HaveLen(5))
+		Expect(tags[:3]).To(Equal([]string{"claude-sandbox", "claude-sandbox-tools", "claude-sandbox-cli"}))
+		Expect(tags[3]).To(HavePrefix("claude-sandbox-df-"))
+		Expect(tags[4]).To(Equal(tags[3] + ":run"))
+		for _, l := range f.fake.CommandLines() {
+			if strings.HasPrefix(l, "docker build -t claude-sandbox ") || strings.HasPrefix(l, "docker build -t claude-sandbox-tools ") {
+				Expect(l).To(ContainSubstring("--no-cache"))
+			}
+		}
+	})
+
 	It("CS-IMG-027: exits 2 naming docker-buildx-plugin when BuildKit is unavailable", func() {
 		f.fake.On("docker buildx version", "", execx.Fail(1))
 		Expect(f.run()).To(Equal(2))
@@ -215,6 +262,14 @@ var _ = Describe("launcher CLI (end-to-end argv)", func() {
 			Expect(strings.Join(f.fake.CommandLines(), "\n")).NotTo(ContainSubstring("docker build "))
 			Expect(detached(f)).To(BeEmpty())
 			noDockerDF(f)
+		})
+
+		It("CS-IMG-041: a launch whose only build is the tools image starts the checker too", func() {
+			f.fake.On("{{.Created}}", time.Now().Format(time.RFC3339Nano)+"\n", nil)
+			f.fake.On(toolsMissing, "", execx.Fail(1))
+			Expect(f.run()).To(Equal(0), f.errw.String())
+			Expect(buildTags(f)).To(Equal([]string{"claude-sandbox-tools"}))
+			Expect(detached(f)).To(HaveLen(1))
 		})
 
 		It("CS-IMG-041: --rebuild takes the same detached path", func() {
@@ -489,7 +544,7 @@ var _ = Describe("launcher CLI (end-to-end argv)", func() {
 		out := f.out.String()
 		Expect(out).To(ContainSubstring("claude-sandbox v2.0.0"))
 		Expect(out).To(ContainSubstring("v1.9.0"))
-		Expect(out).To(ContainSubstring("auto-rebuild"))
+		Expect(out).To(ContainSubstring("rebuilds when a baked source changes"))
 		Expect(f.fake.Session).To(BeNil())
 	})
 

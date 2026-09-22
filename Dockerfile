@@ -1,33 +1,20 @@
-# Base image: sandbox infrastructure WITHOUT the Claude Code CLI.
+# Base image: sandbox infrastructure WITHOUT the Claude Code CLI and WITHOUT
+# the sandbox's own files.
 #
-# The CLI lives in its own image (Dockerfile.cli) and is copied onto this
-# image — or onto a project's child image — by a generated one-layer "cap"
-# at launch. Installing it here would put a daily-changing layer in the
-# middle of every child's ancestry; see spec/image-build.feature (CS-IMG-020).
+# The CLI lives in its own image (Dockerfile.cli), and the sandbox binary,
+# entrypoint, logstream, PROMPT_RALPH.md, Discord MCP bundle, managed-settings
+# hooks and version stamp live in another (Dockerfile.tools). Both are copied
+# onto this image — or onto a project's child image — by a generated one-layer
+# "cap" at launch. Baking either here would put a frequently-changing layer in
+# the middle of every child's ancestry; see spec/image-build.feature
+# (CS-IMG-020, CS-IMG-048). This file therefore COPYs nothing from the build
+# context: it rebuilds only when it changes itself.
 #
 # CACHE MOUNTS: every package-manager step keeps its downloads in a BuildKit
-# cache mount with a FIXED id (claude-sandbox-apt, -apt-lists, -pip, -npm,
-# -go-mod, -go-build). Child Dockerfiles that use the same ids share the same
-# cache, so a package downloads once per daemon, not once per image.
-
-# Build the claude-sandbox Go binary (launcher + in-container ralph runner).
-FROM golang:1.25-bookworm AS builder
-WORKDIR /src
-# Dependencies first, in their own layer: this only re-downloads when go.mod or
-# go.sum changes, not on every source edit — and the module cache mount means
-# even that re-download is served from disk.
-COPY go.mod go.sum ./
-RUN --mount=type=cache,id=claude-sandbox-go-mod,target=/go/pkg/mod \
-    go mod download
-COPY assets.go ./
-COPY cmd/ cmd/
-COPY internal/ internal/
-COPY scaffold/ scaffold/
-COPY scaffold-ralph/ scaffold-ralph/
-COPY container-context.md mcp-servers.json PROMPT_RALPH.md ./
-RUN --mount=type=cache,id=claude-sandbox-go-mod,target=/go/pkg/mod \
-    --mount=type=cache,id=claude-sandbox-go-build,target=/root/.cache/go-build \
-    CGO_ENABLED=0 go build -o /out/claude-sandbox ./cmd/claude-sandbox
+# cache mount with a FIXED id (claude-sandbox-apt, -apt-lists, -pip here;
+# -npm, -go-mod, -go-build in Dockerfile.tools). Child Dockerfiles that use the
+# same ids share the same cache, so a package downloads once per daemon, not
+# once per image.
 
 FROM debian:bookworm-slim
 
@@ -101,45 +88,12 @@ RUN useradd -m -s /bin/bash claude
 # /home/claude/.local); only its PATH entry lives here.
 ENV PATH="/home/claude/.local/bin:$PATH"
 
-# Baked artifacts. COPY --link makes each layer independent of what came
-# before, so a change above does not force these to be re-copied.
-COPY --link --chmod=755 entrypoint.sh /opt/claude-sandbox/bin/entrypoint.sh
-
-# The Go binary serves as both the launcher and (via argv0) the ralph runner.
-COPY --link --chmod=755 --from=builder /out/claude-sandbox /opt/claude-sandbox/bin/claude-sandbox
-RUN ln -s /opt/claude-sandbox/bin/claude-sandbox /opt/claude-sandbox/bin/ralph
-COPY --link logstream/ /opt/claude-sandbox/logstream/
-COPY --link PROMPT_RALPH.md /opt/claude-sandbox/PROMPT_RALPH.md
-
-# Notification hooks as Claude Code MANAGED settings (CS-LNCH-068). Claude Code
-# reads /etc/claude-code/managed-settings.json plus every *.json in
-# managed-settings.d/ on Linux, and hook entries merge across settings levels,
-# so these run ALONGSIDE the host's own hooks in ~/.claude/settings.json —
-# which is live in the container, not shadowed (CS-LNCH-011). A drop-in rather
-# than managed-settings.json so a child image can ship its own policy file.
-# The directories get their own step, and the COPY has no --link: with --link,
-# --chmod=644 is applied to the parent dirs it creates as well, leaving them
-# untraversable by the non-root session user (Claude Code then cannot read
-# the policy; per its docs a claude.ai-authenticated session then exits).
-RUN install -d -m 0755 /etc/claude-code /etc/claude-code/managed-settings.d
-COPY --chmod=644 notification-hooks.json /etc/claude-code/managed-settings.d/10-claude-sandbox.json
+# The sandbox's own files arrive via the cap (Dockerfile.tools → COPY --link
+# into /opt/claude-sandbox and /etc/claude-code/managed-settings.d); only the
+# PATH entry and the ENTRYPOINT that names them live here. Nothing below runs
+# at build time, so a child Dockerfile must not call claude-sandbox, ralph or
+# the entrypoint in a RUN step either.
 ENV PATH="/opt/claude-sandbox/bin:$PATH"
-
-# Discord notification MCP server (baked in so every project gets it for free)
-COPY mcp/discord-notify/ /opt/claude-sandbox/mcp/discord-notify/
-RUN --mount=type=cache,id=claude-sandbox-npm,target=/root/.npm \
-    cd /opt/claude-sandbox/mcp/discord-notify \
-    && npm install --production=false \
-    && npx esbuild index.mjs --bundle --platform=node --format=esm --outfile=dist/index.mjs \
-    && rm -rf node_modules
-
-# Stamp the claude-sandbox version (git describe, passed by the launcher) so it
-# is discoverable in-container ($CLAUDE_SANDBOX_VERSION / the version file) and on
-# the host (image label). Placed last so a changed version only rebuilds this layer.
-ARG CLAUDE_SANDBOX_VERSION=unknown
-RUN echo "$CLAUDE_SANDBOX_VERSION" > /opt/claude-sandbox/version
-ENV CLAUDE_SANDBOX_VERSION=$CLAUDE_SANDBOX_VERSION
-LABEL org.opencontainers.image.revision=$CLAUDE_SANDBOX_VERSION
 
 ENTRYPOINT ["/opt/claude-sandbox/bin/entrypoint.sh"]
 CMD ["claude"]

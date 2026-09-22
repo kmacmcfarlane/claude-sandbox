@@ -228,7 +228,8 @@ func Build(in Inputs) (*Plan, error) {
 	}
 	// CS-LNCH-011: settings.json is NOT shadowed — it reaches the container
 	// live through the config-dir bind above. The notification hooks ship as
-	// managed settings baked into the base image (CS-LNCH-068).
+	// managed settings baked into the tools image and copied in by the cap
+	// (CS-LNCH-068, CS-IMG-024).
 	// CS-LNCH-012/013: siblings of the config dir.
 	if err := in.shadowSiblings(p, configDir); err != nil {
 		return nil, err
