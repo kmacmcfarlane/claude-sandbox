@@ -11,7 +11,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -134,33 +133,21 @@ func (l *Loop) runIterationReal(iter int, resume bool) int {
 	defer tracker.set(nil)
 
 	// Hard iteration timeout: TERM the tree, KILL after the grace
-	// (CS-RLP-015). The pending KILL is cancelled once the pipeline has
-	// finished, so it can never land on the next iteration's processes.
+	// (CS-RLP-015). The guard's state machine makes the timer and the
+	// pipeline's end mutually exclusive (CS-RLP-031): whichever wins the
+	// transition out of "running" decides both whether TERM is sent and how
+	// the iteration is classified.
 	grace := l.killGrace
 	if grace == 0 {
 		grace = 30 * time.Second
 	}
-	var timedOut atomic.Bool
-	var killMu sync.Mutex
-	var killTimer *time.Timer
-	finished := false
-	timer := time.AfterFunc(time.Duration(l.IterationTimeout)*time.Second, func() {
-		timedOut.Store(true)
-		tracker.signal(syscall.SIGTERM)
-		killMu.Lock()
-		defer killMu.Unlock()
-		if !finished {
-			killTimer = time.AfterFunc(grace, func() { tracker.signal(syscall.SIGKILL) })
-		}
-	})
+	guard := newTimeoutGuard(grace,
+		func() { tracker.signal(syscall.SIGTERM) },
+		func() { tracker.signal(syscall.SIGKILL) })
+	timer := time.AfterFunc(time.Duration(l.IterationTimeout)*time.Second, guard.fire)
 	defer func() {
 		timer.Stop()
-		killMu.Lock()
-		defer killMu.Unlock()
-		finished = true
-		if killTimer != nil {
-			killTimer.Stop()
-		}
+		guard.finish() // idempotent; covers an early exit
 	}()
 
 	// pipefail: the rightmost non-zero exit wins.
@@ -177,14 +164,92 @@ func (l *Loop) runIterationReal(iter int, resume bool) int {
 			rc = code
 		}
 	}
+	// Settle the race first: from here on the timer's callback is a no-op
+	// (and a TERM it was sending has completed), and the classification
+	// reads the winner, never a flag the timer may still be about to set.
+	timedOut := guard.finish()
+	timer.Stop()
+	if l.afterPipeline != nil {
+		l.afterPipeline(guard.fire)
+	}
 	// CS-RLP-023: claude's own status for OOM classification; a signal
 	// death is 128+N (SIGKILL -> 137) where ExitCode() would say -1.
 	l.claudeExit = claudeExitStatus(cmds[0])
-	if timedOut.Load() {
+	if timedOut {
 		l.timedOut = true
 		return 124
 	}
 	return rc
+}
+
+// Timeout guard states (CS-RLP-031): running -> done (the pipeline finished
+// first) or running -> timedOut (the timer fired first) -> timedOutDone.
+const (
+	guardRunning = iota
+	guardDone
+	guardTimedOut
+	guardTimedOutDone
+)
+
+// timeoutGuard serializes the hard-timeout callback against the pipeline's
+// end. time.Timer.Stop cannot cancel a callback that is already running, so
+// the callbacks themselves check the state under the mutex and signal while
+// holding it: once finish returns, no TERM or KILL from this iteration can
+// still be in flight or sent later.
+type timeoutGuard struct {
+	mu        sync.Mutex
+	state     int
+	grace     time.Duration
+	term      func()
+	kill      func()
+	killTimer *time.Timer
+	// afterFunc schedules the delayed KILL; time.AfterFunc unless a test
+	// replaces it.
+	afterFunc func(time.Duration, func()) *time.Timer
+}
+
+func newTimeoutGuard(grace time.Duration, term, kill func()) *timeoutGuard {
+	return &timeoutGuard{grace: grace, term: term, kill: kill, afterFunc: time.AfterFunc}
+}
+
+// fire is the timer callback: it TERMs and arms the KILL only when it wins
+// the transition out of running.
+func (g *timeoutGuard) fire() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.state != guardRunning {
+		return
+	}
+	g.state = guardTimedOut
+	g.term()
+	g.killTimer = g.afterFunc(g.grace, g.killNow)
+}
+
+// killNow is the delayed KILL; a no-op once the pipeline has finished.
+func (g *timeoutGuard) killNow() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.state != guardTimedOut {
+		return
+	}
+	g.kill()
+}
+
+// finish records the pipeline's end, cancels a pending KILL and reports
+// whether the timeout won. Idempotent.
+func (g *timeoutGuard) finish() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	switch g.state {
+	case guardRunning:
+		g.state = guardDone
+	case guardTimedOut:
+		g.state = guardTimedOutDone
+	}
+	if g.killTimer != nil {
+		g.killTimer.Stop()
+	}
+	return g.state == guardTimedOutDone
 }
 
 // claudeExitStatus is a finished command's exit status in shell terms:

@@ -134,6 +134,21 @@ Feature: Ralph loop lifecycle (CS-RLP)
     And the pending KILL is cancelled as soon as the iteration's pipeline has
       finished, so it can never land on the next iteration's processes
 
+  Scenario: CS-RLP-031 The hard timeout and the pipeline's end race exactly once
+    Given the timeout timer fires at about the moment the pipeline finishes
+    Then exactly one of them wins the transition out of "running", under one lock
+    When the timer wins
+    Then it sends TERM (and arms the KILL) and the iteration is a timeout (124)
+    When the pipeline finishes first
+    Then a timer callback that was already running sends no TERM and arms no
+      KILL, and the iteration keeps the pipeline's own exit code
+    And once the pipeline is recorded as finished no TERM or KILL from that
+      iteration is in flight or sent later: the callbacks signal while holding
+      the lock, and the delayed KILL re-checks the state before signalling
+    # time.Timer.Stop cannot cancel a callback that has already started, and a
+    # flag read after Wait could be set by a timer firing after the pipeline
+    # ended, misclassifying a finished iteration as 124.
+
   Scenario: CS-RLP-016 Iteration limit ends the loop
     Given --limit 2
     When 2 iterations complete with outcome ok

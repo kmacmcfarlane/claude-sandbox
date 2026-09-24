@@ -57,6 +57,10 @@ type Options struct {
 	// killGrace is the hard timeout's TERM->KILL grace (CS-RLP-015); 0 ->
 	// 30s. Unexported: only white-box tests shorten it.
 	killGrace time.Duration
+	// afterPipeline, when set, runs once the pipeline has finished and the
+	// timeout race is settled, with the hard timeout's callback; white-box
+	// tests fire it there to prove a late timer is a no-op (CS-RLP-031).
+	afterPipeline func(fireTimeout func())
 
 	Runner execx.Runner
 	Out    io.Writer
