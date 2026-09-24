@@ -1,7 +1,7 @@
 package ralphloop
 
 // White-box tests for the unexported prompt/argv/backoff helpers and the real
-// pipeline runner. Spec: CS-RLP-011/012/013/015, CS-RQT-009, plus the
+// pipeline runner. Spec: CS-RLP-011/012/013/015/031, CS-RQT-009, plus the
 // CS-RLP-001 numeric defaults not visible in the banner.
 //
 // CS-RLP-013 (node stage ordering), CS-RLP-014 (raw-log naming on disk), and
@@ -14,6 +14,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -356,5 +357,132 @@ var _ = Describe("hard timeout vs the next iteration and the OOM check (white-bo
 		Expect(code).To(Equal(0), "iteration_timeout continues; the limit ends the loop")
 		Expect(out.String()).NotTo(ContainSubstring("[oom]"))
 		Expect(out.String()).To(ContainSubstring("hit hard time limit"))
+	})
+})
+
+var _ = Describe("timeoutGuard (CS-RLP-031)", func() {
+	type counts struct {
+		mu         sync.Mutex
+		term, kill int
+	}
+	get := func(c *counts) (int, int) {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		return c.term, c.kill
+	}
+	newGuard := func(c *counts, termHook func()) (*timeoutGuard, *func()) {
+		var armed func()
+		g := newTimeoutGuard(time.Hour,
+			func() {
+				if termHook != nil {
+					termHook()
+				}
+				c.mu.Lock()
+				c.term++
+				c.mu.Unlock()
+			},
+			func() { c.mu.Lock(); c.kill++; c.mu.Unlock() })
+		// Capture the delayed KILL instead of scheduling it, so the test
+		// decides when it runs.
+		g.afterFunc = func(_ time.Duration, f func()) *time.Timer {
+			armed = f
+			return time.NewTimer(time.Hour)
+		}
+		return g, &armed
+	}
+
+	It("CS-RLP-031: the timer winning sends TERM, arms the KILL and classifies a timeout", func() {
+		c := &counts{}
+		g, armed := newGuard(c, nil)
+		g.fire()
+		Expect(*armed).NotTo(BeNil())
+		(*armed)() // the grace elapses while the pipeline is still running
+		t, k := get(c)
+		Expect(t).To(Equal(1))
+		Expect(k).To(Equal(1))
+		Expect(g.finish()).To(BeTrue())
+		Expect(g.finish()).To(BeTrue(), "idempotent")
+	})
+
+	It("CS-RLP-031: a timer firing after the pipeline finished sends nothing and is not a timeout", func() {
+		c := &counts{}
+		g, armed := newGuard(c, nil)
+		Expect(g.finish()).To(BeFalse())
+		g.fire()
+		t, k := get(c)
+		Expect(t).To(Equal(0))
+		Expect(k).To(Equal(0))
+		Expect(*armed).To(BeNil(), "no KILL armed")
+		Expect(g.finish()).To(BeFalse())
+	})
+
+	It("CS-RLP-031: a delayed KILL whose Stop came too late is a no-op once the pipeline finished", func() {
+		c := &counts{}
+		g, armed := newGuard(c, nil)
+		g.fire()
+		Expect(g.finish()).To(BeTrue())
+		(*armed)() // the KILL callback was already running when Stop was called
+		_, k := get(c)
+		Expect(k).To(Equal(0))
+	})
+
+	It("CS-RLP-031: finish waits for an in-flight TERM, so none is sent after it returns", func() {
+		c := &counts{}
+		inTerm := make(chan struct{})
+		release := make(chan struct{})
+		g, _ := newGuard(c, func() { close(inTerm); <-release })
+		go g.fire()
+		<-inTerm // the timer won and is mid-TERM
+		done := make(chan bool)
+		go func() { done <- g.finish() }()
+		Consistently(done, 100*time.Millisecond).ShouldNot(Receive())
+		close(release)
+		var timedOut bool
+		Eventually(done).Should(Receive(&timedOut))
+		Expect(timedOut).To(BeTrue())
+		t, _ := get(c)
+		Expect(t).To(Equal(1))
+	})
+
+	It("CS-RLP-031: concurrent fire and finish agree on one winner", func() {
+		for i := 0; i < 200; i++ {
+			c := &counts{}
+			g, _ := newGuard(c, nil)
+			start := make(chan struct{})
+			var wg sync.WaitGroup
+			var timedOut bool
+			wg.Add(2)
+			go func() { defer wg.Done(); <-start; g.fire() }()
+			go func() { defer wg.Done(); <-start; timedOut = g.finish() }()
+			close(start)
+			wg.Wait()
+			t, _ := get(c)
+			Expect(t == 1).To(Equal(timedOut), "TERM sent exactly when the timeout won")
+		}
+	})
+
+	It("CS-RLP-031: runIterationReal keeps the pipeline's code when the timer fires after the pipeline finished", func() {
+		tmp := GinkgoT().TempDir()
+		prompt := filepath.Join(tmp, "PROMPT.md")
+		addendum := filepath.Join(tmp, "PROMPT_INTERACTIVE.md")
+		Expect(os.WriteFile(prompt, []byte("p"), 0o644)).To(Succeed())
+		Expect(os.WriteFile(addendum, []byte("a"), 0o644)).To(Succeed())
+		exit3 := filepath.Join(tmp, "exit3-claude")
+		Expect(os.WriteFile(exit3, []byte("#!/bin/sh\nexit 3\n"), 0o755)).To(Succeed())
+		l := &Loop{Options: Options{
+			WorkDir: tmp, RepoRoot: tmp, Interactive: true, IterationTimeout: 3600,
+			PromptRalph: []byte("base"), Out: &bytes.Buffer{}, Err: &bytes.Buffer{},
+			ClaudeBin: exit3,
+		}}
+		l.PromptFile = prompt
+		l.Addendum = addendum
+		l.StderrFile = filepath.Join(tmp, "stderr")
+		l.RawLogBase = filepath.Join(tmp, "rawlog")
+		fired := false
+		l.afterPipeline = func(fire func()) { fire(); fired = true }
+		Expect(l.runIterationReal(1, false)).To(Equal(3))
+		Expect(fired).To(BeTrue())
+		Expect(l.timedOut).To(BeFalse())
+		Expect(l.claudeExit).To(Equal(3))
 	})
 })
