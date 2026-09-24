@@ -340,11 +340,6 @@ func Build(in Inputs) (*Plan, error) {
 	if aws {
 		in.assembleAWS(p)
 	}
-	if packageCaches {
-		if err := in.assemblePackageCaches(p); err != nil {
-			return nil, err
-		}
-	}
 	if git {
 		if err := in.shadowGitconfig(p); err != nil {
 			return nil, err
@@ -368,6 +363,12 @@ func Build(in Inputs) (*Plan, error) {
 		} else {
 			p.Volumes = append(p.Volumes, fmt.Sprintf("%s:%s:ro", m.Host, m.Container))
 		}
+	}
+
+	// CS-LNCH-035..037, 155..157: package caches. After the cascade mounts,
+	// so one that already covers a cache dir wins (CS-LNCH-157).
+	if packageCaches {
+		in.assemblePackageCaches(p)
 	}
 
 	// CS-LNCH-133..139: container-private pre-commit cache. Always on. After
@@ -932,20 +933,44 @@ var packageCaches = []struct{ dir, env string }{
 }
 
 // assemblePackageCaches mounts the cache dirs writable at the same path and
-// points the toolchains at them. The dirs are created here, before docker
-// create, as the invoking user (CS-LNCH-036): docker creates a missing bind
-// source as root, and the entrypoint deliberately never chowns a mount point.
-func (in *Inputs) assemblePackageCaches(p *Plan) error {
+// points the toolchains at them. Each dir is decided on its own and never
+// fails the launch: a cache that cannot be provided is left out (no mount, no
+// -e), and the toolchain uses its default, container-local cache, as it does
+// with the lever off.
+func (in *Inputs) assemblePackageCaches(p *Plan) {
 	root := filepath.Join(in.Home, PackageCacheRoot)
+	var notMounted []string
 	for _, c := range packageCaches {
 		dir := filepath.Join(root, c.dir)
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return fmt.Errorf("package caches: creating %s: %w", dir, err)
+		// CS-LNCH-155: nested, the bind source resolves on the host; only the
+		// outer sandbox's own mount (which set the toolchain variable to this
+		// path) shows that it exists there and is the user's. Cleaned, so a
+		// trailing slash or a doubled separator still matches.
+		if hostdirs.InSandbox(in.getenv) {
+			if v := in.getenv(c.env); v == "" || filepath.Clean(v) != dir {
+				notMounted = append(notMounted, dir)
+				continue
+			}
 		}
-		p.Volumes = append(p.Volumes, fmt.Sprintf("%s:%s", dir, dir))
+		// CS-LNCH-036/156: created as the invoking user, 0700, before docker
+		// create: docker creates a missing bind source as root, and the
+		// entrypoint deliberately never chowns a mount point.
+		if err := hostdirs.EnsureOwnedDir(dir, hostdirs.OwnedDirMode, nil); err != nil {
+			fmt.Fprintf(in.Out, "Warning: package cache %s not mounted: cannot prepare it (%v); %s in this session is the toolchain's default, container-local cache. Make it a directory you own (chown it, or remove it and relaunch).\n", dir, err, c.env)
+			continue
+		}
+		// CS-LNCH-157: a same-path mount that already covers the dir is kept,
+		// and no second mount point is added; the variable still names it.
+		if cover, ok := samePathMountOf(p.Volumes, dir); !ok {
+			p.Volumes = append(p.Volumes, fmt.Sprintf("%s:%s", dir, dir))
+		} else if strings.HasSuffix(cover, ":ro") {
+			fmt.Fprintf(in.Err, "WARNING: package cache %s is under the read-only mount %s; %s cannot write to it in this session.\n", dir, cover, c.env)
+		}
 		p.EnvFlags = append(p.EnvFlags, c.env+"="+dir)
 	}
-	return nil
+	if len(notMounted) > 0 {
+		fmt.Fprintf(in.Out, "Note: package caches not mounted: this launcher runs inside a sandbox that does not mount %s, so docker would create them on the host as root. The toolchains in this session use their default caches.\n", strings.Join(notMounted, ", "))
+	}
 }
 
 // PreCommitCacheDir is the sandbox-only pre-commit cache under $HOME

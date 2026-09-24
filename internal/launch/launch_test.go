@@ -526,7 +526,7 @@ var _ = Describe("launch.Build", func() {
 
 	// ---- package caches ----
 
-	Describe("package caches (CS-LNCH-035..037)", func() {
+	Describe("package caches (CS-LNCH-035..037, 155..157)", func() {
 		var root string
 		BeforeEach(func() {
 			t := true
@@ -554,12 +554,188 @@ var _ = Describe("launch.Build", func() {
 			Expect(build().ConfigHash).NotTo(Equal(with))
 		})
 
-		It("CS-LNCH-036: creates the host directories before docker run", func() {
+		It("CS-LNCH-036: creates the host directories 0700 as the invoking user before docker create", func() {
 			Expect(filepath.Join(root, "go-mod")).NotTo(BeADirectory())
 			build()
 			for _, name := range []string{"go-mod", "go-build", "npm", "pip"} {
-				Expect(filepath.Join(root, name)).To(BeADirectory())
+				fi, err := os.Lstat(filepath.Join(root, name))
+				Expect(err).NotTo(HaveOccurred())
+				Expect(fi.IsDir()).To(BeTrue())
+				Expect(fi.Mode().Perm()).To(Equal(os.FileMode(0o700)))
+				Expect(int(fi.Sys().(*syscall.Stat_t).Uid)).To(Equal(os.Getuid()))
 			}
+		})
+
+		It("CS-LNCH-036: tightens an existing wider directory", func() {
+			d := filepath.Join(root, "npm")
+			mkdir(d)
+			Expect(os.Chmod(d, 0o755)).To(Succeed())
+			Expect(build().Volumes).To(ContainElement(d + ":" + d))
+			fi, err := os.Stat(d)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(fi.Mode().Perm()).To(Equal(os.FileMode(0o700)))
+		})
+
+		cacheEnv := map[string]string{"go-mod": "GOMODCACHE", "go-build": "GOCACHE", "npm": "npm_config_cache", "pip": "PIP_CACHE_DIR"}
+		// cacheMounts / cacheEnvs: the -v specs and -e values that name the
+		// given cache dir, read from the docker create argv.
+		cacheMounts := func(p *launch.Plan, d string) []string {
+			var got []string
+			for _, v := range argPairs(p.CreateArgs(proj), "-v") {
+				if parts := strings.Split(v, ":"); len(parts) >= 2 && parts[1] == d {
+					got = append(got, v)
+				}
+			}
+			return got
+		}
+		cacheEnvs := func(p *launch.Plan, key string) []string {
+			var vals []string
+			for _, e := range argPairs(p.CreateArgs(proj), "-e") {
+				if k, v, ok := strings.Cut(e, "="); ok && k == key {
+					vals = append(vals, v)
+				}
+			}
+			return vals
+		}
+		expectCache := func(p *launch.Plan, name string, on bool) {
+			d := filepath.Join(root, name)
+			if on {
+				Expect(cacheMounts(p, d)).To(Equal([]string{d + ":" + d}), name)
+				Expect(cacheEnvs(p, cacheEnv[name])).To(Equal([]string{d}), name)
+			} else {
+				Expect(cacheMounts(p, d)).To(BeEmpty(), name)
+				Expect(cacheEnvs(p, cacheEnv[name])).To(BeEmpty(), name)
+			}
+		}
+
+		It("CS-LNCH-156: a regular file in a cache's place leaves that cache out with one warning; the others and the launch go on", func() {
+			d := filepath.Join(root, "go-mod")
+			touch(d, "")
+			p, err := launch.Build(in)
+			Expect(err).NotTo(HaveOccurred())
+			expectCache(p, "go-mod", false)
+			for _, n := range []string{"go-build", "npm", "pip"} {
+				expectCache(p, n, true)
+			}
+			o := out.String()
+			Expect(strings.Count(o, "Warning: package cache")).To(Equal(1))
+			Expect(o).To(ContainSubstring("Warning: package cache " + d + " not mounted: cannot prepare it (creating it:"))
+			Expect(o).To(ContainSubstring("GOMODCACHE in this session"))
+			Expect(o).To(ContainSubstring("chown it, or remove it and relaunch"))
+		})
+
+		It("CS-LNCH-156: a symlink in a cache's place is refused and its target left alone", func() {
+			target := filepath.Join(home, "elsewhere")
+			mkdir(target)
+			Expect(os.Chmod(target, 0o755)).To(Succeed())
+			mkdir(root)
+			d := filepath.Join(root, "pip")
+			Expect(os.Symlink(target, d)).To(Succeed())
+			p := build()
+			expectCache(p, "pip", false)
+			Expect(out.String()).To(ContainSubstring("it is a symlink"))
+			fi, err := os.Stat(target)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(fi.Mode().Perm()).To(Equal(os.FileMode(0o755)))
+		})
+
+		It("CS-LNCH-156: an unwritable parent leaves every cache out without failing the launch", func() {
+			if os.Getuid() == 0 {
+				Skip("root ignores directory permissions")
+			}
+			mkdir(root)
+			Expect(os.Chmod(root, 0o500)).To(Succeed())
+			DeferCleanup(func() { _ = os.Chmod(root, 0o755) })
+			p := build()
+			for _, n := range []string{"go-mod", "go-build", "npm", "pip"} {
+				expectCache(p, n, false)
+			}
+			Expect(strings.Count(out.String(), "Warning: package cache")).To(Equal(4))
+			Expect(out.String()).To(ContainSubstring("permission denied"))
+		})
+
+		It("CS-LNCH-157: a cascade mount naming a cache dir is kept, not doubled, and its variable still names it", func() {
+			d := filepath.Join(root, "go-build")
+			in.Cfg = &cascade.Config{Mounts: []cascade.Mount{{Host: d, Container: d, Writable: true}}}
+			p := build()
+			expectCache(p, "go-build", true)
+			Expect(errw.String()).NotTo(ContainSubstring("package cache"))
+		})
+
+		It("CS-LNCH-157: a read-only parent mount covers every cache, with one warning each", func() {
+			cache := filepath.Join(home, ".cache")
+			mkdir(cache)
+			in.Cfg = &cascade.Config{Mounts: []cascade.Mount{{Host: cache, Container: cache}}}
+			p := build()
+			for n, key := range cacheEnv {
+				d := filepath.Join(root, n)
+				Expect(cacheMounts(p, d)).To(BeEmpty(), n)
+				Expect(cacheEnvs(p, key)).To(Equal([]string{d}), n)
+			}
+			Expect(strings.Count(errw.String(), "WARNING: package cache")).To(Equal(4))
+			Expect(errw.String()).To(ContainSubstring("under the read-only mount " + cache + ":" + cache + ":ro; GOMODCACHE cannot write to it"))
+		})
+
+		Describe("CS-LNCH-155: inside a sandbox", func() {
+			BeforeEach(func() {
+				env["CLAUDE_SANDBOX_PROJECT_DIR"] = "/outer/proj"
+			})
+
+			It("CS-LNCH-155: mounts each cache the outer sandbox mounted (its variable is this path)", func() {
+				for n, key := range cacheEnv {
+					env[key] = filepath.Join(root, n)
+				}
+				p := build()
+				for n := range cacheEnv {
+					expectCache(p, n, true)
+				}
+				Expect(out.String()).NotTo(ContainSubstring("package cache"))
+			})
+
+			It("CS-LNCH-155: with none mounted by the outer sandbox, nothing is mounted or created, with one note", func() {
+				p := build()
+				for n := range cacheEnv {
+					expectCache(p, n, false)
+					Expect(filepath.Join(root, n)).NotTo(BeAnExistingFile())
+				}
+				o := out.String()
+				Expect(strings.Count(o, "Note: package caches not mounted")).To(Equal(1))
+				Expect(o).To(ContainSubstring("inside a sandbox that does not mount " + filepath.Join(root, "go-mod") + ", "))
+				Expect(o).To(ContainSubstring(filepath.Join(root, "pip") + ", so docker would create them on the host as root"))
+			})
+
+			It("CS-LNCH-155: decides per cache: a matching one is mounted, an unset or different one is not", func() {
+				env["GOMODCACHE"] = filepath.Join(root, "go-mod")
+				env["npm_config_cache"] = "/work/.npm"
+				p := build()
+				expectCache(p, "go-mod", true)
+				for _, n := range []string{"go-build", "npm", "pip"} {
+					expectCache(p, n, false)
+					Expect(filepath.Join(root, n)).NotTo(BeAnExistingFile())
+				}
+				o := out.String()
+				Expect(strings.Count(o, "Note: package caches not mounted")).To(Equal(1))
+				Expect(o).NotTo(ContainSubstring(filepath.Join(root, "go-mod")))
+				Expect(o).To(ContainSubstring(filepath.Join(root, "npm")))
+			})
+
+			DescribeTable("CS-LNCH-155: the outer's variable is compared path-cleaned",
+				func(val func(string) string) {
+					for n, key := range cacheEnv {
+						env[key] = val(filepath.Join(root, n))
+					}
+					p := build()
+					for n := range cacheEnv {
+						expectCache(p, n, true)
+					}
+					Expect(out.String()).NotTo(ContainSubstring("package cache"))
+				},
+				Entry("trailing slash", func(d string) string { return d + "/" }),
+				Entry("trailing /.", func(d string) string { return d + "/." }),
+				Entry("doubled separator", func(d string) string {
+					return strings.Replace(d, "/claude-sandbox/", "/claude-sandbox//", 1)
+				}),
+			)
 		})
 
 		It("CS-LNCH-037: mounts nothing from the host's own caches", func() {

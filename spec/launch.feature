@@ -374,14 +374,59 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
 
   Scenario: CS-LNCH-036 Package cache directories are created on the host before docker create
     Given package-cache access is enabled and ~/.cache/claude-sandbox/<name> does not exist
-    Then the launcher creates it (as the invoking user) before assembling the mount
+    Then the launcher creates it as the invoking user, mode 0700, before
+      assembling the mount (hostdirs.EnsureOwnedDir, CS-DIR-004/005)
+    And an existing directory the user owns is tightened to 0700
     # Docker creates a missing bind source as root, and the entrypoint deliberately
     # never chowns a mount point — so a dir the launcher did not create would be
-    # unwritable for the session.
+    # unwritable for the session. 0700 costs nothing: every sandbox runs as the
+    # invoking user's uid (the entrypoint remaps it), and the host's own
+    # toolchains never read this tree (CS-LNCH-037).
 
   Scenario: CS-LNCH-037 Package caches never target the host's own caches
     Then the mounted tree is fixed under ~/.cache/claude-sandbox and is not configurable
     And nothing under ~/go, ~/.npm or ~/.cache/pip is mounted by this lever
+
+  Scenario: CS-LNCH-155 A launcher inside a sandbox mounts a package cache only where the outer sandbox did
+    # A nested launcher's ~/.cache/claude-sandbox is container-local, while
+    # docker resolves the bind source on the HOST: a directory the nested
+    # launcher created only in its container would make docker create it on
+    # the host as root (the pre-commit precedent, CS-LNCH-137). The outer
+    # launcher's own mount is the evidence that the host directory exists and
+    # is the user's: it set the toolchain variable to the same path in the
+    # container the nested launcher runs in.
+    Given package-cache access is enabled and the launcher runs inside a
+      sandbox (CLAUDE_SANDBOX_PROJECT_DIR is set, CS-DIR-006)
+    When the launcher's own GOMODCACHE / GOCACHE / npm_config_cache /
+      PIP_CACHE_DIR, path-cleaned, is that cache's ~/.cache/claude-sandbox/<name>
+    Then that cache's mount and -e are added as in CS-LNCH-035
+    When it is unset or names anything else
+    Then that cache gets neither, and nothing is created for it
+    And one note (one line for all such caches) names the directories and says
+      they are not mounted because the outer sandbox does not mount them
+
+  Scenario: CS-LNCH-156 A package cache directory that cannot be made the user's is left out, not fatal
+    Given package-cache access is enabled and ~/.cache/claude-sandbox/<name>
+      cannot be made the invoking user's — a regular file or a symlink in its
+      place, another uid's directory, an unwritable parent
+    Then the launch still succeeds with neither that cache's mount nor its -e
+    And one warning for that cache names the directory, the error and the
+      toolchain variable, and says to make it a directory you own (chown it, or
+      remove it and relaunch)
+    # It used to fail the launch (MkdirAll error) or, for a root-owned
+    # directory, mount one the session could not write. A cache must never
+    # fail every launch; without it the toolchain uses its container-local
+    # default, as with the lever off.
+
+  Scenario: CS-LNCH-157 A same-path mount that already covers a package cache is kept, not doubled
+    Given package-cache access is enabled and a cascade mounts: entry with
+      host == container that is a cache directory or a parent of it
+    Then no second "-v" for that cache directory is added — docker never sees
+      a duplicate mount point — and its -e still names the directory
+    And when that covering mount is read-only, one WARNING per covered cache
+      says the toolchain cannot write to it in this session
+    # The caches are assembled after the cascade mounts, the pre-commit
+    # precedent (CS-LNCH-139).
 
   # ---- container-private pre-commit cache (CS-LNCH-133..139) ----
   # $HOME in a sandbox IS the host's home, so the host and every sandbox shared
