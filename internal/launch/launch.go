@@ -795,7 +795,15 @@ func (in *Inputs) shadowClaudeMD(p *Plan, configDir string) error {
 // every mount would dangle in the container and Claude Code would run with no
 // user settings, logging that only at debug level. The fully resolved target
 // is bind-mounted read-write at its own path so the link resolves identically
-// inside; a target already under a same-path mount needs nothing.
+// inside; a target already under a same-path mount needs nothing, but a
+// read-only cover warns that settings writes fail (CS-LNCH-160). A target that
+// is not a regular file, or whose path holds ':' (docker splits -v specs on
+// it and would fail the create), is skipped with one warning: the launch
+// never fails over it (CS-LNCH-160).
+//
+// Claude Code writes settings as a temp file renamed over the target; the
+// rename onto this single-file mount point fails with EBUSY and Claude Code
+// falls back to writing in place, so writes still land.
 func (in *Inputs) mountSettingsTarget(p *Plan, configDir string) {
 	link := filepath.Join(configDir, "settings.json")
 	fi, err := os.Lstat(link)
@@ -808,7 +816,18 @@ func (in *Inputs) mountSettingsTarget(p *Plan, configDir string) {
 		fmt.Fprintf(in.Err, "WARNING: %s is a symlink to %s, which does not resolve; the sandbox runs without user settings\n", link, dest)
 		return
 	}
-	if underSamePathMount(p.Volumes, target) {
+	if cover, ok := samePathMountOf(p.Volumes, target); ok {
+		if strings.HasSuffix(cover, ":ro") {
+			fmt.Fprintf(in.Err, "WARNING: settings.json target %s is under the read-only mount %s; settings changes made in this session (plugin installs, /model, permission rules) fail.\n", target, cover)
+		}
+		return
+	}
+	if ti, err := os.Lstat(target); err != nil || !ti.Mode().IsRegular() {
+		fmt.Fprintf(in.Err, "WARNING: %s is a symlink to %s, which is not a regular file; it is not mounted and the sandbox runs without user settings\n", link, target)
+		return
+	}
+	if strings.Contains(target, ":") {
+		fmt.Fprintf(in.Err, "WARNING: %s is a symlink to %s, whose path contains ':', which docker cannot mount; the sandbox runs without user settings (move the target to a path without ':')\n", link, target)
 		return
 	}
 	p.Volumes = append(p.Volumes, fmt.Sprintf("%s:%s", target, target))
