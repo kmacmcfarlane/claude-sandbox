@@ -1315,15 +1315,17 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     And CLAUDE_CODE_TMPDIR is an absolute path under the config dir
       (CLAUDE_CONFIG_DIR, else ~/.claude), which the outer sandbox mounts at
       its real path (CS-LNCH-008) and under which it derives that variable
-      (CS-LNCH-034)
+      (CS-LNCH-034) — compared as spelled, and again with both paths
+      symlink-resolved, so a config dir reached through a symlink counts
     When a new container is launched
     Then the shadow directory is made under "<CLAUDE_CODE_TMPDIR>/claude-sandbox-shadow",
       a real directory owned by the invoking user, mode 0700, created when
       missing
     And the sweep (CS-LNCH-081) runs over that directory
     Given TMPDIR is set (non-empty) inside the sandbox
-    Then the shadow root is TMPDIR, unchecked: setting it is the operator's
-      statement that it is mounted at the same path on the host
+    Then the shadow root is TMPDIR: setting it is the operator's statement
+      that it is mounted at the same path on the host, unless CS-LNCH-162
+      proves it container-local
     Given the launcher does not run inside a sandbox
     Then the shadow root is the temp root, as before (CS-LNCH-080)
 
@@ -1332,11 +1334,19 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     And CLAUDE_CODE_TMPDIR is unset, relative, or not under the config dir
       (its host visibility cannot be known from inside the container)
       or the shadow root under it cannot be made a directory the user owns
+    Or TMPDIR is set but relative
+    Or TMPDIR is set and the mount that holds it (symlink-resolved; the
+      longest mount point in /proc/self/mountinfo covering it, octal escapes
+      such as \040 decoded, a later line winning over an earlier one at the
+      same point) is the container's root filesystem ("/") or a tmpfs —
+      definitely container-local; any other mount, or an unreadable
+      mountinfo, keeps the trust-the-operator rule
     When a new container would be launched (interactive, ralph, headless,
       --detach, --branch)
     Then the launch exits 2 before any image build or "docker create", with an
       error naming the reason and TMPDIR as the workaround (a directory
-      mounted at the same path on the host, such as the scratchpad)
+      mounted at the same path on the host: one in the project, or the
+      scratchpad if it is under the Claude config dir)
     And nothing is created
     But attach and join create no container and are not refused
     And the drift check's private directory (CS-LNCH-084) is never mounted, so

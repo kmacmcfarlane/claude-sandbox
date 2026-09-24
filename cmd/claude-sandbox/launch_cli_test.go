@@ -103,6 +103,9 @@ func newCLIFixture() *cliFixture {
 		Lock:      f.lock,
 		// Never the real temp root: a launch sweeps it (CS-LNCH-081).
 		TempRoot: f.tmp,
+		// Nor the real mountinfo (CS-LNCH-162): no mounts, so an explicit
+		// nested TMPDIR is trusted unless a test says otherwise.
+		MountInfo: func() (string, error) { return "", nil },
 		// Nor the real cache-budget result file (CS-IMG-043); the detached
 		// checker is recorded by the fake, never spawned (CS-IMG-041).
 		CacheDir: f.cache,

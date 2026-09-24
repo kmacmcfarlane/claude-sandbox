@@ -250,4 +250,15 @@ var _ = Describe("nested launch shadow root (CS-LNCH-161/162)", func() {
 		f.errw.Reset()
 		refused("--ralph")
 	})
+
+	It("CS-LNCH-162: an explicit TMPDIR on the container's root filesystem refuses with exit 2", func() {
+		f.envmap["TMPDIR"] = filepath.Join(f.home, "scratch")
+		f.env.MountInfo = func() (string, error) {
+			return "1 0 0:1 / / rw - overlay overlay rw\n", nil
+		}
+		refused()
+		Expect(f.errw.String()).To(ContainSubstring("the container's own root filesystem"))
+		Expect(f.errw.String()).To(ContainSubstring("a directory in the"))
+		Expect(f.errw.String()).NotTo(ContainSubstring("your scratchpad"))
+	})
 })

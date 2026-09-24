@@ -59,6 +59,9 @@ type Env struct {
 	// scratch directory: under go test the launch panics on the real temp
 	// root rather than sweep it (launch.shadowRoot).
 	TempRoot string
+	// MountInfo reads /proc/self/mountinfo for the nested TMPDIR check
+	// (CS-LNCH-162); nil means the real file. Test fixtures set a fake.
+	MountInfo func() (string, error)
 	// CacheDir is where the detached cache-budget checker writes its result
 	// and the next launch reads it (CS-IMG-041..043); "" means
 	// $HOME/.cache/claude-sandbox. Tests point it at a scratch directory.
@@ -83,7 +86,7 @@ func (e *Env) shadowRoot() (string, error) {
 		return e.TempRoot, nil
 	}
 	_, _, _, home := hostIdentity(e.Getenv)
-	return launch.NestedShadowRoot(e.Getenv, home, nil)
+	return launch.NestedShadowRoot(e.Getenv, home, nil, e.MountInfo)
 }
 
 // cacheDir resolves Env.CacheDir.
@@ -995,8 +998,8 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 			"       container's own, so docker (which resolves bind mounts on the host) would mount empty\n"+
 			"       host paths in place of the session's CLAUDE.md, .mcp.json and gitconfig.\n"+
 			"       %v.\n"+
-			"       Set TMPDIR to a directory mounted at the same path on the host (your scratchpad, or a\n"+
-			"       directory in the project) and launch again.", err)
+			"       Set TMPDIR to a directory mounted at the same path on the host (a directory in the\n"+
+			"       project, or the scratchpad if it is under the Claude config dir) and launch again.", err)
 	}
 
 	// A branch is an ordinary new container whose claude invocation forks an

@@ -1452,12 +1452,16 @@ launcher run inside a sandbox cannot use the container's own `/tmp` for its shad
 docker would mount an empty host path of the same name in place of the session's `CLAUDE.md`,
 `.mcp.json` and `gitconfig` (env files are unaffected — the docker client reads `--env-file`
 itself). Inside a sandbox (`CLAUDE_SANDBOX_PROJECT_DIR` set) the shadow root is therefore:
-`$TMPDIR` when set (your statement that it is mounted at the same path on the host); else
-`$CLAUDE_CODE_TMPDIR/claude-sandbox-shadow` when `CLAUDE_CODE_TMPDIR` lies under the Claude
-config dir, which the outer sandbox mounts at its real path (a `0700` directory made when
-missing, and swept like the temp root). Otherwise the launch refuses with exit 2 before any
-image build, naming the reason; set `TMPDIR` to a same-path-mounted directory (the
-scratchpad, or one in the project) and launch again. Attach and join create no container and
+`$TMPDIR` when set (your statement that it is mounted at the same path on the host — refused
+only when it is relative or `/proc/self/mountinfo` shows it on the container's root filesystem
+or a tmpfs); else `$CLAUDE_CODE_TMPDIR/claude-sandbox-shadow` when `CLAUDE_CODE_TMPDIR` lies
+under the Claude config dir (symlinks resolved), which the outer sandbox mounts at its real path
+(a `0700` directory made when missing, and swept like the temp root). Otherwise the launch
+refuses with exit 2 before any image build, naming the reason; set `TMPDIR` to a
+same-path-mounted directory (one in the project, or the scratchpad if it is under the Claude
+config dir) and launch again. Nested shadow directories — including the `0600` env-file copies
+(CS-LNCH-132) — now persist on the host under `<config dir>/tmp/claude-sandbox-shadow` until a
+later nested launch sweeps them (the host launcher does not sweep there yet). Attach and join create no container and
 are unaffected. Spec: `spec/launch.feature` CS-LNCH-161/162.
 
 ### Image layering
