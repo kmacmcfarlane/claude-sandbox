@@ -208,12 +208,17 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       and that script posts ONE Discord message naming, when each is known:
       the session's name, its instance noun, the project directory's basename,
       the notification kind, and how to reach the session
-    And the reach line is "Attach: `claude-sandbox --attach=<noun>` · container `<name>`"
-      for a container's primary session, "Joined session (not attachable)" for a
+    And the reach line is "Attach: `cd <project path> && claude-sandbox --attach=<noun>`
+      · container `<name>`" for a container's primary session — copy-pasteable from
+      anywhere, because attach looks only at the current project's sessions
+      (CS-SESS-030); the path is CLAUDE_SANDBOX_PROJECT_DIR with $HOME shortened to ~
+      and shell-quoted when it needs it, and the "cd … &&" is dropped when the path
+      is unset, relative, over 300 characters or holds a control character or
+      backtick — "Joined session (not attachable)" for a
       joined one (CS-SESS-075), "Headless session (SDK client)" for a headless one
       — both with the container name — and the container name alone without a noun
-    And for a permission prompt only, the CLI's own one-line message is quoted
-      ("Claude needs your permission to use <tool>"): it names the tool and
+    And for a permission prompt only, the CLI's own one-line message is quoted in a
+      code span ("Claude needs your permission to use <tool>"): it names the tool and
       carries no transcript content; the idle message is fixed and adds nothing
     And the launcher supplies the facts the container did not have:
       CLAUDE_SANDBOX_INSTANCE (the noun; unset for ralph, which has none, exactly
@@ -236,14 +241,19 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     # carries CLAUDE_PID and CLAUDE_CODE_SESSION_ID. The matcher is matched
     # against notification_type, not message.
     And every interpolated field is truncated by codepoint, has control characters
-      and backticks replaced, the body is built by jq (never string concatenation),
-      and the post sets allowed_mentions.parse to [], so no text can become an @everyone
+      and backticks replaced, and sits inside a code span, so a name like
+      "[x](http://y)" or "_a_" renders as text; the body is built by jq (never string
+      concatenation) and sets allowed_mentions.parse to [] and flags to 4
+      (SUPPRESS_EMBEDS), so no text can ping anyone or unfurl a link
     And nothing else leaves the container: no env value, no token, no webhook URL,
-      no path beyond a basename, no transcript content
+      no path but the project's (basename in the header, ~-shortened in the attach
+      command), no transcript content
+    And the webhook URL reaches curl as a -K config on a pipe, never in any argv,
+      and the body is sent with --data-binary
     And it degrades one field at a time, and to exactly the single line
       "🔔 Claude Code needs your input" when nothing identifies the session
     And it exits 0 on every path — an unset webhook URL, an unparseable payload, a
-      missing jq — and makes no docker call, no IPC and no network but the one curl
+      NUL byte on stdin, unset HOME and CLAUDE_CONFIG_DIR, a missing jq or curl — and makes no docker call, no IPC and no network but the one curl
 
   @new
   Scenario: CS-LNCH-069 A symlinked settings.json keeps working: its target is mounted at its own path

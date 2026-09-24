@@ -12,7 +12,9 @@
 #     "|| true" (notification-hooks.json).
 #   - silent and instant when CLAUDE_NOTIFICATION_WEBHOOK_URL is unset.
 #   - no docker, no IPC, no network beyond the single curl. Only cat, jq and
-#     curl are run; everything else is a bash builtin.
+#     curl are run; everything else is a bash builtin. The webhook URL reaches
+#     curl through a config file on a pipe (-K), never through argv, so it
+#     does not show up in ps.
 #   - reads exactly one file: this session's own peer-registry record,
 #     <config dir>/sessions/$CLAUDE_PID.json, and only takes its "name" when
 #     the record's sessionId is this session's. The directory is never listed
@@ -22,10 +24,16 @@
 #     payload, no jq).
 #
 # What it may say: the session's name (as /peers shows it), its instance noun,
-# the project directory's basename, the container name, the notification kind,
-# and — for a permission prompt only — the CLI's own one-line message, which
-# names the tool and nothing else. Never an env value, a token, the webhook
-# URL, a path beyond a basename, or anything from the transcript.
+# the project directory's basename and — in the attach command — its path with
+# $HOME shortened to ~, the container name, the notification kind, and — for a
+# permission prompt only — the CLI's own one-line message, which names the
+# tool and nothing else. Never an env value, a token, the webhook URL, any
+# other path, or anything from the transcript.
+#
+# Markdown: every interpolated value sits inside a code span (backticks are
+# stripped from them first), so a session named "[x](http://y)" or "_a_"
+# renders as text, and the post sets flags=4 (SUPPRESS_EMBEDS) and
+# allowed_mentions.parse=[] so nothing unfurls and nothing pings.
 #
 # Hook stdin (Claude Code 2.1.281/2.1.282 bundle, Notification event):
 #   session_id, transcript_path, cwd, hook_event_name:"Notification", message,
@@ -49,7 +57,8 @@ url=${CLAUDE_NOTIFICATION_WEBHOOK_URL:-}
 
 fallback='🔔 Claude Code needs your input'
 
-payload=$(cat 2>/dev/null) || payload=''
+# The braces also silence bash's own "ignored null byte" warning.
+{ payload=$(cat); } 2>/dev/null || payload=''
 
 # Pass 1: normalize the payload to a compact object (anything unparseable
 # becomes {}, so the env-derived identity below still reaches Discord), plus
@@ -73,7 +82,7 @@ sid=''
 name=''
 pid=${CLAUDE_PID:-}
 if [ -n "$sid" ] && [[ $pid =~ ^[0-9]+$ ]]; then
-    record="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/sessions/$pid.json"
+    record="${CLAUDE_CONFIG_DIR:-${HOME:-}/.claude}/sessions/$pid.json"
     if [ -r "$record" ]; then
         name=$(jq -r --arg s "$sid" \
             'if type == "object" and .sessionId == $s then (.name // empty) | tostring else empty end' \
@@ -88,6 +97,7 @@ content=$(printf '%s' "$parsed" | jq -r \
     --arg instance "${CLAUDE_SANDBOX_INSTANCE:-}" \
     --arg container "${CLAUDE_SANDBOX_CONTAINER:-}" \
     --arg projectdir "${CLAUDE_SANDBOX_PROJECT_DIR:-}" \
+    --arg home "${HOME:-}" \
     --arg mode "${CLAUDE_SANDBOX_MODE:-}" \
     --arg joined "${CLAUDE_SANDBOX_JOINED:-}" \
     --arg fallback "$fallback" '
@@ -102,6 +112,20 @@ content=$(printf '%s' "$parsed" | jq -r \
   | ((if $projectdir != "" then $projectdir else (.cwd // "") end)
      | tostring | split("/") | map(select(. != "")) | (last // "")
      | clean(80))                                                       as $project
+  # The project path for a copy-pasteable "cd <path> && claude-sandbox
+  # --attach=<noun>" (attach looks only at the sessions of the current project,
+  # CS-SESS-030): $HOME shortened to ~, shell-quoted when it needs it, and
+  # omitted rather than mangled when it is not absolute, is too long, or holds
+  # a character a code span or a single line cannot carry.
+  | def shq: if test("^[A-Za-z0-9._/+@:=,-]+$") then .
+             else "\u0027" + gsub("\u0027"; "\u0027\\\u0027\u0027") + "\u0027" end;
+    ($projectdir
+     | if startswith("/") and length <= 300 and (test("[\u0000-\u001f\u007f`]") | not)
+       then (if $home != "" and $home != "/" and . == $home then "~"
+             elif $home != "" and $home != "/" and startswith($home + "/")
+               then "~/" + (.[($home | length) + 1:] | shq)
+             else shq end)
+       else "" end)                                                     as $cdpath
   | ($name | clean(80))                                                 as $who
   | ($instance | clean(40))                                             as $noun
   | ($container | clean(120))                                           as $ctr
@@ -109,8 +133,8 @@ content=$(printf '%s' "$parsed" | jq -r \
      elif $kind == "idle_prompt"       then "idle"
      elif $kind == ""                  then "needs your input"
      else ($kind | gsub("_"; " ")) end)                                 as $klabel
-  | (if   $who != "" and $noun != "" then "**\($who)** (`\($noun)`)"
-     elif $who != ""                 then "**\($who)**"
+  | (if   $who != "" and $noun != "" then "**`\($who)`** (`\($noun)`)"
+     elif $who != ""                 then "**`\($who)`**"
      elif $noun != ""                then "**`\($noun)`**"
      else "" end)                                                       as $session
   # How to reach it. Attach reaches a container primary session; a joined
@@ -119,6 +143,8 @@ content=$(printf '%s' "$parsed" | jq -r \
   | (if $ctr != "" then " · container `\($ctr)`" else "" end)          as $ctrtail
   | (if   $joined == "1"          then "Joined session (not attachable)" + $ctrtail
      elif $mode == "headless"     then "Headless session (SDK client)" + $ctrtail
+     elif $noun != "" and $cdpath != ""
+       then "Attach: `cd \($cdpath) && claude-sandbox --attach=\($noun)`" + $ctrtail
      elif $noun != ""             then "Attach: `claude-sandbox --attach=\($noun)`" + $ctrtail
      elif $ctr != ""              then "Container: `\($ctr)`"
      else "" end)                                                       as $reach
@@ -129,17 +155,25 @@ content=$(printf '%s' "$parsed" | jq -r \
        + (if $project != "" then ["project `\($project)`"] else [] end)
        | join(" · ")) as $header
       | ([$header]
-         + (if $msg != "" then ["> " + $msg] else [] end)
+         + (if $msg != "" then ["> `" + $msg + "`"] else [] end)
          + (if $reach != "" then [$reach] else [] end)
          | join("\n"))
     end' 2>/dev/null) || content=''
 [ -n "$content" ] || content=$fallback
 
-# allowed_mentions.parse=[] so no interpolated text can turn into an @everyone.
-body=$(jq -nc --arg c "$content" '{content: $c, allowed_mentions: {parse: []}}' 2>/dev/null) \
-    || body='{"content":"🔔 Claude Code needs your input","allowed_mentions":{"parse":[]}}'
+# flags 4 = SUPPRESS_EMBEDS; allowed_mentions.parse=[] so no text can ping.
+body=$(jq -nc --arg c "$content" '{content: $c, allowed_mentions: {parse: []}, flags: 4}' 2>/dev/null) \
+    || body='{"content":"🔔 Claude Code needs your input","allowed_mentions":{"parse":[]},"flags":4}'
 
+# The URL goes to curl as a config file on a pipe (printf is a builtin, so it
+# is never in any process's argv); quotes and backslashes are escaped for the
+# config syntax and line breaks dropped. The body comes on stdin, verbatim.
+u=${url//$'\n'/}
+u=${u//$'\r'/}
+u=${u//\\/\\\\}
+u=${u//\"/\\\"}
 printf '%s' "$body" | curl -sS -m 10 -X POST \
-    -H 'Content-Type: application/json' -d @- "$url" >/dev/null 2>&1
+    -H 'Content-Type: application/json' --data-binary @- \
+    -K <(printf 'url = "%s"\n' "$u") >/dev/null 2>&1
 
 exit 0

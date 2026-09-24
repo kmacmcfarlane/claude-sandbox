@@ -126,11 +126,13 @@ var _ = Describe("CS-LNCH-111: the notification ping names the waiting session",
 				Expect(err).NotTo(HaveOccurred(), "%s is required for the CS-LNCH-111 script tests", tool)
 				Expect(os.Symlink(p, filepath.Join(bindir, tool))).To(Succeed())
 			}
-			// The stub curl: it records the last argument (the URL) and the
-			// request body instead of making a request. Nothing in this suite
-			// can reach a real webhook.
-			stub := "#!/bin/sh\nlast=\"\"\nfor a in \"$@\"; do last=\"$a\"; done\n" +
-				"{ echo \"$last\"; " + filepath.Join(bindir, "cat") + "; } > " + sink + "\n"
+			// The stub curl: it records its argv (one per line), the -K
+			// config it was handed and the request body instead of making a
+			// request. Nothing in this suite can reach a real webhook.
+			cat := filepath.Join(bindir, "cat")
+			stub := "#!/bin/bash\ncfg=''\nprev=''\nfor a in \"$@\"; do [ \"$prev\" = -K ] && cfg=$a; prev=$a; done\n" +
+				"printf '%s\\n' \"$@\" > " + sink + ".argv\n" +
+				"{ " + cat + " \"$cfg\"; " + cat + "; } > " + sink + "\n"
 			Expect(os.WriteFile(filepath.Join(bindir, "curl"), []byte(stub), 0o755)).To(Succeed())
 
 			script, err := filepath.Abs(filepath.Join("..", "..", "bin", "notify-webhook"))
@@ -159,12 +161,21 @@ var _ = Describe("CS-LNCH-111: the notification ping names the waiting session",
 			if err != nil {
 				return "", "", false
 			}
-			url, body, found := strings.Cut(string(raw), "\n")
+			cfgLine, body, found := strings.Cut(string(raw), "\n")
 			Expect(found).To(BeTrue(), "stub curl wrote no body: %q", raw)
+			Expect(cfgLine).To(HavePrefix(`url = "`))
+			url = strings.TrimSuffix(strings.TrimPrefix(cfgLine, `url = "`), `"`)
+			// The URL reaches curl only through -K, never through argv.
+			argv, err := os.ReadFile(sink + ".argv")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(string(argv)).NotTo(ContainSubstring(url))
+			Expect(string(argv)).To(ContainSubstring("--data-binary\n@-\n"))
 			var m map[string]any
 			Expect(json.Unmarshal([]byte(body), &m)).To(Succeed(), "body must be valid JSON: %s", body)
-			// Exactly these two keys: nothing else leaves the container.
-			Expect(m).To(HaveLen(2))
+			// Exactly these three keys: nothing else leaves the container.
+			Expect(m).To(HaveLen(3))
+			// flags 4 = SUPPRESS_EMBEDS: no link in a name unfurls.
+			Expect(m).To(HaveKeyWithValue("flags", 4.0))
 			// No interpolated text can become an @everyone.
 			Expect(m).To(HaveKeyWithValue("allowed_mentions", map[string]any{"parse": []any{}}))
 			content, isStr := m["content"].(string)
@@ -209,16 +220,17 @@ var _ = Describe("CS-LNCH-111: the notification ping names the waiting session",
 				"CLAUDE_SANDBOX_INSTANCE=otter",
 				"CLAUDE_SANDBOX_CONTAINER=claude-sandbox-work-cs-a1b2c3-otter",
 				"CLAUDE_SANDBOX_MODE=claude",
+				"HOME=/home/rt",
 				"CLAUDE_SANDBOX_PROJECT_DIR=/home/rt/work/src/claude-sandbox")
 
 			url, content, ok := posted()
 			Expect(ok).To(BeTrue())
 			Expect(url).To(Equal("https://webhook.invalid/hook"))
 			Expect(content).To(Equal(
-				"🔔 permission prompt · **claude-sandbox librarian** (`otter`) · project `claude-sandbox`\n" +
-					"> Claude needs your permission to use Bash\n" +
-					"Attach: `claude-sandbox --attach=otter` · container `claude-sandbox-work-cs-a1b2c3-otter`"))
-			// Only the project's basename, never the path; never the URL, and
+				"🔔 permission prompt · **`claude-sandbox librarian`** (`otter`) · project `claude-sandbox`\n" +
+					"> `Claude needs your permission to use Bash`\n" +
+					"Attach: `cd ~/work/src/claude-sandbox && claude-sandbox --attach=otter` · container `claude-sandbox-work-cs-a1b2c3-otter`"))
+			// The project path only with $HOME shortened; never the URL, and
 			// nothing else from the registry record.
 			Expect(content).NotTo(ContainSubstring("/home/rt"))
 			Expect(content).NotTo(ContainSubstring("webhook.invalid"))
@@ -233,7 +245,7 @@ var _ = Describe("CS-LNCH-111: the notification ping names the waiting session",
 
 			_, content, ok := posted()
 			Expect(ok).To(BeTrue())
-			Expect(content).To(Equal("🔔 idle · **claude-sandbox-61** (`heron`) · project `fromcwd`\n" +
+			Expect(content).To(Equal("🔔 idle · **`claude-sandbox-61`** (`heron`) · project `fromcwd`\n" +
 				"Attach: `claude-sandbox --attach=heron`"))
 		})
 
@@ -243,7 +255,7 @@ var _ = Describe("CS-LNCH-111: the notification ping names the waiting session",
 				"CLAUDE_PID=17", "CLAUDE_CODE_SESSION_ID=ENVSID")
 			_, content, ok := posted()
 			Expect(ok).To(BeTrue())
-			Expect(content).To(Equal("🔔 idle · **from-env**"))
+			Expect(content).To(Equal("🔔 idle · **`from-env`**"))
 		})
 
 		It("CS-LNCH-111: reads only this session's record, and only when its sessionId matches", func() {
@@ -324,7 +336,7 @@ var _ = Describe("CS-LNCH-111: the notification ping names the waiting session",
 			raw, err := os.ReadFile(sink)
 			Expect(err).NotTo(HaveOccurred())
 			_, body, _ := strings.Cut(string(raw), "\n")
-			Expect(body).To(MatchJSON(`{"content":"🔔 Claude Code needs your input","allowed_mentions":{"parse":[]}}`))
+			Expect(body).To(MatchJSON(`{"content":"🔔 Claude Code needs your input","allowed_mentions":{"parse":[]},"flags":4}`))
 		})
 
 		It("CS-LNCH-111: exits 0 when curl itself is missing", func() {
@@ -342,12 +354,60 @@ var _ = Describe("CS-LNCH-111: the notification ping names the waiting session",
 
 			_, content, ok := posted()
 			Expect(ok).To(BeTrue())
-			Expect(content).To(ContainSubstring("**say \"hi\"  rm  \\ back slash** (`ot ter`)"))
+			Expect(content).To(ContainSubstring("**`say \"hi\"  rm  \\ back slash`** (`ot ter`)"))
 			// The message is cut at 160 codepoints.
-			Expect(content).To(ContainSubstring("\n> Claude needs your permission to use AAAA"))
+			Expect(content).To(ContainSubstring("\n> `Claude needs your permission to use AAAA"))
 			Expect(content).NotTo(ContainSubstring(strings.Repeat("A", 160-len("Claude needs your permission to use ")+1)))
 			// No injected line breaks: header, quote, reach.
 			Expect(strings.Split(content, "\n")).To(HaveLen(3))
+		})
+
+		It("CS-LNCH-111: a name cannot become live markdown: it sits in a code span", func() {
+			record("17", "SID", "[x](http://y) _a_ @everyone")
+			run(payload("SID", "Claude needs your permission to use mcp__gh__create_issue", "permission_prompt"),
+				hookURL, "CLAUDE_PID=17", "CLAUDE_SANDBOX_INSTANCE=otter")
+			_, content, ok := posted()
+			Expect(ok).To(BeTrue())
+			Expect(content).To(HavePrefix("🔔 permission prompt · **`[x](http://y) _a_ @everyone`** (`otter`)"))
+			// The tool name in the quoted message is in a code span too.
+			Expect(content).To(ContainSubstring("\n> `Claude needs your permission to use mcp__gh__create_issue`\n"))
+		})
+
+		It("CS-LNCH-111: the attach command shell-quotes a project path that needs it", func() {
+			run(payload("SID", idleMsg, "idle_prompt"), hookURL,
+				"HOME=/home/u", "CLAUDE_SANDBOX_INSTANCE=otter",
+				"CLAUDE_SANDBOX_PROJECT_DIR=/home/u/my proj's")
+			_, content, ok := posted()
+			Expect(ok).To(BeTrue())
+			Expect(content).To(HaveSuffix("\nAttach: `cd ~/'my proj'\\''s' && claude-sandbox --attach=otter`"))
+		})
+
+		It("CS-LNCH-111: a project outside $HOME keeps its full path; a mangled one is omitted", func() {
+			run(payload("SID", idleMsg, "idle_prompt"), hookURL,
+				"HOME=/home/u", "CLAUDE_SANDBOX_INSTANCE=otter", "CLAUDE_SANDBOX_PROJECT_DIR=/srv/p")
+			_, content, _ := posted()
+			Expect(content).To(HaveSuffix("\nAttach: `cd /srv/p && claude-sandbox --attach=otter`"))
+
+			run(payload("SID", idleMsg, "idle_prompt"), hookURL,
+				"HOME=/home/u", "CLAUDE_SANDBOX_INSTANCE=otter", "CLAUDE_SANDBOX_PROJECT_DIR=/srv/a`b")
+			_, content, _ = posted()
+			Expect(content).To(HaveSuffix("\nAttach: `claude-sandbox --attach=otter`"))
+		})
+
+		It("CS-LNCH-111: exits 0 with neither HOME nor CLAUDE_CONFIG_DIR set, and on a NUL byte", func() {
+			bash, err := exec.LookPath("bash")
+			Expect(err).NotTo(HaveOccurred())
+			script, err := filepath.Abs(filepath.Join("..", "..", "bin", "notify-webhook"))
+			Expect(err).NotTo(HaveOccurred())
+			cmd := exec.Command(bash, script)
+			cmd.Stdin = strings.NewReader("{\"session_id\":\"SID\"}\x00junk")
+			cmd.Env = []string{"PATH=" + bindir, hookURL, "CLAUDE_PID=17", "CLAUDE_SANDBOX_INSTANCE=otter"}
+			out, err := cmd.CombinedOutput()
+			Expect(err).NotTo(HaveOccurred(), "%s", out)
+			Expect(string(out)).To(BeEmpty())
+			_, content, ok := posted()
+			Expect(ok).To(BeTrue())
+			Expect(content).To(ContainSubstring("--attach=otter"))
 		})
 
 		It("CS-LNCH-111: truncates by codepoint, never splitting a multibyte character", func() {
@@ -355,7 +415,7 @@ var _ = Describe("CS-LNCH-111: the notification ping names the waiting session",
 			run(payload("SID", idleMsg, "idle_prompt"), hookURL, "CLAUDE_PID=17")
 			_, content, ok := posted()
 			Expect(ok).To(BeTrue())
-			Expect(content).To(Equal("🔔 idle · **" + strings.Repeat("é", 80) + "** · project `fromcwd`"))
+			Expect(content).To(Equal("🔔 idle · **`" + strings.Repeat("é", 80) + "`** · project `fromcwd`"))
 		})
 	})
 

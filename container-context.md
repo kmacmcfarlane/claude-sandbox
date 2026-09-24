@@ -130,10 +130,11 @@ restart Claude Code afterwards). Use `setup-lsp-plugins --check` to verify statu
 - **Notification hooks are managed settings.** A `Notification` hook is baked
   into the image at `/etc/claude-code/managed-settings.d/10-claude-sandbox.json`.
   On a permission or idle prompt it runs `/opt/claude-sandbox/bin/notify-webhook`,
-  which posts to `CLAUDE_NOTIFICATION_WEBHOOK_URL` one line naming this session
-  (its `/peers` name, instance noun, project basename, the kind, the tool for a
-  permission prompt, and `claude-sandbox --attach=<noun>` plus the container
-  name) — never conversation text or env values. The launcher sets
+  which posts to `CLAUDE_NOTIFICATION_WEBHOOK_URL` a short message (up to three
+  lines) naming this session: its `/peers` name, instance noun, project, the
+  kind, the tool for a permission prompt, and
+  `cd <project> && claude-sandbox --attach=<noun>` plus the container name —
+  never conversation text or env values. The launcher sets
   `CLAUDE_SANDBOX_INSTANCE`, `CLAUDE_SANDBOX_CONTAINER` and `CLAUDE_SANDBOX_MODE`
   for it (`CLAUDE_SANDBOX_JOINED=1` in a joined session). It runs alongside your
   own hooks and cannot be edited from here.
