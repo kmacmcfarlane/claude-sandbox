@@ -475,10 +475,3 @@ var _ = Describe("CS-LNCH-111: the notification ping names the waiting session",
 			Equal("/opt/claude-sandbox/bin/notify-webhook || true"))
 	})
 })
-
-// jsonQuote JSON-quotes a string for embedding in a small fixture.
-func jsonQuote(s string) string {
-	b, err := json.Marshal(s)
-	Expect(err).NotTo(HaveOccurred())
-	return string(b)
-}
