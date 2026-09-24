@@ -89,11 +89,18 @@ var _ = Describe("EnsureOwnedDir", func() {
 	It("CS-DIR-004: a failing chmod is reported with the mode, through the seam", func() {
 		dir := filepath.Join(base, "d")
 		err := hostdirs.EnsureOwnedDir(dir, hostdirs.OwnedDirMode, &hostdirs.Ops{
-			Chmod: func(name string, _ os.FileMode) error {
-				return &os.PathError{Op: "chmod", Path: name, Err: syscall.EPERM}
+			Fchmod: func(f *os.File, _ os.FileMode) error {
+				return &os.PathError{Op: "chmod", Path: f.Name(), Err: syscall.EPERM}
 			},
 		})
 		Expect(err).To(MatchError("restricting it to 0700: chmod " + dir + ": operation not permitted"))
+	})
+
+	It("CS-DIR-004: the real chmod goes through the checked descriptor and its error names the path", func() {
+		// No seam: a directory we own always chmods; the text is f.Chmod's.
+		dir := filepath.Join(base, "real")
+		Expect(hostdirs.EnsureOwnedDir(dir, 0o711, nil)).To(Succeed())
+		Expect(mode(dir)).To(Equal(os.FileMode(0o711)))
 	})
 
 	Context("CS-DIR-005: refusals happen before any chmod", func() {
@@ -101,9 +108,9 @@ var _ = Describe("EnsureOwnedDir", func() {
 		var ops *hostdirs.Ops
 		BeforeEach(func() {
 			chmods = nil
-			ops = &hostdirs.Ops{Chmod: func(name string, m os.FileMode) error {
-				chmods = append(chmods, name)
-				return os.Chmod(name, m)
+			ops = &hostdirs.Ops{Fchmod: func(f *os.File, m os.FileMode) error {
+				chmods = append(chmods, f.Name())
+				return f.Chmod(m)
 			}}
 		})
 
@@ -114,7 +121,7 @@ var _ = Describe("EnsureOwnedDir", func() {
 			link := filepath.Join(base, "link")
 			Expect(os.Symlink(target, link)).To(Succeed())
 			err := hostdirs.EnsureOwnedDir(link, hostdirs.OwnedDirMode, ops)
-			Expect(err).To(MatchError(ContainSubstring("it is a symlink")))
+			Expect(err).To(MatchError("it is a symlink; the launcher restricts only a real directory"))
 			Expect(chmods).To(BeEmpty())
 			Expect(mode(target)).To(Equal(os.FileMode(0o755)))
 		})

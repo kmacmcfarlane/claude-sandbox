@@ -52,10 +52,13 @@ Feature: Host directories — cache root, state root, owned directories (CS-DIR)
       directory owned by another uid
     When the launcher ensures it as an owned directory
     Then it returns an error naming the cause
-    And nothing is chmod'ed: the check is an Lstat BEFORE any chmod
-    # chmod follows links, and a link's target is not the launcher's to
-    # re-mode. MkdirAll accepts a link to a directory, so the Lstat comes
-    # after it.
+    And nothing is chmod'ed: every check and the chmod act on one descriptor
+    # The order: MkdirAll refuses a regular file (ENOTDIR); an open with
+    # O_NOFOLLOW|O_DIRECTORY refuses a symlink, even to a directory (ELOOP,
+    # reported as "it is a symlink"); fstat of that descriptor refuses a
+    # directory another uid owns; only then fchmod on the same descriptor.
+    # chmod by path follows links, and a path checked with Lstat can be
+    # swapped for a link before a later chmod; a descriptor cannot.
 
   Scenario: CS-DIR-006 In-sandbox detection is CLAUDE_SANDBOX_PROJECT_DIR alone
     Given CLAUDE_SANDBOX_PROJECT_DIR is set and non-empty

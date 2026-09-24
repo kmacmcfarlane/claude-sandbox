@@ -75,8 +75,10 @@ func InSandbox(getenv func(string) string) bool {
 // Ops are EnsureOwnedDir's seams. A nil *Ops, or a nil field, means the real
 // call.
 type Ops struct {
-	// Chmod restricts the directory; nil means os.Chmod.
-	Chmod func(string, os.FileMode) error
+	// Fchmod restricts the directory through the descriptor EnsureOwnedDir
+	// opened and checked; nil means f.Chmod (fchmod(2)). The error is the
+	// *os.PathError f.Chmod returns, naming the path.
+	Fchmod func(f *os.File, mode os.FileMode) error
 	// Getuid is the invoking user; nil means os.Getuid.
 	Getuid func() int
 }
@@ -85,11 +87,12 @@ type Ops struct {
 // exactly mode, creating it (and missing parents) as that user when absent
 // and tightening it when it exists wider (CS-DIR-004).
 //
-// It refuses, before any chmod, a symlink (chmod follows links, and a link's
-// target is not the launcher's to re-mode), a non-directory and a directory
-// another uid owns (CS-DIR-005). MkdirAll accepts a link to a directory, so
-// the Lstat comes after it. The window between Lstat and Chmod is open only
-// to someone who can already write the parent.
+// Every check and the chmod act on ONE descriptor, so nothing can swap the
+// path between them (CS-DIR-005): MkdirAll refuses a non-directory (ENOTDIR,
+// "creating it: ..."); open with O_NOFOLLOW|O_DIRECTORY refuses a symlink
+// (chmod follows links, and a link's target is not the launcher's to
+// re-mode; MkdirAll accepts a link to a directory, so the open comes after
+// it); fstat refuses a directory another uid owns; only then fchmod.
 //
 // Error texts are stable: the peer-registry stand-down warning quotes them
 // (CS-LNCH-107).
@@ -97,31 +100,48 @@ func EnsureOwnedDir(dir string, mode os.FileMode, ops *Ops) error {
 	if err := os.MkdirAll(dir, mode); err != nil {
 		return fmt.Errorf("creating it: %w", err)
 	}
-	fi, err := os.Lstat(dir)
+	// os.OpenFile adds O_CLOEXEC itself.
+	f, err := os.OpenFile(dir, os.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
+		if errors.Is(err, syscall.ELOOP) {
+			return errSymlink
+		}
+		if errors.Is(err, syscall.ENOTDIR) {
+			// MkdirAll saw a directory, so the path became something else
+			// since, or a platform reports a final symlink this way.
+			if fi, lerr := os.Lstat(dir); lerr == nil && fi.Mode()&os.ModeSymlink != 0 {
+				return errSymlink
+			}
+			return errors.New("it is not a directory")
+		}
 		return err
 	}
-	if fi.Mode()&os.ModeSymlink != 0 {
-		return errors.New("it is a symlink; the launcher restricts only a real directory")
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return err
 	}
 	if !fi.IsDir() {
 		return errors.New("it is not a directory")
 	}
-	uid := os.Getuid
-	chmod := os.Chmod
+	getuid, fchmod := os.Getuid, func(f *os.File, m os.FileMode) error { return f.Chmod(m) }
 	if ops != nil {
 		if ops.Getuid != nil {
-			uid = ops.Getuid
+			getuid = ops.Getuid
 		}
-		if ops.Chmod != nil {
-			chmod = ops.Chmod
+		if ops.Fchmod != nil {
+			fchmod = ops.Fchmod
 		}
 	}
-	if st, ok := fi.Sys().(*syscall.Stat_t); ok && int(st.Uid) != uid() {
-		return fmt.Errorf("it is owned by uid %d, not by the invoking user (uid %d)", st.Uid, uid())
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+		if uid := getuid(); int(st.Uid) != uid {
+			return fmt.Errorf("it is owned by uid %d, not by the invoking user (uid %d)", st.Uid, uid)
+		}
 	}
-	if err := chmod(dir, mode); err != nil {
+	if err := fchmod(f, mode); err != nil {
 		return fmt.Errorf("restricting it to %#o: %w", mode, err)
 	}
 	return nil
 }
+
+var errSymlink = errors.New("it is a symlink; the launcher restricts only a real directory")

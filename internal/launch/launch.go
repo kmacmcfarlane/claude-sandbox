@@ -65,7 +65,9 @@ type Inputs struct {
 	OOMScoreAdjSource string
 
 	// Chmod restricts a launcher-owned peer-registry directory (CS-LNCH-051).
-	// Nil means os.Chmod; tests inject a failure (CS-LNCH-107).
+	// Nil means fchmod on the descriptor hostdirs.EnsureOwnedDir checked;
+	// when set it is called with that descriptor's path instead. Tests inject
+	// a failure (CS-LNCH-107).
 	Chmod func(string, os.FileMode) error
 
 	// Linked is the verified linked git worktree the project lies in, nil
@@ -1127,7 +1129,11 @@ func (in *Inputs) mkPeerDir(dir string) error {
 // The rule is hostdirs.EnsureOwnedDir's (CS-DIR-004/005): never through a
 // symlink, never a non-directory or another uid's directory (CS-LNCH-107).
 func (in *Inputs) mkOwnedPeerDir(dir string) error {
-	return hostdirs.EnsureOwnedDir(dir, peerDirMode, &hostdirs.Ops{Chmod: in.Chmod})
+	ops := &hostdirs.Ops{}
+	if in.Chmod != nil {
+		ops.Fchmod = func(f *os.File, m os.FileMode) error { return in.Chmod(f.Name(), m) }
+	}
+	return hostdirs.EnsureOwnedDir(dir, peerDirMode, ops)
 }
 
 // ResolveTristate implements CLI > env var > YAML > default for a setting
