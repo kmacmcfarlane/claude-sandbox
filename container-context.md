@@ -127,10 +127,16 @@ restart Claude Code afterwards). Use `setup-lsp-plugins --check` to verify statu
   (the scratchpad qualifies). `docker compose` files using `${HOME}` are
   subject to the same rule.
 - **Discord MCP server** — baked in at `/opt/claude-sandbox/mcp/discord-notify/dist/index.mjs`. Provides the `send_discord_notification` tool when `DISCORD_WEBHOOK_URL` is set in the env file (`.claude-sandbox/env`). Configured via `~/.mcp.json` — no per-project setup needed.
-- **Notification hooks are managed settings.** A `Notification` hook (posts to
-  `CLAUDE_NOTIFICATION_WEBHOOK_URL` on permission/idle prompts) is baked into
-  the image at `/etc/claude-code/managed-settings.d/10-claude-sandbox.json`. It
-  runs alongside your own hooks and cannot be edited from here.
+- **Notification hooks are managed settings.** A `Notification` hook is baked
+  into the image at `/etc/claude-code/managed-settings.d/10-claude-sandbox.json`.
+  On a permission or idle prompt it runs `/opt/claude-sandbox/bin/notify-webhook`,
+  which posts to `CLAUDE_NOTIFICATION_WEBHOOK_URL` one line naming this session
+  (its `/peers` name, instance noun, project basename, the kind, the tool for a
+  permission prompt, and `claude-sandbox --attach=<noun>` plus the container
+  name) — never conversation text or env values. The launcher sets
+  `CLAUDE_SANDBOX_INSTANCE`, `CLAUDE_SANDBOX_CONTAINER` and `CLAUDE_SANDBOX_MODE`
+  for it (`CLAUDE_SANDBOX_JOINED=1` in a joined session). It runs alongside your
+  own hooks and cannot be edited from here.
 - **`settings.json` is the host file.** The config dir's `settings.json` is not
   a copy: plugin installs and enable/disable, `/model`, `/effort` and
   user-scope permission rules made here persist to the host and to every other

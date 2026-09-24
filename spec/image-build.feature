@@ -50,7 +50,7 @@ Feature: Image build lifecycle (CS-IMG)
     # assets.go embeds into the binary (scaffold/, scaffold-ralph/,
     # container-context.md, mcp-servers.json), logstream/, entrypoint.sh,
     # PROMPT_RALPH.md, mcp/discord-notify/, notification-hooks.json (baked as managed settings,
-    # CS-LNCH-068), bin/setup-lsp-plugins (CS-IMG-050). Until CS-IMG-048 the base COPYed them, so every commit rebuilt
+    # CS-LNCH-068), bin/setup-lsp-plugins (CS-IMG-050), bin/notify-webhook (CS-IMG-051). Until CS-IMG-048 the base COPYed them, so every commit rebuilt
     # the base and, through its changed ID, every child. scaffold/, scaffold-ralph/, container-context.md and
     # mcp-servers.json were COPYed but missing from the set, so editing them
     # rebuilt nothing and the running binary kept seeding the old files.
@@ -588,6 +588,15 @@ Feature: Image build lifecycle (CS-IMG)
       launch still reports it
     And the file is read before this launch starts its own checker, so a report is
       always the previous build's
+
+  Scenario: CS-IMG-051 The tools image ships notify-webhook
+    Then Dockerfile.tools copies bin/notify-webhook to /opt/claude-sandbox/bin/notify-webhook (0755)
+    And it is a baked source (CS-IMG-004), so editing it rebuilds the tools image and the caps
+    And notification-hooks.json's Notification command is exactly that path plus "|| true",
+      so the hook body is a readable script rather than a one-line shell program
+      embedded in JSON (CS-LNCH-111)
+    # --chmod=755 on the COPY, so it stays out of ModeBakedSources (CS-IMG-039):
+    # its mode comes from the Dockerfile, not from the checkout's umask.
 
   Scenario: CS-IMG-029 Base, tools and CLI Dockerfiles declare the shared cache-mount ids
     Then Dockerfile, Dockerfile.tools and Dockerfile.cli use "--mount=type=cache,id=claude-sandbox-<name>" mounts

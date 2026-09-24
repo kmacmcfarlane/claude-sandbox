@@ -455,6 +455,25 @@ func Build(in Inputs) (*Plan, error) {
 	if in.Instance != "" {
 		p.Labels = append(p.Labels, "claude-sandbox.instance="+in.Instance)
 	}
+	// CS-LNCH-111: the container's own identity, for code inside it — the
+	// baked Notification hook posts it so an operator running a dozen
+	// sandboxes can tell which one is waiting and how to reach it. Env vars
+	// only: the instance noun is a per-session choice and is deliberately out
+	// of the config hash (see fingerprint.go), and EnvFlags are not hashed at
+	// all, so none of this can register as drift. A joined session (docker
+	// exec) and every ralph iteration inherit the container's environment; a
+	// join adds CLAUDE_SANDBOX_JOINED=1 on its own exec (CS-SESS-075).
+	// CLAUDE_SANDBOX_INSTANCE and CLAUDE_SANDBOX_MODE mirror their labels: the
+	// noun is unset for ralph, which is single-instance and has none. The
+	// container name is always set. reserveContainer re-runs Build after a
+	// noun re-pick, so these never go stale.
+	if in.Instance != "" {
+		p.EnvFlags = append(p.EnvFlags, "CLAUDE_SANDBOX_INSTANCE="+in.Instance)
+	}
+	p.EnvFlags = append(p.EnvFlags,
+		"CLAUDE_SANDBOX_CONTAINER="+p.ContainerName,
+		"CLAUDE_SANDBOX_MODE="+mode,
+	)
 	// CS-LNCH-039: the pid class rides a label (for allocation) and an env
 	// var (for the in-container helper). EnvFlags are not fingerprinted, and
 	// the label is not either, so a fresh class is never drift (CS-LNCH-040).
