@@ -64,6 +64,7 @@ type cliFixture struct {
 	repo      string
 	tmp       string // Env.TempRoot: shadow directories are made and swept here
 	cache     string // Env.CacheDir: the cache-budget result file (CS-IMG-043)
+	state     string // Env.StateDir: the launcher's state root (CS-DIR-007)
 }
 
 func newCLIFixture() *cliFixture {
@@ -78,8 +79,9 @@ func newCLIFixture() *cliFixture {
 		repo:  filepath.Join(base, "repo"),
 		tmp:   filepath.Join(base, "tmp"),
 		cache: filepath.Join(base, "cache"),
+		state: filepath.Join(base, "state"),
 	}
-	for _, d := range []string{f.home, f.proj, f.repo, f.tmp, f.cache} {
+	for _, d := range []string{f.home, f.proj, f.repo, f.tmp, f.cache, f.state} {
 		Expect(os.MkdirAll(d, 0o755)).To(Succeed())
 	}
 	f.envmap = map[string]string{
@@ -103,7 +105,9 @@ func newCLIFixture() *cliFixture {
 		TempRoot: f.tmp,
 		// Nor the real cache-budget result file (CS-IMG-043); the detached
 		// checker is recorded by the fake, never spawned (CS-IMG-041).
-		CacheDir:   f.cache,
+		CacheDir: f.cache,
+		// Nor the real state root (CS-DIR-007).
+		StateDir:   f.state,
 		Executable: func() (string, error) { return "/fake/claude-sandbox", nil },
 	}
 	return f

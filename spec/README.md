@@ -35,3 +35,4 @@ references the scenario it implements by ID.
 | `ralph-quota.feature` | outcome classification, quota/rate-limit handling |
 | `completion.feature` | shell completion scripts, `__complete` routing, flag/value completion |
 | `pidslot.feature` | PID classes: unique session pids across sandboxes (peer registry) |
+| `host-dirs.feature` | launcher host dirs: cache/state roots, owned-directory rule, in-sandbox test |
