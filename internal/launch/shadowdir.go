@@ -13,12 +13,14 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/hostdirs"
 )
 
 // ShadowDirPrefix is the os.MkdirTemp pattern of a shadow directory. MkdirTemp
@@ -66,6 +68,157 @@ func shadowRoot(root string) string {
 	}
 	return root
 }
+
+// NestedShadowSubdir is the directory under CLAUDE_CODE_TMPDIR that a
+// launcher inside a sandbox makes its shadow directories in (CS-LNCH-161).
+// It does not match shadowDirName, so no sweep ever considers it itself.
+const NestedShadowSubdir = "claude-sandbox-shadow"
+
+// ErrNoHostVisibleTempRoot marks a launcher inside a sandbox that found no
+// temp root the host docker daemon can see (CS-LNCH-162).
+var ErrNoHostVisibleTempRoot = errors.New("no host-visible temp root")
+
+// NestedShadowRoot resolves the shadow root of a launcher running inside a
+// sandbox (CS-LNCH-161/162); home is the invoking user's home. The shadow
+// files are bind-mounted, and a bind source resolves on the HOST: the
+// container's own /tmp would give docker an empty, root-owned host path of
+// the same name. Outside a sandbox it returns "" (the temp root, unchanged).
+//
+// Order: a non-empty TMPDIR is returned as is — setting it is the operator's
+// statement that it is host-visible, and nothing inside the container can
+// check that. Otherwise CLAUDE_CODE_TMPDIR, when it is absolute and under the
+// config dir: the outer sandbox mounts the config dir at its real path
+// (CS-LNCH-008) and derives CLAUDE_CODE_TMPDIR under it (CS-LNCH-034), so a
+// path there is the same path on the host. The root is
+// <CLAUDE_CODE_TMPDIR>/claude-sandbox-shadow, made a 0700 directory the user
+// owns. Anything else is ErrNoHostVisibleTempRoot, wrapped with the reason.
+//
+// An explicit TMPDIR is checked only where the answer is certain
+// (CS-LNCH-162): a relative one is refused, and so is one whose mount (the
+// longest mount point in mountinfo covering it) is the container's root
+// filesystem or a tmpfs — definitely container-local. Any other mount keeps
+// the trust-the-operator rule. mountinfo is the seam for /proc/self/mountinfo
+// (nil = read it); an unreadable one is no evidence, and TMPDIR is trusted.
+func NestedShadowRoot(getenv func(string) string, home string, ops *hostdirs.Ops, mountinfo func() (string, error)) (string, error) {
+	if !hostdirs.InSandbox(getenv) {
+		return "", nil
+	}
+	if t := getenv("TMPDIR"); t != "" {
+		if !filepath.IsAbs(t) {
+			return "", fmt.Errorf("%w: TMPDIR=%s is not an absolute path", ErrNoHostVisibleTempRoot, t)
+		}
+		if mountinfo == nil {
+			if testing.Testing() {
+				panic("launch: a test resolved the real /proc/self/mountinfo; pass a fake mountinfo (Env.MountInfo)")
+			}
+			mountinfo = readMountInfo
+		}
+		if text, err := mountinfo(); err == nil {
+			resolved := filepath.Clean(t)
+			if r, err := filepath.EvalSymlinks(resolved); err == nil {
+				resolved = r
+			}
+			if mp, fstype, ok := coveringMount(text, resolved); ok && (mp == "/" || fstype == "tmpfs") {
+				what := "the container's own root filesystem"
+				if mp != "/" {
+					what = "a tmpfs mounted at " + mp + " inside the container"
+				}
+				return "", fmt.Errorf("%w: TMPDIR=%s is on %s", ErrNoHostVisibleTempRoot, t, what)
+			}
+		}
+		return t, nil
+	}
+	configDir := getenv("CLAUDE_CONFIG_DIR")
+	if configDir == "" && home != "" {
+		configDir = filepath.Join(home, ".claude")
+	}
+	cct := getenv("CLAUDE_CODE_TMPDIR")
+	switch {
+	case cct == "":
+		return "", fmt.Errorf("%w: CLAUDE_CODE_TMPDIR is not set", ErrNoHostVisibleTempRoot)
+	case !filepath.IsAbs(cct) || !filepath.IsAbs(configDir):
+		return "", fmt.Errorf("%w: CLAUDE_CODE_TMPDIR=%s is not an absolute path under the config dir %q", ErrNoHostVisibleTempRoot, cct, configDir)
+	}
+	cct, cfg := filepath.Clean(cct), filepath.Clean(configDir)
+	if !underDir(cct, cfg) && !underDirResolved(cct, cfg) {
+		return "", fmt.Errorf("%w: CLAUDE_CODE_TMPDIR=%s is not under the config dir %s, the one directory the outer sandbox is known to mount at its real path", ErrNoHostVisibleTempRoot, cct, cfg)
+	}
+	root := filepath.Join(cct, NestedShadowSubdir)
+	if err := hostdirs.EnsureOwnedDir(root, hostdirs.OwnedDirMode, ops); err != nil {
+		return "", fmt.Errorf("%w: cannot prepare %s: %v", ErrNoHostVisibleTempRoot, root, err)
+	}
+	return root, nil
+}
+
+// underDir reports whether path is dir or lies below it (both clean).
+func underDir(path, dir string) bool {
+	return path == dir || dir == "/" || strings.HasPrefix(path, dir+"/")
+}
+
+// underDirResolved is underDir on the symlink-resolved paths: a config dir
+// reached through a symlink (or a CLAUDE_CODE_TMPDIR spelled through one)
+// is still the same directory. False when either cannot be resolved.
+func underDirResolved(path, dir string) bool {
+	p, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return false
+	}
+	d, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return false
+	}
+	return underDir(p, d)
+}
+
+func readMountInfo() (string, error) {
+	b, err := os.ReadFile("/proc/self/mountinfo")
+	return string(b), err
+}
+
+// coveringMount returns the mount point and filesystem type of the mount
+// that holds path, per mountinfo text (proc(5)): the longest mount point that
+// is path or a prefix of it by whole components; among equal ones the later
+// line, which is mounted over the earlier.
+func coveringMount(text, path string) (mountPoint, fstype string, ok bool) {
+	for _, line := range strings.Split(text, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 5 {
+			continue
+		}
+		mp := filepath.Clean(unescapeMountInfo(fields[4]))
+		sep := slices.Index(fields, "-")
+		if sep < 0 || sep+1 >= len(fields) {
+			continue
+		}
+		if !underDir(path, mp) {
+			continue
+		}
+		if !ok || len(mp) >= len(mountPoint) {
+			mountPoint, fstype, ok = mp, fields[sep+1], true
+		}
+	}
+	return mountPoint, fstype, ok
+}
+
+// unescapeMountInfo decodes the kernel's octal escapes (\040 space, \011
+// tab, \012 newline, \134 backslash) in a mountinfo field.
+func unescapeMountInfo(s string) string {
+	if !strings.Contains(s, "\\") {
+		return s
+	}
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' && i+3 < len(s) && isOctal(s[i+1]) && isOctal(s[i+2]) && isOctal(s[i+3]) {
+			b.WriteByte((s[i+1]-'0')<<6 | (s[i+2]-'0')<<3 | (s[i+3] - '0'))
+			i += 3
+			continue
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
+}
+
+func isOctal(c byte) bool { return c >= '0' && c <= '7' }
 
 // isSystemTempDir reports whether dir is os.TempDir(), however it is spelled
 // (a trailing slash, a symlink).

@@ -59,6 +59,9 @@ type Env struct {
 	// scratch directory: under go test the launch panics on the real temp
 	// root rather than sweep it (launch.shadowRoot).
 	TempRoot string
+	// MountInfo reads /proc/self/mountinfo for the nested TMPDIR check
+	// (CS-LNCH-162); nil means the real file. Test fixtures set a fake.
+	MountInfo func() (string, error)
 	// CacheDir is where the detached cache-budget checker writes its result
 	// and the next launch reads it (CS-IMG-041..043); "" means
 	// $HOME/.cache/claude-sandbox. Tests point it at a scratch directory.
@@ -72,6 +75,18 @@ type Env struct {
 	// os.Executable. The checker is started through Runner.Start with
 	// Cmd.Detach, so under execx.Fake nothing is spawned.
 	Executable func() (string, error)
+}
+
+// shadowRoot resolves where this launch makes its shadow directory
+// (CS-LNCH-080, 161/162): Env.TempRoot when set (tests), else, inside a
+// sandbox, a host-visible root (launch.NestedShadowRoot), else "" — the temp
+// root, as before.
+func (e *Env) shadowRoot() (string, error) {
+	if e.TempRoot != "" {
+		return e.TempRoot, nil
+	}
+	_, _, _, home := hostIdentity(e.Getenv)
+	return launch.NestedShadowRoot(e.Getenv, home, nil, e.MountInfo)
 }
 
 // cacheDir resolves Env.CacheDir.
@@ -974,6 +989,19 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 		fmt.Fprintf(env.Err, "WARNING: oomScoreAdj %d is below 0: this sandbox is shielded from the host's OOM killer, which will prefer host processes (the desktop) over it.\n", adj)
 	}
 
+	// CS-LNCH-161/162: the shadow files are bind-mounted, so inside a sandbox
+	// they must live where the host daemon sees the same path. Settled before
+	// any image work, so a refusal never costs a build.
+	shadowRoot, err := env.shadowRoot()
+	if err != nil {
+		return exitErr(2, "Error: refusing to launch: this launcher runs inside a sandbox, and its temp directory would be the\n"+
+			"       container's own, so docker (which resolves bind mounts on the host) would mount empty\n"+
+			"       host paths in place of the session's CLAUDE.md, .mcp.json and gitconfig.\n"+
+			"       %v.\n"+
+			"       Set TMPDIR to a directory mounted at the same path on the host (a directory in the\n"+
+			"       project, or the scratchpad if it is under the Claude config dir) and launch again.", err)
+	}
+
 	// A branch is an ordinary new container whose claude invocation forks an
 	// existing conversation (CS-SESS-039/040). The flags go ahead of the user's
 	// passthrough; the fingerprint is unaffected because passthrough args are
@@ -1113,7 +1141,7 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 	}
 	// Reserve under the host lock: re-validate the noun, pick the pid class,
 	// docker create (CS-SESS-048). The lock is released before the start.
-	plan, err := reserveContainer(env, in, wt, f.Ralph)
+	plan, err := reserveContainer(env, in, wt, f.Ralph, shadowRoot)
 	if err != nil {
 		return err
 	}

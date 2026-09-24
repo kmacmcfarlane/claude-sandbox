@@ -271,3 +271,160 @@ var _ = Describe("test guard: the real temp root is refused under go test (CS-LN
 		Expect(d).To(BeADirectory())
 	})
 })
+
+// CS-LNCH-161/162: a launcher inside a sandbox must make its shadow directory
+// where the host daemon resolves the same path. Every path here is under a
+// scratch directory; the real temp root is never named.
+var _ = Describe("nested shadow root (CS-LNCH-161/162)", func() {
+	var (
+		home string
+		env  map[string]string
+	)
+	getenv := func(k string) string { return env[k] }
+	var mountText string
+	mounts := func() (string, error) { return mountText, nil }
+
+	BeforeEach(func() {
+		base, err := filepath.EvalSymlinks(GinkgoT().TempDir())
+		Expect(err).NotTo(HaveOccurred())
+		home = filepath.Join(base, "home")
+		mkdir(filepath.Join(home, ".claude", "tmp"))
+		mountText = ""
+		env = map[string]string{
+			"CLAUDE_SANDBOX_PROJECT_DIR": filepath.Join(base, "proj"),
+			"CLAUDE_CODE_TMPDIR":         filepath.Join(home, ".claude", "tmp"),
+		}
+	})
+
+	It("CS-LNCH-161: outside a sandbox the root is the temp root, unchanged", func() {
+		delete(env, "CLAUDE_SANDBOX_PROJECT_DIR")
+		root, err := launch.NestedShadowRoot(getenv, home, nil, mounts)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(root).To(BeEmpty())
+		Expect(filepath.Join(home, ".claude", "tmp", launch.NestedShadowSubdir)).NotTo(BeADirectory())
+	})
+
+	It("CS-LNCH-161: inside, the root is a 0700 directory the user owns under CLAUDE_CODE_TMPDIR", func() {
+		root, err := launch.NestedShadowRoot(getenv, home, nil, mounts)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(root).To(Equal(filepath.Join(home, ".claude", "tmp", "claude-sandbox-shadow")))
+		fi, err := os.Lstat(root)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fi.IsDir()).To(BeTrue())
+		Expect(fi.Mode().Perm()).To(Equal(os.FileMode(0o700)))
+
+		d, err := launch.NewShadowDir(root)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(filepath.Dir(d)).To(Equal(root))
+		Expect(filepath.Base(root)).NotTo(MatchRegexp(`^claude-sandbox[0-9]+$`), "the subdir itself is never a sweep candidate")
+	})
+
+	It("CS-LNCH-161: CLAUDE_CONFIG_DIR is the config dir when set", func() {
+		cfg := filepath.Join(home, "alt-config")
+		env["CLAUDE_CONFIG_DIR"] = cfg
+		env["CLAUDE_CODE_TMPDIR"] = filepath.Join(cfg, "tmp") + "/"
+		root, err := launch.NestedShadowRoot(getenv, home, nil, mounts)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(root).To(Equal(filepath.Join(cfg, "tmp", "claude-sandbox-shadow")))
+
+		env["CLAUDE_CODE_TMPDIR"] = filepath.Join(home, ".claude", "tmp")
+		_, err = launch.NestedShadowRoot(getenv, home, nil, mounts)
+		Expect(err).To(MatchError(launch.ErrNoHostVisibleTempRoot), "~/.claude is not the config dir then")
+	})
+
+	It("CS-LNCH-161: a non-empty TMPDIR is the root, unchecked and not created", func() {
+		env["TMPDIR"] = filepath.Join(home, "chosen")
+		root, err := launch.NestedShadowRoot(getenv, home, nil, mounts)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(root).To(Equal(filepath.Join(home, "chosen")))
+		Expect(root).NotTo(BeADirectory())
+	})
+
+	DescribeTable("CS-LNCH-162: no host-visible root is an error naming why, and nothing is created",
+		func(cct, want string) {
+			if cct == "<unset>" {
+				delete(env, "CLAUDE_CODE_TMPDIR")
+			} else {
+				env["CLAUDE_CODE_TMPDIR"] = strings.ReplaceAll(cct, "$HOME", home)
+			}
+			root, err := launch.NestedShadowRoot(getenv, home, nil, mounts)
+			Expect(err).To(MatchError(launch.ErrNoHostVisibleTempRoot))
+			Expect(err.Error()).To(ContainSubstring(want))
+			Expect(root).To(BeEmpty())
+			Expect(filepath.Join(home, ".claudex", "tmp", launch.NestedShadowSubdir)).NotTo(BeADirectory())
+		},
+		Entry("unset", "<unset>", "CLAUDE_CODE_TMPDIR is not set"),
+		Entry("relative", ".claude/tmp", "not an absolute path"),
+		Entry("outside the config dir", "$HOME/elsewhere", "not under the config dir"),
+		Entry("a sibling sharing the prefix", "$HOME/.claudex/tmp", "not under the config dir"),
+	)
+
+	It("CS-LNCH-162: a root that cannot be made the user's directory is an error", func() {
+		touch(filepath.Join(home, ".claude", "tmp", launch.NestedShadowSubdir), "a file in the way")
+		_, err := launch.NestedShadowRoot(getenv, home, nil, mounts)
+		Expect(err).To(MatchError(launch.ErrNoHostVisibleTempRoot))
+		Expect(err.Error()).To(ContainSubstring("cannot prepare"))
+	})
+
+	It("CS-LNCH-161: a config dir reached through a symlink still counts", func() {
+		real := filepath.Join(home, "real-config")
+		mkdir(filepath.Join(real, "tmp"))
+		link := filepath.Join(home, "link-config")
+		Expect(os.Symlink(real, link)).To(Succeed())
+		env["CLAUDE_CONFIG_DIR"] = link
+		env["CLAUDE_CODE_TMPDIR"] = filepath.Join(real, "tmp")
+		root, err := launch.NestedShadowRoot(getenv, home, nil, mounts)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(root).To(Equal(filepath.Join(real, "tmp", launch.NestedShadowSubdir)))
+		Expect(root).To(BeADirectory())
+
+		env["CLAUDE_CONFIG_DIR"] = real
+		env["CLAUDE_CODE_TMPDIR"] = filepath.Join(link, "tmp")
+		_, err = launch.NestedShadowRoot(getenv, home, nil, mounts)
+		Expect(err).NotTo(HaveOccurred(), "the variable spelled through the link")
+	})
+
+	It("CS-LNCH-162: a relative TMPDIR is refused", func() {
+		env["TMPDIR"] = "scratch"
+		_, err := launch.NestedShadowRoot(getenv, home, nil, mounts)
+		Expect(err).To(MatchError(launch.ErrNoHostVisibleTempRoot))
+		Expect(err.Error()).To(ContainSubstring("not an absolute path"))
+	})
+
+	Describe("CS-LNCH-162: an explicit TMPDIR on a definitely container-local mount", func() {
+		// proc(5) lines: id parent maj:min root mountpoint opts [optional...] - fstype source superopts
+		line := func(mp, fstype string) string {
+			return "1 0 0:1 / " + mp + " rw,relatime shared:1 - " + fstype + " src rw\n"
+		}
+		BeforeEach(func() {
+			mountText = line("/", "overlay") +
+				line(home, "ext4") +
+				line(filepath.Join(home, "ram"), "tmpfs") +
+				line(strings.ReplaceAll(filepath.Join(home, "with space"), " ", `\040`), "tmpfs")
+		})
+		DescribeTable("is refused on the root filesystem or a tmpfs, trusted elsewhere",
+			func(tmpdir string, refused bool, want string) {
+				env["TMPDIR"] = strings.ReplaceAll(tmpdir, "$HOME", home)
+				root, err := launch.NestedShadowRoot(getenv, home, nil, mounts)
+				if refused {
+					Expect(err).To(MatchError(launch.ErrNoHostVisibleTempRoot))
+					Expect(err.Error()).To(ContainSubstring(want))
+					return
+				}
+				Expect(err).NotTo(HaveOccurred())
+				Expect(root).To(Equal(env["TMPDIR"]))
+			},
+			Entry("the container's /tmp", "/tmp/somewhere-75d8", true, "the container's own root filesystem"),
+			Entry("a tmpfs", "$HOME/ram/x", true, "a tmpfs mounted at"),
+			Entry("a bind mount", "$HOME/scratch", false, ""),
+			Entry("a tmpfs whose mount point has an escaped space (decoded)", "$HOME/with space/x", true, "with space"),
+			Entry("a sibling sharing a mount point's prefix is the parent's mount", "$HOME/ramx", false, ""),
+		)
+		It("an unreadable mountinfo is no evidence: TMPDIR is trusted", func() {
+			env["TMPDIR"] = "/tmp/somewhere-75d8"
+			root, err := launch.NestedShadowRoot(getenv, home, nil, func() (string, error) { return "", os.ErrPermission })
+			Expect(err).NotTo(HaveOccurred())
+			Expect(root).To(Equal("/tmp/somewhere-75d8"))
+		})
+	})
+})

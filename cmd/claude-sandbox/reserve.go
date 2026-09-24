@@ -83,7 +83,9 @@ func (env *Env) now() time.Time {
 // reserveContainer runs the critical section and returns the plan of the
 // container it created. in carries everything but the per-session picks;
 // in.Instance is the noun picked before the image build (CS-SESS-054).
-func reserveContainer(env *Env, in launch.Inputs, wt worktreeChoice, ralph bool) (plan *launch.Plan, err error) {
+// shadowRoot is where its shadow directory is made (Env.shadowRoot,
+// CS-LNCH-161; "" = the temp root).
+func reserveContainer(env *Env, in launch.Inputs, wt worktreeChoice, ralph bool, shadowRoot string) (plan *launch.Plan, err error) {
 	release := acquireLaunchLock(env, in.Home)
 	defer release()
 
@@ -92,7 +94,7 @@ func reserveContainer(env *Env, in launch.Inputs, wt worktreeChoice, ralph bool)
 	// lock (CS-LNCH-080): a launch holding the lock then never sees another
 	// launch's directory before that launch's create, and so cannot sweep it.
 	if in.TempDir == "" {
-		d, derr := launch.NewShadowDir(env.TempRoot)
+		d, derr := launch.NewShadowDir(shadowRoot)
 		if derr != nil {
 			return nil, derr
 		}
