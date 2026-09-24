@@ -868,6 +868,23 @@ cascade (later file wins) > unset.
 > credits. To keep the subscription login, delete the key from the env file, or set it to
 > empty on the host (`export ANTHROPIC_API_KEY=`), which outranks every env file.
 
+**Loader and shell-startup variables are refused.** The launcher fails a launch (exit 2,
+before it builds an image or creates a container) if any env file in the cascade defines a
+variable the dynamic loader or a shell honours *before* the container's root entrypoint can
+drop it: any `LD_*` (`LD_PRELOAD`, `LD_AUDIT`, `LD_LIBRARY_PATH`, …), `GLIBC_TUNABLES`,
+`GCONV_PATH`, `LOCPATH`, or `BASH_ENV`. The entrypoint runs as root and unsets these on its
+first lines, but glibc has already mapped an `LD_PRELOAD` `.so` into the entrypoint's own
+bash before line 1 runs — and an env file is writable from inside a session (the project
+tree is mounted read-write), so a planted key would run code as root on the next launch.
+The refusal names the file, line and key; it never prints the value. A session that
+legitimately needs one of these sets it in its own shell rc; an image sets it with `ENV` in
+the child `Dockerfile`. `--attach` and `--join` re-use an existing container and pass no env
+file, so they are never blocked by this. (Detection uses the same docker-faithful env reader
+as the lint and override notice, so a BOM, indentation or CRLF cannot hide a key.) Docker
+also gets exactly the bytes that were checked: the launcher reads each env file once and
+passes `docker create` a verbatim, mode-0600 copy from the launch's temporary shadow
+directory, so a file rewritten during the image build cannot slip a key past the check.
+
 `claude-sandbox init` never creates `.claude-sandbox/env`. It seeds
 `.claude-sandbox/env.example`, a commented template that the launcher never reads; copy it
 to `.claude-sandbox/env` only when a project needs its own values. `env.example` holds no

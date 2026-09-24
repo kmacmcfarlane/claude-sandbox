@@ -401,3 +401,85 @@ Feature: Config cascade and env stacking (CS-CASC)
     And when no level sets it, there is no source and the launcher records "default"
     And a level that sets it to an empty value is the source (it is what the
       merge took), and the launcher then applies and records the default
+
+  # ---- refused env keys (CS-CASC-042..045) ----
+  # Every --env-file line becomes container environment, and the container's
+  # first process is the entrypoint, run as root. CS-IMG-067 makes that script
+  # drop the loader variables on its first lines, but the dynamic loader has
+  # already applied them to the script's own bash before line 1 runs, and env
+  # files are session-writable (the project tree is mounted rw). So the
+  # launcher refuses the keys the loader and libc act on before any script
+  # line — fail closed, never a filtered copy: a rewritten file would hide a
+  # planted line from the operator, and nothing in an env file legitimately
+  # needs these keys (a session sets LD_LIBRARY_PATH in its own shell rc; an
+  # image sets it with ENV in the child Dockerfile).
+
+  Scenario Outline: CS-CASC-042 The refused keys are those glibc and bash act on before the entrypoint's first line
+    Given an env file line "<key>=x"
+    Then the key <verdict>
+
+    Examples: refused
+      | key             | verdict    | why                                                                 |
+      | LD_PRELOAD      | is refused | the loader maps the named object into every process, root included |
+      | LD_AUDIT        | is refused | same, as an audit module                                            |
+      | LD_LIBRARY_PATH | is refused | redirects every shared library lookup                               |
+      | LD_DEBUG_OUTPUT | is refused | the loader creates files at the named path, as root                 |
+      | LD_PROFILE      | is refused | writes profiling data under /var/tmp as root                        |
+      | LD_SOMETHING    | is refused | every LD_* is a loader control; the prefix covers new ones          |
+      | GLIBC_TUNABLES  | is refused | parsed by the loader before main (CVE-2023-4911 was in that parser) |
+      | GCONV_PATH      | is refused | libc loads charset-conversion modules (.so) from it lazily          |
+      | LOCPATH         | is refused | libc reads locale data from it as root                              |
+      | BASH_ENV        | is refused | sourced by any non-privileged bash a root-run tool spawns           |
+
+    Examples: not refused
+      | key           | verdict        | why                                                              |
+      | ENV           | is not refused | bash -p ignores it, sh reads it only interactively; ENV=prod is a common dotenv key |
+      | MALLOC_CHECK_ | is not refused | allocator diagnostics: loads no code, writes no file             |
+      | PATH          | is not refused | the entrypoint fixes it before anything runs (CS-IMG-067)        |
+      | LDFLAGS       | is not refused | not an LD_ name                                                  |
+      | LD            | is not refused | no underscore: the linker's name, not a loader control           |
+      | MY_LD_PRELOAD | is not refused | the prefix is anchored at the start                              |
+      | ld_preload    | is not refused | the loader is case-sensitive                                     |
+
+  Scenario Outline: CS-CASC-043 Detection reads env files as docker does
+    # The docker-faithful reader of CS-CASC-026..028 and CS-LNCH-108, so no
+    # formatting hides a line docker would honour, and a line docker drops or
+    # rejects is not a finding.
+    Given an env file whose only line is <line>
+    Then LD_PRELOAD <verdict>
+
+    Examples:
+      | line                        | verdict        | note                                              |
+      | "LD_PRELOAD=/p/e.so"        | is refused     |                                                   |
+      | "  LD_PRELOAD=/p/e.so"      | is refused     | leading blanks are trimmed                        |
+      | "\tLD_PRELOAD=/p/e.so"      | is refused     |                                                   |
+      | "<BOM>LD_PRELOAD=/p/e.so"   | is refused     | first-line BOM is dropped                         |
+      | "LD_PRELOAD=/p/e.so\r"      | is refused     | CRLF: one \r is dropped                           |
+      | "LD_PRELOAD="               | is refused     | an empty value still sets the key; nothing to gain by allowing it |
+      | "# LD_PRELOAD=/p/e.so"      | is not refused | a comment                                         |
+      | "LD_PRELOAD =/p/e.so"       | is not refused | key "LD_PRELOAD " — docker rejects the whole create |
+      | "ld_preload=/p/e.so"        | is not refused |                                                   |
+
+  Scenario: CS-CASC-044 A bare refused key is refused whatever the launcher's environment holds
+    # A bare "LD_PRELOAD" line is docker's pass-through of the launcher's own
+    # LD_PRELOAD (CS-CASC-027). Its effect depends on the host environment at
+    # each launch, and it has no use inside the container (the host's path is
+    # not the container's), so it is refused whether or not the host sets it —
+    # the one place the launcher does not follow docker's "defines nothing"
+    # rule, on purpose: fail closed.
+    Given an env file whose only line is "LD_PRELOAD"
+    Then it is refused when the launcher's environment sets LD_PRELOAD
+    And it is refused when the launcher's environment does not
+
+  Scenario: CS-CASC-045 Every refused line in every file is reported, by file, line and key
+    Given the cascade:
+      | level | env                                    |
+      | /ws   | TOKEN=t\nLD_AUDIT=/x.so                |
+      | /ws/p | # c\nBASH_ENV=/p/rc\nLD_PRELOAD=/p/e.so |
+    Then the findings are, in cascade order:
+      | file                    | line | key        |
+      | /ws/.claude-sandbox/env | 2    | LD_AUDIT   |
+      | /ws/p/.claude-sandbox/env | 2  | BASH_ENV   |
+      | /ws/p/.claude-sandbox/env | 3  | LD_PRELOAD |
+    And a finding names the key and never the value (env files hold secrets; CS-CASC-025)
+    And an unreadable file yields no finding (the launch fails on it elsewhere)

@@ -99,6 +99,12 @@ restart Claude Code afterwards). Use `setup-lsp-plugins --check` to verify statu
   the `ralph/stop` file), which are routine and go through Bash because the
   harness blocks Edit/Write to the main checkout from inside a worktree.
   Interactive sessions work in the shared checkout by default.
+- **`.claude-sandbox/env` cannot set loader or shell-startup variables.** The
+  next launch is REFUSED (exit 2) if an env file defines any `LD_*`
+  (`LD_PRELOAD`, `LD_AUDIT`, `LD_LIBRARY_PATH`, …), `GLIBC_TUNABLES`,
+  `GCONV_PATH`, `LOCPATH` or `BASH_ENV`: these load code or read files as ROOT
+  in the entrypoint before it can drop them. Set such a variable in your own
+  shell rc, or with `ENV` in the child `Dockerfile`, not in an env file.
 - **A linked git worktree works as a project.** When the launch directory is a
   git worktree whose repository lives elsewhere (e.g. a Paseo worktree under
   `~/.paseo/worktrees/`), the repository's `.git` directory is mounted

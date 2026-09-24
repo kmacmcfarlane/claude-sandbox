@@ -33,9 +33,9 @@ var _ = Describe("env file linting at launch", func() {
 		Expect(errOut).To(ContainSubstring(parentEnv + ":1: value for UPSTREAM is wrapped in \" quotes."))
 		Expect(errOut).To(ContainSubstring(projEnv + ":1: value for LOCAL is wrapped in ' quotes."))
 
-		// Warn-only: both files still feed --env-file, and neither is rewritten.
-		Expect(f.launched().Args).To(ContainElements("--env-file", parentEnv))
-		Expect(f.launched().Args).To(ContainElements("--env-file", projEnv))
+		// Warn-only: both files still feed --env-file (as verbatim snapshot
+		// copies, CS-LNCH-132), and neither is rewritten.
+		Expect(envFileContents(f.launched().Args)).To(Equal([]string{"UPSTREAM=\"quoted\"\n", "LOCAL='quoted'\n"}))
 		Expect(readFile(projEnv)).To(Equal("LOCAL='quoted'\n"))
 	})
 
@@ -59,14 +59,8 @@ var _ = Describe("env file linting at launch", func() {
 
 		Expect(f.run()).To(Equal(0))
 
-		var envFiles []string
-		args := f.launched().Args
-		for i, a := range args {
-			if a == "--env-file" && i+1 < len(args) {
-				envFiles = append(envFiles, args[i+1])
-			}
-		}
-		Expect(envFiles).To(Equal([]string{upstream}))
+		// One --env-file: the upstream env's snapshot copy (CS-LNCH-132).
+		Expect(envFileContents(f.launched().Args)).To(Equal([]string{"TOKEN=upstream\n"}))
 		Expect(f.errw.String()).NotTo(ContainSubstring(example))
 		Expect(f.out.String()).NotTo(ContainSubstring("env.example"))
 		// With an upstream env present, no missing-env message at all.
