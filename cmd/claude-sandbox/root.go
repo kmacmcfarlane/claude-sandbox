@@ -1131,7 +1131,9 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 		Instance: instance,
 		Worktree: worktree,
 		Linked:   linked,
-		Version:  version,
+		// CS-LNCH-163..165: the nested host-visibility checks.
+		MountInfo: env.MountInfo,
+		Version:   version,
 		// CS-LNCH-093: recorded on the container for the OOM report.
 		MemoryLimitSource: cascade.MemoryLimitSource(configFiles),
 		OOMScoreAdjSource: oomSource,

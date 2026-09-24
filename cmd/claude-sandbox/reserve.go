@@ -13,14 +13,18 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/user"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
+	"testing"
 	"time"
 
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/hostdirs"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/launch"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/oomreport"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/sessions"
@@ -118,7 +122,7 @@ func reserveContainer(env *Env, in launch.Inputs, wt worktreeChoice, ralph bool,
 		if attempt == 1 {
 			// After discovery, so the directories of the stale reservations it
 			// just removed are already unreferenced.
-			pruneShadowDirs(env, in.TempDir)
+			pruneShadowDirs(env, in.TempDir, in.Home)
 		}
 		project := sessions.ForProject(found, in.ProjectDir)
 
@@ -392,8 +396,10 @@ func attachCommand(projectDir, home, instance string) string {
 
 // pruneShadowDirs removes the shadow directories of earlier launches that no
 // container uses any more (CS-LNCH-081). It runs under the launch lock and
-// never blocks the launch: every failure is one warning (CS-LNCH-082).
-func pruneShadowDirs(env *Env, own string) {
+// never blocks the launch: every failure is one warning (CS-LNCH-082). On the
+// host it also sweeps the directories nested launches made under the config
+// dir (CS-LNCH-166); home is the invoking user's.
+func pruneShadowDirs(env *Env, own, home string) {
 	root := env.TempRoot
 	if root == "" {
 		root = filepath.Dir(own)
@@ -401,4 +407,89 @@ func pruneShadowDirs(env *Env, own string) {
 	if _, err := launch.PruneShadowDirs(env.Runner, root, os.Getuid(), env.now(), launch.ShadowDirMinAge, own); err != nil {
 		fmt.Fprintf(env.Err, "Warning: could not clean up old shadow directories under %s: %v\n", root, err)
 	}
+	for _, nested := range nestedShadowSweepRoots(env.Getenv, home) {
+		if filepath.Clean(nested) == filepath.Clean(root) {
+			continue
+		}
+		fi, err := os.Lstat(nested)
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+			continue
+		case err != nil:
+			fmt.Fprintf(env.Err, "Warning: could not clean up old shadow directories under %s: %v\n", nested, err)
+			continue
+		case !fi.Mode().IsDir() || !ownedBy(fi, os.Getuid()):
+			// Never through a symlink, never another user's directory.
+			continue
+		}
+		if _, err := launch.PruneShadowDirs(env.Runner, nested, os.Getuid(), env.now(), launch.ShadowDirMinAge, own); err != nil {
+			fmt.Fprintf(env.Err, "Warning: could not clean up old shadow directories under %s: %v\n", nested, err)
+		}
+	}
+}
+
+// nestedShadowSweepRoots are the directories a nested launcher inside a
+// sandbox this host launched makes its shadow directories in (CS-LNCH-161,
+// 166): <CLAUDE_CODE_TMPDIR>/claude-sandbox-shadow, for the value its
+// sandboxes get — this launcher's own CLAUDE_CODE_TMPDIR when set and
+// absolute, and <config dir>/tmp, which CS-LNCH-034 derives. None inside a
+// sandbox, which sweeps its own shadow root. Under go test a root the real
+// environment would sweep panics: a fixture without HOME would otherwise
+// sweep live nested sessions' directories against a faked docker ps.
+func nestedShadowSweepRoots(getenv func(string) string, home string) []string {
+	if hostdirs.InSandbox(getenv) {
+		return nil
+	}
+	roots := sweepRootsFor(getenv, home)
+	if testing.Testing() {
+		// The real environment's roots, and the default ~/.claude one of each
+		// real home whatever CLAUDE_CONFIG_DIR says.
+		var real []string
+		noEnv := func(string) string { return "" }
+		var homes []string
+		if h, err := os.UserHomeDir(); err == nil && h != "" {
+			homes = append(homes, h)
+		}
+		if u, err := user.Current(); err == nil && u.HomeDir != "" {
+			homes = append(homes, u.HomeDir)
+		}
+		for _, h := range homes {
+			real = append(real, sweepRootsFor(os.Getenv, h)...)
+			real = append(real, sweepRootsFor(noEnv, h)...)
+		}
+		for _, r := range roots {
+			if slices.Contains(real, r) {
+				panic(fmt.Sprintf("a test would sweep the real %s; set HOME (and CLAUDE_CONFIG_DIR/CLAUDE_CODE_TMPDIR, if any) to a scratch directory", r))
+			}
+		}
+	}
+	return roots
+}
+
+// sweepRootsFor computes nestedShadowSweepRoots' candidates.
+func sweepRootsFor(getenv func(string) string, home string) []string {
+	cfg := getenv("CLAUDE_CONFIG_DIR")
+	if cfg == "" && home != "" {
+		cfg = filepath.Join(home, ".claude")
+	}
+	var dirs []string
+	if c := getenv("CLAUDE_CODE_TMPDIR"); c != "" && filepath.IsAbs(c) {
+		dirs = append(dirs, c)
+	}
+	if filepath.IsAbs(cfg) {
+		dirs = append(dirs, filepath.Join(cfg, "tmp"))
+	}
+	var roots []string
+	for _, d := range dirs {
+		if r := filepath.Join(filepath.Clean(d), launch.NestedShadowSubdir); !slices.Contains(roots, r) {
+			roots = append(roots, r)
+		}
+	}
+	return roots
+}
+
+// ownedBy reports whether fi belongs to uid.
+func ownedBy(fi os.FileInfo, uid int) bool {
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	return ok && int(st.Uid) == uid
 }

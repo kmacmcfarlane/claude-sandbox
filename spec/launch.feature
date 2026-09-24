@@ -1352,6 +1352,88 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     And the drift check's private directory (CS-LNCH-084) is never mounted, so
       it stays in the container's own temp root
 
+  Scenario: CS-LNCH-163 A launcher inside a sandbox mounts a settings.json symlink target only where the host can see it
+    # Same class as CS-LNCH-161: the target is resolved INSIDE the container,
+    # but docker resolves a bind source on the HOST. A target on the
+    # container's own filesystem (or under a mount of some other host path)
+    # would make docker bind an empty, root-owned host path of that name.
+    # "Demonstrably host-visible" for a path P (symlink-resolved when it
+    # resolves): /proc/self/mountinfo (the Env.MountInfo seam) is readable and
+    # the mount holding P (CS-LNCH-162's longest-mount-point rule) is neither
+    # the container's root filesystem ("/") nor a tmpfs — i.e. a bind the
+    # outer sandbox made. Unlike CS-LNCH-162 (where TMPDIR is the operator's
+    # statement) an unreadable mountinfo is no evidence: not visible. Not
+    # detected, as in CS-LNCH-162: a bind of a DIFFERENT host path (a cascade
+    # mount with host != container). mountinfo's root field cannot tell one
+    # reliably — on btrfs it carries the subvolume name (Fedora "/root/...",
+    # Ubuntu "/@home/...") — so it is not consulted.
+    Given the launcher runs inside a sandbox (CS-DIR-006)
+    And settings.json is a symlink whose resolved target CS-LNCH-069/160
+      would mount (not under a same-path mount of this launch, a regular
+      file, no ':')
+    When the target is demonstrably host-visible
+    Then it is mounted as in CS-LNCH-069
+    When it is not
+    Then no mount is added and exactly one warning names the link and the
+      target, says the outer sandbox does not mount it at the same path and
+      that the sandbox runs without user settings
+    And the launch continues
+    Given the launcher does not run inside a sandbox
+    Then mountinfo is never read and CS-LNCH-069 applies unchanged
+
+  Scenario: CS-LNCH-164 A launcher inside a sandbox mounts a linked worktree's common git dir only where the host can see it
+    Given the launcher runs inside a sandbox
+    And CS-LNCH-071 would add "-v <common dir>:<common dir>" (no same-path
+      mount of this launch covers it)
+    When the common dir is demonstrably host-visible (CS-LNCH-163's rule)
+    Then it is mounted as in CS-LNCH-071
+    When it is not
+    Then the mount is not added and exactly one warning names the common dir,
+      says the outer sandbox does not mount it at the same path and that git
+      cannot reach the repository in this session
+    # Only the mount stands down: the cascade and child Dockerfile search
+    # through the main checkout (CS-CASC-031..033) are read by the launcher and
+    # the docker client, inside the container, and are unaffected.
+    And the linked-worktree banner, identity and cascade are unchanged
+    And the drift fingerprint follows the normalized mount set, as always
+
+  Scenario: CS-LNCH-165 A launcher inside a sandbox bridges the peer registry only where the outer sandbox did
+    # The peers root under ~/.cache/claude-sandbox is container-local unless
+    # the outer sandbox mounted it. The nested launcher would create it in its
+    # own container, and docker would create the host path as root.
+    Given the shared peer registry is enabled and the launcher runs inside a
+      sandbox
+    When the launcher's own XDG_RUNTIME_DIR, path-cleaned, is the peers root
+      (the outer sandbox is bridged and mounted it, CS-LNCH-050), or the peers
+      root is demonstrably host-visible (CS-LNCH-163's rule)
+    Then the bridge is assembled as in CS-LNCH-050/051
+    When neither holds
+    Then the WHOLE bridge stands down, checked before anything is created: no
+      mounts, no "-e XDG_RUNTIME_DIR", no directory created, no banner
+    And exactly one warning says the bridge is off for this session because
+      the outer sandbox does not mount the peers root, and names both
+      remedies (launch the outer sandbox with sharedPeerRegistry on, or
+      CLAUDE_SANDBOX_SHARED_PEER_REGISTRY=0)
+    And the docker create argv and the drift fingerprint are those of a
+      key-off launch (CS-LNCH-107)
+
+  Scenario: CS-LNCH-166 The host launcher also sweeps the shadow directories nested launches left under the config dir
+    # A nested launcher (CS-LNCH-161) makes its shadow directories under
+    # <CLAUDE_CODE_TMPDIR>/claude-sandbox-shadow, a host path under the config
+    # dir; only a later nested launch swept it, so on a host that stopped
+    # nesting they stayed forever.
+    Given the launcher does not run inside a sandbox
+    When it sweeps (CS-LNCH-081) under the launch lock
+    Then it also sweeps "<dir>/claude-sandbox-shadow" for each distinct dir of:
+      its own CLAUDE_CODE_TMPDIR when set and absolute, and
+      "<config dir>/tmp" (what CS-LNCH-034 derives for its sandboxes)
+    And each such directory is swept only when it Lstats as a real directory
+      owned by the invoking user (never through a symlink), by CS-LNCH-081's
+      rules: the base-name pattern, owner, age, and no container naming it
+    And a missing one is skipped silently; any other failure is one warning
+    And a launcher inside a sandbox does not sweep these (it sweeps its own
+      shadow root, CS-LNCH-161)
+
   # ---- headless mode: SDK clients (Paseo) ----
   # An SDK client (the Claude Agent SDK, as Paseo's daemon uses it) spawns the
   # claude command with piped stdin/stdout/stderr and no TTY, speaks

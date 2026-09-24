@@ -480,7 +480,10 @@ func wouldBeFingerprint(env *Env, projectDir string, f *launchFlags, cfg *cascad
 		Cfg:              cfg, EnvFiles: envFiles,
 		ImageName: image, ImageID: id,
 		Linked: linked,
-		Out:    io.Discard, Err: io.Discard,
+		// The launch passes it too: a nested check that decided differently
+		// would change the mount set, and with it the hash (CS-LNCH-163..165).
+		MountInfo: env.MountInfo,
+		Out:       io.Discard, Err: io.Discard,
 	})
 	if err != nil {
 		// Without a comparable hash, drift cannot be judged; confirmDrift treats
