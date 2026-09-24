@@ -322,7 +322,7 @@ func KilledReport(kills int, lim Limit) string {
 	fmt.Fprintf(&b, "  memoryLimit: %s; swap is off by design.\n", DescribeLimit(lim))
 	fmt.Fprintf(&b, "  At memoryLimit: %s, or cap build/test parallelism (e.g. ginkgo --procs=N, go test -p N, make -jN).\n", remedy(lim))
 	b.WriteString("  Host out of memory: run fewer sandboxes at once or cap their parallelism; see \"When the host runs out of memory\" in the claude-sandbox README.\n")
-	b.WriteString("  To tell which: the host's kernel log (journalctl -k) says \"Memory cgroup out of memory\" for a limit, plain \"Out of memory\" for the host.\n")
+	b.WriteString("  To tell which: the host's kernel log (journalctl -k or sudo dmesg; may need sudo) says \"Memory cgroup out of memory\" for a limit, plain \"Out of memory\" for the host.\n")
 	return b.String()
 }
 

@@ -389,7 +389,7 @@ var _ = Describe("OOM-killed iterations", func() {
 			script(hostOOMed(1), hostOOMed(1))
 			Expect(ralphloop.Run(opts)).To(Equal(137))
 			msg := notes[len(notes)-1]
-			Expect(msg).To(ContainSubstring("claude was killed by the host's OOM killer at iteration 1 (exit 137; 1 OOM kill): the host ran out of memory while the container was under its memoryLimit."))
+			Expect(msg).To(ContainSubstring("claude was killed from outside the container's memoryLimit at iteration 1 (exit 137; 1 OOM kill) (the host ran out of memory, or a parent cgroup's limit)."))
 			Expect(msg).To(ContainSubstring("memoryLimit in effect: 16g (cgroup memory.max)"))
 			Expect(msg).To(ContainSubstring("Raising memoryLimit will not help."))
 			Expect(msg).To(ContainSubstring("run fewer sandboxes at once, or cap their build/test parallelism (e.g. ginkgo --procs=N, go test -p N, make -jN)"))
@@ -449,6 +449,17 @@ var _ = Describe("OOM-killed iterations", func() {
 			Entry("before unreadable: unknown", 0, false, 4, true, ralphloop.OOMCauseUnknown),
 			Entry("after unreadable: unknown", 3, true, 0, false, ralphloop.OOMCauseUnknown),
 		)
+
+		It("CS-RLP-030: ReadMemoryEvents parses every counter in one read; a garbage value reads as absent", func() {
+			writeEvents(cgroup, 9, 4)
+			ev := ralphloop.ReadMemoryEvents(cgroup)
+			Expect(ev).To(HaveKeyWithValue("oom", 4))
+			Expect(ev).To(HaveKeyWithValue("oom_kill", 9))
+			Expect(ev).To(HaveKeyWithValue("oom_group_kill", 0))
+			Expect(os.WriteFile(filepath.Join(cgroup, "memory.events"), []byte("oom x\noom_kill 2\n"), 0o644)).To(Succeed())
+			Expect(ralphloop.ReadMemoryEvents(cgroup)).To(Equal(map[string]int{"oom_kill": 2}))
+			Expect(ralphloop.ReadMemoryEvents(filepath.Join(work, "absent"))).To(BeNil())
+		})
 
 		It("CS-RLP-030: ReadOOMLimitHits parses the oom line, not oom_kill or oom_group_kill", func() {
 			writeEvents(cgroup, 9, 4)

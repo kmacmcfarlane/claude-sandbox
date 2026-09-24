@@ -182,7 +182,7 @@ var _ = Describe("oomreport", func() {
 					"  memoryLimit: 16g (from /ws/.claude-sandbox/config.yaml); swap is off by design.\n" +
 					"  At memoryLimit: raise memoryLimit in that file, or cap build/test parallelism (e.g. ginkgo --procs=N, go test -p N, make -jN).\n" +
 					"  Host out of memory: run fewer sandboxes at once or cap their parallelism; see \"When the host runs out of memory\" in the claude-sandbox README.\n" +
-					"  To tell which: the host's kernel log (journalctl -k) says \"Memory cgroup out of memory\" for a limit, plain \"Out of memory\" for the host.\n"))
+					"  To tell which: the host's kernel log (journalctl -k or sudo dmesg; may need sudo) says \"Memory cgroup out of memory\" for a limit, plain \"Out of memory\" for the host.\n"))
 		})
 
 		It("is singular for one kill and names the default", func() {

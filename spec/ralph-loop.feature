@@ -277,7 +277,7 @@ Feature: Ralph loop lifecycle (CS-RLP)
       iteration saw, and words the kill by its cause (CS-RLP-030):
       | cause   | says                                                                                             |
       | limit   | claude was killed by the container's OOM killer: the container hit its memoryLimit              |
-      | host    | claude was killed by the host's OOM killer: the host ran out of memory while the container was under its memoryLimit |
+      | host    | claude was killed from outside the container's memoryLimit (the host ran out of memory, or a parent cgroup's limit) |
       | unknown | claude was killed by the OOM killer: the container's memoryLimit or the host running out of memory |
     And it names the memoryLimit in effect, read from <cgroup-dir>/memory.max
       and formatted in memoryLimit notation:
@@ -300,11 +300,15 @@ Feature: Ralph loop lifecycle (CS-RLP)
 
   Scenario: CS-RLP-030 The oom counter tells the container's limit from the host
     Given an iteration classified oom (CS-RLP-024)
+    And each sample reads memory.events once, parsing oom_kill and oom from
+      the same read
     When the oom line of memory.events rose across the iteration
     Then the cause is "limit": the container reached its own memory.max
     When the oom line was readable before and after and did not rise
-    Then the cause is "host": the kill came from outside the container's limit —
-      the kernel's global OOM killer, or a parent cgroup's limit
+    Then the cause is "host": the kill came from outside the container's
+      memoryLimit — the kernel's global OOM killer (the host ran out of
+      memory), or a parent cgroup's limit — and the message says so in those
+      words, never that the host certainly ran out
     When the oom line was missing or unparseable in either sample
     Then the cause is "unknown"
     And the cause never changes the classification: oom_kill alone decides

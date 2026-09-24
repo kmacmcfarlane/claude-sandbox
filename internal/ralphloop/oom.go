@@ -24,8 +24,8 @@ const (
 	// memory.events "oom" counter rose).
 	OOMCauseLimit OOMCause = "limit"
 	// OOMCauseHost: "oom" did not rise, so the kill came from outside the
-	// container's limit — the kernel's global OOM killer (the host ran out
-	// of memory) or a parent cgroup's limit.
+	// container's memoryLimit — the kernel's global OOM killer (the host ran
+	// out of memory) or a parent cgroup's limit.
 	OOMCauseHost OOMCause = "host"
 	// OOMCauseUnknown: the "oom" counter could not be read.
 	OOMCauseUnknown OOMCause = "unknown"
@@ -49,38 +49,44 @@ type oomSample struct {
 	limitOK   bool
 }
 
+// ReadMemoryEvents parses <dir>/memory.events in one read: each well-formed
+// "key value" line with a non-negative integer value. A line whose value does
+// not parse is left out, so its key reads as unreadable; a file that cannot
+// be read (cgroup v1, no cgroup mount) yields nil — never an error or a panic.
+func ReadMemoryEvents(dir string) map[string]int {
+	raw, err := os.ReadFile(filepath.Join(dir, "memory.events"))
+	if err != nil {
+		return nil
+	}
+	ev := map[string]int{}
+	sc := bufio.NewScanner(bytes.NewReader(raw))
+	for sc.Scan() {
+		f := strings.Fields(sc.Text())
+		if len(f) != 2 {
+			continue
+		}
+		if n, err := strconv.Atoi(f[1]); err == nil && n >= 0 {
+			ev[f[0]] = n
+		}
+	}
+	return ev
+}
+
 // ReadOOMKills returns the oom_kill counter from <dir>/memory.events. ok is
-// false when the file is missing (cgroup v1, no cgroup mount), has no
-// oom_kill line, or the value does not parse — never an error or a panic.
+// false when the file is missing, has no oom_kill line, or the value does
+// not parse (CS-RLP-025).
 func ReadOOMKills(dir string) (int, bool) {
-	return readMemoryEvent(dir, "oom_kill")
+	n, ok := ReadMemoryEvents(dir)["oom_kill"]
+	return n, ok
 }
 
 // ReadOOMLimitHits returns the "oom" counter from <dir>/memory.events: the
 // times the cgroup reached its own memory.max with the OOM killer as the way
-// out (cgroup-v2.rst). A global OOM kill of a process inside the cgroup does
-// not raise it (CS-RLP-030). ok as for ReadOOMKills.
+// out (cgroup-v2.rst). A kill from outside the limit does not raise it
+// (CS-RLP-030). ok as for ReadOOMKills.
 func ReadOOMLimitHits(dir string) (int, bool) {
-	return readMemoryEvent(dir, "oom")
-}
-
-func readMemoryEvent(dir, key string) (int, bool) {
-	raw, err := os.ReadFile(filepath.Join(dir, "memory.events"))
-	if err != nil {
-		return 0, false
-	}
-	sc := bufio.NewScanner(bytes.NewReader(raw))
-	for sc.Scan() {
-		f := strings.Fields(sc.Text())
-		if len(f) == 2 && f[0] == key {
-			n, err := strconv.Atoi(f[1])
-			if err != nil || n < 0 {
-				return 0, false
-			}
-			return n, true
-		}
-	}
-	return 0, false
+	n, ok := ReadMemoryEvents(dir)["oom"]
+	return n, ok
 }
 
 // CauseOf tells an oom iteration's cause from the "oom" counter samples
@@ -154,7 +160,7 @@ func (l *Loop) oomMessage(iter, kills int, cause OOMCause) string {
 			"Remedies: raise memoryLimit in .claude-sandbox/config.yaml, or cap build/test parallelism %s.",
 			counts, limit, parallelismHint)
 	case OOMCauseHost:
-		return fmt.Sprintf("claude was killed by the host's OOM killer %s: the host ran out of memory while the container was under its memoryLimit. %s "+
+		return fmt.Sprintf("claude was killed from outside the container's memoryLimit %s (the host ran out of memory, or a parent cgroup's limit). %s "+
 			"Raising memoryLimit will not help. Remedies: run fewer sandboxes at once, or cap their build/test parallelism %s; %s.",
 			counts, limit, parallelismHint, hostDoc)
 	}
@@ -165,7 +171,9 @@ func (l *Loop) oomMessage(iter, kills int, cause OOMCause) string {
 }
 
 func (l *Loop) sampleOOM() oomSample {
-	n, ok := ReadOOMKills(l.CgroupDir)
-	hits, limitOK := ReadOOMLimitHits(l.CgroupDir)
+	// One read, so both counters describe the same instant.
+	ev := ReadMemoryEvents(l.CgroupDir)
+	n, ok := ev["oom_kill"]
+	hits, limitOK := ev["oom"]
 	return oomSample{n: n, ok: ok, limitHits: hits, limitOK: limitOK}
 }

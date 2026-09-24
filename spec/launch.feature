@@ -1365,7 +1365,7 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
         memoryLimit: <limit> (from <config.yaml path>); swap is off by design.
         At memoryLimit: raise memoryLimit in that file, or cap build/test parallelism (e.g. ginkgo --procs=N, go test -p N, make -jN).
         Host out of memory: run fewer sandboxes at once or cap their parallelism; see "When the host runs out of memory" in the claude-sandbox README.
-        To tell which: the host's kernel log (journalctl -k) says "Memory cgroup out of memory" for a limit, plain "Out of memory" for the host.
+        To tell which: the host's kernel log (journalctl -k or sudo dmesg; may need sudo) says "Memory cgroup out of memory" for a limit, plain "Out of memory" for the host.
       """
     And "1 OOM kill" is singular
     And when no config.yaml in the cascade sets memoryLimit the second line reads
