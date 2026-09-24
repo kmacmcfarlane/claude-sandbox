@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -141,6 +142,42 @@ const DefaultDetachKeys = "ctrl-q,ctrl-q"
 // the cascade sets memoryLimit (CS-LNCH-022).
 const DefaultMemoryLimit = "8g"
 
+// DefaultOOMScoreAdj is the container's oom_score_adj when neither
+// CLAUDE_SANDBOX_OOM_SCORE_ADJ nor the oomScoreAdj key sets one (CS-LNCH-112).
+// The kernel's global OOM killer ranks a process by its share of RAM + swap in
+// permille plus oom_score_adj; the desktop session runs at 100 (gnome-shell on
+// Fedora), sandbox memory is spread over many ~0.5 GB processes, so at docker's
+// 0 the desktop always died first. 500 puts every sandbox process ahead of any
+// host process at adj <= 100 until that one process holds ~40% of RAM + swap —
+// a host runaway that large is still killed before the sandboxes. It shifts all
+// of a container's processes equally, so the order inside a container and its
+// own memoryLimit OOM are unchanged.
+const DefaultOOMScoreAdj = 500
+
+// OOMScoreAdjEnv overrides the oomScoreAdj key for one launch.
+const OOMScoreAdjEnv = "CLAUDE_SANDBOX_OOM_SCORE_ADJ"
+
+// resolveOOMScoreAdj applies CLAUDE_SANDBOX_OOM_SCORE_ADJ > oomScoreAdj >
+// DefaultOOMScoreAdj and validates docker's range (CS-LNCH-112). An empty env
+// value falls through to the key, as unset.
+func (in *Inputs) resolveOOMScoreAdj() (int, error) {
+	if raw := strings.TrimSpace(in.getenv(OOMScoreAdjEnv)); raw != "" {
+		v, err := strconv.Atoi(raw)
+		if err != nil || v < -1000 || v > 1000 {
+			return 0, fmt.Errorf("%s=%q: must be an integer in [-1000, 1000]", OOMScoreAdjEnv, raw)
+		}
+		return v, nil
+	}
+	if in.Cfg.OOMScoreAdj != nil {
+		v := *in.Cfg.OOMScoreAdj
+		if v < -1000 || v > 1000 {
+			return 0, fmt.Errorf("oomScoreAdj: %d in .claude-sandbox/config.yaml: must be an integer in [-1000, 1000]", v)
+		}
+		return v, nil
+	}
+	return DefaultOOMScoreAdj, nil
+}
+
 // ResolveDetachKeys applies the configured override, falling back to the
 // default. Every caller must route through here so the three docker paths
 // cannot disagree about which keys detach.
@@ -167,6 +204,8 @@ type Plan struct {
 	// MemoryLimitSource is where MemoryLimit came from: a config.yaml path,
 	// oomreport.SourceDefault, or "" when the caller did not say (CS-LNCH-093).
 	MemoryLimitSource string
+	// OOMScoreAdj is the container's --oom-score-adj (CS-LNCH-112).
+	OOMScoreAdj int
 	// ShadowDir is the directory holding this launch's shadow files, also
 	// recorded as the claude-sandbox.shadowdir label (CS-LNCH-080).
 	ShadowDir string
@@ -304,6 +343,12 @@ func Build(in Inputs) (*Plan, error) {
 	if p.MemoryLimit == "" {
 		p.MemoryLimit, p.MemoryLimitSource = DefaultMemoryLimit, oomreport.SourceDefault
 	}
+	// CS-LNCH-112: sandboxes are the host's preferred global-OOM victims.
+	adj, err := in.resolveOOMScoreAdj()
+	if err != nil {
+		return nil, err
+	}
+	p.OOMScoreAdj = adj
 
 	// CS-LNCH-033: detach keys for the primary session. A headless session has
 	// no terminal, and detach keys would swallow bytes of its stream-json
@@ -522,6 +567,8 @@ func (p *Plan) CreateArgs(workdir string) []string {
 		args = append(args, "--env-file", ef)
 	}
 	args = append(args, "--memory", p.MemoryLimit, "--memory-swap", p.MemoryLimit)
+	// CS-LNCH-112: runc applies it to the init and to every docker exec.
+	args = append(args, "--oom-score-adj", strconv.Itoa(p.OOMScoreAdj))
 	for _, e := range p.EnvFlags {
 		args = append(args, "-e", e)
 	}

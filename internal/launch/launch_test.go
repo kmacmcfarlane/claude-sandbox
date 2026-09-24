@@ -1165,6 +1165,64 @@ var _ = Describe("launch.Build", func() {
 		Expect(p.CreateArgs(proj)).To(ContainElements("--memory", "16g", "--memory-swap", "16g"))
 	})
 
+	Describe("CS-LNCH-112: sandboxes are the host's preferred OOM victims", func() {
+		intp := func(v int) *int { return &v }
+
+		It("CS-LNCH-112: creates with --oom-score-adj 500 by default", func() {
+			p := build()
+			Expect(p.OOMScoreAdj).To(Equal(500))
+			Expect(argPairs(p.CreateArgs(proj), "--oom-score-adj")).To(Equal([]string{"500"}))
+		})
+
+		It("CS-LNCH-112: the oomScoreAdj key overrides the default, an explicit 0 included", func() {
+			in.Cfg = &cascade.Config{OOMScoreAdj: intp(800)}
+			Expect(argPairs(build().CreateArgs(proj), "--oom-score-adj")).To(Equal([]string{"800"}))
+			in.Cfg = &cascade.Config{OOMScoreAdj: intp(0)}
+			Expect(argPairs(build().CreateArgs(proj), "--oom-score-adj")).To(Equal([]string{"0"}))
+		})
+
+		It("CS-LNCH-112: CLAUDE_SANDBOX_OOM_SCORE_ADJ beats the key; empty falls through", func() {
+			in.Cfg = &cascade.Config{OOMScoreAdj: intp(800)}
+			env["CLAUDE_SANDBOX_OOM_SCORE_ADJ"] = " 0 "
+			Expect(argPairs(build().CreateArgs(proj), "--oom-score-adj")).To(Equal([]string{"0"}))
+			env["CLAUDE_SANDBOX_OOM_SCORE_ADJ"] = ""
+			Expect(argPairs(build().CreateArgs(proj), "--oom-score-adj")).To(Equal([]string{"800"}))
+		})
+
+		DescribeTable("CS-LNCH-112: a value outside docker's range, or not an integer, fails the launch naming its source",
+			func(envVal string, key *int, want string) {
+				if envVal != "" {
+					env["CLAUDE_SANDBOX_OOM_SCORE_ADJ"] = envVal
+				}
+				in.Cfg = &cascade.Config{OOMScoreAdj: key}
+				_, err := launch.Build(in)
+				Expect(err).To(MatchError(ContainSubstring(want)))
+				Expect(err).To(MatchError(ContainSubstring("[-1000, 1000]")))
+			},
+			Entry("env not a number", "high", nil, "CLAUDE_SANDBOX_OOM_SCORE_ADJ"),
+			Entry("env above the range", "1001", nil, "CLAUDE_SANDBOX_OOM_SCORE_ADJ"),
+			Entry("key below the range", "", intp(-1001), "oomScoreAdj"),
+		)
+
+		It("CS-LNCH-112: the range ends are accepted", func() {
+			env["CLAUDE_SANDBOX_OOM_SCORE_ADJ"] = "-1000"
+			Expect(build().OOMScoreAdj).To(Equal(-1000))
+			env["CLAUDE_SANDBOX_OOM_SCORE_ADJ"] = "1000"
+			Expect(build().OOMScoreAdj).To(Equal(1000))
+		})
+
+		It("CS-LNCH-112: the applied value is in the config hash; unset and an explicit 500 hash alike", func() {
+			def := build().ConfigHash
+			in.Cfg = &cascade.Config{OOMScoreAdj: intp(500)}
+			Expect(build().ConfigHash).To(Equal(def))
+			in.Cfg = &cascade.Config{OOMScoreAdj: intp(0)}
+			Expect(build().ConfigHash).NotTo(Equal(def))
+			in.Cfg = &cascade.Config{}
+			env["CLAUDE_SANDBOX_OOM_SCORE_ADJ"] = "900"
+			Expect(build().ConfigHash).NotTo(Equal(def))
+		})
+	})
+
 	It("CS-LNCH-093: records the memory limit and its source as labels and env, outside the config hash", func() {
 		p := build()
 		Expect(p.MemoryLimitSource).To(Equal("default"))

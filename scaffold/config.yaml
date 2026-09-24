@@ -25,6 +25,15 @@
 # Default: 8g
 # memoryLimit: 8g
 
+# The containers' oom_score_adj (-1000..1000). memoryLimit bounds ONE
+# container; when the HOST runs out of memory the kernel's OOM killer picks a
+# process machine-wide, and at docker's 0 that was the desktop, not a sandbox.
+# 500 makes sandbox processes the preferred victims (the largest one goes
+# first) unless a single host process holds ~40% of RAM + swap. 0 restores
+# docker's default. CLAUDE_SANDBOX_OOM_SCORE_ADJ overrides this key.
+# Default: 500
+# oomScoreAdj: 500
+
 # Key sequence that detaches a session without stopping it. Applies to every
 # interactive session alike — one you launched, one you reattached to
 # (claude-sandbox --attach), and one you joined (--join).

@@ -131,6 +131,14 @@ type Config struct {
 	// DetachKeys overrides the key sequence that detaches from an attached
 	// session. Empty means the built-in default; see defaultDetachKeys.
 	DetachKeys string `yaml:"detachKeys"`
+
+	// OOMScoreAdj is the container's oom_score_adj (CS-LNCH-112), which makes
+	// sandbox processes the kernel's preferred victims when the HOST runs out
+	// of memory. A pointer, because an explicit 0 (docker's default) must be
+	// distinguishable from unset (the launcher's default). json:"-" because
+	// the APPLIED value is hashed explicitly by the drift fingerprint, so an
+	// unset key and an explicit default hash alike.
+	OOMScoreAdj *int `yaml:"oomScoreAdj" json:"-"`
 }
 
 // Load parses and deep-merges the config files (root-first order, as returned

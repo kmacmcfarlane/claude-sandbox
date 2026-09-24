@@ -1006,6 +1006,26 @@ claude-sandbox: this session was killed by the container's OOM killer (exit 137;
 
 When the OOM killer killed something during the session (a test binary, say) but the session ended some other way, it prints one softer `claude-sandbox: note: …` line instead. The same applies to a session you attached to or joined; the limit and the file it came from are recorded on the container when it is created (labels `claude-sandbox.memorylimit` / `claude-sandbox.memorylimitsource`, and `CLAUDE_SANDBOX_MEMORY_LIMIT` / `CLAUDE_SANDBOX_MEMORY_LIMIT_SOURCE` inside it). Nothing is printed after a detach, or when you ended the session with a signal. To make this possible the launcher does not replace itself with `docker`: it runs `docker start`/`attach`/`exec` as a child, watches `docker events` for the container's `oom` and `die` events, and exits with docker's status (see [The session child](#the-session-child)).
 
+#### When the host runs out of memory
+
+`memoryLimit` bounds one container, not all of them: fifteen sandboxes at `8g` are 120 GB of limits, and on a 32 GB machine the **host** runs out long before any container reaches its own limit. Then the kernel's global OOM killer picks one process on the whole machine, ranking each by its share of RAM + swap (in thousandths) plus its `oom_score_adj`. Sandbox memory is spread over many half-gigabyte processes (`claude`, `gopls`, `node`), while a desktop shell often runs at `oom_score_adj` 100 (GNOME Shell on Fedora does), so at docker's default of 0 the desktop was killed first.
+
+The launcher therefore creates every container with `--oom-score-adj 500`, making sandbox processes the preferred victims:
+
+- It applies to every process in the container: runc sets it on the container's init and on every `docker exec` (so joined sessions get it), and child processes inherit it.
+- The kernel kills **one process at a time**, the highest-ranked: the largest process across all sandboxes goes first, usually one `claude` (ending that session) or one `gopls`. Other sandboxes survive unless memory is still short.
+- It shifts every process in a container by the same amount, so the order inside a container, and what happens when a container hits its own `memoryLimit`, are unchanged.
+- A single host process holding roughly 40-50% of RAM + swap or more (the exact share depends on its own `oom_score_adj`) still ranks above every sandbox process and is killed first, so a runaway on the host is not shielded.
+- An OOM kill made because the host ran out is reported like one at the container's limit (the exit report, the `(OOM)` marker, ralph's `oom` outcome), since the container's `oom_kill` counter counts both.
+
+Override it with the `oomScoreAdj` key, or `CLAUDE_SANDBOX_OOM_SCORE_ADJ` for one launch (it beats the key); any integer from -1000 to 1000, and `0` restores docker's default. It is part of the container's config fingerprint, so attaching to a container created with another value reports drift.
+
+```yaml
+oomScoreAdj: 800   # a machine where sandboxes should always go first
+```
+
+Host-side protection (systemd-oomd thresholds, earlyoom, `MemoryMin` on the desktop slice) is the host's business; the launcher only sets its own containers' ranking.
+
 #### Detach keys
 
 The key sequence that detaches a session without stopping it — applied to every interactive session alike, whether launched, attached to, or joined. Defaults to `ctrl-q,ctrl-q`:
@@ -1128,6 +1148,7 @@ If no `.claude-sandbox/Dockerfile` is found anywhere up to `/`, the launcher war
 | `CLAUDE_SANDBOX_DANGEROUS` | (unset) | Set to `1` or `true` to skip permission prompts (equivalent to `--dangerous`) |
 | `CLAUDE_SANDBOX_WORKTREE` | (unset: off interactive, on ralph) | `1`/`true`/`yes` runs sessions in their own worktree (equivalent to `--worktree`); `0`/`false`/`no` runs them in the shared checkout, ralph included; either overrides a config `worktree` key |
 | `CLAUDE_SANDBOX_SHARED_PEER_REGISTRY` | (unset) | `1`/`true`/`yes` shares the Claude Code peer registry and message sockets with other opted-in sandboxes regardless of `CLAUDE_CONFIG_DIR` (equivalent to `sharedPeerRegistry: true`); `0`/`false`/`no` is an explicit off that overrides a config `true` |
+| `CLAUDE_SANDBOX_OOM_SCORE_ADJ` | (unset: `oomScoreAdj`, else 500) | The containers' `--oom-score-adj`, -1000..1000; overrides a config `oomScoreAdj` key (see [When the host runs out of memory](#when-the-host-runs-out-of-memory)) |
 | `CLAUDE_SANDBOX_BASE_ONLY` | (unset) | Set to `1` or `true` to skip child Dockerfile and use base image only |
 | `CLAUDE_SANDBOX_NO_UPDATE_CHECK` | (unset) | Set to `1` or `true` to skip Claude Code version check at launch |
 
