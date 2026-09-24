@@ -1460,9 +1460,25 @@ under the Claude config dir (symlinks resolved), which the outer sandbox mounts 
 refuses with exit 2 before any image build, naming the reason; set `TMPDIR` to a
 same-path-mounted directory (one in the project, or the scratchpad if it is under the Claude
 config dir) and launch again. Nested shadow directories — including the `0600` env-file copies
-(CS-LNCH-132) — now persist on the host under `<config dir>/tmp/claude-sandbox-shadow` until a
-later nested launch sweeps them (the host launcher does not sweep there yet). Attach and join create no container and
-are unaffected. Spec: `spec/launch.feature` CS-LNCH-161/162.
+(CS-LNCH-132) — persist on the host under `$TMPDIR` or `$CLAUDE_CODE_TMPDIR/claude-sandbox-shadow`
+until a sweep removes them: a later nested launch sweeps its own root, and a launch on the host
+also sweeps `<dir>/claude-sandbox-shadow` for its own `CLAUDE_CODE_TMPDIR` and for
+`<config dir>/tmp` (what its sandboxes get), by the same rules and one shared container listing
+(CS-LNCH-166). A nested `$TMPDIR` root, and the root of a sandbox whose `CLAUDE_CODE_TMPDIR` came
+from an env file, are swept only by later nested launches that use them. Attach and join create no container and
+are unaffected.
+
+The same host-path rule covers the other paths a nested launcher resolves inside its container
+and would hand docker as bind sources. Each is mounted only when it is demonstrably host-visible
+— `/proc/self/mountinfo` is readable and the mount holding the path is neither the container's
+root filesystem nor a tmpfs, i.e. a bind the outer sandbox made — and otherwise skipped with one
+warning: a `settings.json` symlink target (the session runs without user settings, as a
+dangling link does; CS-LNCH-163); a linked worktree's common git dir (the launch goes on, git
+cannot reach the repository; CS-LNCH-164); and the shared peer registry, which is also accepted
+when the launcher's `XDG_RUNTIME_DIR` is the peers root (the outer sandbox is bridged) and
+otherwise stands down whole, as a key-off launch (CS-LNCH-165). A bind of a *different* host
+path is not detected (btrfs puts subvolume names in mountinfo's root field, so it cannot be read
+reliably). Spec: `spec/launch.feature` CS-LNCH-161..166.
 
 ### Image layering
 

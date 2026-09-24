@@ -1732,6 +1732,66 @@ var _ = Describe("launch.Build", func() {
 			Expect(envValues(build(), "XDG_RUNTIME_DIR")).To(Equal([]string{edgeRoot}))
 			Expect(out.String()).NotTo(ContainSubstring("Warning: sharedPeerRegistry"))
 		})
+
+		Describe("CS-LNCH-165: inside a sandbox", func() {
+			var reads int
+			BeforeEach(func() {
+				env["CLAUDE_SANDBOX_PROJECT_DIR"] = "/outer/proj"
+				reads = 0
+				// Only the container's own root filesystem: nothing is bound.
+				in.MountInfo = func() (string, error) {
+					reads++
+					return "1 0 0:1 / / rw - overlay overlay rw\n", nil
+				}
+			})
+
+			It("CS-LNCH-165: an outer sandbox that is bridged (XDG_RUNTIME_DIR is the peers root) bridges this one", func() {
+				env["XDG_RUNTIME_DIR"] = root + "/"
+				enable()
+				p := build()
+				Expect(p.Volumes).To(ContainElement(rootMount()))
+				Expect(envValues(p, "XDG_RUNTIME_DIR")).To(Equal([]string{root}))
+				Expect(out.String()).NotTo(ContainSubstring("Warning: sharedPeerRegistry"))
+				Expect(reads).To(Equal(0), "the env proof needs no mountinfo")
+			})
+
+			It("CS-LNCH-165: a peers root mountinfo shows bound in bridges this one", func() {
+				in.MountInfo = func() (string, error) {
+					return "1 0 0:1 / / rw - overlay overlay rw\n2 1 0:2 /peers " + root + " rw - ext4 /dev/sda1 rw\n", nil
+				}
+				enable()
+				p := build()
+				Expect(p.Volumes).To(ContainElement(rootMount()))
+				Expect(out.String()).NotTo(ContainSubstring("Warning: sharedPeerRegistry"))
+			})
+
+			DescribeTable("CS-LNCH-165: otherwise the whole bridge stands down, touching nothing",
+				func(xdg string, mi func() (string, error), reason string) {
+					if xdg != "" {
+						env["XDG_RUNTIME_DIR"] = xdg
+					}
+					off := build()
+					out.Reset()
+					if mi != nil {
+						in.MountInfo = mi
+					}
+					enable()
+					p := build()
+					expectStoodDown(p, root, "inside a sandbox that does not mount "+root+" ("+reason+")")
+					Expect(out.String()).To(ContainSubstring("Launch the outer sandbox with sharedPeerRegistry on"))
+					Expect(out.String()).To(ContainSubstring("CLAUDE_SANDBOX_SHARED_PEER_REGISTRY=0"))
+					Expect(filepath.Join(cfgDir, "sessions")).NotTo(BeADirectory())
+					Expect(p.CreateArgs(proj)).To(Equal(off.CreateArgs(proj)))
+					Expect(p.ConfigHash).To(Equal(off.ConfigHash))
+				},
+				Entry("on the container's root filesystem", "", nil, "it is on the container's own root filesystem"),
+				Entry("XDG_RUNTIME_DIR names something else", "/run/user/1000", nil, "it is on the container's own root filesystem"),
+				Entry("on a tmpfs", "", func() (string, error) {
+					return "1 0 0:1 / / rw - overlay overlay rw\n2 1 0:2 / /tmp rw - tmpfs tmpfs rw\n", nil
+				}, "it is on a tmpfs mounted at /tmp inside the container"),
+				Entry("mountinfo unreadable", "", func() (string, error) { return "", errors.New("boom") }, "/proc/self/mountinfo is unreadable: boom"),
+			)
+		})
 	})
 
 	It("CS-LNCH-019: mounts the parent DIRECTORY of AWS path vars read-only, deduplicated", func() {

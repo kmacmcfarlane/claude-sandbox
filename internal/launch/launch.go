@@ -77,6 +77,12 @@ type Inputs struct {
 	// its own path so git works in the container (CS-LNCH-071).
 	Linked *LinkedWorktree
 
+	// MountInfo reads /proc/self/mountinfo for the nested host-visibility
+	// checks (CS-LNCH-163..165); nil means the real file. Read only inside a
+	// sandbox, and only when a check is needed; under go test a nil one
+	// panics there, so fixtures of nested launches must fake it.
+	MountInfo func() (string, error)
+
 	// PIDClass is the container's pid class (CS-PID-004), rendered as the
 	// claude-sandbox.pidclass label and CLAUDE_SANDBOX_PID_CLASS. Empty
 	// emits neither. Like Instance it is excluded from the fingerprint.
@@ -384,7 +390,13 @@ func Build(in Inputs) (*Plan, error) {
 	// the fingerprint.
 	if in.Linked.MountsCommonDir(in.ProjectDir) {
 		if cover, ok := samePathMountOf(p.Volumes, in.Linked.CommonDir); !ok {
-			p.Volumes = append(p.Volumes, fmt.Sprintf("%s:%s", in.Linked.CommonDir, in.Linked.CommonDir))
+			// CS-LNCH-164: nested, only a common dir the outer sandbox bound
+			// in is the same path on the host.
+			if vis, why := in.nestedBindSourceOK(in.Linked.CommonDir); vis {
+				p.Volumes = append(p.Volumes, fmt.Sprintf("%s:%s", in.Linked.CommonDir, in.Linked.CommonDir))
+			} else {
+				fmt.Fprintf(in.Err, "WARNING: git dir %s is not mounted: this launcher runs inside a sandbox that does not mount it at the same path (%s), so docker would bind an empty host directory; git cannot reach the repository in this session.\n", in.Linked.CommonDir, why)
+			}
 		} else if strings.HasSuffix(cover, ":ro") {
 			fmt.Fprintf(in.Err, "WARNING: git dir %s is under the read-only mount %s; git cannot write to the repository in this session.\n", in.Linked.CommonDir, cover)
 		}
@@ -830,6 +842,12 @@ func (in *Inputs) mountSettingsTarget(p *Plan, configDir string) {
 		fmt.Fprintf(in.Err, "WARNING: %s is a symlink to %s, whose path contains ':', which docker cannot mount; the sandbox runs without user settings (move the target to a path without ':')\n", link, target)
 		return
 	}
+	// CS-LNCH-163: nested, the target was resolved in this container; only
+	// one the outer sandbox bound in is the same path on the host.
+	if vis, why := in.nestedBindSourceOK(target); !vis {
+		fmt.Fprintf(in.Err, "WARNING: %s is a symlink to %s, which this launcher's outer sandbox does not mount at the same path (%s); it is not mounted and the sandbox runs without user settings\n", link, target, why)
+		return
+	}
 	p.Volumes = append(p.Volumes, fmt.Sprintf("%s:%s", target, target))
 }
 
@@ -1223,6 +1241,19 @@ func (in *Inputs) assembleSharedPeerRegistry(p *Plan, configDir string) bool {
 	if n := len(root) + len(worstSocketSuffix); n > maxSocketPath {
 		fmt.Fprintf(in.Out, "Warning: sharedPeerRegistry is off for this session: the message socket path %s would be %d bytes, over Claude Code's %d-byte limit. Without a shared socket, bridged peers could not reach this session nor it them.\n", root+worstSocketSuffix, n, maxSocketPath)
 		return false
+	}
+
+	// CS-LNCH-165: nested, the peers root is this container's own unless the
+	// outer sandbox mounted it — shown by the XDG_RUNTIME_DIR a bridged outer
+	// launch sets to it, or by mountinfo. Otherwise docker would create it on
+	// the host as root. Checked before anything is created.
+	if hostdirs.InSandbox(in.getenv) {
+		if x := in.getenv("XDG_RUNTIME_DIR"); x == "" || filepath.Clean(x) != root {
+			if vis, why := in.nestedBindSourceOK(root); !vis {
+				fmt.Fprintf(in.Out, "Warning: sharedPeerRegistry is off for this session: this launcher runs inside a sandbox that does not mount %s (%s), so docker would create it on the host as root. Launch the outer sandbox with sharedPeerRegistry on, or set CLAUDE_SANDBOX_SHARED_PEER_REGISTRY=0 to keep this session off the bridge.\n", root, why)
+				return false
+			}
+		}
 	}
 
 	// Every launcher-owned directory is created, and TIGHTENED, before any

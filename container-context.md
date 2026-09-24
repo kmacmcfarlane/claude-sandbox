@@ -152,7 +152,11 @@ restart Claude Code afterwards). Use `setup-lsp-plugins --check` to verify statu
   `$CLAUDE_CODE_TMPDIR/claude-sandbox-shadow` (host-visible); when neither
   works (or `TMPDIR` is on this container's root filesystem or a tmpfs) it
   refuses with exit 2 — set `TMPDIR` to a project directory, or to the
-  scratchpad when it is under the Claude config dir, and retry.
+  scratchpad when it is under the Claude config dir, and retry. A
+  `settings.json` symlink target, a linked worktree's git dir and the shared
+  peer registry are mounted from here only when this container's mountinfo
+  shows the outer sandbox bound them in; otherwise one warning says which was
+  skipped.
 - **Discord MCP server** — baked in at `/opt/claude-sandbox/mcp/discord-notify/dist/index.mjs`. Provides the `send_discord_notification` tool when `DISCORD_WEBHOOK_URL` is set in the env file (`.claude-sandbox/env`). Configured via `~/.mcp.json` — no per-project setup needed.
 - **Notification hooks are managed settings.** A `Notification` hook is baked
   into the image at `/etc/claude-code/managed-settings.d/10-claude-sandbox.json`.

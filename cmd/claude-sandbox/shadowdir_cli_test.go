@@ -262,3 +262,135 @@ var _ = Describe("nested launch shadow root (CS-LNCH-161/162)", func() {
 		Expect(f.errw.String()).NotTo(ContainSubstring("your scratchpad"))
 	})
 })
+
+// CS-LNCH-166: the host launcher also sweeps the directories nested launches
+// made under <CLAUDE_CODE_TMPDIR>/claude-sandbox-shadow. Every path is under
+// the fixture's scratch home.
+var _ = Describe("host sweep of nested shadow directories (CS-LNCH-166)", func() {
+	var (
+		f      *cliFixture
+		nested string
+	)
+	// oldIn makes an old shadow-named directory under dir.
+	oldIn := func(dir, name string) string {
+		d := filepath.Join(dir, name)
+		Expect(os.MkdirAll(d, 0o700)).To(Succeed())
+		Expect(os.WriteFile(filepath.Join(d, "CLAUDE.md"), []byte("x"), 0o644)).To(Succeed())
+		t := time.Now().Add(-2 * time.Hour)
+		Expect(os.Chtimes(d, t, t)).To(Succeed())
+		return d
+	}
+	BeforeEach(func() {
+		f = newCLIFixture()
+		nested = filepath.Join(f.home, ".claude", "tmp", launch.NestedShadowSubdir)
+		Expect(os.MkdirAll(nested, 0o700)).To(Succeed())
+	})
+
+	It("CS-LNCH-166: an old unreferenced directory under <config dir>/tmp/claude-sandbox-shadow is swept; used, young and look-alike ones are kept", func() {
+		stale := oldIn(nested, "claude-sandbox111")
+		inUse := oldIn(nested, "claude-sandbox222")
+		young := filepath.Join(nested, "claude-sandbox333")
+		Expect(os.MkdirAll(young, 0o700)).To(Succeed())
+		other := oldIn(nested, "keep-me")
+		f.fake.On(sweepPS, "\x1f"+inUse+"/CLAUDE.md\n", nil)
+
+		Expect(f.run()).To(Equal(0), f.errw.String())
+		Expect(stale).NotTo(BeADirectory())
+		for _, d := range []string{inUse, young, other} {
+			Expect(d).To(BeADirectory())
+		}
+		Expect(f.errw.String()).NotTo(ContainSubstring("shadow"))
+		held := f.lock.held()
+		Expect(held).To(ContainElement(HavePrefix(sweepPS)), "under the lock")
+	})
+
+	It("CS-LNCH-166: honours CLAUDE_CONFIG_DIR and the launcher's own CLAUDE_CODE_TMPDIR", func() {
+		cfg := filepath.Join(f.home, "alt-cfg")
+		cct := filepath.Join(f.home, "cct")
+		f.envmap["CLAUDE_CONFIG_DIR"] = cfg
+		f.envmap["CLAUDE_CODE_TMPDIR"] = cct
+		a := oldIn(filepath.Join(cfg, "tmp", launch.NestedShadowSubdir), "claude-sandbox111")
+		b := oldIn(filepath.Join(cct, launch.NestedShadowSubdir), "claude-sandbox222")
+		notNow := oldIn(nested, "claude-sandbox333") // ~/.claude is not the config dir now
+		f.fake.On(sweepPS, "", nil)
+
+		Expect(f.run()).To(Equal(0), f.errw.String())
+		Expect(a).NotTo(BeADirectory())
+		Expect(b).NotTo(BeADirectory())
+		Expect(notNow).To(BeADirectory())
+	})
+
+	It("CS-LNCH-166: candidates in every root cost ONE container listing", func() {
+		cct := filepath.Join(f.home, "cct")
+		f.envmap["CLAUDE_CODE_TMPDIR"] = cct
+		a := oldShadow(f, "claude-sandbox111")
+		b := oldIn(nested, "claude-sandbox222")
+		c := oldIn(filepath.Join(cct, launch.NestedShadowSubdir), "claude-sandbox333")
+		f.fake.On(sweepPS, "", nil)
+
+		Expect(f.run()).To(Equal(0), f.errw.String())
+		for _, d := range []string{a, b, c} {
+			Expect(d).NotTo(BeADirectory())
+		}
+		n := 0
+		for _, l := range f.fake.CommandLines() {
+			if strings.HasPrefix(l, sweepPS) {
+				n++
+			}
+		}
+		Expect(n).To(Equal(1))
+	})
+
+	It("CS-LNCH-166: a failed shared listing warns once and removes nothing in any root", func() {
+		a := oldShadow(f, "claude-sandbox111")
+		b := oldIn(nested, "claude-sandbox222")
+		f.fake.On(sweepPS, "", execx.Fail(1))
+		Expect(f.run()).To(Equal(0), f.errw.String())
+		Expect(a).To(BeADirectory())
+		Expect(b).To(BeADirectory())
+		Expect(strings.Count(f.errw.String(), "could not clean up old shadow directories")).To(Equal(1))
+	})
+
+	It("CS-LNCH-166: a missing nested root is skipped silently and a symlinked one is never followed", func() {
+		Expect(os.RemoveAll(nested)).To(Succeed())
+		target := filepath.Join(f.home, "elsewhere")
+		kept := oldIn(target, "claude-sandbox111")
+		Expect(os.Symlink(target, nested)).To(Succeed())
+		f.fake.On(sweepPS, "", nil)
+
+		Expect(f.run()).To(Equal(0), f.errw.String())
+		Expect(kept).To(BeADirectory())
+		Expect(f.errw.String()).NotTo(ContainSubstring("shadow"))
+
+		Expect(os.Remove(nested)).To(Succeed())
+		Expect(f.run()).To(Equal(0), f.errw.String())
+		Expect(f.errw.String()).NotTo(ContainSubstring("shadow"))
+	})
+
+	It("CS-LNCH-166: a failed listing for the nested root warns once and removes nothing", func() {
+		stale := oldIn(nested, "claude-sandbox111")
+		f.fake.On(sweepPS, "", execx.Fail(1))
+		Expect(f.run()).To(Equal(0), f.errw.String())
+		Expect(stale).To(BeADirectory())
+		Expect(strings.Count(f.errw.String(), "could not clean up old shadow directories under "+nested)).To(Equal(1))
+	})
+
+	It("CS-LNCH-166: a launcher inside a sandbox does not sweep them", func() {
+		stale := oldIn(nested, "claude-sandbox111")
+		f.envmap["CLAUDE_SANDBOX_PROJECT_DIR"] = f.proj
+		f.fake.On(sweepPS, "", nil)
+		Expect(f.run()).To(Equal(0), f.errw.String())
+		Expect(stale).To(BeADirectory())
+	})
+
+	It("CS-LNCH-166: a fixture that would sweep the real config dir panics under go test", func() {
+		delete(f.envmap, "HOME")
+		f.env.Getenv = func(k string) string {
+			if k == "HOME" {
+				return ""
+			}
+			return f.envmap[k]
+		}
+		Expect(func() { f.run() }).To(PanicWith(ContainSubstring("would sweep the real")))
+	})
+})

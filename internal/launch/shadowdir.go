@@ -244,6 +244,27 @@ func isSystemTempDir(dir string) bool {
 // The docker listing runs only when there is a candidate (CS-LNCH-082). If it
 // fails nothing is removed: without it, "unused" cannot be known.
 func PruneShadowDirs(r execx.Runner, root string, uid int, now time.Time, minAge time.Duration, keep string) ([]string, error) {
+	return NewShadowSweep(r).Prune(root, uid, now, minAge, keep)
+}
+
+// ShadowSweep sweeps several roots with ONE container listing (CS-LNCH-166):
+// the listing runs lazily, the first time any root has a candidate, and is
+// reused for every later root — a headless probe must not pay for a docker ps
+// per root.
+type ShadowSweep struct {
+	r      execx.Runner
+	inUse  map[string]bool
+	listed bool
+	err    error
+}
+
+// NewShadowSweep returns a sweep that lists containers through r.
+func NewShadowSweep(r execx.Runner) *ShadowSweep { return &ShadowSweep{r: r} }
+
+// Prune is PruneShadowDirs for one root, sharing the sweep's listing. When the
+// listing failed it removes nothing; the error is returned only by the Prune
+// that ran it, so a failed listing warns once however many roots follow.
+func (s *ShadowSweep) Prune(root string, uid int, now time.Time, minAge time.Duration, keep string) ([]string, error) {
 	root = shadowRoot(root)
 	entries, err := os.ReadDir(root)
 	if err != nil {
@@ -262,14 +283,20 @@ func PruneShadowDirs(r execx.Runner, root string, uid int, now time.Time, minAge
 	if len(candidates) == 0 {
 		return nil, nil
 	}
-	inUse, err := shadowDirsInUse(r)
-	if err != nil {
-		return nil, err
+	if !s.listed {
+		s.listed = true
+		s.inUse, s.err = shadowDirsInUse(s.r)
+		if s.err != nil {
+			return nil, s.err
+		}
+	}
+	if s.err != nil {
+		return nil, nil
 	}
 	var removed []string
 	var errs []error
 	for _, dir := range candidates {
-		if inUse[filepath.Base(dir)] {
+		if s.inUse[filepath.Base(dir)] {
 			continue
 		}
 		// Re-check right before removing: the listing took time.
