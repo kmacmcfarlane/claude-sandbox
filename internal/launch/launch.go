@@ -938,6 +938,10 @@ var packageCaches = []struct{ dir, env string }{
 // -e), and the toolchain uses its default, container-local cache, as it does
 // with the lever off.
 func (in *Inputs) assemblePackageCaches(p *Plan) {
+	// CS-LNCH-158: the CS-LNCH-138 home check, before anything is created.
+	if !in.cacheHomeUsable("package caches", "The toolchains in this session use their default caches") {
+		return
+	}
 	root := filepath.Join(in.Home, PackageCacheRoot)
 	var notMounted []string
 	for _, c := range packageCaches {
@@ -996,22 +1000,10 @@ func (in *Inputs) assemblePreCommitCache(p *Plan) {
 	if in.envFilesDefine(preCommitHomeEnv) {
 		return
 	}
-	// CS-LNCH-138: a relative (or empty) home would name a directory under
-	// the launcher's cwd on the host and a different one in the container.
-	if !filepath.IsAbs(in.Home) {
-		if testing.Testing() {
-			panic(fmt.Sprintf("launch: a test launched with a non-absolute home %q; set HOME (Inputs.Home) to a scratch directory", in.Home))
-		}
-		fmt.Fprintf(in.Out, "Warning: pre-commit cache not mounted: the home directory %q is not an absolute path. pre-commit in this session uses its default cache.\n", in.Home)
+	if !in.cacheHomeUsable("pre-commit cache", "pre-commit in this session uses its default cache") {
 		return
 	}
 	dir := filepath.Join(in.Home, PreCommitCacheDir)
-	// A forgotten fixture (no HOME in its getenv map) resolves the real home;
-	// fail loudly rather than create a directory under it (the shadowRoot
-	// precedent).
-	if testing.Testing() && isRealHome(in.Home) {
-		panic(fmt.Sprintf("launch: a test would create the pre-commit cache under the real home %s; set HOME (Inputs.Home) to a scratch directory", in.Home))
-	}
 	// CS-LNCH-137: nested, the bind source resolves on the host; only the
 	// outer sandbox's own mount (which set PRE_COMMIT_HOME to this path) shows
 	// that it exists there and is the user's. Cleaned, so a trailing slash or
@@ -1037,6 +1029,30 @@ func (in *Inputs) assemblePreCommitCache(p *Plan) {
 		fmt.Fprintf(in.Err, "WARNING: pre-commit cache %s is under the read-only mount %s; pre-commit cannot install hook environments in this session.\n", dir, cover)
 	}
 	p.EnvFlags = append(p.EnvFlags, preCommitHomeEnv+"="+dir)
+}
+
+// cacheHomeUsable reports whether the home directory may root a cache the
+// launcher creates and mounts (what names it in messages; fallback says what
+// the session does without it).
+//
+// CS-LNCH-138/158: a relative (or empty) home would name a directory under
+// the launcher's cwd on the host and a different one in the container (and a
+// relative -v fails docker create): one warning, no cache. Under go test it
+// panics instead, as it does for the real home — a forgotten fixture (no HOME
+// in its getenv map) resolves the real home, and must fail loudly before
+// anything is created or re-moded under it (the shadowRoot precedent).
+func (in *Inputs) cacheHomeUsable(what, fallback string) bool {
+	if !filepath.IsAbs(in.Home) {
+		if testing.Testing() {
+			panic(fmt.Sprintf("launch: a test launched with a non-absolute home %q; set HOME (Inputs.Home) to a scratch directory", in.Home))
+		}
+		fmt.Fprintf(in.Out, "Warning: %s not mounted: the home directory %q is not an absolute path. %s.\n", what, in.Home, fallback)
+		return false
+	}
+	if testing.Testing() && isRealHome(in.Home) {
+		panic(fmt.Sprintf("launch: a test would create the %s under the real home %s; set HOME (Inputs.Home) to a scratch directory", what, in.Home))
+	}
+	return true
 }
 
 // isRealHome reports whether home is the invoking user's actual home

@@ -428,6 +428,19 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     # The caches are assembled after the cascade mounts, the pre-commit
     # precedent (CS-LNCH-139).
 
+  Scenario: CS-LNCH-158 A home that is not an absolute path stands the package caches down
+    # The CS-LNCH-138 check, shared: a relative or empty home would create
+    # .cache/claude-sandbox/<name> under the launcher's cwd, and docker create
+    # fails on a relative -v — the launch-breaking failure CS-LNCH-156 rules out.
+    Given package-cache access is enabled and the home directory the launcher
+      resolved is empty or relative
+    Then none of the four caches is mounted, no -e is added and nothing is created
+    And one warning says the package caches are not mounted because the home
+      is not absolute (the pre-commit cache warns on its own, CS-LNCH-138)
+    And under go test the launch panics instead, naming Inputs.Home — as it
+      does, before anything is created or re-moded, when a test's home is the
+      real home directory ($HOME's or the user database's)
+
   # ---- container-private pre-commit cache (CS-LNCH-133..139) ----
   # $HOME in a sandbox IS the host's home, so the host and every sandbox shared
   # ~/.cache/pre-commit. pre-commit's hook environments record the interpreter

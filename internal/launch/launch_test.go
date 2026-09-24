@@ -526,7 +526,7 @@ var _ = Describe("launch.Build", func() {
 
 	// ---- package caches ----
 
-	Describe("package caches (CS-LNCH-035..037, 155..157)", func() {
+	Describe("package caches (CS-LNCH-035..037, 155..158)", func() {
 		var root string
 		BeforeEach(func() {
 			t := true
@@ -674,6 +674,35 @@ var _ = Describe("launch.Build", func() {
 			}
 			Expect(strings.Count(errw.String(), "WARNING: package cache")).To(Equal(4))
 			Expect(errw.String()).To(ContainSubstring("under the read-only mount " + cache + ":" + cache + ":ro; GOMODCACHE cannot write to it"))
+		})
+
+		DescribeTable("CS-LNCH-158: a home that is not absolute panics under go test before anything is created",
+			func(h string) {
+				in.Home = h
+				Expect(func() { _, _ = launch.Build(in) }).To(PanicWith(ContainSubstring("non-absolute home")))
+				Expect(filepath.Join(h, ".cache", "claude-sandbox")).NotTo(BeAnExistingFile())
+				Expect(filepath.Join(proj, ".cache")).NotTo(BeAnExistingFile())
+			},
+			Entry("relative", "rel/home"),
+			Entry("empty", ""),
+		)
+
+		It("CS-LNCH-158: a test whose home is the real $HOME panics in the package caches, before the pre-commit cache", func() {
+			real, err := os.UserHomeDir()
+			Expect(err).NotTo(HaveOccurred())
+			in.Home = real
+			Expect(func() { _, _ = launch.Build(in) }).To(PanicWith(ContainSubstring("create the package caches under the real home")))
+		})
+
+		It("CS-LNCH-158: a test whose home is the user database's panics even when $HOME names elsewhere", func() {
+			u, err := user.Current()
+			Expect(err).NotTo(HaveOccurred())
+			if u.HomeDir == "" {
+				Skip("no home directory in the user database")
+			}
+			GinkgoT().Setenv("HOME", GinkgoT().TempDir())
+			in.Home = u.HomeDir
+			Expect(func() { _, _ = launch.Build(in) }).To(PanicWith(ContainSubstring("create the package caches under the real home")))
 		})
 
 		Describe("CS-LNCH-155: inside a sandbox", func() {
