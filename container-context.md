@@ -47,10 +47,12 @@ restart Claude Code afterwards). Use `setup-lsp-plugins --check` to verify statu
   build/test parallelism bounded (`ginkgo --procs=N`, `go test -p N`,
   `make -jN`) rather than defaulting to one worker per host CPU; a
   `Killed` / exit 137 from a tool usually means this. Sandboxes are also
-  the host's preferred OOM victims (`oom_score_adj` 500 by default,
-  `oomScoreAdj`; see `/proc/self/oom_score_adj`): when the HOST runs out of memory, the largest
-  process across all sandboxes is killed before the desktop, so a kill can
-  come even while this container is under its own limit.
+  the host's preferred OOM victims (`oom_score_adj` 500 by default, the
+  `oomScoreAdj` key; see `/proc/self/oom_score_adj`): when the HOST runs out
+  of memory, the kernel normally kills the largest process across all
+  sandboxes before the desktop — unless one host process holds a large share
+  of RAM + swap — so a kill can come even while this container is under its
+  own limit.
 - **Sibling sandboxes are discoverable by name.** Every sandbox container is its own
   PID namespace, so the launcher assigns each one a PID class
   (`CLAUDE_SANDBOX_PID_CLASS`) and the entrypoint lands `claude` on a PID no

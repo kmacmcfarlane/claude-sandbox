@@ -1204,6 +1204,13 @@ var _ = Describe("launch.Build", func() {
 			Entry("key below the range", "", intp(-1001), "oomScoreAdj"),
 		)
 
+		It("CS-LNCH-112: an invalid key names the cascade file that set it", func() {
+			in.Cfg = &cascade.Config{OOMScoreAdj: intp(5000)}
+			in.OOMScoreAdjSource = "/ws/.claude-sandbox/config.yaml"
+			_, err := launch.Build(in)
+			Expect(err).To(MatchError(ContainSubstring("oomScoreAdj: 5000 in /ws/.claude-sandbox/config.yaml")))
+		})
+
 		It("CS-LNCH-112: the range ends are accepted", func() {
 			env["CLAUDE_SANDBOX_OOM_SCORE_ADJ"] = "-1000"
 			Expect(build().OOMScoreAdj).To(Equal(-1000))

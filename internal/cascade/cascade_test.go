@@ -95,6 +95,13 @@ var _ = Describe("config cascade", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(cfg.OOMScoreAdj).To(BeNil())
 
+		// The key's own file is found wherever in the cascade it is set.
+		files = writeConfigs(tmp, "oomScoreAdj: 800\n", "model: opus\n")
+		Expect(cascade.KeySource(files, "oomScoreAdj")).To(Equal(files[0]))
+		files = writeConfigs(tmp, "oomScoreAdj: 800\n", "oomScoreAdj: 0\n")
+		Expect(cascade.KeySource(files, "oomScoreAdj")).To(Equal(files[1]))
+		Expect(cascade.KeySource(files, "memoryLimit")).To(BeEmpty())
+
 		// Not a number: the launch fails rather than guessing.
 		files = writeConfigs(tmp, "oomScoreAdj: high\n")
 		_, err = cascade.Load(files)

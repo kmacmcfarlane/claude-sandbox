@@ -6,6 +6,7 @@ package main
 
 import (
 	"path/filepath"
+	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -58,10 +59,41 @@ var _ = Describe("CS-LNCH-112: sandboxes are the host's preferred OOM victims", 
 		Expect(createFlag(g, "--oom-score-adj")).To(Equal([]string{"0"}))
 	})
 
-	It("CS-LNCH-112: a bad value exits 2 naming its source, and creates nothing", func() {
+	It("CS-LNCH-112: a bad value exits 2 naming its source, before any image work", func() {
 		f.envmap["CLAUDE_SANDBOX_OOM_SCORE_ADJ"] = "2000"
 		Expect(f.run()).To(Equal(2))
-		Expect(f.errw.String()).To(ContainSubstring("CLAUDE_SANDBOX_OOM_SCORE_ADJ"))
+		Expect(f.errw.String()).To(ContainSubstring(`CLAUDE_SANDBOX_OOM_SCORE_ADJ="2000"`))
 		Expect(createdAny(f)).To(BeFalse())
+		for _, l := range f.fake.CommandLines() {
+			Expect(l).NotTo(HavePrefix("docker buildx"), "BuildKit is probed only after validation")
+			Expect(l).NotTo(HavePrefix("docker build"), "no image is built for a launch that cannot happen")
+			Expect(l).NotTo(HavePrefix("docker image inspect"), "no image is even inspected")
+		}
+	})
+
+	It("CS-LNCH-112: a bad key names the upstream cascade file that set it", func() {
+		// The fixture's project sits one level below its base dir, whose
+		// .claude-sandbox/ is an upstream cascade level.
+		upstream := filepath.Join(filepath.Dir(f.proj), ".claude-sandbox", "config.yaml")
+		writeFile(upstream, "oomScoreAdj: -5000\n")
+		Expect(f.run()).To(Equal(2))
+		Expect(f.errw.String()).To(ContainSubstring("oomScoreAdj: -5000 in " + upstream))
+		Expect(createdAny(f)).To(BeFalse())
+	})
+
+	It("CS-LNCH-112: a value below 0 launches with one warning that the sandbox is shielded", func() {
+		f.envmap["CLAUDE_SANDBOX_OOM_SCORE_ADJ"] = "-100"
+		Expect(f.run()).To(Equal(0), f.errw.String())
+		Expect(createFlag(f, "--oom-score-adj")).To(Equal([]string{"-100"}))
+		Expect(strings.Count(f.errw.String(), "WARNING: oomScoreAdj -100 is below 0")).To(Equal(1))
+	})
+
+	It("CS-LNCH-112: 0 and above print no warning", func() {
+		f.envmap["CLAUDE_SANDBOX_OOM_SCORE_ADJ"] = "0"
+		Expect(f.run()).To(Equal(0), f.errw.String())
+		Expect(f.errw.String()).NotTo(ContainSubstring("oomScoreAdj"))
+		// The control for the "before any image work" case: a valid launch
+		// does probe BuildKit through the fake.
+		Expect(f.fake.CommandLines()).To(ContainElement("docker buildx version"))
 	})
 })

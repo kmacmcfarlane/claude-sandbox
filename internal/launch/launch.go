@@ -59,6 +59,9 @@ type Inputs struct {
 	// (cascade.MemoryLimitSource), "" when none did. Recorded on the
 	// container, never hashed (CS-LNCH-093).
 	MemoryLimitSource string
+	// OOMScoreAdjSource is the cascade file that set oomScoreAdj
+	// (cascade.KeySource), named when its value is invalid (CS-LNCH-112).
+	OOMScoreAdjSource string
 
 	// Chmod restricts a launcher-owned peer-registry directory (CS-LNCH-051).
 	// Nil means os.Chmod; tests inject a failure (CS-LNCH-107).
@@ -157,25 +160,35 @@ const DefaultOOMScoreAdj = 500
 // OOMScoreAdjEnv overrides the oomScoreAdj key for one launch.
 const OOMScoreAdjEnv = "CLAUDE_SANDBOX_OOM_SCORE_ADJ"
 
-// resolveOOMScoreAdj applies CLAUDE_SANDBOX_OOM_SCORE_ADJ > oomScoreAdj >
+// ResolveOOMScoreAdj applies CLAUDE_SANDBOX_OOM_SCORE_ADJ > oomScoreAdj >
 // DefaultOOMScoreAdj and validates docker's range (CS-LNCH-112). An empty env
-// value falls through to the key, as unset.
-func (in *Inputs) resolveOOMScoreAdj() (int, error) {
-	if raw := strings.TrimSpace(in.getenv(OOMScoreAdjEnv)); raw != "" {
+// value falls through to the key, as unset. source is the config file that
+// set the key (cascade.KeySource), named in the error. The launcher calls it
+// before any image work so a bad value never costs a build; Build calls it
+// again as a backstop.
+func ResolveOOMScoreAdj(getenv func(string) string, cfg *cascade.Config, source string) (int, error) {
+	if raw := strings.TrimSpace(getenv(OOMScoreAdjEnv)); raw != "" {
 		v, err := strconv.Atoi(raw)
 		if err != nil || v < -1000 || v > 1000 {
 			return 0, fmt.Errorf("%s=%q: must be an integer in [-1000, 1000]", OOMScoreAdjEnv, raw)
 		}
 		return v, nil
 	}
-	if in.Cfg.OOMScoreAdj != nil {
-		v := *in.Cfg.OOMScoreAdj
+	if cfg != nil && cfg.OOMScoreAdj != nil {
+		v := *cfg.OOMScoreAdj
 		if v < -1000 || v > 1000 {
-			return 0, fmt.Errorf("oomScoreAdj: %d in .claude-sandbox/config.yaml: must be an integer in [-1000, 1000]", v)
+			if source == "" {
+				source = "the config cascade"
+			}
+			return 0, fmt.Errorf("oomScoreAdj: %d in %s: must be an integer in [-1000, 1000]", v, source)
 		}
 		return v, nil
 	}
 	return DefaultOOMScoreAdj, nil
+}
+
+func (in *Inputs) resolveOOMScoreAdj() (int, error) {
+	return ResolveOOMScoreAdj(in.getenv, in.Cfg, in.OOMScoreAdjSource)
 }
 
 // ResolveDetachKeys applies the configured override, falling back to the

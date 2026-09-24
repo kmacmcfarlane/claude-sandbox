@@ -415,7 +415,12 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     # process holds roughly 40% of RAM + swap; a runaway that large is still
     # killed ahead of the sandboxes.
     And a value that is not an integer in [-1000, 1000] fails the launch with
-      exit 2, naming where it came from
+      exit 2, naming where it came from: the env var, or the most-local
+      config.yaml that sets oomScoreAdj (upstream levels included)
+    And it is validated before BuildKit is probed or any image is inspected or
+      built, so a bad value never costs a build; Build checks it again
+    And a value below 0 launches with one WARNING line: the sandbox is then
+      shielded from the host's OOM killer, which prefers host processes
     And the applied value is part of the config hash ("oomScoreAdj="): it is a
       property of the container that attach and join cannot change; an unset
       key and an explicit 500 hash alike

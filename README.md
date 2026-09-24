@@ -1015,7 +1015,7 @@ The launcher therefore creates every container with `--oom-score-adj 500`, makin
 - It applies to every process in the container: runc sets it on the container's init and on every `docker exec` (so joined sessions get it), and child processes inherit it.
 - The kernel kills **one process at a time**, the highest-ranked: the largest process across all sandboxes goes first, usually one `claude` (ending that session) or one `gopls`. Other sandboxes survive unless memory is still short.
 - It shifts every process in a container by the same amount, so the order inside a container, and what happens when a container hits its own `memoryLimit`, are unchanged.
-- A single host process holding roughly 40-50% of RAM + swap or more (the exact share depends on its own `oom_score_adj`) still ranks above every sandbox process and is killed first, so a runaway on the host is not shielded.
+- The kernel's denominator is RAM **+ swap**, so the threshold scales with swap: a single host process ranks above every sandbox process only once it holds roughly 40-50% of RAM + swap (the exact share depends on its own `oom_score_adj`) — about 28 GiB or more on a 30 GiB machine with 41 GiB of swap. Below that, a leaking host process is killed only after sandbox processes have been killed, one per OOM event, and it has kept growing; the sandboxes are sacrificed first by design.
 - An OOM kill made because the host ran out is reported like one at the container's limit (the exit report, the `(OOM)` marker, ralph's `oom` outcome), since the container's `oom_kill` counter counts both.
 
 Override it with the `oomScoreAdj` key, or `CLAUDE_SANDBOX_OOM_SCORE_ADJ` for one launch (it beats the key); any integer from -1000 to 1000, and `0` restores docker's default. It is part of the container's config fingerprint, so attaching to a container created with another value reports drift.
@@ -1024,7 +1024,7 @@ Override it with the `oomScoreAdj` key, or `CLAUDE_SANDBOX_OOM_SCORE_ADJ` for on
 oomScoreAdj: 800   # a machine where sandboxes should always go first
 ```
 
-Host-side protection (systemd-oomd thresholds, earlyoom, `MemoryMin` on the desktop slice) is the host's business; the launcher only sets its own containers' ranking.
+This affects only the kernel's OOM killer. systemd-oomd picks whole cgroups by memory pressure and ignores `oom_score_adj`, so its choices are unchanged; host-side protection (oomd thresholds, earlyoom, `MemoryMin` on the desktop slice) is the host's business. A value below 0 prints a warning at launch: it shields the sandbox, so the kernel prefers host processes, the desktop included.
 
 #### Detach keys
 
