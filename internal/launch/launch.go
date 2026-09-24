@@ -938,13 +938,25 @@ var packageCaches = []struct{ dir, env string }{
 // -e), and the toolchain uses its default, container-local cache, as it does
 // with the lever off.
 func (in *Inputs) assemblePackageCaches(p *Plan) {
+	// CS-LNCH-159: docker -e silently beats --env-file, so a cache whose
+	// variable an env file defines is skipped whole (no -e, no mount, nothing
+	// created, nothing printed) — the pre-commit rule (CS-LNCH-135), per cache.
+	var caches []struct{ dir, env string }
+	for _, c := range packageCaches {
+		if !in.envFilesDefine(c.env) {
+			caches = append(caches, c)
+		}
+	}
+	if len(caches) == 0 {
+		return
+	}
 	// CS-LNCH-158: the CS-LNCH-138 home check, before anything is created.
 	if !in.cacheHomeUsable("package caches", "The toolchains in this session use their default caches") {
 		return
 	}
 	root := filepath.Join(in.Home, PackageCacheRoot)
 	var notMounted []string
-	for _, c := range packageCaches {
+	for _, c := range caches {
 		dir := filepath.Join(root, c.dir)
 		// CS-LNCH-155: nested, the bind source resolves on the host; only the
 		// outer sandbox's own mount (which set the toolchain variable to this

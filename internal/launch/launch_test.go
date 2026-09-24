@@ -767,6 +767,108 @@ var _ = Describe("launch.Build", func() {
 			)
 		})
 
+		Describe("CS-LNCH-159: an env file defining a cache's variable wins for that cache", func() {
+			useEnvFile := func(content string) {
+				ef := filepath.Join(proj, "env")
+				touch(ef, content)
+				in.EnvFiles = []string{ef}
+			}
+			expectSkipped := func(p *launch.Plan, name string) {
+				d := filepath.Join(root, name)
+				expectCache(p, name, false)
+				Expect(d).NotTo(BeAnExistingFile())
+				Expect(out.String()).NotTo(ContainSubstring(d))
+				Expect(errw.String()).NotTo(ContainSubstring(d))
+			}
+
+			DescribeTable("CS-LNCH-159: only the defined cache is skipped; the other three are applied",
+				func(name string) {
+					useEnvFile(cacheEnv[name] + "=/work/elsewhere\n")
+					p := build()
+					expectSkipped(p, name)
+					for n := range cacheEnv {
+						if n != name {
+							expectCache(p, n, true)
+						}
+					}
+					Expect(out.String()).NotTo(ContainSubstring("package cache"))
+				},
+				Entry("GOMODCACHE", "go-mod"),
+				Entry("GOCACHE", "go-build"),
+				Entry("npm_config_cache", "npm"),
+				Entry("PIP_CACHE_DIR", "pip"),
+			)
+
+			DescribeTable("CS-LNCH-159: read as docker reads it",
+				func(content string, hostSet bool) {
+					useEnvFile(content)
+					if hostSet {
+						env["GOMODCACHE"] = "/host/gomod"
+					}
+					p := build()
+					expectSkipped(p, "go-mod")
+					expectCache(p, "go-build", true)
+					for _, a := range p.CreateArgs(proj) {
+						Expect(a).NotTo(ContainSubstring("/host/gomod"))
+					}
+				},
+				Entry("indented", "  GOMODCACHE=/work/gm\n", false),
+				Entry("UTF-8 BOM", "\xEF\xBB\xBFGOMODCACHE=/work/gm\n", false),
+				Entry("CRLF", "# c\r\nGOMODCACHE=/work/gm\r\n", false),
+				Entry("bare key, host sets it (docker passes the host value through)", "GOMODCACHE\n", true),
+			)
+
+			DescribeTable("CS-LNCH-159: a line docker would not set the variable from leaves the cache applied",
+				func(content string) {
+					useEnvFile(content)
+					p := build()
+					for n := range cacheEnv {
+						expectCache(p, n, true)
+					}
+				},
+				Entry("bare key, host does not set it (docker drops it)", "GOMODCACHE\n"),
+				Entry("commented out", "# GOMODCACHE=/work/gm\n"),
+				Entry("different case", "gomodcache=/work/gm\n"),
+			)
+
+			It("CS-LNCH-159: one env file per variable across the cascade counts, each cache decided on its own", func() {
+				up := filepath.Join(home, "upenv")
+				touch(up, "GOCACHE=/work/gb\n")
+				local := filepath.Join(proj, "env")
+				touch(local, "PIP_CACHE_DIR=/work/pip\n")
+				in.EnvFiles = []string{up, local}
+				p := build()
+				expectSkipped(p, "go-build")
+				expectSkipped(p, "pip")
+				expectCache(p, "go-mod", true)
+				expectCache(p, "npm", true)
+			})
+
+			It("CS-LNCH-159: all four defined never reaches the home check: nothing created, nothing printed", func() {
+				useEnvFile("GOMODCACHE=/a\nGOCACHE=/b\nnpm_config_cache=/c\nPIP_CACHE_DIR=/d\nPRE_COMMIT_HOME=/e\n")
+				in.Home = "rel/home"
+				p, err := launch.Build(in)
+				Expect(err).NotTo(HaveOccurred())
+				for n := range cacheEnv {
+					expectCache(p, n, false)
+				}
+				Expect("rel").NotTo(BeAnExistingFile())
+				Expect(filepath.Join(proj, "rel")).NotTo(BeAnExistingFile())
+				Expect(out.String()).NotTo(ContainSubstring("package cache"))
+			})
+
+			It("CS-LNCH-159: inside a sandbox, an env-file cache is not named in the nested note", func() {
+				env["CLAUDE_SANDBOX_PROJECT_DIR"] = "/outer/proj"
+				useEnvFile("npm_config_cache=/work/npm\n")
+				p := build()
+				expectSkipped(p, "npm")
+				o := out.String()
+				Expect(strings.Count(o, "Note: package caches not mounted")).To(Equal(1))
+				Expect(o).To(ContainSubstring(filepath.Join(root, "go-mod")))
+				Expect(o).NotTo(ContainSubstring(filepath.Join(root, "npm")))
+			})
+		})
+
 		It("CS-LNCH-037: mounts nothing from the host's own caches", func() {
 			mkdir(filepath.Join(home, "go", "pkg", "mod"))
 			mkdir(filepath.Join(home, ".npm"))
