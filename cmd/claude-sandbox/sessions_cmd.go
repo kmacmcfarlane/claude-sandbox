@@ -171,12 +171,7 @@ func noteEarlierOOM(env *Env, s sessions.Session) {
 	if !t[0].OOMKilled {
 		return
 	}
-	// A container without an instance label is named by its mode, as
-	// reportRunning names it.
-	label := s.Instance
-	if label == "" {
-		label = s.Mode
-	}
+	label := sessionLabel(s)
 	lim := oomreport.Limit{Value: s.MemoryLimit, Source: s.MemoryLimitSource}
 	fmt.Fprintf(env.Err, "Note: an earlier process in this container (session '%s') was killed by the OOM killer (%s); memoryLimit: %s.\n",
 		label, oomreport.EitherCause, oomreport.DescribeLimit(lim))
@@ -314,14 +309,19 @@ func decideSessions(env *Env, projectDir string, f *launchFlags) (sessionDecisio
 	}
 }
 
+// sessionLabel names a container in a report: its instance noun, or its
+// mode for a container without an instance label (CS-SESS-047, CS-SESS-063).
+func sessionLabel(s sessions.Session) string {
+	if s.Instance == "" {
+		return s.Mode
+	}
+	return s.Instance
+}
+
 func reportRunning(env *Env, found []sessions.Session) {
 	fmt.Fprintf(env.Err, "\nFound %d running session(s) for this project:\n", len(found))
 	for _, s := range found {
-		label := s.Instance
-		if label == "" {
-			label = s.Mode
-		}
-		fmt.Fprintf(env.Err, "  %-10s up %-12s %d session(s)\n", label, uptime(s.Status), s.Count)
+		fmt.Fprintf(env.Err, "  %-10s up %-12s %d session(s)\n", sessionLabel(s), uptime(s.Status), s.Count)
 	}
 	fmt.Fprintln(env.Err)
 }
@@ -597,7 +597,7 @@ func noteWorktree(env *Env, s sessions.Session, wt worktreeChoice) {
 	if s.Worktree != "" {
 		where = fmt.Sprintf("worktree '%s' (branch worktree-%s)", s.Worktree, s.Worktree)
 	}
-	msg := fmt.Sprintf("Note: session '%s' runs in %s", s.Instance, where)
+	msg := fmt.Sprintf("Note: session '%s' runs in %s", sessionLabel(s), where)
 	requestedOn := wt.Enabled || wt.StoodDown
 	if requestedOn != (s.Worktree != "") || (wt.Name != "" && wt.Name != s.Worktree) {
 		msg += "; --worktree/--no-worktree cannot change a running session"

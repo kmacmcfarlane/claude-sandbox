@@ -348,6 +348,8 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
     # so it is reported rather than treated as drift (CS-LNCH-044).
     When attach is chosen
     Then a note names the worktree the session runs in (or "the shared checkout")
+    And the note names the session by its instance, or by its mode for a
+      container without an instance label (as CS-SESS-063 does), never ''
     And when the request differs (--worktree=NAME, --no-worktree), the note
       states the running session cannot be changed
     And nothing blocks and no prompt is added
