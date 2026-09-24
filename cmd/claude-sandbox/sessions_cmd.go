@@ -153,7 +153,7 @@ func printSessionTable(env *Env, found []sessions.Session, all bool, projectDir 
 		fmt.Fprintln(env.Out, "* = this project")
 	}
 	if anyOOM {
-		fmt.Fprintln(env.Out, strings.TrimSpace(oomSuffix)+" = a process in this container was killed by the OOM killer; see memoryLimit")
+		fmt.Fprintln(env.Out, strings.TrimSpace(oomSuffix)+" = a process in this container was killed by the OOM killer: its memoryLimit or the host running out of memory")
 	}
 }
 
@@ -178,8 +178,8 @@ func noteEarlierOOM(env *Env, s sessions.Session) {
 		label = s.Mode
 	}
 	lim := oomreport.Limit{Value: s.MemoryLimit, Source: s.MemoryLimitSource}
-	fmt.Fprintf(env.Err, "Note: an earlier process in this container (session '%s') was killed by the OOM killer; memoryLimit: %s.\n",
-		label, oomreport.DescribeLimit(lim))
+	fmt.Fprintf(env.Err, "Note: an earlier process in this container (session '%s') was killed by the OOM killer (%s); memoryLimit: %s.\n",
+		label, oomreport.EitherCause, oomreport.DescribeLimit(lim))
 }
 
 // uptime trims docker's "Up 2 hours (healthy)" to "2 hours".

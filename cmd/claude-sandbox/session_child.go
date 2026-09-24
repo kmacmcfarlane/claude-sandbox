@@ -4,7 +4,7 @@ package main
 // path — a new container's "docker start -ai", "docker attach", a join's
 // "docker exec" and a headless launch — runs docker as a child the launcher
 // waits on, instead of exec'ing into it, so the launcher is still there when
-// the session ends and can say why: the container's OOM killer is otherwise
+// the session ends and can say why: an OOM kill is otherwise
 // indistinguishable from Claude Code dying.
 
 import (

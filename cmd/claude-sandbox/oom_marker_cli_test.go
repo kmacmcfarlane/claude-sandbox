@@ -62,7 +62,7 @@ var _ = Describe("the OOM marker (CS-SESS-061..063)", func() {
 			}
 			Expect(otter).To(HaveSuffix("1 (OOM)"))
 			Expect(heron).NotTo(ContainSubstring("(OOM)"))
-			Expect(f.out.String()).To(ContainSubstring("(OOM) = a process in this container was killed by the OOM killer; see memoryLimit"))
+			Expect(f.out.String()).To(ContainSubstring("(OOM) = a process in this container was killed by the OOM killer: its memoryLimit or the host running out of memory"))
 		})
 
 		It("CS-SESS-061: --all marks too, and the legend is absent when nothing is marked", func() {
@@ -106,7 +106,7 @@ var _ = Describe("the OOM marker (CS-SESS-061..063)", func() {
 	})
 
 	Describe("the note before attach or join", func() {
-		const note = "Note: an earlier process in this container (session 'otter') was killed by the OOM killer; memoryLimit: "
+		const note = "Note: an earlier process in this container (session 'otter') was killed by the OOM killer (the container's memoryLimit or the host running out of memory); memoryLimit: "
 
 		It("CS-SESS-063: --attach notes the kill with the create-time limit and proceeds", func() {
 			running(psRowLimit("cs-a", f.proj, "otter", "16g", "/ws/.claude-sandbox/config.yaml"))

@@ -52,7 +52,9 @@ restart Claude Code afterwards). Use `setup-lsp-plugins --check` to verify statu
   of memory, the kernel normally kills the largest process across all
   sandboxes before the desktop — unless one host process holds a large share
   of RAM + swap — so a kill can come even while this container is under its
-  own limit.
+  own limit. `/sys/fs/cgroup/memory.events` tells which: `oom_kill` counts
+  every OOM kill in this container, while `oom` rises only when the
+  container reaches its own limit.
 - **Sibling sandboxes are discoverable by name.** Every sandbox container is its own
   PID namespace, so the launcher assigns each one a PID class
   (`CLAUDE_SANDBOX_PID_CLASS`) and the entrypoint lands `claude` on a PID no

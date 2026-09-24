@@ -19,8 +19,9 @@ import (
 	"github.com/kmacmcfarlane/claude-sandbox/internal/ralphloop"
 )
 
-func writeEvents(dir string, kills int) {
-	body := fmt.Sprintf("low 0\nhigh 0\nmax 12\noom 3\noom_kill %d\noom_group_kill 0\n", kills)
+// writeEvents writes memory.events with oom_kill = kills and oom = hits.
+func writeEvents(dir string, kills, hits int) {
+	body := fmt.Sprintf("low 0\nhigh 0\nmax 12\noom %d\noom_kill %d\noom_group_kill 0\n", hits, kills)
 	Expect(os.WriteFile(filepath.Join(dir, "memory.events"), []byte(body), 0o644)).To(Succeed())
 }
 
@@ -35,6 +36,7 @@ var _ = Describe("OOM-killed iterations", func() {
 		iters   []int
 		opts    ralphloop.Options
 		kills   int
+		hits    int
 		runlogF string
 	)
 
@@ -52,8 +54,8 @@ var _ = Describe("OOM-killed iterations", func() {
 		for _, k := range []string{"STOP_FILE", "PROMPT_FILE", "CLAUDE_BIN"} {
 			GinkgoT().Setenv(k, "")
 		}
-		kills = 0
-		writeEvents(cgroup, kills)
+		kills, hits = 0, 3
+		writeEvents(cgroup, kills, hits)
 		Expect(os.WriteFile(filepath.Join(cgroup, "memory.max"), []byte("17179869184\n"), 0o644)).To(Succeed())
 		out = &bytes.Buffer{}
 		sleeps, notes, iters = nil, nil, nil
@@ -74,11 +76,22 @@ var _ = Describe("OOM-killed iterations", func() {
 		}
 	})
 
-	// oomed: claude exits 137 and the counter rises by n.
+	// oomed: claude exits 137 and the counter rises by n, at the
+	// container's own limit (the oom counter rises too).
 	oomed := func(n int) func(*ralphloop.Loop, int) int {
 		return func(*ralphloop.Loop, int) int {
 			kills += n
-			writeEvents(cgroup, kills)
+			hits++
+			writeEvents(cgroup, kills, hits)
+			return 137
+		}
+	}
+	// hostOOMed: claude exits 137 and oom_kill rises by n, but oom does not:
+	// the host's global OOM killer (CS-RLP-030).
+	hostOOMed := func(n int) func(*ralphloop.Loop, int) int {
+		return func(*ralphloop.Loop, int) int {
+			kills += n
+			writeEvents(cgroup, kills, hits)
 			return 137
 		}
 	}
@@ -140,7 +153,7 @@ var _ = Describe("OOM-killed iterations", func() {
 			// The counter already stands at 5 when the loop starts: a 137
 			// with no rise during the iteration is not an oom.
 			kills = 5
-			writeEvents(cgroup, kills)
+			writeEvents(cgroup, kills, hits)
 			script(stepExit(137))
 			Expect(ralphloop.Run(opts)).To(Equal(137), "CS-RQT-012 error")
 			Expect(out.String()).NotTo(ContainSubstring("[oom]"))
@@ -154,7 +167,7 @@ var _ = Describe("OOM-killed iterations", func() {
 				sleeps = append(sleeps, d)
 				if d == 3*time.Second {
 					kills++
-					writeEvents(cgroup, kills)
+					writeEvents(cgroup, kills, hits)
 				}
 			}
 			script(ok, stepExit(137))
@@ -170,7 +183,7 @@ var _ = Describe("OOM-killed iterations", func() {
 		})
 
 		It("CS-RLP-023: ReadOOMKills parses the oom_kill line and reports unreadable input", func() {
-			writeEvents(cgroup, 7)
+			writeEvents(cgroup, 7, hits)
 			n, readable := ralphloop.ReadOOMKills(cgroup)
 			Expect(readable).To(BeTrue())
 			Expect(n).To(Equal(7))
@@ -214,7 +227,7 @@ var _ = Describe("OOM-killed iterations", func() {
 		})
 
 		It("CS-RLP-024: a raise without claude dying is not an iteration failure", func() {
-			script(func(*ralphloop.Loop, int) int { kills++; writeEvents(cgroup, kills); return 0 })
+			script(func(*ralphloop.Loop, int) int { kills++; writeEvents(cgroup, kills, hits); return 0 })
 			Expect(ralphloop.Run(opts)).To(Equal(0))
 			Expect(out.String()).NotTo(ContainSubstring("[oom]"))
 		})
@@ -241,7 +254,7 @@ var _ = Describe("OOM-killed iterations", func() {
 
 		It("CS-RLP-025: an unreadable BEFORE-sample is not read as 0", func() {
 			Expect(os.Remove(filepath.Join(cgroup, "memory.events"))).To(Succeed())
-			script(func(*ralphloop.Loop, int) int { writeEvents(cgroup, 1); return 137 })
+			script(func(*ralphloop.Loop, int) int { writeEvents(cgroup, 1, hits); return 137 })
 			Expect(ralphloop.Run(opts)).To(Equal(137), "falls through to CS-RQT-012")
 			Expect(out.String()).NotTo(ContainSubstring("[oom]"))
 		})
@@ -365,11 +378,48 @@ var _ = Describe("OOM-killed iterations", func() {
 			script(oomed(1), oomed(1))
 			Expect(ralphloop.Run(opts)).To(Equal(137))
 			msg := notes[len(notes)-1]
-			Expect(msg).To(ContainSubstring("claude was killed by the container's OOM killer at iteration 1 (exit 137; 1 OOM kill)"))
+			Expect(msg).To(ContainSubstring("claude was killed by the container's OOM killer at iteration 1 (exit 137; 1 OOM kill): the container hit its memoryLimit."))
 			Expect(msg).To(ContainSubstring("memoryLimit in effect: 16g (cgroup memory.max)"))
 			Expect(msg).To(ContainSubstring("swap is off by design"))
 			Expect(msg).To(ContainSubstring("raise memoryLimit in .claude-sandbox/config.yaml"))
 			Expect(msg).To(ContainSubstring("cap build/test parallelism (e.g. ginkgo --procs=N, go test -p N, make -jN)"))
+		})
+
+		It("CS-RLP-028: a host OOM names the host, says raising memoryLimit will not help, and points at the README", func() {
+			script(hostOOMed(1), hostOOMed(1))
+			Expect(ralphloop.Run(opts)).To(Equal(137))
+			msg := notes[len(notes)-1]
+			Expect(msg).To(ContainSubstring("claude was killed from outside the container's memoryLimit at iteration 1 (exit 137; 1 OOM kill) (the host ran out of memory, or a parent cgroup's limit)."))
+			Expect(msg).To(ContainSubstring("memoryLimit in effect: 16g (cgroup memory.max)"))
+			Expect(msg).To(ContainSubstring("Raising memoryLimit will not help."))
+			Expect(msg).To(ContainSubstring("run fewer sandboxes at once, or cap their build/test parallelism (e.g. ginkgo --procs=N, go test -p N, make -jN)"))
+			Expect(msg).To(ContainSubstring(`see the README section "When the host runs out of memory"`))
+			Expect(msg).NotTo(ContainSubstring("raise memoryLimit in"))
+			Expect(msg).NotTo(ContainSubstring("container's OOM killer"))
+		})
+
+		It("CS-RLP-028: an unreadable oom counter names both causes and both remedies", func() {
+			// oom_kill is readable (so the outcome is oom) but the oom line is gone.
+			script(func(*ralphloop.Loop, int) int {
+				kills++
+				Expect(os.WriteFile(filepath.Join(cgroup, "memory.events"), []byte(fmt.Sprintf("oom_kill %d\n", kills)), 0o644)).To(Succeed())
+				return 137
+			}, ok)
+			Expect(ralphloop.Run(opts)).To(Equal(0))
+			msg := notes[0]
+			Expect(msg).To(ContainSubstring("claude was killed by the OOM killer at iteration 1 (exit 137; 1 OOM kill): the container's memoryLimit or the host running out of memory."))
+			Expect(msg).To(ContainSubstring("at the limit, raise memoryLimit in .claude-sandbox/config.yaml"))
+			Expect(msg).To(ContainSubstring(`if the host ran out, run fewer sandboxes at once (see the README section "When the host runs out of memory")`))
+			Expect(msg).To(ContainSubstring("either way, cap build/test parallelism (e.g. ginkgo --procs=N, go test -p N, make -jN)"))
+		})
+
+		It("CS-RLP-028: the back-off and single retry are the same for a host OOM", func() {
+			opts.Limit = 5
+			script(hostOOMed(1), hostOOMed(1), ok)
+			Expect(ralphloop.Run(opts)).To(Equal(137))
+			Expect(iters).To(Equal([]int{1, 1}))
+			Expect(nonPacing()).To(Equal(steps(60)))
+			Expect(out.String()).To(ContainSubstring("The retry was OOM-killed too. Exiting."))
 		})
 
 		DescribeTable("CS-RLP-028: memory.max in memoryLimit notation",
@@ -389,6 +439,50 @@ var _ = Describe("OOM-killed iterations", func() {
 		)
 	})
 
+	Describe("the cause", func() {
+		DescribeTable("CS-RLP-030: the oom counter tells the container's limit from the host",
+			func(before int, beforeOK bool, after int, afterOK bool, want ralphloop.OOMCause) {
+				Expect(ralphloop.CauseOf(before, beforeOK, after, afterOK)).To(Equal(want))
+			},
+			Entry("oom rose: limit", 3, true, 4, true, ralphloop.OOMCauseLimit),
+			Entry("oom unchanged: host", 3, true, 3, true, ralphloop.OOMCauseHost),
+			Entry("before unreadable: unknown", 0, false, 4, true, ralphloop.OOMCauseUnknown),
+			Entry("after unreadable: unknown", 3, true, 0, false, ralphloop.OOMCauseUnknown),
+		)
+
+		It("CS-RLP-030: ReadMemoryEvents parses every counter in one read; a garbage value reads as absent", func() {
+			writeEvents(cgroup, 9, 4)
+			ev := ralphloop.ReadMemoryEvents(cgroup)
+			Expect(ev).To(HaveKeyWithValue("oom", 4))
+			Expect(ev).To(HaveKeyWithValue("oom_kill", 9))
+			Expect(ev).To(HaveKeyWithValue("oom_group_kill", 0))
+			Expect(os.WriteFile(filepath.Join(cgroup, "memory.events"), []byte("oom x\noom_kill 2\n"), 0o644)).To(Succeed())
+			Expect(ralphloop.ReadMemoryEvents(cgroup)).To(Equal(map[string]int{"oom_kill": 2}))
+			Expect(ralphloop.ReadMemoryEvents(filepath.Join(work, "absent"))).To(BeNil())
+		})
+
+		It("CS-RLP-030: ReadOOMLimitHits parses the oom line, not oom_kill or oom_group_kill", func() {
+			writeEvents(cgroup, 9, 4)
+			n, readable := ralphloop.ReadOOMLimitHits(cgroup)
+			Expect(readable).To(BeTrue())
+			Expect(n).To(Equal(4))
+			Expect(os.WriteFile(filepath.Join(cgroup, "memory.events"), []byte("oom_kill 2\noom_group_kill 0\n"), 0o644)).To(Succeed())
+			_, readable = ralphloop.ReadOOMLimitHits(cgroup)
+			Expect(readable).To(BeFalse(), "no oom line")
+		})
+
+		It("CS-RLP-030: an unreadable oom counter leaves the classification to oom_kill", func() {
+			script(func(*ralphloop.Loop, int) int {
+				kills++
+				Expect(os.WriteFile(filepath.Join(cgroup, "memory.events"), []byte(fmt.Sprintf("oom_kill %d\n", kills)), 0o644)).To(Succeed())
+				return 137
+			}, ok)
+			Expect(ralphloop.Run(opts)).To(Equal(0))
+			Expect(out.String()).To(ContainSubstring("[oom]"))
+			Expect(iters).To(Equal([]int{1, 1}))
+		})
+	})
+
 	Describe("runlog", func() {
 		It("CS-RLP-029: run-logger's entry gets the outcome; an oom entry gets claudeExit and oomKills", func() {
 			opts.Limit = 1
@@ -399,9 +493,20 @@ var _ = Describe("OOM-killed iterations", func() {
 			Expect(got[0]).To(HaveKeyWithValue("outcome", "oom"))
 			Expect(got[0]).To(HaveKeyWithValue("claudeExit", float64(137)))
 			Expect(got[0]).To(HaveKeyWithValue("oomKills", float64(2)))
+			Expect(got[0]).To(HaveKeyWithValue("oomCause", "limit"))
 			Expect(got[0]).To(HaveKeyWithValue("sessionId", "s"), "run-logger's fields are kept")
 			Expect(got[1]).To(HaveKeyWithValue("outcome", "ok"))
 			Expect(got[1]).NotTo(HaveKey("oomKills"))
+			Expect(got[1]).NotTo(HaveKey("oomCause"))
+		})
+
+		It("CS-RLP-029: a host OOM is recorded with oomCause host", func() {
+			opts.Limit = 1
+			script(withLog(hostOOMed(1)), withLog(ok))
+			Expect(ralphloop.Run(opts)).To(Equal(0))
+			got := iterations()
+			Expect(got[0]).To(HaveKeyWithValue("outcome", "oom"))
+			Expect(got[0]).To(HaveKeyWithValue("oomCause", "host"))
 		})
 
 		It("CS-RLP-029: with no run-logger entry, a non-ok outcome gets a minimal entry and ok stays unrecorded", func() {

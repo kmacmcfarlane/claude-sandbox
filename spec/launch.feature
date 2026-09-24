@@ -1289,6 +1289,14 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
   # looked exactly like Claude Code dying. With --rm the container is gone
   # before an inspect after exit could read State.OOMKilled, so the launcher
   # stays resident, watches the daemon's events for the container, and reports.
+  #
+  # The report cannot say WHICH OOM killer: docker's oom event is containerd's
+  # TaskOOM, which its cgroup v2 watcher (pkg/oom/v2) publishes whenever the
+  # container's memory.events oom_kill rises — and oom_kill counts kills "by
+  # any kind of OOM killer" (cgroup-v2.rst), the host's global one included,
+  # which CS-LNCH-112 makes prefer sandboxes. The "oom" counter that would tell
+  # them apart lives in the container's cgroup, which --rm removes with it, so
+  # the report names both causes and both remedies.
 
   Scenario: CS-LNCH-085 Every interactive path runs docker as a child the launcher waits on
     When a session is started on any of these paths
@@ -1353,14 +1361,19 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     Given a die event with exitCode 137 and at least one oom event
     Then the launcher prints to stderr, after the child's output:
       """
-      claude-sandbox: this session was killed by the container's OOM killer (exit 137; N OOM kills).
+      claude-sandbox: this session was killed by the OOM killer (exit 137; N OOM kills) — the container's memoryLimit or the host running out of memory.
         memoryLimit: <limit> (from <config.yaml path>); swap is off by design.
-        Remedies: raise memoryLimit in that file, or cap build/test parallelism (e.g. ginkgo --procs=N, go test -p N, make -jN).
+        At memoryLimit: raise memoryLimit in that file, or cap build/test parallelism (e.g. ginkgo --procs=N, go test -p N, make -jN).
+        Host out of memory: run fewer sandboxes at once or cap their parallelism; see "When the host runs out of memory" in the claude-sandbox README.
+        To tell which: the host's kernel log (journalctl -k or sudo dmesg; may need sudo) says "Memory cgroup out of memory" for a limit, plain "Out of memory" for the host.
       """
     And "1 OOM kill" is singular
     And when no config.yaml in the cascade sets memoryLimit the second line reads
       "memoryLimit: 8g (the default; no config.yaml in the cascade sets it)" and
-      the remedy "set a higher memoryLimit in .claude-sandbox/config.yaml"
+      the limit remedy "set a higher memoryLimit in .claude-sandbox/config.yaml"
+    # mm/oom_kill.c logs "Memory cgroup out of memory: Killed process ..." for
+    # a cgroup limit (this container's, or a parent cgroup's) and "Out of
+    # memory: Killed process ..." for the global OOM killer.
     And the limit and its source are the container's labels as carried by its
       events (CS-LNCH-093), else what the launch resolved, else "not recorded
       on this container"
@@ -1370,9 +1383,9 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     Given oom events were seen for the container
     And the session ended some other way (a die with another exit code)
     Then exactly one line is printed to stderr:
-      "claude-sandbox: note: the container's OOM killer killed N processes during
-      this session (memoryLimit <limit> (from <source>)); the session itself was
-      not killed."
+      "claude-sandbox: note: the OOM killer killed N processes in this container
+      during this session (the container's memoryLimit <limit> (from <source>)
+      or the host running out of memory); the session itself was not killed."
     And a die without any oom event prints nothing
 
   Scenario: CS-LNCH-091 A signal-initiated exit is silent and prompt
