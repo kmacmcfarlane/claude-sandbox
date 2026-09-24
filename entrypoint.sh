@@ -94,10 +94,21 @@ find "$TARGET_HOME" "${PRUNE_ARGS[@]}" -print0 | xargs -0 chown "$TARGET_UID:$TA
 # themselves stay root-owned. Chowning files would copy every one of them up
 # into the container layer on overlay2 at each start — a child venv holding
 # numpy or torch is hundreds of MB. The path is fixed (never $VIRTUAL_ENV, which
-# an env file could point at /), -xdev stays off mounts, and find never follows
-# symlinks. Installs live in the container layer and die with the container.
-if [ -d /opt/claude-sandbox/venv ] && [ ! -L /opt/claude-sandbox/venv ]; then
-    find /opt/claude-sandbox/venv -xdev -type d \
+# an env file could point at /) and find never follows symlinks. Bind mounts
+# never get their ownership changed, as with the home chown above: the block
+# runs only when the venv is on the root filesystem and is not itself a mount
+# point (a mount of the venv, /opt or /opt/claude-sandbox is the host's), and
+# every mount point below it is pruned (-xdev alone still lists the mount point
+# directory itself). Installs live in the container layer and die with it.
+VENV_DIR=/opt/claude-sandbox/venv
+if [ -d "$VENV_DIR" ] && [ ! -L "$VENV_DIR" ] \
+    && [ "$(stat -c %d "$VENV_DIR")" = "$(stat -c %d /)" ] \
+    && ! mountpoint -q "$VENV_DIR"; then
+    VENV_PRUNE=()
+    while IFS= read -r mp; do
+        [[ "$mp" == "$VENV_DIR"/* ]] && VENV_PRUNE+=(-path "$mp" -prune -o)
+    done < <(awk '{print $5}' /proc/self/mountinfo)
+    find "$VENV_DIR" -xdev "${VENV_PRUNE[@]}" -type d \
         \( ! -uid "$TARGET_UID" -o ! -gid "$TARGET_GID" \) \
         -exec chown "$TARGET_UID:$TARGET_GID" {} + 2>/dev/null || true
 fi

@@ -612,6 +612,12 @@ Feature: Image build lifecycle (CS-IMG)
     And the path is fixed, never $VIRTUAL_ENV (an env file could point it at /),
       find stays on one filesystem (-xdev) and never follows symlinks, and a missing
       or symlinked venv is skipped
+    And bind mounts never get their ownership changed (the home chown's rule): the
+      block runs only when the venv is on the root filesystem's device and is not
+      itself a mount point (a mount of the venv, /opt or /opt/claude-sandbox is the
+      host's), and every mount point below the venv, read from
+      /proc/self/mountinfo, is pruned — -xdev alone still lists a mount point
+      directory itself, and when the venv is a mount -xdev takes that mount's device
     And container-context.md says the installs are per-container: they die with it
     # Measured on the base venv (190 dirs, 1753 entries): ~10 ms. `pip install
     # --user` is no alternative: the venv has include-system-site-packages =

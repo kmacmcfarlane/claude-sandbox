@@ -424,12 +424,21 @@ var _ = Describe("baked sources", func() {
 			"the entrypoint's fixed path must be where the base builds the venv")
 
 		ep := repoFile("entrypoint.sh")
-		start := strings.Index(ep, "if [ -d "+venv+" ]")
+		Expect(ep).To(ContainSubstring("\nVENV_DIR=" + venv + "\n"))
+		start := strings.Index(ep, `if [ -d "$VENV_DIR" ]`)
 		Expect(start).To(BeNumerically(">=", 0), "the venv block is present")
 		block := ep[start:]
 		block = block[:strings.Index(block, "\nfi\n")]
-		Expect(block).To(ContainSubstring(`[ ! -L ` + venv + ` ]`), "a symlinked venv is skipped")
-		Expect(block).To(ContainSubstring("find " + venv + " -xdev -type d"))
+		Expect(block).To(ContainSubstring(`[ ! -L "$VENV_DIR" ]`), "a symlinked venv is skipped")
+		// Bind mounts never change owner (the home chown's rule): the venv must
+		// be on the root filesystem and not itself a mount point...
+		Expect(block).To(ContainSubstring(`[ "$(stat -c %d "$VENV_DIR")" = "$(stat -c %d /)" ]`),
+			"a venv on another device (a mount of the venv, /opt or /opt/claude-sandbox) is skipped")
+		Expect(block).To(ContainSubstring(`! mountpoint -q "$VENV_DIR"`), "a mounted venv is skipped")
+		// ...and every mount point below it is pruned, read from mountinfo.
+		Expect(block).To(ContainSubstring(`[[ "$mp" == "$VENV_DIR"/* ]] && VENV_PRUNE+=(-path "$mp" -prune -o)`))
+		Expect(block).To(ContainSubstring(`done < <(awk '{print $5}' /proc/self/mountinfo)`))
+		Expect(block).To(ContainSubstring(`find "$VENV_DIR" -xdev "${VENV_PRUNE[@]}" -type d`))
 		Expect(block).To(ContainSubstring(`-exec chown "$TARGET_UID:$TARGET_GID" {} +`))
 		Expect(block).NotTo(ContainSubstring("VIRTUAL_ENV"), "never a path an env file can set")
 		Expect(block).NotTo(ContainSubstring("-type f"), "files keep their owner (no overlay2 copy-up)")
