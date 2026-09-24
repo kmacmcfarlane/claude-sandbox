@@ -232,7 +232,7 @@ var _ = Describe("shell completion", func() {
 	// ---- headless ----
 
 	Describe("CS-COMP-025: headless completes the launcher flags valid for headless", func() {
-		rejected := []string{"--ralph", "--limit", "--attach", "--join", "--branch"}
+		rejected := []string{"--ralph", "--limit", "--attach", "--join", "--branch", "--detach"} // --detach: CS-LNCH-115
 		claudeOwned := []string{"--help", "-h", "--version"}
 
 		It("offers the headless launcher flags with descriptions, and \"--\"", func() {

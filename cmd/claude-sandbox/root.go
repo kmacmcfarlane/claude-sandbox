@@ -225,6 +225,7 @@ const launchUsage = `Usage:
   claude-sandbox --ralph --limit 5        # run ralph for 5 iterations
   claude-sandbox sessions                 # list sandbox sessions
   claude-sandbox --attach                 # reattach after losing a terminal
+  claude-sandbox --detach                 # start a new session in the background, attach later
   claude-sandbox --branch                 # fork a conversation into a new container
   claude-sandbox --worktree               # work in a private worktree, not the shared checkout
   claude-sandbox init                     # bootstrap .claude-sandbox/ (config, env, gitignore)
@@ -278,6 +279,9 @@ config key 'worktree: true|false' changes the default for both):
 
 Multiple sessions (when a session is already running for this project):
   --new                     Launch a new container without prompting
+  --detach                  Start a new container in the background and exit: no terminal
+                            needed, implies --new; prints the --attach command. Not with
+                            --ralph, --attach, --join, --branch or headless
   --branch                  Fork a conversation into a new container and work on it
                             in parallel (claude's --resume picker chooses which;
                             works with or without running sessions). Add claude's
@@ -329,8 +333,10 @@ type launchFlags struct {
 
 	// Multi-session bypasses (CS-SESS-028). Each removes a decision, which is
 	// what makes them usable with no terminal attached.
-	NewSession       bool
-	Branch           bool
+	NewSession bool
+	Branch     bool
+	// Detach starts the new container without attaching (CS-LNCH-113..118).
+	Detach           bool
 	Attach           bool
 	AttachTarget     string
 	Join             bool
@@ -439,6 +445,9 @@ func scanArgs(args []string, headless bool) (*launchFlags, error) {
 			i++
 		case "--branch":
 			f.Branch = true
+			i++
+		case "--detach":
+			f.Detach = true
 			i++
 		case "--no-session-check":
 			f.NoSessionCheck = true
@@ -702,6 +711,27 @@ func validateBranch(f *launchFlags) error {
 	return nil
 }
 
+// validateDetach rejects flag combinations that contradict --detach
+// (CS-LNCH-115). A detached launch is always a new, interactive-mode
+// container that nobody is attached to yet; headless refuses it in
+// headlessRejection.
+func validateDetach(f *launchFlags) error {
+	if !f.Detach {
+		return nil
+	}
+	switch {
+	case f.Ralph:
+		return exitErr(2, "Error: --detach is not valid with --ralph")
+	case f.Attach:
+		return exitErr(2, "Error: --detach conflicts with --attach: --detach starts a new container in the background")
+	case f.Join:
+		return exitErr(2, "Error: --detach conflicts with --join: --detach starts a new container in the background")
+	case f.Branch:
+		return exitErr(2, "Error: --detach is not valid with --branch: claude's --resume picker would wait in a session nobody is attached to; pass --resume=<id> --fork-session after -- instead")
+	}
+	return nil
+}
+
 func runLaunch(env *Env, args []string) error {
 	f, err := scanLaunchArgs(args)
 	if err != nil {
@@ -760,6 +790,8 @@ func headlessRejection(f *launchFlags) error {
 		return exitErr(2, "Error: --join is not valid with headless: a headless launch is always a new container")
 	case f.Branch:
 		return exitErr(2, "Error: --branch is not valid with headless; pass claude's own --resume/--fork-session after --")
+	case f.Detach:
+		return exitErr(2, "Error: --detach is not valid with headless: an SDK client's session is its stdio stream")
 	}
 	return nil
 }
@@ -796,6 +828,14 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 	}
 	if err := validateBranch(f); err != nil {
 		return err
+	}
+	if err := validateDetach(f); err != nil {
+		return err
+	}
+	if f.Detach {
+		// CS-LNCH-114: nobody is there to answer the session prompt, and the
+		// point is a new container.
+		f.NewSession = true
 	}
 	projectDir, givenDir, err := resolveProjectDirFrom(env.Getenv, env.Err)
 	if err != nil {
@@ -1018,13 +1058,17 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 		MemoryLimitSource: cascade.MemoryLimitSource(configFiles),
 		OOMScoreAdjSource: oomSource,
 		Headless:          headless, LookupEnv: env.lookupEnv,
-		Out: env.Out, Err: env.Err,
+		Detached: f.Detach,
+		Out:      env.Out, Err: env.Err,
 	}
 	// Reserve under the host lock: re-validate the noun, pick the pid class,
 	// docker create (CS-SESS-048). The lock is released before the start.
 	plan, err := reserveContainer(env, in, wt, f.Ralph)
 	if err != nil {
 		return err
+	}
+	if f.Detach {
+		return startDetached(env, plan, projectDir)
 	}
 	return startReserved(env, plan, headless)
 }

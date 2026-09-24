@@ -147,6 +147,7 @@ var launchFlagSpecs = []launchFlagSpec{
 	{Name: "--worktree", Desc: "Work in a Claude Code worktree, .claude/worktrees/<name> (ralph's default; --worktree=NAME names it)"},
 	{Name: "--no-worktree", Desc: "Work in the shared checkout (the interactive default; turns ralph's worktree off)"},
 	{Name: "--new", Desc: "Launch a new container without prompting"},
+	{Name: "--detach", Desc: "Start a new container in the background and exit; attach later with --attach (implies --new)"},
 	{Name: "--branch", Desc: "Fork a conversation into a new container (claude's --resume picker chooses which; add --name to name the fork)"},
 	// --attach/--join take an OPTIONAL instance noun, and only in the "=" form:
 	// "--attach otter" would be ambiguous with a passthrough positional. So they

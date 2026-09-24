@@ -363,6 +363,7 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
     Examples:
       | flag                  | effect                                          |
       | --new                 | always launches a new container                 |
+      | --detach              | a new container, started in the background (CS-LNCH-114) |
       | --branch              | new container forking a chosen conversation     |
       | --attach=<noun>       | attaches to that instance                       |
       | --join=<noun>         | joins that container                            |
@@ -404,6 +405,8 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
       | docker exec  | a joined session                          |
     And all three use the same resolved sequence
     And the detachKeys config key overrides all three together
+    And a --detach launch's "docker start" attaches nothing and so carries no
+      --detach-keys; the sequence applies at its later attach (CS-LNCH-113)
 
   @manual
   Scenario: CS-SESS-037 The detach/reattach round trip survives repetition

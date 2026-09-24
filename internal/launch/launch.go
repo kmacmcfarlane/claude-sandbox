@@ -82,6 +82,12 @@ type Inputs struct {
 	// the HeadlessEnv allowlist.
 	Headless bool
 
+	// Detached marks a --detach launch (CS-LNCH-113): the container is
+	// created exactly as an attached one, -t included, and carries the
+	// LabelDetached label. It is a per-session choice, outside the config
+	// hash (CS-LNCH-118).
+	Detached bool
+
 	// LookupEnv tells set-but-empty from unset for the headless env allowlist
 	// (CS-LNCH-063). Nil falls back to Getenv, where "" reads as unset.
 	LookupEnv func(string) (string, bool)
@@ -117,6 +123,13 @@ const ModeHeadless = "headless"
 // container is only ever exited while docker removes it. Like every label it
 // is outside the config hash.
 const LabelKeep = "claude-sandbox.keep"
+
+// LabelDetached marks a container launched with --detach (CS-LNCH-118), so
+// later tooling (restore) can tell it was started with no client and relaunch
+// it the same way. Set only on detached launches; an attached launch's argv is
+// unchanged. Its mode label stays "claude": a detached session is an ordinary
+// attach and join candidate.
+const LabelDetached = "claude-sandbox.detached"
 
 // HeadlessEnv is the exact list of variables a headless launch forwards from
 // its own environment (CS-LNCH-063): what the Claude Agent SDK and Paseo set
@@ -214,6 +227,9 @@ type Plan struct {
 	DetachKeys    string   // --detach-keys sequence, for docker start only
 	// Headless renders create with -i but no -t (CS-LNCH-059).
 	Headless bool
+	// Instance is the container's instance noun ("" for ralph), for messages
+	// such as the --detach attach hint (CS-LNCH-113).
+	Instance string
 	// MemoryLimitSource is where MemoryLimit came from: a config.yaml path,
 	// oomreport.SourceDefault, or "" when the caller did not say (CS-LNCH-093).
 	MemoryLimitSource string
@@ -257,7 +273,7 @@ func Build(in Inputs) (*Plan, error) {
 	if in.Cfg == nil {
 		in.Cfg = &cascade.Config{}
 	}
-	p := &Plan{Image: in.ImageName, Headless: in.Headless}
+	p := &Plan{Image: in.ImageName, Headless: in.Headless, Instance: in.Instance}
 
 	// CS-LNCH-007: project at its real host path.
 	p.Volumes = append(p.Volumes, fmt.Sprintf("%s:%s", in.ProjectDir, in.ProjectDir))
@@ -513,6 +529,9 @@ func Build(in Inputs) (*Plan, error) {
 	if in.Instance != "" {
 		p.Labels = append(p.Labels, "claude-sandbox.instance="+in.Instance)
 	}
+	if in.Detached {
+		p.Labels = append(p.Labels, LabelDetached+"=1") // CS-LNCH-118
+	}
 	// CS-LNCH-111: the container's own identity, for code inside it — the
 	// baked Notification hook posts it so an operator running a dozen
 	// sandboxes can tell which one is waiting and how to reach it. Env vars
@@ -669,6 +688,13 @@ func isNameConflict(stderr string) bool {
 // launcher runs it as a child and waits (CS-LNCH-085).
 func (p *Plan) StartCmd() execx.Cmd {
 	return execx.Cmd{Name: "docker", Args: p.StartArgs()}
+}
+
+// DetachedStartArgs renders the "docker start" of a --detach launch
+// (CS-LNCH-113): no -a and no -i, so nothing attaches, and so no detach keys
+// either — they belong to the later "docker attach".
+func (p *Plan) DetachedStartArgs() []string {
+	return []string{"start", p.ContainerName}
 }
 
 func (in *Inputs) tempFile(name string, content []byte) (string, error) {

@@ -1106,8 +1106,8 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       "--setting-sources=<list>" and inline JSON in "--mcp-config" and "--settings"
     And the launcher's own --version and --help apply only BEFORE "headless";
       after it they are claude's
-    And --ralph, --limit, --attach[=N], --join[=N] and --branch exit 2: a
-      headless launch is always one new, non-ralph container
+    And --ralph, --limit, --attach[=N], --join[=N], --branch and --detach exit
+      2: a headless launch is always one new, non-ralph, attached container
     And "headless" is registered as a cobra command, so help and completion
       list it (CS-COMP-004)
 
@@ -1450,3 +1450,75 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       signals never reach it
     And on Linux it has a parent-death SIGKILL from an OS thread held for its
       lifetime, so a launcher killed outright (SIGKILL) never leaves it running
+
+  # ---- detached launch (--detach) ----
+  # A session started with no terminal attached — from an IDE, a script, a
+  # systemd unit — and reattached later with --attach. The container is the
+  # same --rm container an attached launch makes; only the start differs.
+
+  Scenario: CS-LNCH-113 --detach creates as usual and starts without attaching
+    When a new container is launched with --detach
+    Then "docker create -it --rm --init ..." runs exactly as for an attached
+      launch (CS-LNCH-057), -t included, so a later "docker attach" gets a TTY,
+      plus the label "claude-sandbox.detached=1"
+    And then "docker start <container>" runs as a plain command: no -a, no -i,
+      no --detach-keys (it attaches nothing, so there is nothing to detach), its
+      stdout (docker echoes the name) discarded and its stderr shown
+    And no session child runs and no "docker events" subscription is made
+    And stdout gets:
+      """
+      Started '<noun>' (<container>) in the background.
+      Attach: claude-sandbox --attach=<noun>   (from <project dir>; detach again with <keys>)
+      """
+      where <keys> is the resolved detachKeys sequence (CS-SESS-036), which the
+      later attach carries
+    And the launcher exits 0 while the session keeps running
+    And a positional initial prompt ("-- '/librarian-mode start'") reaches the
+      container's claude command exactly as it would attached
+
+  Scenario: CS-LNCH-114 A detached launch needs no terminal and is always a new container
+    Given sessions are running for this project
+    And no terminal is attached
+    When --detach is given
+    Then it implies --new: no session prompt, no exit 3, a new container
+    And "docker start" without -a needs no TTY on the launcher's side
+
+  Scenario Outline: CS-LNCH-115 --detach is refused where it has no meaning
+    When <combination> is given
+    Then the launch exits 2 before any docker command runs, naming the conflict
+    Examples:
+      | combination            | why                                                          |
+      | --detach --ralph       | ralph is unattended already and owns its own lifecycle       |
+      | --detach --attach[=N]  | attach enters a running session; --detach starts a new one   |
+      | --detach --join[=N]    | join enters a running container; --detach starts a new one   |
+      | --detach --branch      | claude's --resume picker would wait in a session nobody sees |
+      | headless --detach      | a headless launch is an SDK client's stdio stream            |
+
+  Scenario: CS-LNCH-116 A detached start that failed or never ran is cleaned up at once
+    Given a detached launch's "docker start" exits non-zero, or
+      "docker inspect" then reports the container still "created"
+    Then the reservation is removed with "docker rm" and, once that succeeded,
+      the shadow directory (CS-LNCH-057/083/096)
+    And the launcher exits with docker's status (1 when docker start succeeded
+      but never ran it), printing no attach hint
+    And the stale-reservation sweep (CS-SESS-052) stays the backstop when the
+      removal fails
+
+  Scenario: CS-LNCH-117 A detached launch leaves the shadow directory and the OOM report to later
+    When a detached launch has started its container
+    Then its shadow directory is kept: the running container mounts it, and no
+      launcher is left to see the container's die (CS-LNCH-094 needs one)
+    And once the --rm container has exited and is gone, a later launch's sweep
+      removes it (CS-LNCH-081: no container names it, older than one hour)
+    And nothing reports an OOM kill at launch time; a later --attach runs the
+      session child and reports one that ends the session (CS-SESS-059), and
+      "sessions" marks an OOM kill while the container still exists (CS-SESS-061)
+
+  Scenario: CS-LNCH-118 A detached session is an ordinary session afterwards
+    Then a detached container's mode label stays "claude", so it is an attach,
+      join, tier-1 prompt and completion candidate like any other
+    And its "claude-sandbox.detached=1" label lets later tooling (restore)
+      tell it was launched detached and relaunch it the same way; an attached
+      launch carries no such label
+    And --detach is a per-session choice, not the environment: it is not part
+      of the config hash, so attaching to a detached container shows no drift

@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/launch"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/oomreport"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/sessions"
@@ -245,6 +246,52 @@ func startReserved(env *Env, plan *launch.Plan, headless bool) error {
 		os.RemoveAll(plan.ShadowDir)
 	}
 	return sessionExit(end.code)
+}
+
+// startDetached starts the reserved container without attaching to it
+// (CS-LNCH-113): a plain "docker start", no session child, no events
+// subscription, no OOM report — nobody is attached to see one. The launcher
+// then exits 0 with the command that attaches.
+//
+// The shadow directory stays (CS-LNCH-117): the running container mounts it,
+// and no launcher is left to see its die (CS-LNCH-094). Once the --rm
+// container is gone, a later launch's sweep removes it (CS-LNCH-081). A start
+// that failed, or that returned with the container still "created", is
+// cleaned up as an attached one is (CS-LNCH-116): the reservation, then —
+// only once it is gone — the directory.
+func startDetached(env *Env, plan *launch.Plan, projectDir string) error {
+	err := env.Runner.Run(execx.Cmd{
+		Name: "docker", Args: plan.DetachedStartArgs(),
+		// docker echoes the container name on stdout; its errors go to stderr.
+		Stdout: io.Discard, Stderr: env.Err,
+	})
+	neverStarted := false
+	if err == nil {
+		state, _ := sessions.Inspect(env.Runner, plan.ContainerName)
+		neverStarted = state == sessions.StateCreated
+	}
+	if err != nil || neverStarted {
+		if sessions.RemoveReservation(env.Runner, plan.ContainerName) == nil && plan.ShadowDir != "" {
+			os.RemoveAll(plan.ShadowDir)
+		}
+		if err != nil {
+			if code := execx.ExitCode(err); code > 0 {
+				return sessionExit(code)
+			}
+			return exitErr(2, "Error: docker start %s: %v", plan.ContainerName, err)
+		}
+		return exitErr(1, "Error: docker start %s returned but the container never ran; removed it.", plan.ContainerName)
+	}
+	who := plan.ContainerName
+	if plan.Instance != "" {
+		who = "'" + plan.Instance + "' (" + plan.ContainerName + ")"
+	}
+	fmt.Fprintf(env.Out, "Started %s in the background.\n", who)
+	if plan.Instance != "" {
+		fmt.Fprintf(env.Out, "Attach: claude-sandbox --attach=%s   (from %s; detach again with %s)\n",
+			plan.Instance, projectDir, plan.DetachKeys)
+	}
+	return nil
 }
 
 // pruneShadowDirs removes the shadow directories of earlier launches that no
