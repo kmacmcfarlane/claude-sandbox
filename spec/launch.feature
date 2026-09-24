@@ -441,6 +441,22 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       does, before anything is created or re-moded, when a test's home is the
       real home directory ($HOME's or the user database's)
 
+  Scenario: CS-LNCH-159 An env file that defines a package cache's variable wins for that cache
+    Given package-cache access is enabled and an env file in the cascade
+      defines GOMODCACHE, GOCACHE, npm_config_cache or PIP_CACHE_DIR, read as
+      docker reads it (CS-LNCH-108) — a bare "KEY" line counts when the
+      launcher's environment sets it, since docker passes it through
+    Then that cache gets no -e and no mount, its directory is neither created
+      nor re-moded, and no message is printed for it
+    # docker -e silently beats --env-file: the launcher's -e used to override
+    # the operator's choice. The pre-commit rule (CS-LNCH-135), per cache.
+    And every other cache is decided as before (CS-LNCH-035/036, 155..158)
+    And inside a sandbox (CS-LNCH-155) such a cache is not named in the note
+    And when all four are defined by env files, the home check (CS-LNCH-158)
+      is not reached: nothing is created and nothing is printed
+    # The operator chose the location; mounting it is theirs (a cascade
+    # mounts: entry) if it lies outside the existing mounts.
+
   # ---- container-private pre-commit cache (CS-LNCH-133..139) ----
   # $HOME in a sandbox IS the host's home, so the host and every sandbox shared
   # ~/.cache/pre-commit. pre-commit's hook environments record the interpreter

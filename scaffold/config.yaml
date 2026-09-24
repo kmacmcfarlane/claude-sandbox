@@ -65,6 +65,7 @@
 #   # cache, npm, pip) on the host so they survive the container. Mounts
 #   # ~/.cache/claude-sandbox/{go-mod,go-build,npm,pip} writable at the same
 #   # path and sets GOMODCACHE / GOCACHE / npm_config_cache / PIP_CACHE_DIR.
+#   # An env file that sets one of those variables wins for that cache.
 #   # The tree is sandbox-only on purpose — never your own ~/go, ~/.npm or
 #   # ~/.cache/pip — so a session can never plant a module your host toolchain
 #   # would trust. It grows without bound; delete the directory to reset it.
