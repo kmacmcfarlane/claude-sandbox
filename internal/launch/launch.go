@@ -18,6 +18,7 @@ import (
 	assets "github.com/kmacmcfarlane/claude-sandbox"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/cascade"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/hostdirs"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/imagebuild"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/oomreport"
 )
@@ -64,7 +65,9 @@ type Inputs struct {
 	OOMScoreAdjSource string
 
 	// Chmod restricts a launcher-owned peer-registry directory (CS-LNCH-051).
-	// Nil means os.Chmod; tests inject a failure (CS-LNCH-107).
+	// Nil means fchmod on the descriptor hostdirs.EnsureOwnedDir checked;
+	// when set it is called with that descriptor's path instead. Tests inject
+	// a failure (CS-LNCH-107).
 	Chmod func(string, os.FileMode) error
 
 	// Linked is the verified linked git worktree the project lies in, nil
@@ -903,8 +906,8 @@ func (in *Inputs) assembleAWS(p *Plan) {
 
 // SandboxHomeRoot is the one tree under $HOME that belongs to the sandbox
 // alone. Every fixed host-side directory the launcher mounts derives from it,
-// so the roots cannot drift apart.
-const SandboxHomeRoot = ".cache/claude-sandbox"
+// so the roots cannot drift apart. It is hostdirs' cache root (CS-DIR-003).
+const SandboxHomeRoot = hostdirs.CacheRootRel
 
 // PackageCacheRoot is the sandbox-only tree under $HOME that the package-cache
 // lever mounts (CS-LNCH-037). Fixed on purpose: pointing this at the host's
@@ -1123,30 +1126,14 @@ func (in *Inputs) mkPeerDir(dir string) error {
 // mkOwnedPeerDir creates a directory under PeerRegistryRoot and enforces
 // peerDirMode even when it already existed wider (CS-LNCH-051). These are
 // sandbox-only directories the launcher owns, so tightening them is safe.
-//
-// It never tightens through a symlink (CS-LNCH-107): chmod follows links, and
-// the target of one is not the launcher's. MkdirAll accepts a link to a
-// directory, so the Lstat comes after it. The window between Lstat and Chmod
-// is open only to someone who can write the user's own cache directory.
+// The rule is hostdirs.EnsureOwnedDir's (CS-DIR-004/005): never through a
+// symlink, never a non-directory or another uid's directory (CS-LNCH-107).
 func (in *Inputs) mkOwnedPeerDir(dir string) error {
-	if err := in.mkPeerDir(dir); err != nil {
-		return err
+	ops := &hostdirs.Ops{}
+	if in.Chmod != nil {
+		ops.Fchmod = func(f *os.File, m os.FileMode) error { return in.Chmod(f.Name(), m) }
 	}
-	fi, err := os.Lstat(dir)
-	if err != nil {
-		return err
-	}
-	if fi.Mode()&os.ModeSymlink != 0 {
-		return errors.New("it is a symlink; the launcher restricts only a real directory")
-	}
-	chmod := in.Chmod
-	if chmod == nil {
-		chmod = os.Chmod
-	}
-	if err := chmod(dir, peerDirMode); err != nil {
-		return fmt.Errorf("restricting it to 0700: %w", err)
-	}
-	return nil
+	return hostdirs.EnsureOwnedDir(dir, peerDirMode, ops)
 }
 
 // ResolveTristate implements CLI > env var > YAML > default for a setting

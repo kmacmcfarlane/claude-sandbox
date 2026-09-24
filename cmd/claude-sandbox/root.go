@@ -19,6 +19,7 @@ import (
 	assets "github.com/kmacmcfarlane/claude-sandbox"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/cascade"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/hostdirs"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/imagebuild"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/launch"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/layout"
@@ -62,6 +63,11 @@ type Env struct {
 	// and the next launch reads it (CS-IMG-041..043); "" means
 	// $HOME/.cache/claude-sandbox. Tests point it at a scratch directory.
 	CacheDir string
+	// StateDir is the launcher's state root (CS-DIR-001, CS-DIR-007); ""
+	// means hostdirs.StateRoot: $XDG_STATE_HOME/claude-sandbox when that is
+	// absolute, else $HOME/.local/state/claude-sandbox. Tests point it at a
+	// scratch directory; stateDir() panics under go test when it is unset.
+	StateDir string
 	// Executable is the binary the detached checker runs as; nil means
 	// os.Executable. The checker is started through Runner.Start with
 	// Cmd.Detach, so under execx.Fake nothing is spawned.
@@ -79,7 +85,22 @@ func (e *Env) cacheDir() string {
 		panic("a test resolved the real cache dir; set Env.CacheDir to a scratch directory such as GinkgoT().TempDir()")
 	}
 	_, _, _, home := hostIdentity(e.Getenv)
-	return filepath.Join(home, launch.SandboxHomeRoot)
+	return hostdirs.CacheRoot(home)
+}
+
+// stateDir resolves Env.StateDir: the launcher's state root, for state that
+// cannot be rebuilt from another store (CS-DIR-001/007). Like cacheDir it
+// panics under go test when unset, so no fixture reads or writes the
+// operator's real ~/.local/state.
+func (e *Env) stateDir() string {
+	if e.StateDir != "" {
+		return e.StateDir
+	}
+	if testing.Testing() {
+		panic("a test resolved the real state dir; set Env.StateDir to a scratch directory such as GinkgoT().TempDir()")
+	}
+	_, _, _, home := hostIdentity(e.Getenv)
+	return hostdirs.StateRoot(home, e.Getenv)
 }
 
 // lookupEnv is Env.LookupEnv with the Getenv fallback.
