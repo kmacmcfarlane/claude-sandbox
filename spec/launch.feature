@@ -383,7 +383,7 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     Then the mounted tree is fixed under ~/.cache/claude-sandbox and is not configurable
     And nothing under ~/go, ~/.npm or ~/.cache/pip is mounted by this lever
 
-  # ---- container-private pre-commit cache (CS-LNCH-133..137) ----
+  # ---- container-private pre-commit cache (CS-LNCH-133..139) ----
   # $HOME in a sandbox IS the host's home, so the host and every sandbox shared
   # ~/.cache/pre-commit. pre-commit's hook environments record the interpreter
   # that built them (py_env-python3.11 -> /usr/bin/python3.11 from the Debian
@@ -461,11 +461,34 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     # same path in the container the nested launcher runs in.
     Given the launcher runs inside a sandbox (CLAUDE_SANDBOX_PROJECT_DIR is
       set, CS-DIR-006) and no env file defines PRE_COMMIT_HOME
-    When the launcher's own PRE_COMMIT_HOME is ~/.cache/claude-sandbox/pre-commit
+    When the launcher's own PRE_COMMIT_HOME, path-cleaned (a trailing slash or
+      doubled separator does not matter), is ~/.cache/claude-sandbox/pre-commit
     Then the mount and -e are added as in CS-LNCH-133
     When it is unset or names anything else
     Then neither is added, nothing is created, and one note says the cache is
       not mounted because the outer sandbox does not mount it
+
+  Scenario: CS-LNCH-138 A home that is not an absolute path stands the cache down
+    # A relative or empty home would name a directory under the launcher's cwd
+    # on the host and a different path in the container.
+    Given the home directory the launcher resolved is empty or relative
+    Then no mount and no -e PRE_COMMIT_HOME are added and nothing is created
+    And one warning says the cache is not mounted because the home is not absolute
+    And under go test the launch panics instead, naming Inputs.Home
+    # As it does when a test's home is the real home directory — $HOME's or the
+    # user database's, since HOME can be unset (env -i) while the launcher
+    # falls back to the user database: a forgotten fixture fails loudly
+    # rather than create a directory in the operator's home.
+
+  Scenario: CS-LNCH-139 A same-path mount that already covers the cache is kept, not doubled
+    Given a cascade mounts: entry with host == container that is the cache
+      directory or a parent of it
+    Then no second "-v" for the cache directory is added — docker never sees a
+      duplicate mount point — and -e PRE_COMMIT_HOME still names the directory
+    And when that covering mount is read-only, one WARNING says pre-commit
+      cannot install hook environments in this session
+    # The check runs after the cascade mounts are assembled, the linked
+    # worktree git-dir precedent (CS-LNCH-071).
 
   # ---- config-driven container settings ----
 

@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/user"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -596,7 +597,7 @@ var _ = Describe("launch.Build", func() {
 
 	// ---- pre-commit cache ----
 
-	Describe("pre-commit cache (CS-LNCH-133..137)", func() {
+	Describe("pre-commit cache (CS-LNCH-133..139)", func() {
 		var dir string
 		BeforeEach(func() {
 			dir = filepath.Join(home, ".cache", "claude-sandbox", "pre-commit")
@@ -760,6 +761,61 @@ var _ = Describe("launch.Build", func() {
 			}
 		})
 
+		DescribeTable("CS-LNCH-138: a home that is not absolute panics under go test (and stands down otherwise)",
+			func(h string) {
+				in.Home = h
+				Expect(func() { _, _ = launch.Build(in) }).To(PanicWith(ContainSubstring("non-absolute home")))
+				Expect(filepath.Join(h, ".cache", "claude-sandbox", "pre-commit")).NotTo(BeAnExistingFile())
+			},
+			Entry("relative", "rel/home"),
+			Entry("empty", ""),
+		)
+
+		It("CS-LNCH-138: a test whose home is the real $HOME panics before creating anything", func() {
+			real, err := os.UserHomeDir()
+			Expect(err).NotTo(HaveOccurred())
+			in.Home = real
+			Expect(func() { _, _ = launch.Build(in) }).To(PanicWith(ContainSubstring("under the real home")))
+		})
+
+		It("CS-LNCH-138: a test whose home is the user database's panics even when $HOME names elsewhere", func() {
+			u, err := user.Current()
+			Expect(err).NotTo(HaveOccurred())
+			if u.HomeDir == "" {
+				Skip("no home directory in the user database")
+			}
+			// HOME unset or pointing elsewhere (env -i): hostIdentity falls back
+			// to the user database, so the guard must consult it too.
+			GinkgoT().Setenv("HOME", GinkgoT().TempDir())
+			in.Home = u.HomeDir
+			Expect(func() { _, _ = launch.Build(in) }).To(PanicWith(ContainSubstring("under the real home")))
+		})
+
+		It("CS-LNCH-139: a cascade mount naming the directory is kept, not doubled, and PRE_COMMIT_HOME still names it", func() {
+			in.Cfg = &cascade.Config{Mounts: []cascade.Mount{{Host: dir, Container: dir, Writable: true}}}
+			p := build()
+			var dsts []string
+			for _, v := range argPairs(p.CreateArgs(proj), "-v") {
+				if parts := strings.Split(v, ":"); len(parts) >= 2 && parts[1] == dir {
+					dsts = append(dsts, v)
+				}
+			}
+			Expect(dsts).To(Equal([]string{dir + ":" + dir}))
+			Expect(envValues(p)).To(Equal([]string{dir}))
+			Expect(errw.String()).NotTo(ContainSubstring("pre-commit"))
+		})
+
+		It("CS-LNCH-139: a read-only parent mount covers it, with one warning", func() {
+			cache := filepath.Join(home, ".cache")
+			mkdir(cache)
+			in.Cfg = &cascade.Config{Mounts: []cascade.Mount{{Host: cache, Container: cache}}}
+			p := build()
+			Expect(mounts(p)).To(BeEmpty())
+			Expect(envValues(p)).To(Equal([]string{dir}))
+			Expect(strings.Count(errw.String(), "WARNING: pre-commit cache")).To(Equal(1))
+			Expect(errw.String()).To(ContainSubstring("under the read-only mount " + cache + ":" + cache + ":ro"))
+		})
+
 		Describe("CS-LNCH-137: inside a sandbox", func() {
 			BeforeEach(func() {
 				env["CLAUDE_SANDBOX_PROJECT_DIR"] = "/outer/proj"
@@ -785,6 +841,21 @@ var _ = Describe("launch.Build", func() {
 				Entry("unset (an older outer launcher)", ""),
 				Entry("another path (the outer's env file chose one)", "/work/.pc"),
 			)
+
+			DescribeTable("CS-LNCH-137: the outer's PRE_COMMIT_HOME is compared path-cleaned",
+				func(suffix string) {
+					env["PRE_COMMIT_HOME"] = dir + suffix
+					expectApplied(build())
+					Expect(out.String()).NotTo(ContainSubstring("pre-commit"))
+				},
+				Entry("trailing slash", "/"),
+				Entry("trailing /.", "/."),
+			)
+
+			It("CS-LNCH-137: a doubled separator inside the value still matches", func() {
+				env["PRE_COMMIT_HOME"] = strings.Replace(dir, "/pre-commit", "//pre-commit", 1)
+				expectApplied(build())
+			})
 
 			It("CS-LNCH-137: an env file still wins, silently", func() {
 				ef := filepath.Join(proj, "env")

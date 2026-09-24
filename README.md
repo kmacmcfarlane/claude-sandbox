@@ -1314,6 +1314,7 @@ Every sandbox gets its own [pre-commit](https://pre-commit.com) cache, separate 
 - Your shell's own `PRE_COMMIT_HOME` is **not** forwarded: it names the host cache, which is the collision this avoids.
 - If the directory cannot be made yours (root-owned, a file or symlink in the way), the launch continues without it and prints one warning; pre-commit then uses its default cache as before.
 - A launcher run inside a sandbox mounts it only when the outer sandbox did (its `PRE_COMMIT_HOME` is that path); otherwise it prints one note and mounts nothing, since docker would create the missing host directory as root.
+- If a `mounts:` entry in `config.yaml` already mounts that directory (or a parent) at the same path, it is used as is and no second mount is added; a read-only one prints a warning, since pre-commit cannot write there.
 - Containers launched before this change report config drift on attach/join once (the mount set changed).
 
 ### UID/GID mapping
