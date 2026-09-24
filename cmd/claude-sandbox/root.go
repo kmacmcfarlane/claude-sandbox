@@ -916,10 +916,20 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 	// returned above and pass no env file, CS-LNCH-131). Refuse it if any
 	// cascade env file defines a loader or shell-startup variable: every
 	// --env-file line reaches the root entrypoint's own bash before it can
-	// unset them (CS-IMG-067), and env files are session-writable, so a planted
+	// unset them (CS-IMG-067), and an env file is the one env channel the
+	// launcher passes from a session-writable file at create time (the child
+	// Dockerfile and cascade mounts are trusted by design), so a planted
 	// LD_PRELOAD would load a .so as root. Fail closed before any image build
 	// or docker create. The shared path covers ralph and headless too.
-	if refusals := cascade.RefusedEnvKeys(envFiles); len(refusals) > 0 {
+	// CS-LNCH-132: the files are read ONCE here; the same bytes go to Build,
+	// which hands docker verbatim copies from the shadow directory — the image
+	// builds and lock wait between here and the create are a window a session
+	// could otherwise toggle the file through.
+	envSnap, err := cascade.ReadEnvFiles(envFiles)
+	if err != nil {
+		return exitErr(2, "Error: reading env file: %v", err)
+	}
+	if refusals := cascade.RefusedEnvKeys(envSnap); len(refusals) > 0 {
 		fmt.Fprintln(env.Err, "Error: refusing to launch — an env file defines a variable the dynamic")
 		fmt.Fprintln(env.Err, "       loader or a shell honours before the root entrypoint can drop it,")
 		fmt.Fprintln(env.Err, "       so it would load code or read files as root at container start:")
@@ -1067,7 +1077,7 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 		CLIModel: f.Model, Passthrough: passthrough,
 		CLISSH: f.SSH, CLIGit: f.Git, CLIDockerSocket: f.DockerSocket, CLIAWS: f.AWS,
 		CLIPackageCaches: f.PackageCaches,
-		Cfg:              cfg, EnvFiles: envFiles, ImageName: image,
+		Cfg:              cfg, EnvFiles: envFiles, Env: envSnap, ImageName: image,
 		ImageID:  imagebuild.ImageID(env.Runner, image),
 		Instance: instance,
 		Worktree: worktree,

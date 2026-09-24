@@ -1605,3 +1605,27 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     Given a running session and a cascade env file containing "LD_AUDIT=/x.so"
     When the launcher attaches to or joins that session
     Then no --env-file is passed and the operation is not refused
+
+  Scenario: CS-LNCH-132 Docker gets the bytes the launcher checked, never a re-read of the file
+    # Between the refusal check and "docker create" lie the image builds and
+    # an up-to-30 s lock wait; a session-writable env file toggled in that
+    # window would pass the check clean and reach docker planted. So the
+    # cascade env files are read ONCE (cascade.ReadEnvFiles), the check runs
+    # on those bytes, and Build writes a verbatim, unfiltered 0600 copy of each
+    # into the launch's shadow directory (outside the project tree; made under
+    # the lock, CS-LNCH-080) and passes THOSE paths as --env-file, in cascade
+    # order. The stand-downs that yield to an env file (CS-LNCH-108) and the
+    # drift fingerprint's env digests (CS-SESS-020) read the same snapshot.
+    Given a cascade env file containing "TOKEN=a"
+    And the file is rewritten to "LD_PRELOAD=/p/evil.so" after the refusal
+      check and before docker create
+    When the launcher runs
+    Then every --env-file argument names a file in the shadow directory, mode
+      0600, whose content equals the file's content at check time ("TOKEN=a"),
+      and no --env-file names the original path
+    And the same holds for a ralph, headless and --detach launch
+    And the fingerprint's env digests are of the snapshot: a launch whose file
+      changed after the snapshot hashes as the snapshot, and messages and the
+      cascade report keep naming the original path
+    And an env file that cannot be read fails the launch (exit 2) before any
+      image work, rather than proceeding past a file it could not check

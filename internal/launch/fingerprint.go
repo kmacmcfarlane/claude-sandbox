@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"os"
 	"sort"
 	"strings"
 )
@@ -56,7 +55,7 @@ func shortDigest(b []byte) string {
 // configFingerprint hashes the effective launch and returns the hash plus the
 // per-file digests used to explain a mismatch.
 func (in *Inputs) configFingerprint(p *Plan, ha hostAccess, sharedPeerRegistry bool) (string, []InputDigest) {
-	inputs := make([]InputDigest, 0, len(in.EnvFiles)+len(in.shadowDigests)+2)
+	inputs := make([]InputDigest, 0, len(in.Env)+len(in.shadowDigests)+2)
 
 	// (1) The merged cascade config. Canonical JSON of the post-merge struct:
 	// this is the value that actually governs the launch, whatever combination
@@ -65,13 +64,12 @@ func (in *Inputs) configFingerprint(p *Plan, ha hostAccess, sharedPeerRegistry b
 	inputs = append(inputs, InputDigest{Path: "<merged config>", Digest: shortDigest(merged), Kind: KindConfig})
 
 	// (2) Env files, in cascade order, by content — docker reads --env-file at
-	// run time, so the contents are what matter, not just the paths.
-	for _, ef := range in.EnvFiles {
-		raw, err := os.ReadFile(ef)
-		if err != nil {
-			raw = []byte("<unreadable>")
-		}
-		inputs = append(inputs, InputDigest{Path: ef, Digest: shortDigest(raw), Kind: KindEnv})
+	// create time, so the contents are what matter, not just the paths. The
+	// snapshot's bytes are the ones docker gets (CS-LNCH-132), so the hash
+	// describes the container, not a later re-read; the Path stays the
+	// original for the drift explanation.
+	for _, ef := range in.Env {
+		inputs = append(inputs, InputDigest{Path: ef.Path, Digest: shortDigest(ef.Content), Kind: KindEnv})
 	}
 
 	// (3)+(4) The image: which Dockerfile and context produced it, and the ID

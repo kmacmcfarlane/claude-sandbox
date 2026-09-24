@@ -880,7 +880,10 @@ The refusal names the file, line and key; it never prints the value. A session t
 legitimately needs one of these sets it in its own shell rc; an image sets it with `ENV` in
 the child `Dockerfile`. `--attach` and `--join` re-use an existing container and pass no env
 file, so they are never blocked by this. (Detection uses the same docker-faithful env reader
-as the lint and override notice, so a BOM, indentation or CRLF cannot hide a key.)
+as the lint and override notice, so a BOM, indentation or CRLF cannot hide a key.) Docker
+also gets exactly the bytes that were checked: the launcher reads each env file once and
+passes `docker create` a verbatim, mode-0600 copy from the launch's temporary shadow
+directory, so a file rewritten during the image build cannot slip a key past the check.
 
 `claude-sandbox init` never creates `.claude-sandbox/env`. It seeds
 `.claude-sandbox/env.example`, a commented template that the launcher never reads; copy it

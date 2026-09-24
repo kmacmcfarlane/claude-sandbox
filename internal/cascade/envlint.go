@@ -111,6 +111,35 @@ func readEnvAssignments(path string) ([]envAssignment, error) {
 	if err != nil {
 		return nil, err
 	}
+	return parseEnvAssignments(raw), nil
+}
+
+// EnvFile is one cascade env file read ONCE: the bytes the launcher checked
+// are the bytes docker gets (CS-LNCH-132). The launcher passes a verbatim copy
+// of Content to docker create, never Path — the file under Path is
+// session-writable and could change between the check and the create.
+type EnvFile struct {
+	Path    string // the original path, for messages and the fingerprint
+	Content []byte
+}
+
+// ReadEnvFiles snapshots every path, in order. Any unreadable file is an
+// error: docker create would fail on it anyway, and a launch must never
+// proceed past a file it could not check.
+func ReadEnvFiles(paths []string) ([]EnvFile, error) {
+	out := make([]EnvFile, 0, len(paths))
+	for _, p := range paths {
+		raw, err := os.ReadFile(p)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, EnvFile{Path: p, Content: raw})
+	}
+	return out, nil
+}
+
+// parseEnvAssignments is readEnvAssignments over bytes already read.
+func parseEnvAssignments(raw []byte) []envAssignment {
 	// Split on '\n' and drop one '\r' per line below: the same result as
 	// bufio.ScanLines, without its 64 KiB line limit.
 	lines := strings.Split(string(raw), "\n")
@@ -131,7 +160,7 @@ func readEnvAssignments(path string) ([]envAssignment, error) {
 		key, value, ok := strings.Cut(line, "=")
 		out = append(out, envAssignment{Line: i + 1, Key: key, Value: value, HasValue: ok})
 	}
-	return out, nil
+	return out
 }
 
 // validEnvKey reports whether docker accepts key as a variable name: non-empty
@@ -140,24 +169,20 @@ func validEnvKey(key string) bool {
 	return key != "" && !strings.ContainsAny(key, " \t")
 }
 
-// EnvFilesDefine reports whether docker, given files as --env-file flags, would
-// set key in the container (CS-LNCH-108). Files are read by readEnvAssignments,
-// so a BOM, leading whitespace and one trailing '\r' are handled as docker
-// handles them. A bare KEY line counts only when lookup finds KEY in the
-// launcher's environment (nil lookup: never), because docker passes that value
-// through and drops the line otherwise — the override notice's rule
-// (CS-CASC-027/028). Keys docker rejects never match; unreadable files are
-// skipped.
-func EnvFilesDefine(files []string, key string, lookup LookupEnv) bool {
+// EnvFilesDefine reports whether docker, given the snapshotted files as
+// --env-file flags, would set key in the container (CS-LNCH-108). Contents
+// are parsed as readEnvAssignments parses a file, so a BOM, leading whitespace
+// and one trailing '\r' are handled as docker handles them. A bare KEY line
+// counts only when lookup finds KEY in the launcher's environment (nil lookup:
+// never), because docker passes that value through and drops the line
+// otherwise — the override notice's rule (CS-CASC-027/028). Keys docker
+// rejects never match. It reads the snapshot, never the path (CS-LNCH-132).
+func EnvFilesDefine(files []EnvFile, key string, lookup LookupEnv) bool {
 	if !validEnvKey(key) {
 		return false
 	}
 	for _, f := range files {
-		assigns, err := readEnvAssignments(f)
-		if err != nil {
-			continue
-		}
-		for _, a := range assigns {
+		for _, a := range parseEnvAssignments(f.Content) {
 			if a.Key != key {
 				continue
 			}

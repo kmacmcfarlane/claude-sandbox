@@ -102,6 +102,13 @@ type Inputs struct {
 
 	Cfg      *cascade.Config
 	EnvFiles []string
+	// Env is the cascade env files snapshotted ONCE by the caller, the bytes
+	// its refusal check saw (CS-LNCH-129, CS-LNCH-132). Build writes a
+	// verbatim 0600 copy of each into the shadow directory and passes THOSE
+	// to docker create, so a session-writable file changed between the check
+	// and the create never reaches docker. Nil: Build snapshots EnvFiles
+	// itself (drift checks, tests) — still one read for the whole build.
+	Env []cascade.EnvFile
 
 	ImageName string
 	Out       io.Writer
@@ -275,6 +282,16 @@ func Build(in Inputs) (*Plan, error) {
 	}
 	p := &Plan{Image: in.ImageName, Headless: in.Headless, Instance: in.Instance}
 
+	// CS-LNCH-132: one snapshot for everything below — the stand-downs
+	// (CS-LNCH-108), the fingerprint and the copies docker gets.
+	if in.Env == nil && len(in.EnvFiles) > 0 {
+		snap, err := cascade.ReadEnvFiles(in.EnvFiles)
+		if err != nil {
+			return nil, fmt.Errorf("reading env file: %w", err)
+		}
+		in.Env = snap
+	}
+
 	// CS-LNCH-007: project at its real host path.
 	p.Volumes = append(p.Volumes, fmt.Sprintf("%s:%s", in.ProjectDir, in.ProjectDir))
 
@@ -386,8 +403,16 @@ func Build(in Inputs) (*Plan, error) {
 		p.DetachKeys = ResolveDetachKeys(in.Cfg.DetachKeys)
 	}
 
-	// Env files (root-first; later wins).
-	p.EnvFiles = in.EnvFiles
+	// Env files (root-first; later wins). CS-LNCH-132: docker gets verbatim
+	// copies of the snapshot, written 0600 into the shadow directory (outside
+	// the project tree), never the session-writable originals.
+	for i, ef := range in.Env {
+		copyPath, err := in.envCopy(i, ef.Content)
+		if err != nil {
+			return nil, fmt.Errorf("copying env file %s: %w", ef.Path, err)
+		}
+		p.EnvFiles = append(p.EnvFiles, copyPath)
+	}
 
 	// CS-LNCH-023: model precedence CLI > YAML.
 	model := in.CLIModel
@@ -697,15 +722,36 @@ func (p *Plan) DetachedStartArgs() []string {
 	return []string{"start", p.ContainerName}
 }
 
-func (in *Inputs) tempFile(name string, content []byte) (string, error) {
-	dir := in.TempDir
-	if dir == "" {
+// shadowDirFor returns the shadow directory, making one when none was given.
+func (in *Inputs) shadowDirFor() (string, error) {
+	if in.TempDir == "" {
 		d, err := NewShadowDir("")
 		if err != nil {
 			return "", err
 		}
 		in.TempDir = d
-		dir = d
+	}
+	return in.TempDir, nil
+}
+
+// envCopy writes the i-th snapshotted env file verbatim into the shadow
+// directory, mode 0600 (env files hold secrets), and returns its path
+// (CS-LNCH-132). Not through tempFile: the content is already in the
+// fingerprint as KindEnv under its original path (configFingerprint), and a
+// second digest under a shadow name would double-count it.
+func (in *Inputs) envCopy(i int, content []byte) (string, error) {
+	dir, err := in.shadowDirFor()
+	if err != nil {
+		return "", err
+	}
+	p := filepath.Join(dir, fmt.Sprintf("env-%d", i))
+	return p, os.WriteFile(p, content, 0o600)
+}
+
+func (in *Inputs) tempFile(name string, content []byte) (string, error) {
+	dir, err := in.shadowDirFor()
+	if err != nil {
+		return "", err
 	}
 	p := filepath.Join(dir, name)
 	// Every shadow file is written through here, so this is the one place that
@@ -1231,11 +1277,12 @@ func samePathMountOf(volumes []string, path string) (string, bool) {
 }
 
 // envFilesDefine reports whether docker would set key from the env files,
-// read by the cascade's shared docker-faithful reader (CS-LNCH-108): a BOM,
+// parsed by the cascade's shared docker-faithful reader (CS-LNCH-108): a BOM,
 // indentation and a CRLF ending do not hide a key, and a bare KEY line counts
 // when the launcher's own environment sets KEY, since docker passes it through.
+// It reads the snapshot docker will get, never the path (CS-LNCH-132).
 func (in *Inputs) envFilesDefine(key string) bool {
-	return cascade.EnvFilesDefine(in.EnvFiles, key, in.lookupEnvValue)
+	return cascade.EnvFilesDefine(in.Env, key, in.lookupEnvValue)
 }
 
 // lookupEnvValue is the launcher's environment as docker resolves a bare env

@@ -496,7 +496,7 @@ var _ = Describe("launch.Build", func() {
 			Expect(e).NotTo(HavePrefix("AWS_PROFILE"))
 			Expect(e).NotTo(HavePrefix("AWS_REGION"))
 		}
-		Expect(p.CreateArgs(proj)).To(ContainElements("--env-file", envFile))
+		Expect(envFileContents(p.CreateArgs(proj))).To(Equal([]string{"AWS_PROFILE=from-envfile\nAWS_REGION=eu-west-1\n"}))
 	})
 
 	It("CS-LNCH-103: forwards the AWS allowlist by name and never puts a value in argv", func() {
@@ -1602,7 +1602,7 @@ var _ = Describe("launch.Build", func() {
 				Expect(a).NotTo(HavePrefix("ANTHROPIC_API_KEY"))
 				Expect(a).NotTo(ContainSubstring(secret))
 			}
-			Expect(args).To(ContainElements("--env-file", envFile))
+			Expect(envFileContents(args)).To(Equal([]string{"ANTHROPIC_API_KEY=" + secret + "\n"}))
 		})
 
 		It("CS-LNCH-106: a set key still outranks the env file with a bare -e NAME", func() {
@@ -1613,7 +1613,7 @@ var _ = Describe("launch.Build", func() {
 			in.EnvFiles = []string{envFile}
 			p := build()
 			Expect(p.EnvFlags).To(ContainElement("ANTHROPIC_API_KEY"))
-			Expect(p.CreateArgs(proj)).To(ContainElements("--env-file", envFile))
+			Expect(envFileContents(p.CreateArgs(proj))).To(Equal([]string{"ANTHROPIC_API_KEY=" + secret + "\n"}))
 		})
 	})
 
@@ -1731,14 +1731,85 @@ var _ = Describe("launch.Build", func() {
 	)
 
 	It("renders env files as stacked --env-file flags in cascade order", func() {
-		in.EnvFiles = []string{"/root/env", "/proj/env"}
+		root := filepath.Join(home, "root-env")
+		local := filepath.Join(proj, "proj-env")
+		touch(root, "A=root\n")
+		touch(local, "A=proj\n")
+		in.EnvFiles = []string{root, local}
 		args := build().CreateArgs(proj)
-		Expect(args).To(ContainElements("--env-file", "/root/env"))
-		i := indexOf(args, "/root/env")
-		j := indexOf(args, "/proj/env")
-		Expect(i).To(BeNumerically("<", j))
+		Expect(envFileContents(args)).To(Equal([]string{"A=root\n", "A=proj\n"}))
+	})
+
+	Describe("CS-LNCH-132: docker gets the checked bytes, never a re-read", func() {
+		It("passes 0600 copies of the snapshot from the shadow directory, not the originals", func() {
+			ef := filepath.Join(proj, "env")
+			touch(ef, "TOKEN=checked\n")
+			in.EnvFiles = []string{ef}
+			in.Env = []cascade.EnvFile{{Path: ef, Content: []byte("TOKEN=checked\n")}}
+			// The session rewrites the file between the check and the create.
+			touch(ef, "LD_PRELOAD=/p/evil.so\n")
+			p := build()
+			args := p.CreateArgs(proj)
+			Expect(envFileContents(args)).To(Equal([]string{"TOKEN=checked\n"}))
+			Expect(args).NotTo(ContainElement(ef))
+			Expect(p.EnvFiles).To(HaveLen(1))
+			Expect(p.EnvFiles[0]).To(HavePrefix(in.TempDir + "/"))
+			st, err := os.Stat(p.EnvFiles[0])
+			Expect(err).NotTo(HaveOccurred())
+			Expect(st.Mode().Perm()).To(Equal(os.FileMode(0o600)))
+		})
+
+		It("hashes the snapshot under the original path, so a later rewrite is not in the fingerprint", func() {
+			ef := filepath.Join(proj, "env")
+			touch(ef, "TOKEN=checked\n")
+			in.EnvFiles = []string{ef}
+			plain := build() // snapshots the file itself
+			in.Env = []cascade.EnvFile{{Path: ef, Content: []byte("TOKEN=checked\n")}}
+			touch(ef, "TOKEN=rewritten\n")
+			snap := build()
+			Expect(snap.ConfigHash).To(Equal(plain.ConfigHash))
+			var envDigests []launch.InputDigest
+			for _, d := range snap.ConfigInputs {
+				if d.Kind == launch.KindEnv {
+					envDigests = append(envDigests, d)
+				}
+			}
+			Expect(envDigests).To(HaveLen(1))
+			Expect(envDigests[0].Path).To(Equal(ef))
+		})
+
+		It("the stand-downs read the snapshot (CS-LNCH-108), not the path", func() {
+			ef := filepath.Join(proj, "env")
+			touch(ef, "TOKEN=x\n")
+			in.EnvFiles = []string{ef}
+			in.Env = []cascade.EnvFile{{Path: ef, Content: []byte("CLAUDE_CODE_TMPDIR=/from-snapshot\n")}}
+			p := build()
+			for _, e := range p.EnvFlags {
+				Expect(e).NotTo(HavePrefix("CLAUDE_CODE_TMPDIR="), "the snapshot defines it, so no -e is added")
+			}
+		})
+
+		It("with no snapshot, Build reads each file once and fails on an unreadable one", func() {
+			in.EnvFiles = []string{filepath.Join(proj, "missing-env")}
+			_, err := launch.Build(in)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("reading env file"))
+		})
 	})
 })
+
+// envFileContents reads each --env-file copy of a create argv (CS-LNCH-132).
+func envFileContents(args []string) []string {
+	var out []string
+	for i, a := range args {
+		if a == "--env-file" && i+1 < len(args) {
+			raw, err := os.ReadFile(args[i+1])
+			Expect(err).NotTo(HaveOccurred())
+			out = append(out, string(raw))
+		}
+	}
+	return out
+}
 
 func indexOf(s []string, v string) int {
 	for i, x := range s {

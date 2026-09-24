@@ -46,7 +46,7 @@ var _ = Describe("refused env keys (CS-CASC-042..045)", func() {
 
 	DescribeTable("CS-CASC-043: detection reads env files as docker does",
 		func(line string, refused bool) {
-			got := cascade.RefusedEnvKeys([]string{write(line)})
+			got := cascade.RefusedEnvKeys(snap(write(line)))
 			if refused {
 				Expect(got).To(HaveLen(1))
 				Expect(got[0].Key).To(Equal("LD_PRELOAD"))
@@ -68,7 +68,7 @@ var _ = Describe("refused env keys (CS-CASC-042..045)", func() {
 	It("CS-CASC-044: a bare refused key is refused whatever the environment holds", func() {
 		// A bare key is refused with no lookup at all — RefusedEnvKeys does not
 		// consult the launcher's environment, unlike EnvFilesDefine.
-		got := cascade.RefusedEnvKeys([]string{write("LD_PRELOAD\n")})
+		got := cascade.RefusedEnvKeys(snap(write("LD_PRELOAD\n")))
 		Expect(got).To(HaveLen(1))
 		Expect(got[0].Key).To(Equal("LD_PRELOAD"))
 	})
@@ -77,7 +77,7 @@ var _ = Describe("refused env keys (CS-CASC-042..045)", func() {
 		up := write("TOKEN=t\nLD_AUDIT=/x.so\n")
 		local := write("# c\nBASH_ENV=/p/rc\nLD_PRELOAD=/p/e.so\n")
 
-		got := cascade.RefusedEnvKeys([]string{up, local})
+		got := cascade.RefusedEnvKeys(snap(up, local))
 		Expect(got).To(Equal([]cascade.EnvRefusal{
 			{File: up, Line: 2, Key: "LD_AUDIT"},
 			{File: local, Line: 2, Key: "BASH_ENV"},
@@ -85,8 +85,8 @@ var _ = Describe("refused env keys (CS-CASC-042..045)", func() {
 		}))
 	})
 
-	It("CS-CASC-045: an unreadable file yields no finding", func() {
-		got := cascade.RefusedEnvKeys([]string{filepath.Join(GinkgoT().TempDir(), "does-not-exist")})
-		Expect(got).To(BeEmpty())
+	It("CS-CASC-045: an unreadable file cannot be snapshotted, so the launch fails on it before any check", func() {
+		_, err := cascade.ReadEnvFiles([]string{filepath.Join(GinkgoT().TempDir(), "does-not-exist")})
+		Expect(err).To(HaveOccurred())
 	})
 })

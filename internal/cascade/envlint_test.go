@@ -199,6 +199,21 @@ var _ = Describe("env file linting", func() {
 	})
 })
 
+// snap reads paths into the snapshot EnvFilesDefine and RefusedEnvKeys take
+// (CS-LNCH-132); a missing path is dropped, as a caller that skips
+// unreadable files would.
+func snap(paths ...string) []cascade.EnvFile {
+	var out []cascade.EnvFile
+	for _, p := range paths {
+		raw, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		out = append(out, cascade.EnvFile{Path: p, Content: raw})
+	}
+	return out
+}
+
 // Spec: spec/launch.feature (CS-LNCH-108) — EnvFilesDefine is the launcher's
 // "would docker set this key" check, on the shared reader.
 var _ = Describe("EnvFilesDefine", func() {
@@ -219,7 +234,7 @@ var _ = Describe("EnvFilesDefine", func() {
 				host["K"] = ""
 			}
 			f := writeEnv(tmp, content)
-			Expect(cascade.EnvFilesDefine([]string{f}, "K", lookup)).To(Equal(want))
+			Expect(cascade.EnvFilesDefine(snap(f), "K", lookup)).To(Equal(want))
 		},
 		Entry("plain assignment", "K=v\n", false, true),
 		Entry("empty value", "K=\n", false, true),
@@ -237,18 +252,28 @@ var _ = Describe("EnvFilesDefine", func() {
 
 	It("CS-LNCH-108: a nil lookup never resolves a bare key", func() {
 		f := writeEnv(tmp, "K\n")
-		Expect(cascade.EnvFilesDefine([]string{f}, "K", nil)).To(BeFalse())
+		Expect(cascade.EnvFilesDefine(snap(f), "K", nil)).To(BeFalse())
 	})
 
-	It("CS-LNCH-108: checks every file and skips unreadable ones", func() {
+	It("CS-LNCH-108: checks every file", func() {
 		f := writeEnv(tmp, "K=v\n")
-		missing := filepath.Join(tmp, "missing")
-		Expect(cascade.EnvFilesDefine([]string{missing, f}, "K", nil)).To(BeTrue())
+		g := writeEnv(GinkgoT().TempDir(), "A=1\n")
+		Expect(cascade.EnvFilesDefine(snap(g, f), "K", nil)).To(BeTrue())
+	})
+
+	It("CS-LNCH-132: ReadEnvFiles snapshots every path once, in order, and fails on an unreadable one", func() {
+		f := writeEnv(tmp, "K=v\n")
+		g := writeEnv(GinkgoT().TempDir(), "A=1\n")
+		got, err := cascade.ReadEnvFiles([]string{f, g})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(got).To(Equal([]cascade.EnvFile{{Path: f, Content: []byte("K=v\n")}, {Path: g, Content: []byte("A=1\n")}}))
+		_, err = cascade.ReadEnvFiles([]string{f, filepath.Join(tmp, "missing")})
+		Expect(err).To(HaveOccurred())
 	})
 
 	It("CS-LNCH-108: a key docker rejects never matches, even on its own line", func() {
 		f := writeEnv(tmp, "=v\nA B=v\n")
-		Expect(cascade.EnvFilesDefine([]string{f}, "", nil)).To(BeFalse())
-		Expect(cascade.EnvFilesDefine([]string{f}, "A B", nil)).To(BeFalse())
+		Expect(cascade.EnvFilesDefine(snap(f), "", nil)).To(BeFalse())
+		Expect(cascade.EnvFilesDefine(snap(f), "A B", nil)).To(BeFalse())
 	})
 })

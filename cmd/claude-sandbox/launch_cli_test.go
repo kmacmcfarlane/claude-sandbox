@@ -468,7 +468,7 @@ var _ = Describe("launcher CLI (end-to-end argv)", func() {
 			Expect(a).NotTo(HavePrefix("ANTHROPIC_API_KEY"))
 			Expect(a).NotTo(ContainSubstring("sk-ant-envfile-sentinel"))
 		}
-		Expect(args).To(ContainElements("--env-file", envFile))
+		Expect(envFileContents(args)).To(Equal([]string{"ANTHROPIC_API_KEY=sk-ant-envfile-sentinel\n"}))
 	})
 
 	It("CS-LNCH-024: prints the cascade report root-first with contributing files", func() {
@@ -484,8 +484,8 @@ var _ = Describe("launcher CLI (end-to-end argv)", func() {
 		// Root level listed before the project level.
 		Expect(strings.Index(out, parent+"/.claude-sandbox/")).To(BeNumerically("<",
 			strings.Index(out, f.proj+"/.claude-sandbox/")))
-		// The env file feeds an --env-file flag.
-		Expect(f.launched().Args).To(ContainElements("--env-file", filepath.Join(f.proj, ".claude-sandbox", "env")))
+		// The env file feeds an --env-file flag (a snapshot copy, CS-LNCH-132).
+		Expect(envFileContents(f.launched().Args)).To(Equal([]string{""}))
 	})
 
 	It("CS-LNCH-025: warns and says where an env belongs when no env cascade exists, launching without --env-file", func() {

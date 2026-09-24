@@ -14,6 +14,9 @@ package cascade
 // read-write), so an in-sandbox agent could otherwise plant one of these keys
 // and have code run as root on the next launch.
 //
+// An env file is the one env channel the launcher passes from a
+// session-writable file at create time; the child Dockerfile and cascade
+// mounts are trusted by design (the README's accidental-damage threat model).
 // The launcher REFUSES a launch whose cascade env files define any such key,
 // rather than stripping them into a filtered copy: a rewrite would silently
 // drop a line the operator can no longer see, and nothing in an env file
@@ -64,10 +67,12 @@ type EnvRefusal struct {
 	Key  string
 }
 
-// RefusedEnvKeys reports, for a root-first cascade of env files, every line
-// that defines a key IsRefusedEnvKey rejects, in cascade order then file order
-// (CS-CASC-045). It reads files with readEnvAssignments, so a BOM, indentation
-// and one trailing '\r' are handled as docker handles them (CS-CASC-043).
+// RefusedEnvKeys reports, for a root-first cascade of snapshotted env files,
+// every line that defines a key IsRefusedEnvKey rejects, in cascade order then
+// file order (CS-CASC-045). It parses the snapshot bytes as readEnvAssignments
+// parses a file, so a BOM, indentation and one trailing '\r' are handled as
+// docker handles them (CS-CASC-043) — and those same bytes are what docker
+// gets, never a re-read of the path (CS-LNCH-132).
 //
 // Unlike EnvFilesDefine, a BARE refused key (no '=') is always a finding
 // (CS-CASC-044): docker would pass it through from the launcher's own
@@ -76,21 +81,16 @@ type EnvRefusal struct {
 // host sets it. This is the one place detection does not follow docker's
 // "a bare key defines nothing unless the host sets it" rule, on purpose: fail
 // closed. Keys docker itself rejects (empty, or containing a blank) never
-// match. Unreadable files yield no finding — the launch fails on them
-// elsewhere.
-func RefusedEnvKeys(files []string) []EnvRefusal {
+// match.
+func RefusedEnvKeys(files []EnvFile) []EnvRefusal {
 	var out []EnvRefusal
 	for _, f := range files {
-		assigns, err := readEnvAssignments(f)
-		if err != nil {
-			continue
-		}
-		for _, a := range assigns {
+		for _, a := range parseEnvAssignments(f.Content) {
 			if !validEnvKey(a.Key) {
 				continue
 			}
 			if IsRefusedEnvKey(a.Key) {
-				out = append(out, EnvRefusal{File: f, Line: a.Line, Key: a.Key})
+				out = append(out, EnvRefusal{File: f.Path, Line: a.Line, Key: a.Key})
 			}
 		}
 	}

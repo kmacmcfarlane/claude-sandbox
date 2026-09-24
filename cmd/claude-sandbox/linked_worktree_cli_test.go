@@ -56,7 +56,7 @@ var _ = Describe("linked git worktree (CS-LNCH-070..075, CS-CASC-031..033)", fun
 		Expect(l.fake.CommandLines()).To(ContainElement("git -C " + l.proj + " " + linkedRevParse))
 		Expect(l.launchLine()).To(MatchRegexp(` claude --dangerously-skip-permissions$`), "dangerous: true from the main checkout")
 		args := l.launched().Args
-		Expect(args).To(ContainElements("--env-file", filepath.Join(l.main, ".claude-sandbox", "env")))
+		Expect(envFileContents(args)).To(Equal([]string{"FROM_MAIN=1\n"}))
 		Expect(l.out.String()).To(ContainSubstring("Sandbox config cascade"))
 		Expect(l.out.String()).To(ContainSubstring(filepath.Join(l.main, ".claude-sandbox") + "/  →  config.yaml env"))
 	})
