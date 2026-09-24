@@ -1079,7 +1079,7 @@ Override it with the `oomScoreAdj` key, or `CLAUDE_SANDBOX_OOM_SCORE_ADJ` for on
 oomScoreAdj: 800   # a machine where sandboxes should always go first
 ```
 
-This affects only the kernel's OOM killer. systemd-oomd picks whole cgroups by memory pressure and ignores `oom_score_adj`, so its choices are unchanged; host-side protection (oomd thresholds, earlyoom, `MemoryMin` on the desktop slice) is the host's business. A value below 0 prints a warning at launch: it shields the sandbox, so the kernel prefers host processes, the desktop included.
+This affects only the kernel's OOM killer. systemd-oomd picks whole cgroups by memory pressure or swap use and ignores `oom_score_adj`, so its choices are unchanged; host-side protection (oomd thresholds, earlyoom, `MemoryMin` on the desktop slice) is the host's business. A value below 0 prints a warning at launch: it shields the sandbox, so the kernel prefers host processes, the desktop included.
 
 #### Detach keys
 
