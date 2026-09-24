@@ -10,10 +10,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
+	"testing"
 
 	assets "github.com/kmacmcfarlane/claude-sandbox"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/cascade"
@@ -367,6 +369,10 @@ func Build(in Inputs) (*Plan, error) {
 			p.Volumes = append(p.Volumes, fmt.Sprintf("%s:%s:ro", m.Host, m.Container))
 		}
 	}
+
+	// CS-LNCH-133..139: container-private pre-commit cache. Always on. After
+	// the cascade mounts, so one that already covers it wins (CS-LNCH-139).
+	in.assemblePreCommitCache(p)
 
 	// CS-LNCH-071: a linked worktree's .git file names a git dir inside the
 	// repository's common dir, outside the project mount. Read-write — git
@@ -940,6 +946,103 @@ func (in *Inputs) assemblePackageCaches(p *Plan) error {
 		p.EnvFlags = append(p.EnvFlags, c.env+"="+dir)
 	}
 	return nil
+}
+
+// PreCommitCacheDir is the sandbox-only pre-commit cache under $HOME
+// (CS-LNCH-133). The host's own ~/.cache/pre-commit holds hook environments
+// built by the host's Python; the image's Python differs, so sharing that
+// cache made every host/sandbox alternation rebuild them.
+const PreCommitCacheDir = SandboxHomeRoot + "/pre-commit"
+
+// preCommitHomeEnv is the variable pre-commit reads its cache location from.
+const preCommitHomeEnv = "PRE_COMMIT_HOME"
+
+// assemblePreCommitCache mounts the sandbox-only pre-commit cache writable at
+// the same path and points PRE_COMMIT_HOME at it (CS-LNCH-133). It never
+// fails the launch: without it the session shares the host's cache, as it
+// did before.
+//
+// The launcher's own PRE_COMMIT_HOME is deliberately not forwarded
+// (CS-LNCH-136): it names the host's cache, i.e. the collision. The explicit
+// way to hand it to a session is an env file, and an env file wins
+// (CS-LNCH-135).
+func (in *Inputs) assemblePreCommitCache(p *Plan) {
+	// CS-LNCH-135: docker -e silently beats --env-file.
+	if in.envFilesDefine(preCommitHomeEnv) {
+		return
+	}
+	// CS-LNCH-138: a relative (or empty) home would name a directory under
+	// the launcher's cwd on the host and a different one in the container.
+	if !filepath.IsAbs(in.Home) {
+		if testing.Testing() {
+			panic(fmt.Sprintf("launch: a test launched with a non-absolute home %q; set HOME (Inputs.Home) to a scratch directory", in.Home))
+		}
+		fmt.Fprintf(in.Out, "Warning: pre-commit cache not mounted: the home directory %q is not an absolute path. pre-commit in this session uses its default cache.\n", in.Home)
+		return
+	}
+	dir := filepath.Join(in.Home, PreCommitCacheDir)
+	// A forgotten fixture (no HOME in its getenv map) resolves the real home;
+	// fail loudly rather than create a directory under it (the shadowRoot
+	// precedent).
+	if testing.Testing() && isRealHome(in.Home) {
+		panic(fmt.Sprintf("launch: a test would create the pre-commit cache under the real home %s; set HOME (Inputs.Home) to a scratch directory", in.Home))
+	}
+	// CS-LNCH-137: nested, the bind source resolves on the host; only the
+	// outer sandbox's own mount (which set PRE_COMMIT_HOME to this path) shows
+	// that it exists there and is the user's. Cleaned, so a trailing slash or
+	// a doubled separator in the inherited value still matches.
+	if hostdirs.InSandbox(in.getenv) {
+		if v := in.getenv(preCommitHomeEnv); v == "" || filepath.Clean(v) != dir {
+			fmt.Fprintf(in.Out, "Note: pre-commit cache not mounted: this launcher runs inside a sandbox that does not mount %s, so docker would create it on the host as root. pre-commit in this session uses its default cache.\n", dir)
+			return
+		}
+	}
+	// CS-LNCH-134: created as the invoking user before docker create.
+	if err := hostdirs.EnsureOwnedDir(dir, hostdirs.OwnedDirMode, nil); err != nil {
+		fmt.Fprintf(in.Out, "Warning: pre-commit cache is not isolated for this session: cannot prepare %s (%v); pre-commit in this session shares the host's cache. Make it a directory you own (chown it, or remove it and relaunch), or set PRE_COMMIT_HOME in a .claude-sandbox/env file.\n", dir, err)
+		return
+	}
+	// CS-LNCH-139: a same-path mount that already covers the directory (a
+	// cascade mounts: entry naming it or a parent) is kept, and no second
+	// mount point is added; PRE_COMMIT_HOME still names it. Runs after the
+	// cascade mounts so it can see them.
+	if cover, ok := samePathMountOf(p.Volumes, dir); !ok {
+		p.Volumes = append(p.Volumes, fmt.Sprintf("%s:%s", dir, dir))
+	} else if strings.HasSuffix(cover, ":ro") {
+		fmt.Fprintf(in.Err, "WARNING: pre-commit cache %s is under the read-only mount %s; pre-commit cannot install hook environments in this session.\n", dir, cover)
+	}
+	p.EnvFlags = append(p.EnvFlags, preCommitHomeEnv+"="+dir)
+}
+
+// isRealHome reports whether home is the invoking user's actual home
+// directory, however it is spelled: $HOME's, or the user database's (HOME
+// can be unset, as under "env -i go test", while hostIdentity falls back to
+// the user database).
+func isRealHome(home string) bool {
+	var reals []string
+	if h, err := os.UserHomeDir(); err == nil && h != "" {
+		reals = append(reals, h)
+	}
+	if u, err := user.Current(); err == nil && u.HomeDir != "" {
+		reals = append(reals, u.HomeDir)
+	}
+	for _, real := range reals {
+		if samePath(home, real) {
+			return true
+		}
+	}
+	return false
+}
+
+// samePath compares two paths through symlinks when both resolve, else
+// lexically.
+func samePath(a, b string) bool {
+	ra, errA := filepath.EvalSymlinks(a)
+	rb, errB := filepath.EvalSymlinks(b)
+	if errA != nil || errB != nil {
+		return filepath.Clean(a) == filepath.Clean(b)
+	}
+	return ra == rb
 }
 
 // PeerRegistryRoot is the sandbox-only tree under $HOME that the shared peer

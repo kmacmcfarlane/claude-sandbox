@@ -65,7 +65,12 @@ func launchVars(project string) map[string]string {
 	Expect(err).NotTo(HaveOccurred())
 	cfgDir := filepath.Join(GinkgoT().TempDir(), "claude-config")
 	Expect(os.MkdirAll(cfgDir, 0o755)).To(Succeed())
+	// Never the real home: Build creates the pre-commit cache under it
+	// (CS-LNCH-134).
+	home := filepath.Join(GinkgoT().TempDir(), "home")
+	Expect(os.MkdirAll(home, 0o755)).To(Succeed())
 	return map[string]string{
+		"HOME":                           home,
 		"PROJECT_DIR":                    project,
 		"CLAUDE_SANDBOX_REPO_ROOT":       repo,
 		"CLAUDE_CONFIG_DIR":              cfgDir,

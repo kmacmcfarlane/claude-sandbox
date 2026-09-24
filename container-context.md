@@ -112,6 +112,13 @@ restart Claude Code afterwards). Use `setup-lsp-plugins --check` to verify statu
   hooks you change there are the main repository's. The main checkout's files
   and its `.claude-sandbox/` are NOT mounted; `$CLAUDE_SANDBOX_PROJECT_DIR`
   is the worktree.
+- **pre-commit has its own cache here.** `PRE_COMMIT_HOME` points at
+  `~/.cache/claude-sandbox/pre-commit` (mounted from the host, shared by all
+  sandboxes, persistent), not the host's `~/.cache/pre-commit`: the host's
+  Python differs from this image's, and hook environments are bound to the
+  interpreter that built them. The first hook run in a fresh cache installs
+  its environments; that is expected, not a failure. Do not point
+  `PRE_COMMIT_HOME` back at `~/.cache/pre-commit`.
 - `/home/claude` is symlinked to the host user's home directory (e.g. `/home/rt`). Both paths work. Build-time files from the Dockerfile are relocated here automatically.
 - **The scratchpad survives the container.** The launcher points
   `CLAUDE_CODE_TMPDIR` inside the host-mounted Claude config directory, so the

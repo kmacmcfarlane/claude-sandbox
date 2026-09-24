@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/user"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -581,12 +582,288 @@ var _ = Describe("launch.Build", func() {
 		It("CS-LNCH-037: adds nothing when the lever is off", func() {
 			in.CLIPackageCaches = nil
 			p := build()
+			// Only the always-on pre-commit cache (CS-LNCH-133) is under the root.
 			for _, v := range p.Volumes {
+				if strings.Contains(v, ".cache/claude-sandbox/pre-commit") {
+					continue
+				}
 				Expect(v).NotTo(ContainSubstring(".cache/claude-sandbox"))
 			}
 			for _, e := range p.EnvFlags {
 				Expect(e).NotTo(HavePrefix("GOMODCACHE="))
 			}
+		})
+	})
+
+	// ---- pre-commit cache ----
+
+	Describe("pre-commit cache (CS-LNCH-133..139)", func() {
+		var dir string
+		BeforeEach(func() {
+			dir = filepath.Join(home, ".cache", "claude-sandbox", "pre-commit")
+		})
+		envValues := func(p *launch.Plan) []string {
+			var vals []string
+			for _, e := range argPairs(p.CreateArgs(proj), "-e") {
+				if k, v, ok := strings.Cut(e, "="); ok && k == "PRE_COMMIT_HOME" {
+					vals = append(vals, v)
+				}
+			}
+			return vals
+		}
+		mounts := func(p *launch.Plan) []string {
+			var got []string
+			for _, v := range argPairs(p.CreateArgs(proj), "-v") {
+				if strings.Contains(v, "pre-commit") {
+					got = append(got, v)
+				}
+			}
+			return got
+		}
+		expectApplied := func(p *launch.Plan) {
+			Expect(mounts(p)).To(Equal([]string{dir + ":" + dir}))
+			Expect(envValues(p)).To(Equal([]string{dir}))
+		}
+		expectAbsent := func(p *launch.Plan) {
+			Expect(mounts(p)).To(BeEmpty())
+			Expect(envValues(p)).To(BeEmpty())
+		}
+
+		It("CS-LNCH-133: mounts the sandbox-only cache writable at the same path and sets PRE_COMMIT_HOME", func() {
+			mkdir(filepath.Join(home, ".cache", "pre-commit"))
+			p := build()
+			expectApplied(p)
+			for _, v := range p.Volumes {
+				Expect(v).NotTo(ContainSubstring(filepath.Join(home, ".cache", "pre-commit")))
+			}
+			Expect(launch.PreCommitCacheDir).To(Equal(".cache/claude-sandbox/pre-commit"))
+			Expect(out.String()).NotTo(ContainSubstring("pre-commit"))
+		})
+
+		It("CS-LNCH-133: ralph and headless launches get it too", func() {
+			in.RalphMode = true
+			expectApplied(build())
+			in.RalphMode = false
+			in.Headless = true
+			expectApplied(build())
+		})
+
+		It("CS-LNCH-133: the fingerprint carries the mount through the normalized mount set", func() {
+			with := build().ConfigHash
+			Expect(os.RemoveAll(dir)).To(Succeed())
+			touch(dir, "") // CS-LNCH-134 stand-down: same launch without the mount
+			p := build()
+			expectAbsent(p)
+			Expect(p.ConfigHash).NotTo(Equal(with))
+		})
+
+		It("CS-LNCH-134: creates the directory 0700 as the invoking user before docker create", func() {
+			Expect(dir).NotTo(BeADirectory())
+			build()
+			fi, err := os.Lstat(dir)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(fi.IsDir()).To(BeTrue())
+			Expect(fi.Mode().Perm()).To(Equal(os.FileMode(0o700)))
+			Expect(int(fi.Sys().(*syscall.Stat_t).Uid)).To(Equal(os.Getuid()))
+		})
+
+		It("CS-LNCH-134: tightens an existing wider directory", func() {
+			mkdir(dir)
+			Expect(os.Chmod(dir, 0o755)).To(Succeed())
+			expectApplied(build())
+			fi, err := os.Stat(dir)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(fi.Mode().Perm()).To(Equal(os.FileMode(0o700)))
+		})
+
+		expectWarned := func(errText string) {
+			o := out.String()
+			Expect(strings.Count(o, "Warning: pre-commit cache")).To(Equal(1))
+			Expect(o).To(ContainSubstring("Warning: pre-commit cache is not isolated for this session: cannot prepare " + dir + " ("))
+			Expect(o).To(ContainSubstring(errText))
+			Expect(o).To(ContainSubstring("shares the host's cache"))
+			Expect(o).To(ContainSubstring("chown it, or remove it and relaunch"))
+			Expect(o).To(ContainSubstring("set PRE_COMMIT_HOME in a .claude-sandbox/env file"))
+		}
+
+		It("CS-LNCH-134: a regular file in its place: the launch goes on without it, with one warning", func() {
+			touch(dir, "")
+			p, err := launch.Build(in)
+			Expect(err).NotTo(HaveOccurred())
+			expectAbsent(p)
+			expectWarned("creating it:")
+		})
+
+		It("CS-LNCH-134: a symlink in its place is refused and its target left alone", func() {
+			target := filepath.Join(home, "elsewhere")
+			mkdir(target)
+			Expect(os.Chmod(target, 0o755)).To(Succeed())
+			mkdir(filepath.Dir(dir))
+			Expect(os.Symlink(target, dir)).To(Succeed())
+			p := build()
+			expectAbsent(p)
+			expectWarned("it is a symlink")
+			fi, err := os.Stat(target)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(fi.Mode().Perm()).To(Equal(os.FileMode(0o755)))
+		})
+
+		It("CS-LNCH-134: an unwritable parent: the launch goes on without it", func() {
+			if os.Getuid() == 0 {
+				Skip("root ignores directory permissions")
+			}
+			parent := filepath.Dir(dir)
+			mkdir(parent)
+			Expect(os.Chmod(parent, 0o500)).To(Succeed())
+			DeferCleanup(func() { _ = os.Chmod(parent, 0o755) })
+			expectAbsent(build())
+			expectWarned("permission denied")
+		})
+
+		DescribeTable("CS-LNCH-135: an env file that defines PRE_COMMIT_HOME wins: nothing created, mounted or printed",
+			func(content string, hostSet bool) {
+				ef := filepath.Join(proj, "env")
+				touch(ef, content)
+				in.EnvFiles = []string{ef}
+				if hostSet {
+					env["PRE_COMMIT_HOME"] = "/host/pc"
+				}
+				p := build()
+				expectAbsent(p)
+				Expect(dir).NotTo(BeAnExistingFile())
+				Expect(out.String()).NotTo(ContainSubstring("pre-commit"))
+			},
+			Entry("KEY=value", "PRE_COMMIT_HOME=/work/.pc\n", false),
+			Entry("indented", "  PRE_COMMIT_HOME=/work/.pc\n", false),
+			Entry("UTF-8 BOM", "\xEF\xBB\xBFPRE_COMMIT_HOME=/work/.pc\n", false),
+			Entry("CRLF", "# c\r\nPRE_COMMIT_HOME=/work/.pc\r\n", false),
+			Entry("bare key, host sets it (docker passes the host value through)", "PRE_COMMIT_HOME\n", true),
+		)
+
+		DescribeTable("CS-LNCH-135: an env-file line docker would not set PRE_COMMIT_HOME from leaves the default",
+			func(content string) {
+				ef := filepath.Join(proj, "env")
+				touch(ef, content)
+				in.EnvFiles = []string{ef}
+				expectApplied(build())
+			},
+			Entry("bare key, host does not set it (docker drops it)", "PRE_COMMIT_HOME\n"),
+			Entry("commented out", "# PRE_COMMIT_HOME=/work/.pc\n"),
+			Entry("different case", "pre_commit_home=/work/.pc\n"),
+		)
+
+		It("CS-LNCH-136: the launcher's own PRE_COMMIT_HOME is not forwarded", func() {
+			env["PRE_COMMIT_HOME"] = "/host/pc"
+			p := build()
+			expectApplied(p)
+			for _, a := range p.CreateArgs(proj) {
+				Expect(a).NotTo(ContainSubstring("/host/pc"))
+			}
+		})
+
+		DescribeTable("CS-LNCH-138: a home that is not absolute panics under go test (and stands down otherwise)",
+			func(h string) {
+				in.Home = h
+				Expect(func() { _, _ = launch.Build(in) }).To(PanicWith(ContainSubstring("non-absolute home")))
+				Expect(filepath.Join(h, ".cache", "claude-sandbox", "pre-commit")).NotTo(BeAnExistingFile())
+			},
+			Entry("relative", "rel/home"),
+			Entry("empty", ""),
+		)
+
+		It("CS-LNCH-138: a test whose home is the real $HOME panics before creating anything", func() {
+			real, err := os.UserHomeDir()
+			Expect(err).NotTo(HaveOccurred())
+			in.Home = real
+			Expect(func() { _, _ = launch.Build(in) }).To(PanicWith(ContainSubstring("under the real home")))
+		})
+
+		It("CS-LNCH-138: a test whose home is the user database's panics even when $HOME names elsewhere", func() {
+			u, err := user.Current()
+			Expect(err).NotTo(HaveOccurred())
+			if u.HomeDir == "" {
+				Skip("no home directory in the user database")
+			}
+			// HOME unset or pointing elsewhere (env -i): hostIdentity falls back
+			// to the user database, so the guard must consult it too.
+			GinkgoT().Setenv("HOME", GinkgoT().TempDir())
+			in.Home = u.HomeDir
+			Expect(func() { _, _ = launch.Build(in) }).To(PanicWith(ContainSubstring("under the real home")))
+		})
+
+		It("CS-LNCH-139: a cascade mount naming the directory is kept, not doubled, and PRE_COMMIT_HOME still names it", func() {
+			in.Cfg = &cascade.Config{Mounts: []cascade.Mount{{Host: dir, Container: dir, Writable: true}}}
+			p := build()
+			var dsts []string
+			for _, v := range argPairs(p.CreateArgs(proj), "-v") {
+				if parts := strings.Split(v, ":"); len(parts) >= 2 && parts[1] == dir {
+					dsts = append(dsts, v)
+				}
+			}
+			Expect(dsts).To(Equal([]string{dir + ":" + dir}))
+			Expect(envValues(p)).To(Equal([]string{dir}))
+			Expect(errw.String()).NotTo(ContainSubstring("pre-commit"))
+		})
+
+		It("CS-LNCH-139: a read-only parent mount covers it, with one warning", func() {
+			cache := filepath.Join(home, ".cache")
+			mkdir(cache)
+			in.Cfg = &cascade.Config{Mounts: []cascade.Mount{{Host: cache, Container: cache}}}
+			p := build()
+			Expect(mounts(p)).To(BeEmpty())
+			Expect(envValues(p)).To(Equal([]string{dir}))
+			Expect(strings.Count(errw.String(), "WARNING: pre-commit cache")).To(Equal(1))
+			Expect(errw.String()).To(ContainSubstring("under the read-only mount " + cache + ":" + cache + ":ro"))
+		})
+
+		Describe("CS-LNCH-137: inside a sandbox", func() {
+			BeforeEach(func() {
+				env["CLAUDE_SANDBOX_PROJECT_DIR"] = "/outer/proj"
+			})
+
+			It("CS-LNCH-137: mounts it when the outer sandbox did (its PRE_COMMIT_HOME is this path)", func() {
+				env["PRE_COMMIT_HOME"] = dir
+				expectApplied(build())
+				Expect(out.String()).NotTo(ContainSubstring("pre-commit"))
+			})
+
+			DescribeTable("CS-LNCH-137: otherwise nothing is mounted or created, with one note",
+				func(val string) {
+					if val != "" {
+						env["PRE_COMMIT_HOME"] = val
+					}
+					p := build()
+					expectAbsent(p)
+					Expect(dir).NotTo(BeAnExistingFile())
+					Expect(strings.Count(out.String(), "Note: pre-commit cache not mounted")).To(Equal(1))
+					Expect(out.String()).To(ContainSubstring("inside a sandbox that does not mount " + dir))
+				},
+				Entry("unset (an older outer launcher)", ""),
+				Entry("another path (the outer's env file chose one)", "/work/.pc"),
+			)
+
+			DescribeTable("CS-LNCH-137: the outer's PRE_COMMIT_HOME is compared path-cleaned",
+				func(suffix string) {
+					env["PRE_COMMIT_HOME"] = dir + suffix
+					expectApplied(build())
+					Expect(out.String()).NotTo(ContainSubstring("pre-commit"))
+				},
+				Entry("trailing slash", "/"),
+				Entry("trailing /.", "/."),
+			)
+
+			It("CS-LNCH-137: a doubled separator inside the value still matches", func() {
+				env["PRE_COMMIT_HOME"] = strings.Replace(dir, "/pre-commit", "//pre-commit", 1)
+				expectApplied(build())
+			})
+
+			It("CS-LNCH-137: an env file still wins, silently", func() {
+				ef := filepath.Join(proj, "env")
+				touch(ef, "PRE_COMMIT_HOME=/work/.pc\n")
+				in.EnvFiles = []string{ef}
+				expectAbsent(build())
+				Expect(out.String()).NotTo(ContainSubstring("pre-commit"))
+			})
 		})
 	})
 
@@ -650,7 +927,9 @@ var _ = Describe("launch.Build", func() {
 				Expect(v).NotTo(ContainSubstring("claude-sandbox/peers"))
 				Expect(v).NotTo(ContainSubstring("XDG_RUNTIME_DIR"))
 			}
-			Expect(filepath.Join(home, ".cache", "claude-sandbox")).NotTo(BeADirectory())
+			// The pre-commit cache (CS-LNCH-133) is always created; the peers
+			// root is not.
+			Expect(root).NotTo(BeADirectory())
 		})
 
 		It("CS-LNCH-049: with the key on, the argv is the key-off argv plus exactly the bridge entries", func() {
