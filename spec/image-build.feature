@@ -621,8 +621,11 @@ Feature: Image build lifecycle (CS-IMG)
     And both the venv chown and the home chown (and the home relocation's mount
       check) take mount points from /proc/self/mountinfo DECODED (the kernel writes
       a space as \040 and a backslash as \134) and escape find -path's glob
-      characters (\ * ? [, backslash first), so a mount named "sp ace", "br[1]",
-      "st*r" or "b\s" is pruned and keeps its host owner
+      characters (\ * ? [, backslash first), so a mount named "sp ace", "a 1",
+      "br[1]", "st*r" or "b\s" is pruned and keeps its host owner
+    # %b reads \0nnn as octal (up to three digits after \0), so every raw \ is
+    # made \0 before decoding: mountinfo writes "a 1" as a\0401, which a plain
+    # %b decodes to "a" + \001.
     And container-context.md says the installs are per-container: they die with it
     # Measured on the base venv (190 dirs, 1753 entries): ~10 ms. `pip install
     # --user` is no alternative: the venv has include-system-site-packages =

@@ -19,10 +19,13 @@ DOCKER_SOCKET_GID="${DOCKER_GID:-}"
 # Every mount point in this container, DECODED: /proc/self/mountinfo writes a
 # space as \040, a tab as \011, a newline as \012 and a backslash as \134, so
 # the raw field never equals the path of a mount whose name holds one. Both
-# chowns below skip bind mounts by these paths.
+# chowns below skip bind mounts by these paths. The raw field holds a backslash
+# only as the start of such a three-digit escape, and %b reads \0nnn (up to
+# three digits after \0) as octal, so each \ becomes \0 first: a bare \040
+# followed by a digit ("a 1" is a\0401) would otherwise swallow that digit.
 _CS_MOUNT_POINTS=()
 while IFS= read -r _mp; do
-    printf -v _mp '%b' "$_mp"
+    printf -v _mp '%b' "${_mp//\\/\\0}"
     _CS_MOUNT_POINTS+=("$_mp")
 done < <(awk '{print $5}' /proc/self/mountinfo)
 

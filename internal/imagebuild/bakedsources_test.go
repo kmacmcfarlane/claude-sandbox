@@ -420,7 +420,7 @@ var _ = Describe("baked sources", func() {
 
 	It("CS-IMG-052: the entrypoint hands the base venv's directories to the session user", func() {
 		const venv = "/opt/claude-sandbox/venv"
-		Expect(repoFile("Dockerfile")).To(MatchRegexp(`(?m)^ENV VIRTUAL_ENV=` + venv + `\s*$`),
+		Expect(repoFile("Dockerfile")).To(MatchRegexp(`(?m)^ENV VIRTUAL_ENV=`+venv+`\s*$`),
 			"the entrypoint's fixed path must be where the base builds the venv")
 
 		ep := repoFile("entrypoint.sh")
@@ -441,7 +441,7 @@ var _ = Describe("baked sources", func() {
 
 		// Mount points are read once from mountinfo and DECODED (\040 = space,
 		// \134 = backslash), and every consumer uses the decoded list.
-		Expect(ep).To(ContainSubstring("while IFS= read -r _mp; do\n    printf -v _mp '%b' \"$_mp\"\n    _CS_MOUNT_POINTS+=(\"$_mp\")\ndone < <(awk '{print $5}' /proc/self/mountinfo)\n"))
+		Expect(ep).To(ContainSubstring("while IFS= read -r _mp; do\n    printf -v _mp '%b' \"${_mp//\\\\/\\\\0}\"\n    _CS_MOUNT_POINTS+=(\"$_mp\")\ndone < <(awk '{print $5}' /proc/self/mountinfo)\n"))
 		Expect(strings.Count(ep, "/proc/self/mountinfo)")).To(Equal(1), "no consumer reads mountinfo raw")
 		Expect(ep).To(ContainSubstring(`for _mp in "${_CS_MOUNT_POINTS[@]}"; do`), "the home relocation's mount check")
 		// The shared prune helper escapes find -path's glob characters,
@@ -463,6 +463,32 @@ var _ = Describe("baked sources", func() {
 		Expect(start).To(BeNumerically("<", strings.Index(ep, "exec gosu")))
 
 		Expect(repoFile("container-context.md")).To(ContainSubstring("die with the container"))
+	})
+
+	It("CS-IMG-052: the entrypoint's mountinfo decode is unambiguous before a digit", func() {
+		ep := repoFile("entrypoint.sh")
+		var decode string
+		for _, l := range strings.Split(ep, "\n") {
+			if strings.Contains(l, "printf -v _mp '%b'") {
+				decode = strings.TrimSpace(l)
+			}
+		}
+		Expect(decode).NotTo(BeEmpty())
+		// Raw mountinfo field -> the path it names.
+		cases := map[string]string{
+			`a\0401`:       "a 1",
+			`x\134t\0402x`: `x\t 2x`,
+			`tab\0119`:     "tab\t9",
+			`nl\0127`:      "nl\n7",
+			`b\134s`:       `b\s`,
+			`sp\040ace`:    "sp ace",
+			`/opt/br[1]`:   "/opt/br[1]",
+		}
+		for raw, want := range cases {
+			out, err := exec.Command("bash", "-c", "_mp=$1; "+decode+"; printf '%s' \"$_mp\"", "_", raw).Output()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(string(out)).To(Equal(want), raw)
+		}
 	})
 
 	It("CS-IMG-037: the parser skips multi-stage COPYs and joins continuations", func() {
