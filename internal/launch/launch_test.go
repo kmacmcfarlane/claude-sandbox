@@ -267,6 +267,69 @@ var _ = Describe("launch.Build", func() {
 			Expect(errw.String()).To(BeEmpty())
 		})
 
+		It("CS-LNCH-160: a target under a read-only same-path mount adds nothing and warns once", func() {
+			target := filepath.Join(dotfiles, "claude-settings.json")
+			touch(target, `{}`)
+			Expect(os.Symlink(target, link)).To(Succeed())
+			in.Cfg = &cascade.Config{Mounts: []cascade.Mount{{Host: dotfiles, Container: dotfiles}}}
+			p := build()
+			Expect(mountsFor(p, target)).To(BeEmpty())
+			Expect(strings.Count(errw.String(), "\n")).To(Equal(1))
+			Expect(errw.String()).To(ContainSubstring(target))
+			Expect(errw.String()).To(ContainSubstring(dotfiles + ":" + dotfiles + ":ro"))
+			Expect(errw.String()).To(ContainSubstring("read-only"))
+		})
+
+		It("CS-LNCH-160: a target under a writable same-path mount adds nothing and prints nothing", func() {
+			target := filepath.Join(dotfiles, "claude-settings.json")
+			touch(target, `{}`)
+			Expect(os.Symlink(target, link)).To(Succeed())
+			in.Cfg = &cascade.Config{Mounts: []cascade.Mount{{Host: dotfiles, Container: dotfiles, Writable: true}}}
+			p := build()
+			Expect(mountsFor(p, target)).To(BeEmpty())
+			Expect(errw.String()).To(BeEmpty())
+		})
+
+		It("CS-LNCH-160: a directory target is not mounted, with one warning", func() {
+			target := filepath.Join(dotfiles, "claude-dir")
+			mkdir(target)
+			Expect(os.Symlink(target, link)).To(Succeed())
+			p := build()
+			Expect(mountsFor(p, target)).To(BeEmpty())
+			Expect(strings.Count(errw.String(), "\n")).To(Equal(1))
+			Expect(errw.String()).To(ContainSubstring(link))
+			Expect(errw.String()).To(ContainSubstring(target))
+			Expect(errw.String()).To(ContainSubstring("not a regular file"))
+			Expect(errw.String()).To(ContainSubstring("without user settings"))
+		})
+
+		It("CS-LNCH-160: a FIFO target is not mounted, with one warning", func() {
+			target := filepath.Join(dotfiles, "claude-fifo")
+			Expect(syscall.Mkfifo(target, 0o600)).To(Succeed())
+			Expect(os.Symlink(target, link)).To(Succeed())
+			p := build()
+			Expect(mountsFor(p, target)).To(BeEmpty())
+			Expect(errw.String()).To(ContainSubstring("not a regular file"))
+		})
+
+		It("CS-LNCH-160: a target path containing ':' is not mounted, with one warning, and the launch goes on", func() {
+			colonDir := filepath.Join(dotfiles, "a:b")
+			mkdir(colonDir)
+			target := filepath.Join(colonDir, "settings.json")
+			touch(target, `{}`)
+			Expect(os.Symlink(target, link)).To(Succeed())
+			p, err := launch.Build(in)
+			Expect(err).NotTo(HaveOccurred())
+			for _, v := range p.Volumes {
+				Expect(v).NotTo(ContainSubstring("a:b"))
+			}
+			Expect(strings.Count(errw.String(), "\n")).To(Equal(1))
+			Expect(errw.String()).To(ContainSubstring(link))
+			Expect(errw.String()).To(ContainSubstring(target))
+			Expect(errw.String()).To(ContainSubstring("contains ':'"))
+			Expect(errw.String()).To(ContainSubstring("without user settings"))
+		})
+
 		It("CS-LNCH-069: the target mount is in the drift fingerprint", func() {
 			target := filepath.Join(dotfiles, "claude-settings.json")
 			touch(target, `{}`)

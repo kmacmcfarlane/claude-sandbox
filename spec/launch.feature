@@ -269,14 +269,20 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     Given $CONFIG_DIR/settings.json is a symlink
     When its fully resolved target (filepath.EvalSymlinks: relative links and
       chains resolved) is not under any existing same-path mount
+    And the target is a regular file whose path docker's -v can carry
+      (CS-LNCH-160)
     Then the target file is bind-mounted read-write at its own host path
       ("<target>:<target>"), so the link resolves identically in the container
       and sandbox writes land in the target, as on the host
+    # Claude Code writes settings as a temp file renamed over the target; a
+    # rename onto a single-file mount point fails with EBUSY, and Claude Code
+    # then writes in place (its fallback set is EXDEV/EPERM/EEXIST/EBUSY —
+    # verified working on 2.1.277, same set in 2.1.282), so writes still land.
     And the mount is added after the cascade mounts (CS-LNCH-021), so a
       target a same-path cascade mount already covers adds nothing
     When the resolved target is already under a same-path mount — the config
       dir itself, the project, or a same-path cascade mount
-    Then no mount is added
+    Then no mount is added (and a read-only cover warns, CS-LNCH-160)
     When the link is dangling
     Then exactly one warning names the link and says the sandbox runs without
       user settings, and no mount is added
@@ -285,6 +291,32 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     And the extra mount is part of the drift fingerprint through the
       normalized mount set, like every other volume: a container started
       without it cannot see the user settings, and attach cannot add a mount
+
+  @new
+  Scenario: CS-LNCH-160 The settings.json target mount never fails a launch and says when writes cannot land
+    # Review of CS-LNCH-069: the target went into a -v spec unchecked. docker
+    # splits -v on ':', so a target path with a colon failed docker create
+    # (exit 125) on every launch; a link to a directory mounted the whole
+    # directory read-write; and a target under a read-only same-path mount
+    # (~/.ssh with --ssh, a :ro cascade mount) stayed read-only, so plugin
+    # installs, /model and permission rules failed with EROFS in silence.
+    # A skip plus one warning follows the "never fail every launch" rule
+    # (CS-LNCH-107, 156); --mount would carry the colon but the launcher's
+    # whole mount set is -v, and the fingerprint normalizes -v specs.
+    Given $CONFIG_DIR/settings.json is a symlink that resolves
+    When the resolved target is under a same-path mount that is read-only
+    Then no mount is added and exactly one warning names the target and the
+      covering mount and says settings changes made in the session fail
+    When the resolved target is not under a same-path mount and is not a
+      regular file (a directory, a device, a FIFO)
+    Then no mount is added and exactly one warning names the link and the
+      target, says it is not a regular file and that the sandbox runs
+      without user settings
+    When the resolved target is a regular file whose path contains ':'
+    Then no mount is added and exactly one warning names the link and the
+      target, says docker cannot mount a path containing ':' and that the
+      sandbox runs without user settings
+    And the launch continues in every case
 
   Scenario: CS-LNCH-012 .claude.json sibling mounted read-write when present
     Given $CONFIG_PARENT/.claude.json exists
