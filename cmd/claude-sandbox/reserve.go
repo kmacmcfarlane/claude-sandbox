@@ -404,7 +404,10 @@ func pruneShadowDirs(env *Env, own, home string) {
 	if root == "" {
 		root = filepath.Dir(own)
 	}
-	if _, err := launch.PruneShadowDirs(env.Runner, root, os.Getuid(), env.now(), launch.ShadowDirMinAge, own); err != nil {
+	// One container listing for every root (CS-LNCH-166), run only once a
+	// candidate appears.
+	sweep := launch.NewShadowSweep(env.Runner)
+	if _, err := sweep.Prune(root, os.Getuid(), env.now(), launch.ShadowDirMinAge, own); err != nil {
 		fmt.Fprintf(env.Err, "Warning: could not clean up old shadow directories under %s: %v\n", root, err)
 	}
 	for _, nested := range nestedShadowSweepRoots(env.Getenv, home) {
@@ -422,7 +425,7 @@ func pruneShadowDirs(env *Env, own, home string) {
 			// Never through a symlink, never another user's directory.
 			continue
 		}
-		if _, err := launch.PruneShadowDirs(env.Runner, nested, os.Getuid(), env.now(), launch.ShadowDirMinAge, own); err != nil {
+		if _, err := sweep.Prune(nested, os.Getuid(), env.now(), launch.ShadowDirMinAge, own); err != nil {
 			fmt.Fprintf(env.Err, "Warning: could not clean up old shadow directories under %s: %v\n", nested, err)
 		}
 	}
@@ -433,7 +436,10 @@ func pruneShadowDirs(env *Env, own, home string) {
 // 166): <CLAUDE_CODE_TMPDIR>/claude-sandbox-shadow, for the value its
 // sandboxes get — this launcher's own CLAUDE_CODE_TMPDIR when set and
 // absolute, and <config dir>/tmp, which CS-LNCH-034 derives. None inside a
-// sandbox, which sweeps its own shadow root. Under go test a root the real
+// sandbox, which sweeps its own shadow root. Only the root itself is Lstat'ed
+// (pruneShadowDirs): a symlinked PARENT (a config dir reached through a link)
+// is followed by design — it is how the user reaches that directory — and
+// every entry beneath is still pattern-, owner- and age-checked. Under go test a root the real
 // environment would sweep panics: a fixture without HOME would otherwise
 // sweep live nested sessions' directories against a faked docker ps.
 func nestedShadowSweepRoots(getenv func(string) string, home string) []string {

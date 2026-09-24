@@ -1433,6 +1433,11 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     And a missing one is skipped silently; any other failure is one warning
     And a launcher inside a sandbox does not sweep these (it sweeps its own
       shadow root, CS-LNCH-161)
+    And all roots share ONE container listing, run only once the first
+      candidate appears (a headless probe pays for at most one docker ps)
+    And a sandbox whose CLAUDE_CODE_TMPDIR came from an env file (the
+      CS-LNCH-034 stand-down) is not host-swept: its nested directories are
+      cleaned only by later nested launches that use it
 
   # ---- headless mode: SDK clients (Paseo) ----
   # An SDK client (the Claude Agent SDK, as Paseo's daemon uses it) spawns the

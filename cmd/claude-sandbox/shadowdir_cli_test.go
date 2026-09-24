@@ -320,6 +320,37 @@ var _ = Describe("host sweep of nested shadow directories (CS-LNCH-166)", func()
 		Expect(notNow).To(BeADirectory())
 	})
 
+	It("CS-LNCH-166: candidates in every root cost ONE container listing", func() {
+		cct := filepath.Join(f.home, "cct")
+		f.envmap["CLAUDE_CODE_TMPDIR"] = cct
+		a := oldShadow(f, "claude-sandbox111")
+		b := oldIn(nested, "claude-sandbox222")
+		c := oldIn(filepath.Join(cct, launch.NestedShadowSubdir), "claude-sandbox333")
+		f.fake.On(sweepPS, "", nil)
+
+		Expect(f.run()).To(Equal(0), f.errw.String())
+		for _, d := range []string{a, b, c} {
+			Expect(d).NotTo(BeADirectory())
+		}
+		n := 0
+		for _, l := range f.fake.CommandLines() {
+			if strings.HasPrefix(l, sweepPS) {
+				n++
+			}
+		}
+		Expect(n).To(Equal(1))
+	})
+
+	It("CS-LNCH-166: a failed shared listing warns once and removes nothing in any root", func() {
+		a := oldShadow(f, "claude-sandbox111")
+		b := oldIn(nested, "claude-sandbox222")
+		f.fake.On(sweepPS, "", execx.Fail(1))
+		Expect(f.run()).To(Equal(0), f.errw.String())
+		Expect(a).To(BeADirectory())
+		Expect(b).To(BeADirectory())
+		Expect(strings.Count(f.errw.String(), "could not clean up old shadow directories")).To(Equal(1))
+	})
+
 	It("CS-LNCH-166: a missing nested root is skipped silently and a symlinked one is never followed", func() {
 		Expect(os.RemoveAll(nested)).To(Succeed())
 		target := filepath.Join(f.home, "elsewhere")

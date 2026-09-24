@@ -1463,8 +1463,9 @@ config dir) and launch again. Nested shadow directories — including the `0600`
 (CS-LNCH-132) — persist on the host under `$TMPDIR` or `$CLAUDE_CODE_TMPDIR/claude-sandbox-shadow`
 until a sweep removes them: a later nested launch sweeps its own root, and a launch on the host
 also sweeps `<dir>/claude-sandbox-shadow` for its own `CLAUDE_CODE_TMPDIR` and for
-`<config dir>/tmp` (what its sandboxes get), by the same rules (CS-LNCH-166). A nested `$TMPDIR`
-root is swept only by nested launches that use it. Attach and join create no container and
+`<config dir>/tmp` (what its sandboxes get), by the same rules and one shared container listing
+(CS-LNCH-166). A nested `$TMPDIR` root, and the root of a sandbox whose `CLAUDE_CODE_TMPDIR` came
+from an env file, are swept only by later nested launches that use them. Attach and join create no container and
 are unaffected.
 
 The same host-path rule covers the other paths a nested launcher resolves inside its container
