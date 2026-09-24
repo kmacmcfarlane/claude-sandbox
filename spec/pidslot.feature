@@ -61,7 +61,8 @@ Feature: PID classes — unique session pids across sandboxes (CS-PID)
     # The loop is the parent, so its own fork is the landing fork; no tini.
 
   Scenario: CS-PID-007 The entrypoint hands the command to the helper
-    Then entrypoint.sh ends with "exec gosu <user> /opt/claude-sandbox/bin/claude-sandbox pidslot -- <cmd...>"
+    Then entrypoint.sh ends with "exec /usr/sbin/gosu <user> /opt/claude-sandbox/bin/claude-sandbox pidslot -- <cmd...>"
+    # Absolute: the session PATH is restored just before this line (CS-IMG-067).
     And the base image installs tini
     And docker create keeps --init, so docker-init remains PID 1 and reaps orphans
     # Sessions claude spawns itself inside a container (claude --bg, /bg,

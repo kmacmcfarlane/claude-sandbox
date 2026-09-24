@@ -124,7 +124,7 @@ var _ = Describe("pid classes (CS-PID, CS-LNCH-039)", func() {
 		root := filepath.Join("..", "..")
 		ep, err := os.ReadFile(filepath.Join(root, "entrypoint.sh"))
 		Expect(err).NotTo(HaveOccurred())
-		Expect(strings.TrimSpace(string(ep))).To(HaveSuffix(`exec gosu "$TARGET_USER" /opt/claude-sandbox/bin/claude-sandbox pidslot -- "$@"`))
+		Expect(strings.TrimSpace(string(ep))).To(HaveSuffix(`exec /usr/sbin/gosu "$TARGET_USER" /opt/claude-sandbox/bin/claude-sandbox pidslot -- "$@"`))
 		df, err := os.ReadFile(filepath.Join(root, "Dockerfile"))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(string(df)).To(MatchRegexp(`(?m)^\s+tini\s*\\?$`))

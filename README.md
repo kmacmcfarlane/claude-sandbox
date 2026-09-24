@@ -1163,6 +1163,14 @@ ENV PATH="/home/claude/go/bin:$PATH"
 3. Symlinks `/home/claude → /home/rt` so hardcoded paths still resolve
 4. Chowns all non-bind-mounted files under the home dir to match the host UID/GID
 
+The entrypoint runs as root on every start of a container (a `docker start` of a stopped one
+included), so it trusts nothing from the container environment: it runs under `bash -p` (no
+`BASH_ENV`), on a fixed `PATH=/usr/sbin:/usr/bin:/sbin:/bin` with `LD_PRELOAD`,
+`LD_LIBRARY_PATH` and `LD_AUDIT` dropped, and hands the session its own `PATH` back at the
+privilege drop. The `LD_*` three are not restored for the session — set them in your shell
+profile if you need them. A second run in the same container finds its work done (the user
+already renamed, the home already moved) and changes nothing.
+
 For `RUN` steps that create files under the home directory (caches, configs, user-local installs), bracket them with `USER claude` / `USER root`:
 
 ```dockerfile
@@ -1282,7 +1290,7 @@ SSH, git, Docker socket, AWS and package-cache mounts are all opt-in. Enable the
 
 ### UID/GID mapping
 
-The entrypoint remaps the `claude` user inside the container to match your host UID/GID, so files created or modified by Claude have correct ownership — no root-owned files left behind. It also recursively chowns all non-bind-mounted files under the home directory, so files created as root during `docker build` (in child Dockerfiles) are owned by the runtime user. Likewise it hands the directories of the base Python venv (`/opt/claude-sandbox/venv`, built as root) to the runtime user, so `pip install <package>` works in a session — the installs are per-container and die with it; put permanent ones in the child Dockerfile.
+The entrypoint remaps the `claude` user inside the container to match your host UID/GID, so files created or modified by Claude have correct ownership — no root-owned files left behind. It also recursively chowns all non-bind-mounted files under the home directory, so files created as root during `docker build` (in child Dockerfiles) are owned by the runtime user. Likewise it hands the directories of the base Python venv (`/opt/claude-sandbox/venv`, built as root) to the runtime user, so `pip install <package>` works in a session — the installs are per-container and die with it; put permanent ones in the child Dockerfile. Only entries not already owned are touched, so a restart of the same container chowns nothing. Because the entrypoint runs as root on every start and `~/.local/bin` and `venv/bin` (both user-writable) come first on the image `PATH`, the root part runs on a fixed distribution-only `PATH` under `bash -p` with `LD_PRELOAD`/`LD_LIBRARY_PATH`/`LD_AUDIT` dropped; the session gets its `PATH` back, not the `LD_*` variables.
 
 ### Session registry and PID classes
 
@@ -1603,7 +1611,7 @@ mcp/
 Dockerfile                          Base image: Debian + build-essential, Docker CLI/compose/buildx, Node.js 22 (no Claude Code, no sandbox files)
 Dockerfile.tools                    Sandbox tools image: Go binary, entrypoint, setup-lsp-plugins, notify-webhook, logstream, MCP bundle, hooks, version; copied onto the base/child by the run cap
 Dockerfile.cli                      Claude Code CLI image, pinned to a version; copied onto the base/child by the run cap
-entrypoint.sh                       Remaps container user UID/GID to match the host; grants Docker socket access
+entrypoint.sh                       Remaps container user UID/GID to match the host; grants Docker socket access; root part on a fixed PATH, idempotent on restart
 notification-hooks.json             Notification hooks, baked into the tools image as a managed-settings drop-in
 mcp-servers.json                    MCP server fragment merged into container's .mcp.json
 ```
