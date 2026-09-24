@@ -1539,7 +1539,11 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     Then it subscribes to the container's die (and oom) events BEFORE
       "docker start", from a moment before it, keeping only events whose name
       is exactly the container's (CS-LNCH-087/095)
-    And it waits up to 2 s (DieWait) for a die
+    And it waits 2 seconds (DieWait; less if the container dies): a die ends
+      the wait early, and an event stream that ends early (the subscription
+      failed or died) does not, so the inspect below still comes 2 s in
+    And a die with exit 137 and no oom yet waits OOMGrace (150 ms) more for an
+      oom the daemon may publish after it (CS-LNCH-088)
     And on a die it prints one error line naming the session, docker's exit
       code (and an OOM kill when one was seen) and "Rerun without --detach to
       see why", prints no attach hint, removes the shadow directory (nothing

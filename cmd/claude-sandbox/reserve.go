@@ -296,7 +296,19 @@ func startDetached(env *Env, plan *launch.Plan, projectDir, home string) error {
 			"Rerun without --detach to see why.", who, detail)
 	}
 
+	settleStart := time.Now()
 	o, _ := w.Await(detachedSettle, oomreport.Died, nil)
+	if o.Died && o.ExitCode == oomreport.OOMExit && o.OOMKills == 0 {
+		// The daemon may publish the oom after the die it caused (AwaitDeath).
+		o, _ = w.Await(oomreport.OOMGrace, oomreport.SawOOM, nil)
+	}
+	if !o.Died {
+		// A stream that ended early (the subscription failed or died) must not
+		// shorten the settle: the inspect still comes detachedSettle in.
+		if rest := detachedSettle - time.Since(settleStart); rest > 0 {
+			time.Sleep(rest)
+		}
+	}
 	if o.Died {
 		// A --rm container that died is gone: nothing mounts the directory.
 		if plan.ShadowDir != "" {

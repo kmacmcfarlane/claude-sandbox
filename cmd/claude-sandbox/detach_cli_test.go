@@ -7,6 +7,8 @@ package main
 // TempRoot and CacheDir are scratch directories.
 
 import (
+	"io"
+	"os"
 	"slices"
 	"strings"
 	"time"
@@ -30,16 +32,58 @@ func startCalls(f *cliFixture) [][]string {
 	return out
 }
 
+// laggingEvents scripts a "docker events" stream that delivers first at once
+// and later after lag, then ends; every other command goes to the Fake.
+type laggingEvents struct {
+	*execx.Fake
+	first, later string
+	lag          time.Duration
+}
+
+type laggingProc struct{ done chan struct{} }
+
+func (p *laggingProc) Signal(os.Signal) error { return nil }
+func (p *laggingProc) Wait() error            { <-p.done; return nil }
+func (p *laggingProc) Pid() int               { return 4243 }
+
+func (l *laggingEvents) Start(c execx.Cmd) (execx.Process, error) {
+	if len(c.Args) == 0 || c.Args[0] != "events" {
+		return l.Fake.Start(c)
+	}
+	name := ""
+	for _, a := range c.Args {
+		if v, ok := strings.CutPrefix(a, "container="); ok {
+			name = v
+		}
+	}
+	p := &laggingProc{done: make(chan struct{})}
+	go func() {
+		defer close(p.done)
+		io.WriteString(c.Stdout, strings.ReplaceAll(l.first, thisContainer, name))
+		time.Sleep(l.lag)
+		io.WriteString(c.Stdout, strings.ReplaceAll(l.later, thisContainer, name))
+	}()
+	return p, nil
+}
+
 var _ = Describe("detached launch (CS-LNCH-113..119)", func() {
 	var f *cliFixture
 	// state is what "docker inspect" reports after the settle; evts is the
 	// container's event stream (CS-LNCH-119).
 	var state string
 	var evts []string
+	// inspectedAt is when "docker inspect" ran, for the settle timing.
+	var inspectedAt time.Time
 	BeforeEach(func() {
+		// The fake's event stream ends at once, so every launch sleeps out
+		// the settle; keep it short here.
+		saved := detachedSettle
+		detachedSettle = 60 * time.Millisecond
+		DeferCleanup(func() { detachedSettle = saved })
 		f = newCLIFixture()
 		state, evts = "running", nil
 		f.fake.OnFunc("docker inspect --type container", func(execx.Cmd) (string, error) {
+			inspectedAt = time.Now()
 			if state == "" {
 				return "", execx.Fail(1)
 			}
@@ -191,6 +235,29 @@ var _ = Describe("detached launch (CS-LNCH-113..119)", func() {
 		evts = []string{dockerEvent("oom", ""), dockerEvent("die", "137")}
 		Expect(f.run("--detach")).To(Equal(1))
 		Expect(f.errw.String()).To(ContainSubstring("(exit 137, killed by the OOM killer)"))
+	})
+
+	It("CS-LNCH-119: an oom published after the die it caused is still named", func() {
+		// The die first; the oom 50 ms later, well inside OOMGrace, on a
+		// stream that stays open meanwhile.
+		f.env.Runner = &laggingEvents{Fake: f.fake, first: dockerEvent("die", "137"), later: dockerEvent("oom", ""), lag: 50 * time.Millisecond}
+		Expect(f.run("--detach")).To(Equal(1))
+		Expect(f.errw.String()).To(ContainSubstring("(exit 137, killed by the OOM killer)"))
+	})
+
+	It("CS-LNCH-119: an event stream that ends early still waits the whole settle before the inspect", func() {
+		detachedSettle = 300 * time.Millisecond
+		start := time.Now()
+		Expect(f.run("--detach")).To(Equal(0), f.errw.String())
+		Expect(inspectedAt.Sub(start)).To(BeNumerically(">=", detachedSettle))
+	})
+
+	It("CS-LNCH-119: a die ends the settle early", func() {
+		detachedSettle = 5 * time.Second
+		evts = []string{dockerEvent("die", "1")}
+		start := time.Now()
+		Expect(f.run("--detach")).To(Equal(1))
+		Expect(time.Since(start)).To(BeNumerically("<", time.Second))
 	})
 
 	It("CS-LNCH-119: another container's die (a name prefix match) is not ours", func() {

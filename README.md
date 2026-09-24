@@ -273,7 +273,8 @@ would wait in a session nobody sees; pass `--resume=<id> --fork-session` after `
 `headless`.
 
 `docker start` without a client returns as soon as the process exists, so the launcher
-watches the container for up to 2 seconds before it reports success: a session that dies in
+watches the container for 2 seconds (less if it dies) before it reports success — a
+successful detached launch always takes those 2 seconds: a session that dies in
 that window — a bad claude flag after `--`, an entrypoint failure — is reported as
 `Error: 'otter' (…) stopped right after it started (exit 2); its output went with it. Rerun
 without --detach to see why.` and the launch exits 1, as it does when the container is not
