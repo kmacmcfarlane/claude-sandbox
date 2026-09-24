@@ -418,6 +418,30 @@ var _ = Describe("baked sources", func() {
 			ContainSubstring(`"command": "/opt/claude-sandbox/bin/notify-webhook || true"`))
 	})
 
+	It("CS-IMG-052: the entrypoint hands the base venv's directories to the session user", func() {
+		const venv = "/opt/claude-sandbox/venv"
+		Expect(repoFile("Dockerfile")).To(MatchRegexp(`(?m)^ENV VIRTUAL_ENV=` + venv + `\s*$`),
+			"the entrypoint's fixed path must be where the base builds the venv")
+
+		ep := repoFile("entrypoint.sh")
+		start := strings.Index(ep, "if [ -d "+venv+" ]")
+		Expect(start).To(BeNumerically(">=", 0), "the venv block is present")
+		block := ep[start:]
+		block = block[:strings.Index(block, "\nfi\n")]
+		Expect(block).To(ContainSubstring(`[ ! -L ` + venv + ` ]`), "a symlinked venv is skipped")
+		Expect(block).To(ContainSubstring("find " + venv + " -xdev -type d"))
+		Expect(block).To(ContainSubstring(`-exec chown "$TARGET_UID:$TARGET_GID" {} +`))
+		Expect(block).NotTo(ContainSubstring("VIRTUAL_ENV"), "never a path an env file can set")
+		Expect(block).NotTo(ContainSubstring("-type f"), "files keep their owner (no overlay2 copy-up)")
+		Expect(block).NotTo(MatchRegexp(`chown -R|find -[HL]|-follow`))
+
+		// After the uid/gid remap, before the hand-off.
+		Expect(start).To(BeNumerically(">", strings.Index(ep, `usermod -o -u "$TARGET_UID"`)))
+		Expect(start).To(BeNumerically("<", strings.Index(ep, "exec gosu")))
+
+		Expect(repoFile("container-context.md")).To(ContainSubstring("die with the container"))
+	})
+
 	It("CS-IMG-037: the parser skips multi-stage COPYs and joins continuations", func() {
 		df := "FROM x AS b\n# COPY commented/ out/\nCOPY --link --chmod=755 a.sh \\\n  b/ /dst/\nCOPY --from=b /out/bin /bin\nADD ./c.txt /c\n"
 		Expect(contextSources(df)).To(Equal([]string{"a.sh", "b", "c.txt"}))

@@ -86,6 +86,22 @@ while IFS= read -r mp; do
 done < <(awk '{print $5}' /proc/self/mountinfo)
 find "$TARGET_HOME" "${PRUNE_ARGS[@]}" -print0 | xargs -0 chown "$TARGET_UID:$TARGET_GID" 2>/dev/null || true
 
+# Let the session user `pip install` into the base venv (CS-IMG-052). The venv
+# is built as root (and children may pip-install into it as root at build
+# time), so hand the session user its DIRECTORIES only: creating, renaming and
+# unlinking entries needs write access to the containing directory, never to
+# the file, so installs, upgrades and uninstalls all work while the files
+# themselves stay root-owned. Chowning files would copy every one of them up
+# into the container layer on overlay2 at each start — a child venv holding
+# numpy or torch is hundreds of MB. The path is fixed (never $VIRTUAL_ENV, which
+# an env file could point at /), -xdev stays off mounts, and find never follows
+# symlinks. Installs live in the container layer and die with the container.
+if [ -d /opt/claude-sandbox/venv ] && [ ! -L /opt/claude-sandbox/venv ]; then
+    find /opt/claude-sandbox/venv -xdev -type d \
+        \( ! -uid "$TARGET_UID" -o ! -gid "$TARGET_GID" \) \
+        -exec chown "$TARGET_UID:$TARGET_GID" {} + 2>/dev/null || true
+fi
+
 # Grant docker socket access by adding user to a group with the socket's GID
 if [ -n "$DOCKER_SOCKET_GID" ]; then
     if ! getent group "$DOCKER_SOCKET_GID" >/dev/null 2>&1; then
