@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/hostdirs"
 )
 
 // ShadowDirPrefix is the os.MkdirTemp pattern of a shadow directory. MkdirTemp
@@ -65,6 +66,58 @@ func shadowRoot(root string) string {
 			"set Env.TempRoot (or Inputs.TempDir) to a scratch directory such as GinkgoT().TempDir()", root))
 	}
 	return root
+}
+
+// NestedShadowSubdir is the directory under CLAUDE_CODE_TMPDIR that a
+// launcher inside a sandbox makes its shadow directories in (CS-LNCH-161).
+// It does not match shadowDirName, so no sweep ever considers it itself.
+const NestedShadowSubdir = "claude-sandbox-shadow"
+
+// ErrNoHostVisibleTempRoot marks a launcher inside a sandbox that found no
+// temp root the host docker daemon can see (CS-LNCH-162).
+var ErrNoHostVisibleTempRoot = errors.New("no host-visible temp root")
+
+// NestedShadowRoot resolves the shadow root of a launcher running inside a
+// sandbox (CS-LNCH-161/162); home is the invoking user's home. The shadow
+// files are bind-mounted, and a bind source resolves on the HOST: the
+// container's own /tmp would give docker an empty, root-owned host path of
+// the same name. Outside a sandbox it returns "" (the temp root, unchanged).
+//
+// Order: a non-empty TMPDIR is returned as is — setting it is the operator's
+// statement that it is host-visible, and nothing inside the container can
+// check that. Otherwise CLAUDE_CODE_TMPDIR, when it is absolute and under the
+// config dir: the outer sandbox mounts the config dir at its real path
+// (CS-LNCH-008) and derives CLAUDE_CODE_TMPDIR under it (CS-LNCH-034), so a
+// path there is the same path on the host. The root is
+// <CLAUDE_CODE_TMPDIR>/claude-sandbox-shadow, made a 0700 directory the user
+// owns. Anything else is ErrNoHostVisibleTempRoot, wrapped with the reason.
+func NestedShadowRoot(getenv func(string) string, home string, ops *hostdirs.Ops) (string, error) {
+	if !hostdirs.InSandbox(getenv) {
+		return "", nil
+	}
+	if t := getenv("TMPDIR"); t != "" {
+		return t, nil
+	}
+	configDir := getenv("CLAUDE_CONFIG_DIR")
+	if configDir == "" && home != "" {
+		configDir = filepath.Join(home, ".claude")
+	}
+	cct := getenv("CLAUDE_CODE_TMPDIR")
+	switch {
+	case cct == "":
+		return "", fmt.Errorf("%w: CLAUDE_CODE_TMPDIR is not set", ErrNoHostVisibleTempRoot)
+	case !filepath.IsAbs(cct) || !filepath.IsAbs(configDir):
+		return "", fmt.Errorf("%w: CLAUDE_CODE_TMPDIR=%s is not an absolute path under the config dir %q", ErrNoHostVisibleTempRoot, cct, configDir)
+	}
+	cct, cfg := filepath.Clean(cct), filepath.Clean(configDir)
+	if cct != cfg && !strings.HasPrefix(cct, cfg+"/") {
+		return "", fmt.Errorf("%w: CLAUDE_CODE_TMPDIR=%s is not under the config dir %s, the one directory the outer sandbox is known to mount at its real path", ErrNoHostVisibleTempRoot, cct, cfg)
+	}
+	root := filepath.Join(cct, NestedShadowSubdir)
+	if err := hostdirs.EnsureOwnedDir(root, hostdirs.OwnedDirMode, ops); err != nil {
+		return "", fmt.Errorf("%w: cannot prepare %s: %v", ErrNoHostVisibleTempRoot, root, err)
+	}
+	return root, nil
 }
 
 // isSystemTempDir reports whether dir is os.TempDir(), however it is spelled

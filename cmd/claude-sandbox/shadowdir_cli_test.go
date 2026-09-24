@@ -184,3 +184,70 @@ var _ = Describe("test guard: an Env without TempRoot (CS-LNCH-082)", func() {
 		}
 	})
 })
+
+// CS-LNCH-161/162: a launcher inside a sandbox (Env.TempRoot unset, as in
+// production) makes its shadow directory under the host-visible
+// CLAUDE_CODE_TMPDIR, or refuses before any build. Every path is under the
+// fixture's scratch home; the real temp root is never named.
+var _ = Describe("nested launch shadow root (CS-LNCH-161/162)", func() {
+	var (
+		f   *cliFixture
+		cct string
+	)
+	BeforeEach(func() {
+		f = newCLIFixture()
+		f.env.TempRoot = ""
+		cct = filepath.Join(f.home, ".claude", "tmp")
+		Expect(os.MkdirAll(cct, 0o755)).To(Succeed())
+		f.envmap["CLAUDE_SANDBOX_PROJECT_DIR"] = f.proj
+		f.envmap["CLAUDE_CODE_TMPDIR"] = cct
+	})
+
+	It("CS-LNCH-161: the shadow directory is made, mounted and swept under CLAUDE_CODE_TMPDIR", func() {
+		root := filepath.Join(cct, launch.NestedShadowSubdir)
+		Expect(os.MkdirAll(root, 0o700)).To(Succeed())
+		stale := filepath.Join(root, "claude-sandbox12345")
+		Expect(os.MkdirAll(stale, 0o700)).To(Succeed())
+		t := time.Now().Add(-2 * time.Hour)
+		Expect(os.Chtimes(stale, t, t)).To(Succeed())
+		f.fake.On(sweepPS, "", nil)
+
+		Expect(f.run()).To(Equal(0), f.errw.String())
+		dir := labelValue(f.launched().Args, launch.LabelShadowDir)
+		Expect(filepath.Dir(dir)).To(Equal(root))
+		Expect(f.launchLine()).To(ContainSubstring(dir + "/CLAUDE.md:"))
+		Expect(stale).NotTo(BeADirectory(), "the sweep runs over the nested root")
+	})
+
+	It("CS-LNCH-161: a non-empty TMPDIR is used as the root", func() {
+		chosen := filepath.Join(f.home, "scratch")
+		Expect(os.MkdirAll(chosen, 0o700)).To(Succeed())
+		f.envmap["TMPDIR"] = chosen
+		Expect(f.run()).To(Equal(0), f.errw.String())
+		Expect(filepath.Dir(labelValue(f.launched().Args, launch.LabelShadowDir))).To(Equal(chosen))
+	})
+
+	refused := func(args ...string) {
+		Expect(f.run(args...)).To(Equal(2))
+		Expect(f.errw.String()).To(ContainSubstring("runs inside a sandbox"))
+		Expect(f.errw.String()).To(ContainSubstring("Set TMPDIR"))
+		for _, l := range f.fake.CommandLines() {
+			Expect(l).NotTo(HavePrefix("docker create"))
+			Expect(l).NotTo(HavePrefix("docker build"))
+		}
+		Expect(filepath.Join(cct, launch.NestedShadowSubdir)).NotTo(BeADirectory())
+	}
+
+	It("CS-LNCH-162: CLAUDE_CODE_TMPDIR outside the config dir refuses with exit 2 before any build", func() {
+		f.envmap["CLAUDE_CODE_TMPDIR"] = filepath.Join(f.home, "elsewhere")
+		refused()
+		Expect(f.errw.String()).To(ContainSubstring("not under the config dir"))
+	})
+
+	It("CS-LNCH-162: an unset CLAUDE_CODE_TMPDIR refuses headless and ralph launches too", func() {
+		delete(f.envmap, "CLAUDE_CODE_TMPDIR")
+		refused("headless", "--")
+		f.errw.Reset()
+		refused("--ralph")
+	})
+})

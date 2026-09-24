@@ -271,3 +271,95 @@ var _ = Describe("test guard: the real temp root is refused under go test (CS-LN
 		Expect(d).To(BeADirectory())
 	})
 })
+
+// CS-LNCH-161/162: a launcher inside a sandbox must make its shadow directory
+// where the host daemon resolves the same path. Every path here is under a
+// scratch directory; the real temp root is never named.
+var _ = Describe("nested shadow root (CS-LNCH-161/162)", func() {
+	var (
+		home string
+		env  map[string]string
+	)
+	getenv := func(k string) string { return env[k] }
+
+	BeforeEach(func() {
+		base, err := filepath.EvalSymlinks(GinkgoT().TempDir())
+		Expect(err).NotTo(HaveOccurred())
+		home = filepath.Join(base, "home")
+		mkdir(filepath.Join(home, ".claude", "tmp"))
+		env = map[string]string{
+			"CLAUDE_SANDBOX_PROJECT_DIR": filepath.Join(base, "proj"),
+			"CLAUDE_CODE_TMPDIR":         filepath.Join(home, ".claude", "tmp"),
+		}
+	})
+
+	It("CS-LNCH-161: outside a sandbox the root is the temp root, unchanged", func() {
+		delete(env, "CLAUDE_SANDBOX_PROJECT_DIR")
+		root, err := launch.NestedShadowRoot(getenv, home, nil)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(root).To(BeEmpty())
+		Expect(filepath.Join(home, ".claude", "tmp", launch.NestedShadowSubdir)).NotTo(BeADirectory())
+	})
+
+	It("CS-LNCH-161: inside, the root is a 0700 directory the user owns under CLAUDE_CODE_TMPDIR", func() {
+		root, err := launch.NestedShadowRoot(getenv, home, nil)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(root).To(Equal(filepath.Join(home, ".claude", "tmp", "claude-sandbox-shadow")))
+		fi, err := os.Lstat(root)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fi.IsDir()).To(BeTrue())
+		Expect(fi.Mode().Perm()).To(Equal(os.FileMode(0o700)))
+
+		d, err := launch.NewShadowDir(root)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(filepath.Dir(d)).To(Equal(root))
+		Expect(filepath.Base(root)).NotTo(MatchRegexp(`^claude-sandbox[0-9]+$`), "the subdir itself is never a sweep candidate")
+	})
+
+	It("CS-LNCH-161: CLAUDE_CONFIG_DIR is the config dir when set", func() {
+		cfg := filepath.Join(home, "alt-config")
+		env["CLAUDE_CONFIG_DIR"] = cfg
+		env["CLAUDE_CODE_TMPDIR"] = filepath.Join(cfg, "tmp") + "/"
+		root, err := launch.NestedShadowRoot(getenv, home, nil)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(root).To(Equal(filepath.Join(cfg, "tmp", "claude-sandbox-shadow")))
+
+		env["CLAUDE_CODE_TMPDIR"] = filepath.Join(home, ".claude", "tmp")
+		_, err = launch.NestedShadowRoot(getenv, home, nil)
+		Expect(err).To(MatchError(launch.ErrNoHostVisibleTempRoot), "~/.claude is not the config dir then")
+	})
+
+	It("CS-LNCH-161: a non-empty TMPDIR is the root, unchecked and not created", func() {
+		env["TMPDIR"] = filepath.Join(home, "chosen")
+		root, err := launch.NestedShadowRoot(getenv, home, nil)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(root).To(Equal(filepath.Join(home, "chosen")))
+		Expect(root).NotTo(BeADirectory())
+	})
+
+	DescribeTable("CS-LNCH-162: no host-visible root is an error naming why, and nothing is created",
+		func(cct, want string) {
+			if cct == "<unset>" {
+				delete(env, "CLAUDE_CODE_TMPDIR")
+			} else {
+				env["CLAUDE_CODE_TMPDIR"] = strings.ReplaceAll(cct, "$HOME", home)
+			}
+			root, err := launch.NestedShadowRoot(getenv, home, nil)
+			Expect(err).To(MatchError(launch.ErrNoHostVisibleTempRoot))
+			Expect(err.Error()).To(ContainSubstring(want))
+			Expect(root).To(BeEmpty())
+			Expect(filepath.Join(home, ".claudex", "tmp", launch.NestedShadowSubdir)).NotTo(BeADirectory())
+		},
+		Entry("unset", "<unset>", "CLAUDE_CODE_TMPDIR is not set"),
+		Entry("relative", ".claude/tmp", "not an absolute path"),
+		Entry("outside the config dir", "$HOME/elsewhere", "not under the config dir"),
+		Entry("a sibling sharing the prefix", "$HOME/.claudex/tmp", "not under the config dir"),
+	)
+
+	It("CS-LNCH-162: a root that cannot be made the user's directory is an error", func() {
+		touch(filepath.Join(home, ".claude", "tmp", launch.NestedShadowSubdir), "a file in the way")
+		_, err := launch.NestedShadowRoot(getenv, home, nil)
+		Expect(err).To(MatchError(launch.ErrNoHostVisibleTempRoot))
+		Expect(err.Error()).To(ContainSubstring("cannot prepare"))
+	})
+})
