@@ -452,7 +452,7 @@ var _ = Describe("baked sources", func() {
 		Expect(helper).To(ContainSubstring(`mp=${mp//\\/\\\\}; mp=${mp//\*/\\*}; mp=${mp//\?/\\?}; mp=${mp//\[/\\[}`))
 		Expect(helper).To(ContainSubstring(`_CS_PRUNE+=(-path "$mp" -prune -o)`))
 		// The home chown uses the same helper.
-		Expect(ep).To(ContainSubstring("_cs_prune_args \"$TARGET_HOME\"\nfind \"$TARGET_HOME\" \"${_CS_PRUNE[@]}\" -print0"))
+		Expect(ep).To(ContainSubstring("_cs_prune_args \"$TARGET_HOME\"\nfind \"$TARGET_HOME\" \"${_CS_PRUNE[@]}\" \\( ! -uid \"$TARGET_UID\" -o ! -gid \"$TARGET_GID\" \\) -print0"))
 		Expect(block).To(ContainSubstring(`-exec chown "$TARGET_UID:$TARGET_GID" {} +`))
 		Expect(block).NotTo(ContainSubstring("VIRTUAL_ENV"), "never a path an env file can set")
 		Expect(block).NotTo(ContainSubstring("-type f"), "files keep their owner (no overlay2 copy-up)")
@@ -460,7 +460,7 @@ var _ = Describe("baked sources", func() {
 
 		// After the uid/gid remap, before the hand-off.
 		Expect(start).To(BeNumerically(">", strings.Index(ep, `usermod -o -u "$TARGET_UID"`)))
-		Expect(start).To(BeNumerically("<", strings.Index(ep, "exec gosu")))
+		Expect(start).To(BeNumerically("<", strings.Index(ep, "exec /usr/sbin/gosu")))
 
 		Expect(repoFile("container-context.md")).To(ContainSubstring("die with the container"))
 	})
@@ -489,6 +489,109 @@ var _ = Describe("baked sources", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(string(out)).To(Equal(want), raw)
 		}
+	})
+
+	Describe("CS-IMG-067: the entrypoint's root part trusts nothing from the container environment", func() {
+		// Lines of the script that run something: not blank, not a comment.
+		commands := func(ep string) []string {
+			var out []string
+			for _, l := range strings.Split(ep, "\n") {
+				t := strings.TrimSpace(l)
+				if t == "" || strings.HasPrefix(t, "#") {
+					continue
+				}
+				out = append(out, t)
+			}
+			return out
+		}
+
+		It("fixes the environment before any command and restores PATH only for the hand-off", func() {
+			ep := repoFile("entrypoint.sh")
+			Expect(strings.HasPrefix(ep, "#!/bin/bash -p\n")).To(BeTrue(),
+				"privileged mode: no BASH_ENV/ENV, no imported functions, SHELLOPTS, BASHOPTS, CDPATH, GLOBIGNORE")
+			cmds := commands(ep)
+			// The very first things executed, in order: save, fix, drop.
+			Expect(cmds[0]).To(Equal(`_CS_SESSION_PATH="$PATH"`))
+			Expect(cmds[1]).To(Equal("export PATH=/usr/sbin:/usr/bin:/sbin:/bin"), "root-only-writable dirs; /usr/local/* left out")
+			Expect(cmds[2]).To(Equal("unset LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT GCONV_PATH LOCPATH"))
+			// Restored right before the exec, and nothing in between; the exec
+			// names gosu and the binary absolutely (CS-PID-007), so no PATH
+			// lookup happens under the restored PATH.
+			Expect(cmds[len(cmds)-2]).To(Equal(`PATH="$_CS_SESSION_PATH"`))
+			Expect(cmds[len(cmds)-1]).To(Equal(`exec /usr/sbin/gosu "$TARGET_USER" /opt/claude-sandbox/bin/claude-sandbox pidslot -- "$@"`))
+			Expect(strings.Count(ep, "_CS_SESSION_PATH")).To(Equal(2), "saved once, used once")
+			Expect(ep).NotTo(MatchRegexp(`(?m)^\s*(export )?LD_(PRELOAD|LIBRARY_PATH|AUDIT)=`), "the LD_* three are never restored")
+			Expect(ep).NotTo(ContainSubstring("exec gosu"), "bare gosu would be looked up on the restored PATH")
+		})
+
+		It("the prologue resolves the root part's tools under a poisoned PATH (runnable)", func() {
+			ep := repoFile("entrypoint.sh")
+			cmds := commands(ep)
+			prologue := strings.Join(cmds[:3], "\n")
+			poison := GinkgoT().TempDir()
+			for _, tool := range []string{"awk", "id", "find", "chown"} {
+				Expect(os.WriteFile(filepath.Join(poison, tool), []byte("#!/bin/sh\necho POISON\n"), 0o755)).To(Succeed())
+			}
+			// The image order: user-writable dirs first (CS-IMG-052).
+			cmd := exec.Command("bash", "-c", prologue+"\nprintf '%s\\n' \"$PATH\" \"$_CS_SESSION_PATH\" \"$(command -v awk)\" \"$(command -v id)\" \"${LD_PRELOAD-unset}\" \"${LD_LIBRARY_PATH-unset}\" \"${GCONV_PATH-unset}\" \"${LOCPATH-unset}\"")
+			cmd.Env = []string{"PATH=" + poison + ":/usr/sbin:/usr/bin:/sbin:/bin", "LD_PRELOAD=" + poison + "/x.so", "LD_LIBRARY_PATH=" + poison, "GCONV_PATH=" + poison, "LOCPATH=" + poison}
+			out, err := cmd.Output()
+			Expect(err).NotTo(HaveOccurred())
+			lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
+			Expect(lines).To(HaveLen(8))
+			Expect(lines[0]).To(Equal("/usr/sbin:/usr/bin:/sbin:/bin"))
+			Expect(lines[1]).To(Equal(poison+":/usr/sbin:/usr/bin:/sbin:/bin"), "the session PATH is kept aside verbatim")
+			Expect(lines[2]).To(HavePrefix("/usr/bin/"), "awk is the distribution's, not the planted one")
+			Expect(lines[3]).To(HavePrefix("/usr/bin/"))
+			Expect(lines[4]).To(Equal("unset"))
+			Expect(lines[5]).To(Equal("unset"))
+			Expect(lines[6]).To(Equal("unset"))
+			Expect(lines[7]).To(Equal("unset"))
+		})
+
+		It("bash -p ignores BASH_ENV (the shebang's guarantee, runnable)", func() {
+			dir := GinkgoT().TempDir()
+			env := filepath.Join(dir, "evil.sh")
+			Expect(os.WriteFile(env, []byte("CS_EVIL=ran\n"), 0o644)).To(Succeed())
+			run := func(args ...string) string {
+				cmd := exec.Command("bash", append(args, "-c", `printf '%s' "${CS_EVIL-unset}"`)...)
+				cmd.Env = []string{"PATH=/usr/bin:/bin", "BASH_ENV=" + env}
+				out, err := cmd.Output()
+				Expect(err).NotTo(HaveOccurred())
+				return string(out)
+			}
+			Expect(run()).To(Equal("ran"), "without -p a non-interactive bash sources BASH_ENV first")
+			Expect(run("-p")).To(Equal("unset"))
+		})
+	})
+
+	It("CS-IMG-068: the entrypoint is idempotent on a restart of the same container", func() {
+		ep := repoFile("entrypoint.sh")
+		// The user is resolved by name, claude first, then the already-renamed
+		// host user; every later step keys on it.
+		Expect(ep).To(ContainSubstring("if getent passwd claude >/dev/null; then\n    _CS_USER=claude\nelif getent passwd \"$TARGET_USER\" >/dev/null; then\n    _CS_USER=\"$TARGET_USER\"\nelse\n"))
+		Expect(ep).To(ContainSubstring(`_CS_GROUP="$(id -gn "$_CS_USER")"`))
+		Expect(ep).NotTo(MatchRegexp(`id -[ug] claude\b`), "never id on the build-time name: it is gone after the rename")
+		Expect(ep).NotTo(MatchRegexp(`(?m)^\s*(usermod|groupmod) .* claude\s*(2>|\|\||$)`), "usermod/groupmod act on the resolved user/group")
+		Expect(ep).To(ContainSubstring(`if [ "$(id -u "$_CS_USER")" != "$TARGET_UID" ] || [ "$(id -g "$_CS_USER")" != "$TARGET_GID" ]; then`))
+		Expect(ep).To(ContainSubstring(`if [ "$_CS_USER" != "$TARGET_USER" ]; then` + "\n" +
+			`    usermod -l "$TARGET_USER" -d "$TARGET_HOME" "$_CS_USER"`))
+		// The relocation runs only while /home/claude is a real directory.
+		Expect(ep).To(ContainSubstring(`&& [ -d /home/claude ] && [ ! -L /home/claude ]; then`))
+		Expect(ep).To(ContainSubstring("    rm -rf /home/claude\n    ln -s \"$TARGET_HOME\" /home/claude\n"))
+		// The home chown skips what is already owned and runs no empty chown.
+		Expect(ep).To(ContainSubstring(`find "$TARGET_HOME" "${_CS_PRUNE[@]}" \( ! -uid "$TARGET_UID" -o ! -gid "$TARGET_GID" \) -print0 \` + "\n" +
+			`    | xargs -0 --no-run-if-empty chown -h "$TARGET_UID:$TARGET_GID"`))
+		// No other root-part chown can follow a link: the venv chown acts on
+		// -type d (lstat: a link never matches), and nothing else chowns.
+		n := 0
+		for _, l := range strings.Split(ep, "\n") {
+			if t := strings.TrimSpace(l); !strings.HasPrefix(t, "#") && strings.Contains(t, "chown") {
+				n++
+			}
+		}
+		Expect(n).To(Equal(2), "exactly the home and venv chowns")
+		Expect(ep).To(ContainSubstring(`-type d \` + "\n" + `        \( ! -uid "$TARGET_UID" -o ! -gid "$TARGET_GID" \) \` + "\n" + `        -exec chown "$TARGET_UID:$TARGET_GID" {} +`))
 	})
 
 	It("CS-IMG-037: the parser skips multi-stage COPYs and joins continuations", func() {

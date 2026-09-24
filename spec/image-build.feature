@@ -632,6 +632,66 @@ Feature: Image build lifecycle (CS-IMG)
     # false, so pip refuses ("User site-packages are not visible in this
     # virtualenv").
 
+  Scenario: CS-IMG-067 The entrypoint's root part trusts nothing from the container environment
+    Given entrypoint.sh runs as root on EVERY start of a container — a docker start of
+      a stopped kept container re-runs it — and its environment is the container's,
+      every --env-file line included
+    And the image PATH puts /home/claude/.local/bin and /opt/claude-sandbox/venv/bin,
+      both writable by the session user (CS-IMG-052), ahead of /usr/bin
+    When the entrypoint starts
+    Then before any command runs it saves the session PATH and sets
+      PATH=/usr/sbin:/usr/bin:/sbin:/bin, exported, so id, awk, find, chown, usermod
+      and every other tool of the root part resolve to the distribution's own
+      directories — a session-planted ~/.local/bin/awk or venv/bin/awk never runs as
+      root on a restart
+    # /usr/local/* is left out: a child image may hand it to the user, and the
+    # root part needs nothing from it.
+    And it unsets LD_PRELOAD, LD_LIBRARY_PATH and LD_AUDIT and does not restore them:
+      the loader honours them for every root-run tool and for gosu itself, whose exec
+      happens before the privilege drop (they had already loaded into this bash — a
+      launcher-side refusal is the only cure for that, and is out of scope here)
+    And it unsets GCONV_PATH and LOCPATH the same way: glibc loads gconv modules and
+      locale data from them lazily into every root-run tool
+    And its shebang is "#!/bin/bash -p": privileged mode neither sources $BASH_ENV or
+      $ENV nor imports functions, SHELLOPTS, BASHOPTS, CDPATH or GLOBIGNORE from the
+      environment, so an env file naming a session-writable BASH_ENV cannot run as
+      root before the first line of the script (bash resets IFS itself)
+    And the session PATH is restored immediately before the hand-off, after which
+      nothing is looked up on PATH: gosu is /usr/sbin/gosu and the binary is
+      /opt/claude-sandbox/bin/claude-sandbox (CS-PID-007)
+    # Considered and kept for the root part: HOST_UID/GID/USER/HOME and DOCKER_GID
+    # (the launcher's own -e, which outranks --env-file); POSIXLY_CORRECT, LANG/LC_*
+    # (change output form, not which program runs); PYTHON*, TMPDIR (nothing here
+    # runs python or mktemp). Kept for the session: everything but the LD_* three,
+    # BASH_ENV included — as the unprivileged user it is their own configuration.
+
+  Scenario: CS-IMG-068 The entrypoint is idempotent on a restart of the same container
+    Given a container whose first start renamed claude to the host user, remapped its
+      UID/GID, moved /home/claude to the host home and left /home/claude a symlink
+    When the container is stopped and started again (a kept container, a restart
+      policy) and the entrypoint runs a second time with the same environment
+    Then it resolves the user to operate on by name — "claude" when it exists, else the
+      host user — and exits 1 naming both when neither exists, so "id: 'claude': no
+      such user" is never printed and every step keys on that user
+    And the remap runs only when the uid or gid differs, the rename only when the
+      name differs, and the home relocation only when /home/claude is a real
+      directory (never the symlink the first run left: -d follows it, and the merge
+      walk would crawl the whole home merging it into itself)
+    And the home chown lists only entries not already owned by the host UID:GID, as the
+      venv chown does (CS-IMG-052) — a chown copies a file up into the container layer
+      on overlay2 even when it changes nothing — so a restart chowns nothing
+    And it chowns with -h: find selects a symlink by the link's own owner and a plain
+      chown follows it, so a build-time ~/.local/bin/x -> /usr/bin/tool would hand
+      /usr/bin/tool — which the root part runs on its fixed PATH — to the session user,
+      and again on every start (the link itself stayed root's). The link becomes the
+      user's, its target keeps its owner. The venv chown acts on directories only
+      (-type d never matches a link) and the relocation's mv moves a link, not its target
+    And the session comes back up as the host user with the same uid, home and PATH
+    # Measured in a scratch image at HOST_UID 1000 and 1234 (2026-09-24): with the old
+    # entrypoint a restart ran the planted ~/.local/bin/awk and the BASH_ENV file as
+    # root (markers written under /root) and printed the id error; with this one no
+    # marker, no error, the session user, home symlink and PATH as on the first start.
+
   Scenario: CS-IMG-029 Base, tools and CLI Dockerfiles declare the shared cache-mount ids
     Then Dockerfile, Dockerfile.tools and Dockerfile.cli use "--mount=type=cache,id=claude-sandbox-<name>" mounts
     And the ids are apt, apt-lists, pip, npm, go-mod, go-build
