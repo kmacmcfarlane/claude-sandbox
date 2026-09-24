@@ -309,13 +309,17 @@ func decideSessions(env *Env, projectDir string, f *launchFlags) (sessionDecisio
 	}
 }
 
-// sessionLabel names a container in a report: its instance noun, or its
-// mode for a container without an instance label (CS-SESS-047, CS-SESS-063).
+// sessionLabel names one container in a message: its instance noun, else its
+// mode for a container without an instance label, else its container name,
+// so a message never names an empty session (CS-SESS-063).
 func sessionLabel(s sessions.Session) string {
-	if s.Instance == "" {
+	switch {
+	case s.Instance != "":
+		return s.Instance
+	case s.Mode != "":
 		return s.Mode
 	}
-	return s.Instance
+	return s.Name
 }
 
 func reportRunning(env *Env, found []sessions.Session) {
@@ -363,7 +367,7 @@ func resolveTarget(env *Env, candidates []sessions.Session, target, verb string)
 // one candidate, so the common case stays a single prompt (CS-SESS-017).
 func selectInstance(env *Env, candidates []sessions.Session, verb string) (sessions.Session, error) {
 	if len(candidates) == 1 {
-		fmt.Fprintf(env.Err, "Using the only running session: %s\n", candidates[0].Instance)
+		fmt.Fprintf(env.Err, "Using the only running session: %s\n", sessionLabel(candidates[0]))
 		return candidates[0], nil
 	}
 	names := sessions.Instances(candidates)
@@ -524,7 +528,7 @@ func newInstance(env *Env, projectDir string, f *launchFlags, gitRoot string) st
 // comes from the container's own labels, carried by its events.
 func attachTo(env *Env, s sessions.Session, configuredKeys string) error {
 	detachKeys := launch.ResolveDetachKeys(configuredKeys)
-	fmt.Fprintf(env.Out, "Attaching to %s. Press %s to detach without stopping it.\n", s.Instance, detachKeys)
+	fmt.Fprintf(env.Out, "Attaching to %s. Press %s to detach without stopping it.\n", sessionLabel(s), detachKeys)
 	// Docker cannot report whether another client is already attached, so this
 	// cannot be prevented — only mentioned.
 	fmt.Fprintln(env.Out, "If someone else is already attached, you will share the terminal.")
@@ -542,7 +546,7 @@ func attachTo(env *Env, s sessions.Session, configuredKeys string) error {
 // a session child the launcher waits on.
 func joinInto(env *Env, s sessions.Session, projectDir, hostUser, model, configuredKeys string, dangerous bool, f *launchFlags, wt worktreeChoice) error {
 	detachKeys := launch.ResolveDetachKeys(configuredKeys)
-	fmt.Fprintf(env.Out, "Starting a new session inside %s.\n", s.Instance)
+	fmt.Fprintf(env.Out, "Starting a new session inside %s.\n", sessionLabel(s))
 	fmt.Fprintln(env.Out, "Note: this session ends if that container's primary session exits, and it cannot be reattached.")
 	// Detaching from a joined session orphans it beyond recovery, so this is
 	// the path where docker's ctrl-p,ctrl-q default does the most damage: the
@@ -631,7 +635,7 @@ func confirmDrift(env *Env, s sessions.Session, wantHash string, wantInputs []la
 	if !env.Prompter.Interactive() {
 		return false, false, exitErr(exitDecisionRequired,
 			"Error: configuration has changed since session '%s' started, and no terminal is attached.\n"+
-				"Pass --allow-config-drift to proceed anyway, or --new to launch a fresh container.", s.Instance)
+				"Pass --allow-config-drift to proceed anyway, or --new to launch a fresh container.", sessionLabel(s))
 	}
 	fmt.Fprintln(env.Err, "  [c] continue anyway")
 	fmt.Fprintln(env.Err, "  [n] new container with the current config")
@@ -659,5 +663,5 @@ func warnModelMismatch(env *Env, s sessions.Session, want string) {
 		running = "(default)"
 	}
 	fmt.Fprintf(env.Err, "Note: session '%s' is running model %s; --model %s cannot change a running session.\n",
-		s.Instance, running, want)
+		sessionLabel(s), running, want)
 }

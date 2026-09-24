@@ -312,8 +312,8 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
   Scenario: CS-SESS-025 Drift requires an explicit choice before attach or join
     Given the recomputed hash differs from the chosen session's label
     Then the drifted files are named, distinguishing changed, added, and removed
-    And the session is named by its instance, or by its mode for a container
-      without an instance label (as CS-SESS-063 does), never ''
+    And the prompt and its no-terminal error name the session as CS-SESS-063
+      does, never ''
     And it is stated that attaching will not apply those changes
     And the choices offered are:
       | key | action                              |
@@ -331,6 +331,7 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
     Given a session was started with a different model than the one requested
     When attach is chosen
     Then a warning states the running session's model cannot be changed
+    And the warning names the session as CS-SESS-063 does, never ''
     When join is chosen
     Then the requested model is passed to the joined claude process
 
@@ -350,8 +351,7 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
     # so it is reported rather than treated as drift (CS-LNCH-044).
     When attach is chosen
     Then a note names the worktree the session runs in (or "the shared checkout")
-    And the note names the session by its instance, or by its mode for a
-      container without an instance label (as CS-SESS-063 does), never ''
+    And the note names the session as CS-SESS-063 does, never ''
     And when the request differs (--worktree=NAME, --no-worktree), the note
       states the running session cannot be changed
     And nothing blocks and no prompt is added
@@ -684,6 +684,11 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
     And with State.OOMKilled false, or an inspect that fails, nothing is printed
     And the decision flow, the exit-3 no-terminal behaviour (CS-SESS-019) and
       the bypass flags (CS-SESS-028) are unchanged
+    And every message that names one session (this note, the attach, join and
+      "only running session" lines, the drift prompt and its no-terminal error,
+      the model and worktree notes) names it by its instance, else by its mode
+      for a container without an instance label, else by its container name,
+      never ''
 
   # ---- kept containers: exited and restarting ----
   #
