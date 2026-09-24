@@ -872,6 +872,18 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 		// The drift prompt chose a new container instead: fall through and launch.
 	}
 
+	// CS-LNCH-112: settled before any image work, so a bad value never costs
+	// a build; Build checks it again as a backstop. After the session
+	// decision: an attach or join creates nothing, so the value is moot there.
+	oomSource := cascade.KeySource(configFiles, "oomScoreAdj")
+	adj, err := launch.ResolveOOMScoreAdj(env.Getenv, cfg, oomSource)
+	if err != nil {
+		return exitErr(2, "Error: %v", err)
+	}
+	if adj < 0 {
+		fmt.Fprintf(env.Err, "WARNING: oomScoreAdj %d is below 0: this sandbox is shielded from the host's OOM killer, which will prefer host processes (the desktop) over it.\n", adj)
+	}
+
 	// A branch is an ordinary new container whose claude invocation forks an
 	// existing conversation (CS-SESS-039/040). The flags go ahead of the user's
 	// passthrough; the fingerprint is unaffected because passthrough args are
@@ -1004,6 +1016,7 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 		Version:  version,
 		// CS-LNCH-093: recorded on the container for the OOM report.
 		MemoryLimitSource: cascade.MemoryLimitSource(configFiles),
+		OOMScoreAdjSource: oomSource,
 		Headless:          headless, LookupEnv: env.lookupEnv,
 		Out: env.Out, Err: env.Err,
 	}

@@ -105,6 +105,9 @@ func (in *Inputs) configFingerprint(p *Plan, ha hostAccess, sharedPeerRegistry b
 	fmt.Fprintf(&env, "sharedPeerRegistry=%t\n", sharedPeerRegistry)
 	fmt.Fprintf(&env, "uid=%d gid=%d user=%s home=%s\n", in.HostUID, in.HostGID, in.HostUser, in.Home)
 	fmt.Fprintf(&env, "memory=%s\n", p.MemoryLimit)
+	// CS-LNCH-112: the APPLIED value (cascade.Config.OOMScoreAdj is json:"-"),
+	// a property of the container that attach and join cannot change.
+	fmt.Fprintf(&env, "oomScoreAdj=%d\n", p.OOMScoreAdj)
 
 	// Excluded on purpose: model, passthrough args, --limit, the instance noun,
 	// the pid class (CS-LNCH-040), the worktree name and the config key behind

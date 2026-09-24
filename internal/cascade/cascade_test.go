@@ -75,6 +75,39 @@ var _ = Describe("config cascade", func() {
 		Expect(cfg.SharedPeerRegistry).To(BeNil())
 	})
 
+	It("CS-LNCH-112: oomScoreAdj merges like any other scalar; an explicit 0 is not unset", func() {
+		files := writeConfigs(tmp,
+			"oomScoreAdj: 800\n",
+			"oomScoreAdj: 0\n",
+		)
+		cfg, err := cascade.Load(files)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.OOMScoreAdj).NotTo(BeNil())
+		Expect(*cfg.OOMScoreAdj).To(Equal(0))
+
+		files = writeConfigs(tmp, "oomScoreAdj: 800\n", "model: opus\n")
+		cfg, err = cascade.Load(files)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(*cfg.OOMScoreAdj).To(Equal(800))
+
+		files = writeConfigs(tmp, "model: opus\n")
+		cfg, err = cascade.Load(files)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.OOMScoreAdj).To(BeNil())
+
+		// The key's own file is found wherever in the cascade it is set.
+		files = writeConfigs(tmp, "oomScoreAdj: 800\n", "model: opus\n")
+		Expect(cascade.KeySource(files, "oomScoreAdj")).To(Equal(files[0]))
+		files = writeConfigs(tmp, "oomScoreAdj: 800\n", "oomScoreAdj: 0\n")
+		Expect(cascade.KeySource(files, "oomScoreAdj")).To(Equal(files[1]))
+		Expect(cascade.KeySource(files, "memoryLimit")).To(BeEmpty())
+
+		// Not a number: the launch fails rather than guessing.
+		files = writeConfigs(tmp, "oomScoreAdj: high\n")
+		_, err = cascade.Load(files)
+		Expect(err).To(HaveOccurred())
+	})
+
 	It("CS-CASC-002: upstream keys survive when the local file is sparse", func() {
 		files := writeConfigs(tmp,
 			"model: opus\n",

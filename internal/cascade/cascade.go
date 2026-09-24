@@ -131,6 +131,14 @@ type Config struct {
 	// DetachKeys overrides the key sequence that detaches from an attached
 	// session. Empty means the built-in default; see defaultDetachKeys.
 	DetachKeys string `yaml:"detachKeys"`
+
+	// OOMScoreAdj is the container's oom_score_adj (CS-LNCH-112), which makes
+	// sandbox processes the kernel's preferred victims when the HOST runs out
+	// of memory. A pointer, because an explicit 0 (docker's default) must be
+	// distinguishable from unset (the launcher's default). json:"-" because
+	// the APPLIED value is hashed explicitly by the drift fingerprint, so an
+	// unset key and an explicit default hash alike.
+	OOMScoreAdj *int `yaml:"oomScoreAdj" json:"-"`
 }
 
 // Load parses and deep-merges the config files (root-first order, as returned
@@ -283,11 +291,18 @@ func TrackInHostSource(files []string) string {
 
 // MemoryLimitSource returns the most-local config file that sets memoryLimit
 // ("" when none does), for the OOM report and the container's labels
-// (CS-CASC-036). files are root-first, as Load takes them. Only this key is
-// tracked: the cascade keeps no per-key provenance, and the report needs
-// nothing else. A file that sets the key to an empty value still counts —
-// it is what the merge took — and the caller then reports the default.
+// (CS-CASC-036). files are root-first, as Load takes them. A file that sets
+// the key to an empty value still counts — it is what the merge took — and
+// the caller then reports the default.
 func MemoryLimitSource(files []string) string {
+	return KeySource(files, "memoryLimit")
+}
+
+// KeySource returns the most-local config file that sets the top-level key
+// ("" when none does). The cascade keeps no per-key provenance, so the few
+// callers that must name a key's file (memoryLimit's OOM report, CS-CASC-036;
+// an invalid oomScoreAdj, CS-LNCH-112) re-read the files for that one key.
+func KeySource(files []string, key string) string {
 	src := ""
 	for _, f := range files {
 		raw, err := os.ReadFile(f)
@@ -298,7 +313,7 @@ func MemoryLimitSource(files []string) string {
 		if yaml.Unmarshal(raw, &doc) != nil {
 			continue
 		}
-		if _, ok := doc["memoryLimit"]; ok {
+		if _, ok := doc[key]; ok {
 			src = f
 		}
 	}

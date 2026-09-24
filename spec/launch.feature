@@ -394,6 +394,37 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     Then --memory and --memory-swap are both set to the configured memoryLimit (default 8g)
     # Equal swap disables swap: the container OOM-kills at the limit.
 
+  Scenario: CS-LNCH-112 Sandboxes are the host's preferred OOM victims
+    # memoryLimit only bounds one container; the sum across sandboxes can far
+    # exceed host RAM (216 GiB of limits on a 30 GiB host, 2026-09-21), so the
+    # host runs out first and the KERNEL's global OOM killer picks a victim.
+    # It ranks single processes by memory share (permille of RAM + swap) plus
+    # oom_score_adj; sandbox memory is spread over many ~0.5 GB processes, and
+    # the desktop's gnome-shell runs at adj 100, so the desktop died first.
+    When a new container is created
+    Then "docker create" carries --oom-score-adj <adj>, where <adj> is
+      CLAUDE_SANDBOX_OOM_SCORE_ADJ when set and non-empty, else the cascade key
+      oomScoreAdj, else 500
+    And an explicit 0 (env or key) is honoured and restores docker's default
+    # runc writes the value for the container's init AND for every "docker
+    # exec" (bootstrapData carries the container's oom_score_adj to both), and
+    # children inherit it on fork — so joins, ralph iterations and every tool
+    # a session spawns share it. All of a container's processes shift equally,
+    # so the order inside the container, and its own memoryLimit OOM, are
+    # unchanged. 500 outranks any host process at adj <= 100 until that one
+    # process holds roughly 40% of RAM + swap; a runaway that large is still
+    # killed ahead of the sandboxes.
+    And a value that is not an integer in [-1000, 1000] fails the launch with
+      exit 2, naming where it came from: the env var, or the most-local
+      config.yaml that sets oomScoreAdj (upstream levels included)
+    And it is validated before BuildKit is probed or any image is inspected or
+      built, so a bad value never costs a build; Build checks it again
+    And a value below 0 launches with one WARNING line: the sandbox is then
+      shielded from the host's OOM killer, which prefers host processes
+    And the applied value is part of the config hash ("oomScoreAdj="): it is a
+      property of the container that attach and join cannot change; an unset
+      key and an explicit 500 hash alike
+
   Scenario: CS-LNCH-023 Model precedence CLI > YAML
     Given YAML sets model "opus" and the CLI passes --model sonnet
     Then the container command includes "--model sonnet"
