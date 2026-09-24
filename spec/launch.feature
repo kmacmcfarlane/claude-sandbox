@@ -1567,3 +1567,41 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     And exit 0 means only that the container was up after the settle, not that
       the session stays healthy: one that dies later disappears with its
       output, as an attached session's container does after a detach
+
+  # ---- refused loader/shell-startup env keys (CS-LNCH-129..131) ----
+  # An env file is the one env channel a session can write (the project tree is
+  # mounted rw), and every --env-file line becomes the environment of the
+  # entrypoint, which runs as root (CS-IMG-067). The loader and libc act on
+  # LD_*/GCONV_PATH/LOCPATH/GLIBC_TUNABLES, and bash on BASH_ENV, before the
+  # entrypoint's first line, so the entrypoint's own unset cannot undo a .so
+  # already mapped into its bash. The launcher fails the launch closed when any
+  # cascade env file defines such a key (cascade.RefusedEnvKeys, CS-CASC-042..045),
+  # before it builds an image or creates a container. Fail closed, not a
+  # filtered shadow copy: a rewrite would silently drop a line the operator can
+  # no longer see, and no env file legitimately carries these keys.
+
+  Scenario: CS-LNCH-129 A refused key in a cascade env file fails the launch before docker create
+    Given a cascade env file containing "LD_PRELOAD=/home/u/evil.so"
+    When the launcher runs
+    Then it prints an error naming the file, the line number and the key, and
+      that these variables load code into the root entrypoint so the launcher
+      refuses them; a session that needs one sets it in its own shell rc
+    And it exits 2 without a "docker create", without building any image and
+      without reserving a container
+    And a launch whose env files carry no refused key is unaffected
+
+  Scenario: CS-LNCH-130 The refusal covers ralph and headless too
+    # launchWith is the shared path, so the check runs for every launch kind.
+    # A headless refusal prints to stderr (CS-LNCH-060), leaving stdout clean.
+    Given a cascade env file containing "BASH_ENV=/tmp/rc"
+    Then a ralph launch is refused the same way
+    And a headless launch is refused the same way, with the message on stderr
+
+  Scenario: CS-LNCH-131 Attach and join carry no env files, so a refused key does not reach them
+    # --env-file is a create-time flag; attach re-attaches an existing
+    # container and join runs "docker exec" with only its own -e. Neither
+    # re-reads the env cascade, so a refused key in a file cannot reach a root
+    # process through them, and they are not blocked by one.
+    Given a running session and a cascade env file containing "LD_AUDIT=/x.so"
+    When the launcher attaches to or joins that session
+    Then no --env-file is passed and the operation is not refused

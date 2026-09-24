@@ -912,6 +912,25 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 		// The drift prompt chose a new container instead: fall through and launch.
 	}
 
+	// CS-LNCH-129/130: this launch will create a container (attach and join
+	// returned above and pass no env file, CS-LNCH-131). Refuse it if any
+	// cascade env file defines a loader or shell-startup variable: every
+	// --env-file line reaches the root entrypoint's own bash before it can
+	// unset them (CS-IMG-067), and env files are session-writable, so a planted
+	// LD_PRELOAD would load a .so as root. Fail closed before any image build
+	// or docker create. The shared path covers ralph and headless too.
+	if refusals := cascade.RefusedEnvKeys(envFiles); len(refusals) > 0 {
+		fmt.Fprintln(env.Err, "Error: refusing to launch — an env file defines a variable the dynamic")
+		fmt.Fprintln(env.Err, "       loader or a shell honours before the root entrypoint can drop it,")
+		fmt.Fprintln(env.Err, "       so it would load code or read files as root at container start:")
+		for _, r := range refusals {
+			fmt.Fprintf(env.Err, "         %s:%d: %s\n", r.File, r.Line, r.Key)
+		}
+		fmt.Fprintln(env.Err, "       Remove these keys from the env file. A session that needs one sets")
+		fmt.Fprintln(env.Err, "       it in its own shell rc; an image sets it with ENV in the Dockerfile.")
+		return exitErr(2, "")
+	}
+
 	// CS-LNCH-112: settled before any image work, so a bad value never costs
 	// a build; Build checks it again as a backstop. After the session
 	// decision: an attach or join creates nothing, so the value is moot there.
