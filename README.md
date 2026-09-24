@@ -62,6 +62,9 @@ claude-sandbox sessions
 # Reattach after your terminal died:
 claude-sandbox --attach
 
+# Start a session in the background (no terminal needed), attach later:
+claude-sandbox --detach -- "/librarian-mode start"
+
 # Fork a conversation into a new container, to chase a side idea in parallel:
 claude-sandbox --branch
 
@@ -102,6 +105,7 @@ These flags are consumed by the launcher and control the container environment. 
 | `--worktree[=NAME]` | | Run claude in its own Claude Code worktree, `.claude/worktrees/NAME` on branch `worktree-NAME` — **off by default for interactive sessions, on for `--ralph`**; NAME defaults to the container's instance noun (`ralph` for ralph), and an existing NAME is reopened. See [Worktree mode](#worktree-mode) |
 | `--no-worktree` | | Run claude in the shared checkout (the interactive default; turns ralph's worktree off). Durable alternatives for both: `worktree: true`/`false` in config.yaml, or `CLAUDE_SANDBOX_WORKTREE=1`/`0` |
 | `--new` | | Launch a new container without prompting, even if sessions are running |
+| `--detach` | | Start a new container in the background and exit 0, printing the `--attach` command; needs no terminal and implies `--new`. Refused with `--ralph`, `--attach`, `--join`, `--branch` and `headless`. See [Starting detached](#starting-detached) |
 | `--branch` | | Fork a conversation into a new container (claude's `--resume` picker chooses which); add claude's `--name "my-name"` to name the fork |
 | `--attach[=INSTANCE]` | | Reattach to a running session instead of launching |
 | `--join[=INSTANCE]` | | Start another session inside a running container |
@@ -247,12 +251,57 @@ Docker's own default (`ctrl-p ctrl-q`) is deliberately not used, because the Cla
 
 Docker cannot report whether another client is attached, so attaching to a session someone else is actively using silently shares the terminal — output is duplicated and keystrokes interleave.
 
+### Starting detached
+
+`--detach` starts a new session with no terminal attached — from an IDE, a script or a unit
+file — and exits 0 once it is running:
+
+```bash
+claude-sandbox --detach -- "/librarian-mode start"
+# Started 'otter' (claude-sandbox-…-otter) in the background.
+# Attach: cd ~/proj && claude-sandbox --attach=otter   (detach again with ctrl-q,ctrl-q)
+```
+
+The container is exactly the one an attached launch makes — created with a TTY and `--rm`
+under the [launch lock](#launch-reservation) — but it is started with a plain `docker start`
+instead of `docker start -ai`, so nothing attaches. It is an ordinary session afterwards:
+`sessions` lists it, `--attach` reattaches it, `--join` enters it, and the detach keys apply
+from the first attach. It implies `--new` (there is nobody to answer the session prompt) and
+needs no terminal. A positional initial prompt after `--` reaches claude as it would attached.
+It is refused (exit 2) with `--ralph`, `--attach`, `--join`, `--branch` (claude's resume picker
+would wait in a session nobody sees; pass `--resume=<id> --fork-session` after `--` instead) and
+`headless`.
+
+`docker start` without a client returns as soon as the process exists, so the launcher
+watches the container for 2 seconds (less if it dies) before it reports success — a
+successful detached launch always takes those 2 seconds: a session that dies in
+that window — a bad claude flag after `--`, an entrypoint failure — is reported as
+`Error: 'otter' (…) stopped right after it started (exit 2); its output went with it. Rerun
+without --detach to see why.` and the launch exits 1, as it does when the container is not
+running, paused or restarting after the wait. **Exit 0 therefore means only that the container
+was up 2 seconds in**, not that the session stays healthy: because the container is `--rm`, a
+session that dies later — or `/exit` — removes it together with its output, and the next
+`--attach` finds nothing. Rerun without `--detach` to watch one that keeps dying.
+
+Past that window nothing waits on a detached session, so nothing reports how it ends: there
+is no [OOM report](#the-session-child). A later `--attach` watches as usual, and `sessions`
+marks an OOM kill for as long as the container exists. The shadow directory stays while the
+container runs and is swept by a later launch once it is gone
+([Shadow directory cleanup](#shadow-directory-cleanup)).
+A `docker start` that fails, or that leaves the container never started, removes the
+reservation and exits non-zero without an attach hint. The container carries the label
+`claude-sandbox.detached=1`, which is not part of the config-drift hash.
+The `Attach:` line is the same copy-paste command the notification ping gives: `cd` into the
+project (`$HOME` shortened to `~`, quoted when needed) because `--attach` looks only at the
+current project's sessions. Spec: `spec/launch.feature` CS-LNCH-113..119.
+
 ### Non-interactive use
 
 When a decision is required and no terminal is attached, the command prints what it found and **exits 3** rather than guessing. Choose explicitly instead:
 
 ```bash
 claude-sandbox --new             # always a new container
+claude-sandbox --detach          # a new container, started in the background
 claude-sandbox --branch          # new container forking a conversation (claude's picker chooses)
 claude-sandbox --branch --name sidequest  # same, naming the fork
 claude-sandbox --attach=otter    # a specific session
@@ -383,7 +432,7 @@ claude-sandbox headless [launcher flags] -- <claude args>
 - **Arguments.** Launcher flags go before `--` (`--docker-socket`, `--model`, `--dangerous`,
   `--worktree`, …). Everything after `--` reaches claude verbatim, including `--version`,
   `auth status`, `--resume=<id>` and inline JSON. After `headless`, `--version` and `--help`
-  are claude's. `--ralph`, `--limit`, `--attach`, `--join` and `--branch` are rejected.
+  are claude's. `--ralph`, `--limit`, `--attach`, `--join`, `--branch` and `--detach` are rejected.
 - **Environment.** Only these variables are forwarded from the client, each as a bare
   `-e NAME` (so values stay out of `ps`) and only when set: `CLAUDE_CODE_ENTRYPOINT`,
   `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING`, `CLAUDE_AGENT_SDK_VERSION`,
@@ -1156,7 +1205,7 @@ Inside the container, `CLAUDE_SANDBOX_PROJECT_DIR` is always set to the project 
 
 ## Shell completion
 
-`claude-sandbox completion <shell>` prints a completion script for `bash`, `zsh`, `fish`, or `powershell`. It covers the launcher flags (with descriptions), the `init` / `init-ralph` / `ralph` / `headless` subcommands, the flags of the first three, the launcher flags `headless` accepts (all but `--ralph`, `--limit`, `--attach`, `--join` and `--branch`) plus its `--`, `--model` aliases, and the known `claude` passthrough flags. Once an argument crosses the passthrough boundary — a claude flag, a `--`, or a positional — the launcher stops suggesting its own flags, since everything past that point belongs to `claude`.
+`claude-sandbox completion <shell>` prints a completion script for `bash`, `zsh`, `fish`, or `powershell`. It covers the launcher flags (with descriptions), the `init` / `init-ralph` / `ralph` / `headless` subcommands, the flags of the first three, the launcher flags `headless` accepts (all but `--ralph`, `--limit`, `--attach`, `--join`, `--branch` and `--detach`) plus its `--`, `--model` aliases, and the known `claude` passthrough flags. Once an argument crosses the passthrough boundary — a claude flag, a `--`, or a positional — the launcher stops suggesting its own flags, since everything past that point belongs to `claude`.
 
 ```bash
 # bash (needs bash-completion v2; see caveats below)
@@ -1333,7 +1382,7 @@ Spec: `spec/launch.feature` CS-LNCH-085..098, `spec/sessions.feature` CS-SESS-05
 Each launch writes its shadow files (the merged `CLAUDE.md`, `.mcp.json`, `gitconfig`) into one
 fresh `claude-sandbox<digits>` directory under the temp root (`$TMPDIR`, else `/tmp`) and
 bind-mounts them. The launcher removes its own directory when the session's container has
-died. After a detach, a signal-initiated exit or a launcher that was killed it cannot, so the
+died. After a detach, a `--detach` launch, a signal-initiated exit or a launcher that was killed it cannot, so the
 container carries a `claude-sandbox.shadowdir` label naming it, and every later launch sweeps, under the launch lock and right after discovery, the
 directories nothing uses any more. A directory is removed only when its name is exactly
 `claude-sandbox` followed by digits, it is a real directory (symlinks are never followed or
