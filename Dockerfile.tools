@@ -62,6 +62,9 @@ RUN ln -s /opt/claude-sandbox/bin/claude-sandbox /opt/claude-sandbox/bin/ralph
 # Registers the LSP plugins with Claude Code; container-context.md tells every
 # session to run it once language servers are installed (CS-IMG-050).
 COPY --link --chmod=755 bin/setup-lsp-plugins /opt/claude-sandbox/bin/setup-lsp-plugins
+# The body of the managed-settings Notification hook below (CS-LNCH-111): it
+# names the waiting session in the Discord ping instead of posting a fixed line.
+COPY --link --chmod=755 bin/notify-webhook /opt/claude-sandbox/bin/notify-webhook
 COPY --link logstream/ /opt/claude-sandbox/logstream/
 COPY --link PROMPT_RALPH.md /opt/claude-sandbox/PROMPT_RALPH.md
 COPY --link --from=mcp /src/dist/index.mjs /opt/claude-sandbox/mcp/discord-notify/dist/index.mjs

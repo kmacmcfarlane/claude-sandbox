@@ -406,6 +406,18 @@ var _ = Describe("baked sources", func() {
 		})
 	})
 
+	It("CS-IMG-051: the tools image ships notify-webhook, the body of the Notification hook", func() {
+		df := repoFile("Dockerfile.tools")
+		Expect(df).To(MatchRegexp(`(?m)^COPY --link --chmod=755 bin/notify-webhook /opt/claude-sandbox/bin/notify-webhook\s*$`))
+		Expect(imagebuild.BakedSources).To(ContainElement("bin/notify-webhook"))
+		// --chmod=755 on the COPY, so the checkout's umask never reaches the
+		// image and the file stays out of ModeBakedSources (CS-IMG-039).
+		Expect(imagebuild.ModeBakedSources).NotTo(ContainElement("bin/notify-webhook"))
+		// The drop-in calls the script by that path and still swallows failure.
+		Expect(repoFile("notification-hooks.json")).To(
+			ContainSubstring(`"command": "/opt/claude-sandbox/bin/notify-webhook || true"`))
+	})
+
 	It("CS-IMG-037: the parser skips multi-stage COPYs and joins continuations", func() {
 		df := "FROM x AS b\n# COPY commented/ out/\nCOPY --link --chmod=755 a.sh \\\n  b/ /dst/\nCOPY --from=b /out/bin /bin\nADD ./c.txt /c\n"
 		Expect(contextSources(df)).To(Equal([]string{"a.sh", "b", "c.txt"}))

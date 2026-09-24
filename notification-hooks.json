@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "[ -n \"${CLAUDE_NOTIFICATION_WEBHOOK_URL:-}\" ] && curl -s -H 'Content-Type: application/json' -d '{\"content\":\"🔔 Claude Code needs your input\"}' \"$CLAUDE_NOTIFICATION_WEBHOOK_URL\" > /dev/null 2>&1 || true"
+            "command": "/opt/claude-sandbox/bin/notify-webhook || true"
           }
         ]
       }

@@ -421,8 +421,8 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
 
   Scenario: CS-SESS-032 Join runs claude as the host user
     When join is chosen
-    Then "docker exec -it --detach-keys=<seq> -u <host user> -w <project dir>
-      <container> claude ..." runs as the session child the launcher waits on
+    Then "docker exec -it --detach-keys=<seq> -u <host user> -e CLAUDE_SANDBOX_JOINED=1
+      -w <project dir> <container> claude ..." (CS-SESS-075) runs as the session child the launcher waits on
       (CS-LNCH-085)
     And the output warns that a detached joined session cannot be recovered
     # -u is required: exec skips the entrypoint's gosu step and the image ends
@@ -741,3 +741,14 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
     When "claude-sandbox sessions --json" is run
     Then each object carries "state" (docker's state, "" when not reported)
     And "keep" with the claude-sandbox.keep label value when it is set
+
+  @new
+  Scenario: CS-SESS-075 A joined claude knows it is not the container's primary
+    When join is chosen
+    Then the docker exec passes "-e CLAUDE_SANDBOX_JOINED=1" to that exec only
+    And the container itself never carries CLAUDE_SANDBOX_JOINED, so the primary
+      session and every other join started without it do not see it
+    # The baked Notification hook (CS-LNCH-111) offers "claude-sandbox --attach=<noun>"
+    # to reach a waiting session, and attach reaches the container's PRIMARY
+    # claude. A joined session is a docker exec that cannot be reattached, so its
+    # ping must say so instead of pointing at a different session.

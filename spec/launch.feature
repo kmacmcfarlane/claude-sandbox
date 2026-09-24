@@ -197,6 +197,68 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       with no per-launch file and no claude argv
 
   @new
+  Scenario: CS-LNCH-111 The notification ping names the session that is waiting
+    # The hook posted a fixed "Claude Code needs your input". With a dozen
+    # concurrent sandboxes the operator could not tell which one had stopped,
+    # so every ping cost a sweep of `claude-sandbox sessions` and a guess.
+    Given CLAUDE_NOTIFICATION_WEBHOOK_URL is set in the container
+    When Claude Code fires a Notification hook with notification_type
+      "permission_prompt" or "idle_prompt"
+    Then the drop-in runs /opt/claude-sandbox/bin/notify-webhook, still with "|| true",
+      and that script posts ONE Discord message naming, when each is known:
+      the session's name, its instance noun, the project directory's basename,
+      the notification kind, and how to reach the session
+    And the reach line is "Attach: `cd <project path> && claude-sandbox --attach=<noun>`
+      · container `<name>`" for a container's primary session — copy-pasteable from
+      anywhere, because attach looks only at the current project's sessions
+      (CS-SESS-030); the path is CLAUDE_SANDBOX_PROJECT_DIR with $HOME shortened to ~
+      and shell-quoted when it needs it, and the "cd … &&" is dropped when the path
+      is unset, relative, over 300 characters or holds a control character, a
+      backtick or a backslash (fish honours \' inside single quotes, so no quoting
+      is safe for it); a noun that does not match ^[a-z0-9-]+$ gets no command at
+      all, only "Container: `<name>`" — "Joined session (not attachable)" for a
+      joined one (CS-SESS-075), "Headless session (SDK client)" for a headless one
+      — both with the container name — and the container name alone without a noun
+    And for a permission prompt only, the CLI's own one-line message is quoted in a
+      code span ("Claude needs your permission to use <tool>"): it names the tool and
+      carries no transcript content; the idle message is fixed and adds nothing
+    And the launcher supplies the facts the container did not have:
+      CLAUDE_SANDBOX_INSTANCE (the noun; unset for ralph, which has none, exactly
+      as the claude-sandbox.instance label is), CLAUDE_SANDBOX_CONTAINER and
+      CLAUDE_SANDBOX_MODE (claude, ralph or headless, as the claude-sandbox.mode label)
+    And all three are env vars only, so they are outside the config fingerprint,
+      which already excludes the noun as a per-session choice (CS-LNCH-040/044):
+      a new session is never drift
+    And a joined session and every ralph iteration inherit them from the container,
+      and attach reaches the primary that already has them
+    And the session's name is the "name" of this session's own peer-registry record,
+      <config dir>/sessions/$CLAUDE_PID.json, taken only when that record's sessionId
+      equals the payload's session_id (else CLAUDE_CODE_SESSION_ID) — the sessions
+      directory is never listed and no other record is read, and the transcript is
+      never read
+    # The Notification payload carries no name of any kind: in the 2.1.281/2.1.282
+    # bundle it is session_id, transcript_path, cwd, hook_event_name, message,
+    # notification_type (plus scratchpad_dir, prompt_id, agent_type when they
+    # apply; title is declared but no call site sets it). The hook's environment
+    # carries CLAUDE_PID and CLAUDE_CODE_SESSION_ID. The matcher is matched
+    # against notification_type, not message.
+    And every interpolated field is truncated by codepoint, has control characters
+      and backticks replaced, and sits inside a code span, so a name like
+      "[x](http://y)" or "_a_" renders as text; the body is built by jq (never string
+      concatenation) and sets allowed_mentions.parse to [] and flags to 4
+      (SUPPRESS_EMBEDS), so no text can ping anyone or unfurl a link
+    And nothing else leaves the container: no env value, no token, no webhook URL,
+      no path but the project's (basename in the header, ~-shortened in the attach
+      command), no transcript content
+    And the webhook URL reaches curl as a -K config on a pipe, never in any argv,
+      with globoff so {} and [] in it are literal, and the body is sent with
+      --data-binary
+    And it degrades one field at a time, and to exactly the single line
+      "🔔 Claude Code needs your input" when nothing identifies the session
+    And it exits 0 on every path — an unset webhook URL, an unparseable payload, a
+      NUL byte on stdin, unset HOME and CLAUDE_CONFIG_DIR, a missing jq or curl — and makes no docker call, no IPC and no network but the one curl
+
+  @new
   Scenario: CS-LNCH-069 A symlinked settings.json keeps working: its target is mounted at its own path
     # The removed shadow read the host file with os.ReadFile, which follows
     # links, so a settings.json symlinked into a dotfiles repo reached the

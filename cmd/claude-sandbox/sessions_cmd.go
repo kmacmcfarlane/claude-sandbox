@@ -553,7 +553,11 @@ func joinInto(env *Env, s sessions.Session, projectDir, hostUser, model, configu
 	// how the container happened to be started.
 	// The helper lands this claude on the container's pid class (CS-SESS-044,
 	// CS-PID-005); CLAUDE_SANDBOX_PID_CLASS is inherited from the container.
-	args := []string{"exec", "-it", "--detach-keys=" + detachKeys, "-u", hostUser, "-w", projectDir, s.Name,
+	// CS-SESS-075: CLAUDE_SANDBOX_JOINED tells the baked Notification hook
+	// that this claude is not the container's primary, so its ping does not
+	// offer an --attach that would land on a different session.
+	args := []string{"exec", "-it", "--detach-keys=" + detachKeys, "-u", hostUser,
+		"-e", "CLAUDE_SANDBOX_JOINED=1", "-w", projectDir, s.Name,
 		"/opt/claude-sandbox/bin/claude-sandbox", "pidslot", "--", "claude"}
 	// CS-SESS-064: the resolved setting, not just the CLI flag.
 	if dangerous {

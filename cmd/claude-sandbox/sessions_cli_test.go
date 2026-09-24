@@ -177,6 +177,20 @@ var _ = Describe("sessions (CS-SESS)", func() {
 			Expect(f.out.String()).To(ContainSubstring("cannot be reattached"))
 		})
 
+		It("CS-SESS-075: [j] marks the joined claude as not the primary, on the exec only", func() {
+			running(psRow("cs-a", "Up 1 hour", f.proj, "otter"))
+			tty("j")
+			Expect(f.run()).To(Equal(0))
+			Expect(f.sessionLine()).To(MatchRegexp(` -u \S+ -e CLAUDE_SANDBOX_JOINED=1 -w `))
+		})
+
+		It("CS-SESS-075: a new container never carries the join marker", func() {
+			running()
+			Expect(f.run()).To(Equal(0))
+			Expect(f.launchLine()).To(HavePrefix("docker create "))
+			Expect(f.launchLine()).NotTo(ContainSubstring("CLAUDE_SANDBOX_JOINED"))
+		})
+
 		It("CS-SESS-064: [j] honours a cascade dangerous: true", func() {
 			writeFile(filepath.Join(f.proj, ".claude-sandbox", "config.yaml"), "dangerous: true\n")
 			running(psRow("cs-a", "Up 1 hour", f.proj, "otter"))
