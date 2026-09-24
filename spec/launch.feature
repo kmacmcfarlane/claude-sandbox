@@ -383,6 +383,90 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     Then the mounted tree is fixed under ~/.cache/claude-sandbox and is not configurable
     And nothing under ~/go, ~/.npm or ~/.cache/pip is mounted by this lever
 
+  # ---- container-private pre-commit cache (CS-LNCH-133..137) ----
+  # $HOME in a sandbox IS the host's home, so the host and every sandbox shared
+  # ~/.cache/pre-commit. pre-commit's hook environments record the interpreter
+  # that built them (py_env-python3.11 -> /usr/bin/python3.11 from the Debian
+  # image; the host builds python3.13 ones), so whichever side ran a hook
+  # second found an environment bound to an interpreter it lacks: a full
+  # reinstall on every alternation, and a real environment failure that looks
+  # exactly like that routine rebuild. Operator decision 12: the image's
+  # Python is NOT aligned with the host (versions drift again whenever either
+  # side moves); sandboxes get their own cache instead. Always on, no config
+  # key: it is a pure cache, and an env file is the override.
+
+  Scenario: CS-LNCH-133 Every launch points pre-commit at a sandbox-only cache mounted at the same path
+    When the launcher builds a new container — interactive, ralph, headless,
+      --branch or --detach
+    Then "-v ~/.cache/claude-sandbox/pre-commit:~/.cache/claude-sandbox/pre-commit"
+      is added without :ro
+    And docker create receives -e PRE_COMMIT_HOME=~/.cache/claude-sandbox/pre-commit
+    And nothing under the host's own ~/.cache/pre-commit is mounted or named
+    # ~/.cache/claude-sandbox itself is never mounted, only chosen
+    # subdirectories, so this one gets its own same-path mount (the
+    # package-cache precedent, CS-LNCH-035). Container-built environments
+    # persist across sessions and are shared by every sandbox, which run the
+    # same image Python; the host keeps its own cache untouched.
+    And the drift fingerprint carries the mount through the normalized mount set
+    # Adding the mount changes every fingerprint once: containers launched
+    # before the upgrade report config drift on attach/join, which is true —
+    # they share the host's pre-commit cache.
+
+  Scenario: CS-LNCH-134 The cache directory is created and owned before docker create, or the launch goes on without it
+    Given ~/.cache/claude-sandbox/pre-commit does not exist
+    Then the launcher creates it as the invoking user, mode 0700, before
+      docker create (hostdirs.EnsureOwnedDir, CS-DIR-004/005)
+    # Docker creates a missing bind source as root and the entrypoint never
+    # chowns a mount point, so a directory the launcher did not create would
+    # be unwritable for the session.
+    Given the directory cannot be made the invoking user's — a regular file or
+      a symlink in its place, another uid's directory, an unwritable parent
+    Then the launch still succeeds with neither the mount nor -e PRE_COMMIT_HOME
+    And exactly one warning names the directory and the error, says pre-commit
+      in this session shares the host's cache, and names both remedies: make it
+      a directory you own (chown it, or remove it and relaunch) or set
+      PRE_COMMIT_HOME in an env file
+    # A cache must never fail every launch; without it the session behaves as
+    # before this feature.
+
+  Scenario: CS-LNCH-135 An env file that defines PRE_COMMIT_HOME wins
+    Given an env file in the cascade defines PRE_COMMIT_HOME, read as docker
+      reads it (CS-LNCH-108) — a bare "PRE_COMMIT_HOME" line counts when the
+      launcher's environment sets it, since docker passes it through
+    Then no "-e PRE_COMMIT_HOME" is added
+    # docker -e silently beats --env-file (the CLAUDE_CODE_TMPDIR precedent,
+    # CS-LNCH-034).
+    And the pre-commit cache directory is neither created nor mounted, and no
+      message is printed
+    # The operator chose the location; mounting it is theirs (a cascade
+    # mounts: entry) if it lies outside the existing mounts.
+
+  Scenario: CS-LNCH-136 The launcher's own PRE_COMMIT_HOME is not forwarded
+    Given the launcher's environment sets PRE_COMMIT_HOME and no env file defines it
+    Then docker create receives -e PRE_COMMIT_HOME=~/.cache/claude-sandbox/pre-commit
+      and no -e carries the launcher's value
+    # A host PRE_COMMIT_HOME names the HOST's cache, whose environments the
+    # host's Python built — forwarding it would restore exactly the collision
+    # this fixes. The launcher forwards no host variable implicitly; the
+    # explicit way to hand the host's value to a session is a bare
+    # "PRE_COMMIT_HOME" line in an env file (CS-LNCH-135).
+
+  Scenario: CS-LNCH-137 A launcher inside a sandbox mounts the cache only where the outer sandbox did
+    # A nested launcher's ~/.cache/claude-sandbox is container-local, while
+    # docker resolves the bind source on the HOST: a directory the nested
+    # launcher created only in its container would make docker create it on
+    # the host as root, and every later host launch would then warn
+    # (CS-LNCH-134). The outer launcher's own mount is the evidence that the
+    # host directory exists and is the user's: it set PRE_COMMIT_HOME to the
+    # same path in the container the nested launcher runs in.
+    Given the launcher runs inside a sandbox (CLAUDE_SANDBOX_PROJECT_DIR is
+      set, CS-DIR-006) and no env file defines PRE_COMMIT_HOME
+    When the launcher's own PRE_COMMIT_HOME is ~/.cache/claude-sandbox/pre-commit
+    Then the mount and -e are added as in CS-LNCH-133
+    When it is unset or names anything else
+    Then neither is added, nothing is created, and one note says the cache is
+      not mounted because the outer sandbox does not mount it
+
   # ---- config-driven container settings ----
 
   Scenario: CS-LNCH-021 Extra mounts from the merged cascade

@@ -1277,6 +1277,7 @@ The container only has access to:
 - `~/.aws/` — AWS credentials and config (read-only, opt-in via `--aws`)
 - `/var/run/docker.sock` — host Docker daemon (opt-in via `--docker-socket`)
 - `~/.cache/claude-sandbox/{go-mod,go-build,npm,pip}` — package caches for sessions (writable, opt-in via `--package-caches`)
+- `~/.cache/claude-sandbox/pre-commit` — the sandboxes' own pre-commit cache (writable, always on; see [pre-commit cache](#pre-commit-cache))
 - Any extra mounts defined in `.claude-sandbox/config.yaml`
 
 When `CLAUDE_CONFIG_DIR` relocates the config directory (e.g. via direnv), `.claude.json` and `.mcp.json` are mounted from the parent of that directory — mirroring the standard `$HOME/.claude/` + `$HOME/.claude.json` + `$HOME/.mcp.json` layout.
@@ -1304,6 +1305,16 @@ SSH, git, Docker socket, AWS and package-cache mounts are all opt-in. Enable the
 **SSH** — mounts `~/.ssh/` read-only so Claude can access git remotes over SSH.
 
 **Package caches** — downloads a session makes (Go modules, the Go build cache, npm, pip) otherwise die with the container. When enabled, the launcher creates `~/.cache/claude-sandbox/{go-mod,go-build,npm,pip}` on the host (as you, before `docker create`, so the entrypoint's mount-point rule leaves them writable), mounts each **writable** at the same path, and sets `GOMODCACHE`, `GOCACHE`, `npm_config_cache` and `PIP_CACHE_DIR` to point at them. The tree is sandbox-only on purpose: it is never your own `~/go`, `~/.npm` or `~/.cache/pip`. Go verifies module zips on download but trusts extracted directories, so a shared cache would let a session plant a module your host toolchain then trusts; confined to its own tree, the blast radius is other sandbox sessions, which already share a trust level. The caches are content-addressed and lock-safe, so concurrent sessions are fine. Nothing evicts them — delete the directory to reset.
+
+### pre-commit cache
+
+Every sandbox gets its own [pre-commit](https://pre-commit.com) cache, separate from your host's `~/.cache/pre-commit`: the launcher creates `~/.cache/claude-sandbox/pre-commit` (as you, mode 0700, before `docker create`), mounts it **writable** at the same path and sets `PRE_COMMIT_HOME` to it. This is always on, for every launch kind (interactive, ralph, headless). The reason: `$HOME` in a sandbox is your host home, and pre-commit hook environments record the interpreter that built them — the image's Debian Python (3.11) on one side, your host's Python (e.g. Fedora's 3.13) on the other — so a shared cache made whichever side ran a hook second rebuild every environment, and a real environment failure looked exactly like that routine rebuild. The image's Python is deliberately not aligned with the host (the two drift again whenever either moves). Sandboxes share one cache among themselves (they run the same Python) and it persists across sessions; your host cache is never touched. Delete the directory to reset it.
+
+- **Override:** set `PRE_COMMIT_HOME` in a `.claude-sandbox/env` file; the env file wins and the launcher then creates and mounts nothing (mount a location outside the project yourself via `mounts:`). A bare `PRE_COMMIT_HOME` line passes your shell's value through — the explicit way to share the host cache again.
+- Your shell's own `PRE_COMMIT_HOME` is **not** forwarded: it names the host cache, which is the collision this avoids.
+- If the directory cannot be made yours (root-owned, a file or symlink in the way), the launch continues without it and prints one warning; pre-commit then uses its default cache as before.
+- A launcher run inside a sandbox mounts it only when the outer sandbox did (its `PRE_COMMIT_HOME` is that path); otherwise it prints one note and mounts nothing, since docker would create the missing host directory as root.
+- Containers launched before this change report config drift on attach/join once (the mount set changed).
 
 ### UID/GID mapping
 
