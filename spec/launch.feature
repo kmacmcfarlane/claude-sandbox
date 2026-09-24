@@ -213,8 +213,10 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       anywhere, because attach looks only at the current project's sessions
       (CS-SESS-030); the path is CLAUDE_SANDBOX_PROJECT_DIR with $HOME shortened to ~
       and shell-quoted when it needs it, and the "cd … &&" is dropped when the path
-      is unset, relative, over 300 characters or holds a control character or
-      backtick — "Joined session (not attachable)" for a
+      is unset, relative, over 300 characters or holds a control character, a
+      backtick or a backslash (fish honours \' inside single quotes, so no quoting
+      is safe for it); a noun that does not match ^[a-z0-9-]+$ gets no command at
+      all, only "Container: `<name>`" — "Joined session (not attachable)" for a
       joined one (CS-SESS-075), "Headless session (SDK client)" for a headless one
       — both with the container name — and the container name alone without a noun
     And for a permission prompt only, the CLI's own one-line message is quoted in a
@@ -249,7 +251,8 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       no path but the project's (basename in the header, ~-shortened in the attach
       command), no transcript content
     And the webhook URL reaches curl as a -K config on a pipe, never in any argv,
-      and the body is sent with --data-binary
+      with globoff so {} and [] in it are literal, and the body is sent with
+      --data-binary
     And it degrades one field at a time, and to exactly the single line
       "🔔 Claude Code needs your input" when nothing identifies the session
     And it exits 0 on every path — an unset webhook URL, an unparseable payload, a

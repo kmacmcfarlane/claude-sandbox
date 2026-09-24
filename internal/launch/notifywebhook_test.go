@@ -161,8 +161,11 @@ var _ = Describe("CS-LNCH-111: the notification ping names the waiting session",
 			if err != nil {
 				return "", "", false
 			}
-			cfgLine, body, found := strings.Cut(string(raw), "\n")
-			Expect(found).To(BeTrue(), "stub curl wrote no body: %q", raw)
+			// The -K config: globoff (no {}/[] globbing), then the URL.
+			lines := strings.SplitN(string(raw), "\n", 3)
+			Expect(lines).To(HaveLen(3), "stub curl wrote no body: %q", raw)
+			Expect(lines[0]).To(Equal("globoff"))
+			cfgLine, body := lines[1], lines[2]
 			Expect(cfgLine).To(HavePrefix(`url = "`))
 			url = strings.TrimSuffix(strings.TrimPrefix(cfgLine, `url = "`), `"`)
 			// The URL reaches curl only through -K, never through argv.
@@ -335,7 +338,7 @@ var _ = Describe("CS-LNCH-111: the notification ping names the waiting session",
 				hookURL, "CLAUDE_PID=17", "CLAUDE_SANDBOX_INSTANCE=otter")
 			raw, err := os.ReadFile(sink)
 			Expect(err).NotTo(HaveOccurred())
-			_, body, _ := strings.Cut(string(raw), "\n")
+			body := strings.SplitN(string(raw), "\n", 3)[2]
 			Expect(body).To(MatchJSON(`{"content":"🔔 Claude Code needs your input","allowed_mentions":{"parse":[]},"flags":4}`))
 		})
 
@@ -350,7 +353,7 @@ var _ = Describe("CS-LNCH-111: the notification ping names the waiting session",
 			record("17", "SID", "say \"hi\" `rm` \\ back\nslash")
 			long := "Claude needs your permission to use " + strings.Repeat("A", 400)
 			run(payload("SID", long, "permission_prompt"), hookURL,
-				"CLAUDE_PID=17", "CLAUDE_SANDBOX_INSTANCE=ot`ter")
+				"CLAUDE_PID=17", "CLAUDE_SANDBOX_INSTANCE=ot`ter", "CLAUDE_SANDBOX_CONTAINER=cs-x")
 
 			_, content, ok := posted()
 			Expect(ok).To(BeTrue())
@@ -388,10 +391,40 @@ var _ = Describe("CS-LNCH-111: the notification ping names the waiting session",
 			_, content, _ := posted()
 			Expect(content).To(HaveSuffix("\nAttach: `cd /srv/p && claude-sandbox --attach=otter`"))
 
-			run(payload("SID", idleMsg, "idle_prompt"), hookURL,
-				"HOME=/home/u", "CLAUDE_SANDBOX_INSTANCE=otter", "CLAUDE_SANDBOX_PROJECT_DIR=/srv/a`b")
-			_, content, _ = posted()
-			Expect(content).To(HaveSuffix("\nAttach: `claude-sandbox --attach=otter`"))
+			for _, bad := range []string{"/srv/a`b", `/srv/a\' ; echo pwned ; '`} {
+				run(payload("SID", idleMsg, "idle_prompt"), hookURL,
+					"HOME=/home/u", "CLAUDE_SANDBOX_INSTANCE=otter", "CLAUDE_SANDBOX_PROJECT_DIR="+bad)
+				_, content, _ = posted()
+				// A backslash too: fish honours \' inside single quotes.
+				Expect(content).To(HaveSuffix("\nAttach: `claude-sandbox --attach=otter`"), bad)
+				// The basename still names the project, as text in a code span;
+				// what must not appear is a command a shell would run.
+				Expect(content).NotTo(ContainSubstring("`cd "))
+			}
+		})
+
+		It("CS-LNCH-111: a noun the launcher could not have picked gets no pasteable command", func() {
+			for _, bad := range []string{"Otter", "ot;ter", "ot ter", "-" + "$(x)"} {
+				run(payload("SID", idleMsg, "idle_prompt"), hookURL,
+					"CLAUDE_SANDBOX_INSTANCE="+bad, "CLAUDE_SANDBOX_CONTAINER=cs-otter",
+					"CLAUDE_SANDBOX_PROJECT_DIR=/srv/p")
+				_, content, ok := posted()
+				Expect(ok).To(BeTrue())
+				Expect(content).NotTo(ContainSubstring("--attach"), bad)
+				Expect(content).To(HaveSuffix("\nContainer: `cs-otter`"), bad)
+			}
+		})
+
+		It("CS-LNCH-111: a URL with {} or [] reaches curl unglobbed, via the config only", func() {
+			run(payload("SID", idleMsg, "idle_prompt"),
+				"CLAUDE_NOTIFICATION_WEBHOOK_URL=https://webhook.invalid/h/{a,b}[1-2]",
+				"CLAUDE_SANDBOX_INSTANCE=otter")
+			url, _, ok := posted()
+			Expect(ok).To(BeTrue())
+			Expect(url).To(Equal("https://webhook.invalid/h/{a,b}[1-2]"))
+			argv, err := os.ReadFile(sink + ".argv")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(string(argv)).NotTo(ContainSubstring("webhook.invalid"))
 		})
 
 		It("CS-LNCH-111: exits 0 with neither HOME nor CLAUDE_CONFIG_DIR set, and on a NUL byte", func() {
