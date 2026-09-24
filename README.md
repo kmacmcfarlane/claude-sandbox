@@ -1282,7 +1282,7 @@ SSH, git, Docker socket, AWS and package-cache mounts are all opt-in. Enable the
 
 ### UID/GID mapping
 
-The entrypoint remaps the `claude` user inside the container to match your host UID/GID, so files created or modified by Claude have correct ownership — no root-owned files left behind. It also recursively chowns all non-bind-mounted files under the home directory, so files created as root during `docker build` (in child Dockerfiles) are owned by the runtime user.
+The entrypoint remaps the `claude` user inside the container to match your host UID/GID, so files created or modified by Claude have correct ownership — no root-owned files left behind. It also recursively chowns all non-bind-mounted files under the home directory, so files created as root during `docker build` (in child Dockerfiles) are owned by the runtime user. Likewise it hands the directories of the base Python venv (`/opt/claude-sandbox/venv`, built as root) to the runtime user, so `pip install <package>` works in a session — the installs are per-container and die with it; put permanent ones in the child Dockerfile.
 
 ### Session registry and PID classes
 

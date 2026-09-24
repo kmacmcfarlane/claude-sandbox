@@ -418,6 +418,79 @@ var _ = Describe("baked sources", func() {
 			ContainSubstring(`"command": "/opt/claude-sandbox/bin/notify-webhook || true"`))
 	})
 
+	It("CS-IMG-052: the entrypoint hands the base venv's directories to the session user", func() {
+		const venv = "/opt/claude-sandbox/venv"
+		Expect(repoFile("Dockerfile")).To(MatchRegexp(`(?m)^ENV VIRTUAL_ENV=`+venv+`\s*$`),
+			"the entrypoint's fixed path must be where the base builds the venv")
+
+		ep := repoFile("entrypoint.sh")
+		Expect(ep).To(ContainSubstring("\nVENV_DIR=" + venv + "\n"))
+		start := strings.Index(ep, `if [ -d "$VENV_DIR" ]`)
+		Expect(start).To(BeNumerically(">=", 0), "the venv block is present")
+		block := ep[start:]
+		block = block[:strings.Index(block, "\nfi\n")]
+		Expect(block).To(ContainSubstring(`[ ! -L "$VENV_DIR" ]`), "a symlinked venv is skipped")
+		// Bind mounts never change owner (the home chown's rule): the venv must
+		// be on the root filesystem and not itself a mount point...
+		Expect(block).To(ContainSubstring(`[ "$(stat -c %d "$VENV_DIR")" = "$(stat -c %d /)" ]`),
+			"a venv on another device (a mount of the venv, /opt or /opt/claude-sandbox) is skipped")
+		Expect(block).To(ContainSubstring(`! mountpoint -q "$VENV_DIR"`), "a mounted venv is skipped")
+		// ...and every mount point below it is pruned, read from mountinfo.
+		Expect(block).To(ContainSubstring(`_cs_prune_args "$VENV_DIR"`))
+		Expect(block).To(ContainSubstring(`find "$VENV_DIR" -xdev "${_CS_PRUNE[@]}" -type d`))
+
+		// Mount points are read once from mountinfo and DECODED (\040 = space,
+		// \134 = backslash), and every consumer uses the decoded list.
+		Expect(ep).To(ContainSubstring("while IFS= read -r _mp; do\n    printf -v _mp '%b' \"${_mp//\\\\/\\\\0}\"\n    _CS_MOUNT_POINTS+=(\"$_mp\")\ndone < <(awk '{print $5}' /proc/self/mountinfo)\n"))
+		Expect(strings.Count(ep, "/proc/self/mountinfo)")).To(Equal(1), "no consumer reads mountinfo raw")
+		Expect(ep).To(ContainSubstring(`for _mp in "${_CS_MOUNT_POINTS[@]}"; do`), "the home relocation's mount check")
+		// The shared prune helper escapes find -path's glob characters,
+		// backslash first, and matches the directory literally.
+		helper := ep[strings.Index(ep, "_cs_prune_args() {"):]
+		helper = helper[:strings.Index(helper, "\n}\n")]
+		Expect(helper).To(ContainSubstring(`[[ "$mp" == "$1"/* ]] || continue`))
+		Expect(helper).To(ContainSubstring(`mp=${mp//\\/\\\\}; mp=${mp//\*/\\*}; mp=${mp//\?/\\?}; mp=${mp//\[/\\[}`))
+		Expect(helper).To(ContainSubstring(`_CS_PRUNE+=(-path "$mp" -prune -o)`))
+		// The home chown uses the same helper.
+		Expect(ep).To(ContainSubstring("_cs_prune_args \"$TARGET_HOME\"\nfind \"$TARGET_HOME\" \"${_CS_PRUNE[@]}\" -print0"))
+		Expect(block).To(ContainSubstring(`-exec chown "$TARGET_UID:$TARGET_GID" {} +`))
+		Expect(block).NotTo(ContainSubstring("VIRTUAL_ENV"), "never a path an env file can set")
+		Expect(block).NotTo(ContainSubstring("-type f"), "files keep their owner (no overlay2 copy-up)")
+		Expect(block).NotTo(MatchRegexp(`chown -R|find -[HL]|-follow`))
+
+		// After the uid/gid remap, before the hand-off.
+		Expect(start).To(BeNumerically(">", strings.Index(ep, `usermod -o -u "$TARGET_UID"`)))
+		Expect(start).To(BeNumerically("<", strings.Index(ep, "exec gosu")))
+
+		Expect(repoFile("container-context.md")).To(ContainSubstring("die with the container"))
+	})
+
+	It("CS-IMG-052: the entrypoint's mountinfo decode is unambiguous before a digit", func() {
+		ep := repoFile("entrypoint.sh")
+		var decode string
+		for _, l := range strings.Split(ep, "\n") {
+			if strings.Contains(l, "printf -v _mp '%b'") {
+				decode = strings.TrimSpace(l)
+			}
+		}
+		Expect(decode).NotTo(BeEmpty())
+		// Raw mountinfo field -> the path it names.
+		cases := map[string]string{
+			`a\0401`:       "a 1",
+			`x\134t\0402x`: `x\t 2x`,
+			`tab\0119`:     "tab\t9",
+			`nl\0127`:      "nl\n7",
+			`b\134s`:       `b\s`,
+			`sp\040ace`:    "sp ace",
+			`/opt/br[1]`:   "/opt/br[1]",
+		}
+		for raw, want := range cases {
+			out, err := exec.Command("bash", "-c", "_mp=$1; "+decode+"; printf '%s' \"$_mp\"", "_", raw).Output()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(string(out)).To(Equal(want), raw)
+		}
+	})
+
 	It("CS-IMG-037: the parser skips multi-stage COPYs and joins continuations", func() {
 		df := "FROM x AS b\n# COPY commented/ out/\nCOPY --link --chmod=755 a.sh \\\n  b/ /dst/\nCOPY --from=b /out/bin /bin\nADD ./c.txt /c\n"
 		Expect(contextSources(df)).To(Equal([]string{"a.sh", "b", "c.txt"}))

@@ -101,7 +101,7 @@ Ralph stores all runtime files under the resolved ralph directory — `.claude-s
 
 - Python 3 + venv at `/opt/claude-sandbox/venv` (`VIRTUAL_ENV` env var set, venv bin prepended to `PATH`)
 - Pre-installed: `ruamel.yaml` (for round-trip YAML preservation in agent tooling scripts)
-- To add packages: `pip install <package>` (resolves to venv pip via PATH)
+- To add packages: `pip install <package>` (resolves to venv pip via PATH). The venv is built as root; the entrypoint chowns its **directories** (not files) to the host UID:GID at every start, which is all pip needs to install, upgrade or uninstall — chowning files would copy each one up on overlay2 (CS-IMG-052). Like the home chown it never touches a bind mount: it runs only when the venv is on the root filesystem and not a mount point, and prunes mount points below it (`-xdev` alone still lists a mount point directory). Both it and the home chown read mount points from `/proc/self/mountinfo` decoded (`\040` = space, `\134` = backslash; each `\` is made `\0` first, since `%b` reads `\0nnn` and would swallow a digit after `\040`) and glob-escaped for `find -path` (`_cs_prune_args`). `pip install --user` fails (the venv hides user site-packages). Installs are per-container and die with it; permanent ones go in the child Dockerfile
 - Do NOT use `--break-system-packages` — always install into the venv
 
 ## Development Notes

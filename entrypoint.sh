@@ -16,6 +16,32 @@ TARGET_USER="${HOST_USER:-claude}"
 TARGET_HOME="${HOST_HOME:-/home/claude}"
 DOCKER_SOCKET_GID="${DOCKER_GID:-}"
 
+# Every mount point in this container, DECODED: /proc/self/mountinfo writes a
+# space as \040, a tab as \011, a newline as \012 and a backslash as \134, so
+# the raw field never equals the path of a mount whose name holds one. Both
+# chowns below skip bind mounts by these paths. The raw field holds a backslash
+# only as the start of such a three-digit escape, and %b reads \0nnn (up to
+# three digits after \0) as octal, so each \ becomes \0 first: a bare \040
+# followed by a digit ("a 1" is a\0401) would otherwise swallow that digit.
+_CS_MOUNT_POINTS=()
+while IFS= read -r _mp; do
+    printf -v _mp '%b' "${_mp//\\/\\0}"
+    _CS_MOUNT_POINTS+=("$_mp")
+done < <(awk '{print $5}' /proc/self/mountinfo)
+
+# _cs_prune_args DIR: sets _CS_PRUNE to "-path MP -prune -o" for every mount
+# point below DIR. find's -path takes a glob, so \ * ? [ are escaped (backslash
+# first) and a mount named "br[1]" or "st*r" is matched literally.
+_cs_prune_args() {
+    local mp
+    _CS_PRUNE=()
+    for mp in "${_CS_MOUNT_POINTS[@]}"; do
+        [[ "$mp" == "$1"/* ]] || continue
+        mp=${mp//\\/\\\\}; mp=${mp//\*/\\*}; mp=${mp//\?/\\?}; mp=${mp//\[/\\[}
+        _CS_PRUNE+=(-path "$mp" -prune -o)
+    done
+}
+
 # Adjust claude user/group UID/GID to match host
 if [ "$(id -u claude)" != "$TARGET_UID" ] || [ "$(id -g claude)" != "$TARGET_GID" ]; then
     groupmod -o -g "$TARGET_GID" claude 2>/dev/null || true
@@ -43,9 +69,9 @@ if [ "$TARGET_USER" != "claude" ]; then
         # overwrite these (host-provided .claude, .aws, .ssh, .gitconfig, a
         # direnv allow-state dir, etc.).
         declare -A _CS_MOUNTS=()
-        while IFS= read -r _mp; do
+        for _mp in "${_CS_MOUNT_POINTS[@]}"; do
             case "$_mp" in "$TARGET_HOME"/*) _CS_MOUNTS["$_mp"]=1 ;; esac
-        done < <(awk '{print $5}' /proc/self/mountinfo)
+        done
 
         # Merge /home/claude into $TARGET_HOME. Move any entry whose destination
         # is absent; when the destination dir exists only because Docker
@@ -80,11 +106,32 @@ fi
 
 # Own all non-bind-mounted files under the home dir so that files created
 # as root during `docker build` match the host user's UID/GID at runtime.
-PRUNE_ARGS=()
-while IFS= read -r mp; do
-    [[ "$mp" == "$TARGET_HOME"/* ]] && PRUNE_ARGS+=(-path "$mp" -prune -o)
-done < <(awk '{print $5}' /proc/self/mountinfo)
-find "$TARGET_HOME" "${PRUNE_ARGS[@]}" -print0 | xargs -0 chown "$TARGET_UID:$TARGET_GID" 2>/dev/null || true
+_cs_prune_args "$TARGET_HOME"
+find "$TARGET_HOME" "${_CS_PRUNE[@]}" -print0 | xargs -0 chown "$TARGET_UID:$TARGET_GID" 2>/dev/null || true
+
+# Let the session user `pip install` into the base venv (CS-IMG-052). The venv
+# is built as root (and children may pip-install into it as root at build
+# time), so hand the session user its DIRECTORIES only: creating, renaming and
+# unlinking entries needs write access to the containing directory, never to
+# the file, so installs, upgrades and uninstalls all work while the files
+# themselves stay root-owned. Chowning files would copy every one of them up
+# into the container layer on overlay2 at each start — a child venv holding
+# numpy or torch is hundreds of MB. The path is fixed (never $VIRTUAL_ENV, which
+# an env file could point at /) and find never follows symlinks. Bind mounts
+# never get their ownership changed, as with the home chown above: the block
+# runs only when the venv is on the root filesystem and is not itself a mount
+# point (a mount of the venv, /opt or /opt/claude-sandbox is the host's), and
+# every mount point below it is pruned (_cs_prune_args; -xdev alone still lists the mount point
+# directory itself). Installs live in the container layer and die with it.
+VENV_DIR=/opt/claude-sandbox/venv
+if [ -d "$VENV_DIR" ] && [ ! -L "$VENV_DIR" ] \
+    && [ "$(stat -c %d "$VENV_DIR")" = "$(stat -c %d /)" ] \
+    && ! mountpoint -q "$VENV_DIR"; then
+    _cs_prune_args "$VENV_DIR"
+    find "$VENV_DIR" -xdev "${_CS_PRUNE[@]}" -type d \
+        \( ! -uid "$TARGET_UID" -o ! -gid "$TARGET_GID" \) \
+        -exec chown "$TARGET_UID:$TARGET_GID" {} + 2>/dev/null || true
+fi
 
 # Grant docker socket access by adding user to a group with the socket's GID
 if [ -n "$DOCKER_SOCKET_GID" ]; then

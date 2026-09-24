@@ -598,6 +598,40 @@ Feature: Image build lifecycle (CS-IMG)
     # --chmod=755 on the COPY, so it stays out of ModeBakedSources (CS-IMG-039):
     # its mode comes from the Dockerfile, not from the checkout's umask.
 
+  Scenario: CS-IMG-052 The session user can pip install into the base venv
+    Given the base image builds its Python venv at /opt/claude-sandbox/venv as root
+      (and a child Dockerfile may pip-install into it as root at build time)
+    When the entrypoint starts a container
+    Then it chowns every DIRECTORY under /opt/claude-sandbox/venv that the session
+      user does not own to the host UID:GID, after the UID/GID remap and before the
+      hand-off, so `pip install <pkg>` as the session user installs, upgrades,
+      uninstalls and self-upgrades pip, whatever the host uid
+    And files keep their build-time owner: creating, renaming and unlinking need
+      write access to the directory only, and chowning files would copy each one up
+      into the container layer on overlay2 at every start
+    And the path is fixed, never $VIRTUAL_ENV (an env file could point it at /),
+      find stays on one filesystem (-xdev) and never follows symlinks, and a missing
+      or symlinked venv is skipped
+    And bind mounts never get their ownership changed (the home chown's rule): the
+      block runs only when the venv is on the root filesystem's device and is not
+      itself a mount point (a mount of the venv, /opt or /opt/claude-sandbox is the
+      host's), and every mount point below the venv, read from
+      /proc/self/mountinfo, is pruned — -xdev alone still lists a mount point
+      directory itself, and when the venv is a mount -xdev takes that mount's device
+    And both the venv chown and the home chown (and the home relocation's mount
+      check) take mount points from /proc/self/mountinfo DECODED (the kernel writes
+      a space as \040 and a backslash as \134) and escape find -path's glob
+      characters (\ * ? [, backslash first), so a mount named "sp ace", "a 1",
+      "br[1]", "st*r" or "b\s" is pruned and keeps its host owner
+    # %b reads \0nnn as octal (up to three digits after \0), so every raw \ is
+    # made \0 before decoding: mountinfo writes "a 1" as a\0401, which a plain
+    # %b decodes to "a" + \001.
+    And container-context.md says the installs are per-container: they die with it
+    # Measured on the base venv (190 dirs, 1753 entries): ~10 ms. `pip install
+    # --user` is no alternative: the venv has include-system-site-packages =
+    # false, so pip refuses ("User site-packages are not visible in this
+    # virtualenv").
+
   Scenario: CS-IMG-029 Base, tools and CLI Dockerfiles declare the shared cache-mount ids
     Then Dockerfile, Dockerfile.tools and Dockerfile.cli use "--mount=type=cache,id=claude-sandbox-<name>" mounts
     And the ids are apt, apt-lists, pip, npm, go-mod, go-build

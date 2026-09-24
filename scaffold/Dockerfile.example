@@ -12,7 +12,8 @@
 #   all non-bind-mounted files under the home directory at startup.
 #
 #   - Use "USER claude" for RUN steps that create files under /home/claude
-#     (e.g. go install, pip install --user, writing to ~/.cache).
+#     (e.g. go install, writing to ~/.cache). pip installs into the base venv
+#     run as root (see "Python packages" below); "pip install --user" fails there.
 #   - Use /home/claude (not a hardcoded host path like /home/yourname) so the
 #     image is portable across host users.
 #   - End with "USER root" so the entrypoint has the privileges it needs.
