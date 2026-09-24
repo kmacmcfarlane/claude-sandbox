@@ -513,7 +513,7 @@ var _ = Describe("baked sources", func() {
 			// The very first things executed, in order: save, fix, drop.
 			Expect(cmds[0]).To(Equal(`_CS_SESSION_PATH="$PATH"`))
 			Expect(cmds[1]).To(Equal("export PATH=/usr/sbin:/usr/bin:/sbin:/bin"), "root-only-writable dirs; /usr/local/* left out")
-			Expect(cmds[2]).To(Equal("unset LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT"))
+			Expect(cmds[2]).To(Equal("unset LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT GCONV_PATH LOCPATH"))
 			// Restored right before the exec, and nothing in between; the exec
 			// names gosu and the binary absolutely (CS-PID-007), so no PATH
 			// lookup happens under the restored PATH.
@@ -533,18 +533,20 @@ var _ = Describe("baked sources", func() {
 				Expect(os.WriteFile(filepath.Join(poison, tool), []byte("#!/bin/sh\necho POISON\n"), 0o755)).To(Succeed())
 			}
 			// The image order: user-writable dirs first (CS-IMG-052).
-			cmd := exec.Command("bash", "-c", prologue+"\nprintf '%s\\n' \"$PATH\" \"$_CS_SESSION_PATH\" \"$(command -v awk)\" \"$(command -v id)\" \"${LD_PRELOAD-unset}\" \"${LD_LIBRARY_PATH-unset}\"")
-			cmd.Env = []string{"PATH=" + poison + ":/usr/sbin:/usr/bin:/sbin:/bin", "LD_PRELOAD=" + poison + "/x.so", "LD_LIBRARY_PATH=" + poison}
+			cmd := exec.Command("bash", "-c", prologue+"\nprintf '%s\\n' \"$PATH\" \"$_CS_SESSION_PATH\" \"$(command -v awk)\" \"$(command -v id)\" \"${LD_PRELOAD-unset}\" \"${LD_LIBRARY_PATH-unset}\" \"${GCONV_PATH-unset}\" \"${LOCPATH-unset}\"")
+			cmd.Env = []string{"PATH=" + poison + ":/usr/sbin:/usr/bin:/sbin:/bin", "LD_PRELOAD=" + poison + "/x.so", "LD_LIBRARY_PATH=" + poison, "GCONV_PATH=" + poison, "LOCPATH=" + poison}
 			out, err := cmd.Output()
 			Expect(err).NotTo(HaveOccurred())
 			lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
-			Expect(lines).To(HaveLen(6))
+			Expect(lines).To(HaveLen(8))
 			Expect(lines[0]).To(Equal("/usr/sbin:/usr/bin:/sbin:/bin"))
 			Expect(lines[1]).To(Equal(poison+":/usr/sbin:/usr/bin:/sbin:/bin"), "the session PATH is kept aside verbatim")
 			Expect(lines[2]).To(HavePrefix("/usr/bin/"), "awk is the distribution's, not the planted one")
 			Expect(lines[3]).To(HavePrefix("/usr/bin/"))
 			Expect(lines[4]).To(Equal("unset"))
 			Expect(lines[5]).To(Equal("unset"))
+			Expect(lines[6]).To(Equal("unset"))
+			Expect(lines[7]).To(Equal("unset"))
 		})
 
 		It("bash -p ignores BASH_ENV (the shebang's guarantee, runnable)", func() {
@@ -579,7 +581,17 @@ var _ = Describe("baked sources", func() {
 		Expect(ep).To(ContainSubstring("    rm -rf /home/claude\n    ln -s \"$TARGET_HOME\" /home/claude\n"))
 		// The home chown skips what is already owned and runs no empty chown.
 		Expect(ep).To(ContainSubstring(`find "$TARGET_HOME" "${_CS_PRUNE[@]}" \( ! -uid "$TARGET_UID" -o ! -gid "$TARGET_GID" \) -print0 \` + "\n" +
-			`    | xargs -0 --no-run-if-empty chown "$TARGET_UID:$TARGET_GID"`))
+			`    | xargs -0 --no-run-if-empty chown -h "$TARGET_UID:$TARGET_GID"`))
+		// No other root-part chown can follow a link: the venv chown acts on
+		// -type d (lstat: a link never matches), and nothing else chowns.
+		n := 0
+		for _, l := range strings.Split(ep, "\n") {
+			if t := strings.TrimSpace(l); !strings.HasPrefix(t, "#") && strings.Contains(t, "chown") {
+				n++
+			}
+		}
+		Expect(n).To(Equal(2), "exactly the home and venv chowns")
+		Expect(ep).To(ContainSubstring(`-type d \` + "\n" + `        \( ! -uid "$TARGET_UID" -o ! -gid "$TARGET_GID" \) \` + "\n" + `        -exec chown "$TARGET_UID:$TARGET_GID" {} +`))
 	})
 
 	It("CS-IMG-037: the parser skips multi-stage COPYs and joins continuations", func() {

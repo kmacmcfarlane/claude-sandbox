@@ -16,10 +16,12 @@
 # hand-off. LD_PRELOAD, LD_LIBRARY_PATH and LD_AUDIT are dropped and NOT
 # restored: the loader honours them for every root-run tool here and for gosu
 # itself, whose exec happens before the privilege drop — and they had already
-# loaded into this bash. A session that needs them sets them in its own shell.
+# loaded into this bash. GCONV_PATH and LOCPATH are the same class: glibc
+# loads gconv modules and locale data from them lazily into every root-run
+# tool. A session that needs any of them sets it in its own shell.
 _CS_SESSION_PATH="$PATH"
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
-unset LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT
+unset LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT GCONV_PATH LOCPATH
 set -e
 
 # The entrypoint must run as root to remap UID/GID and chown files.
@@ -148,10 +150,14 @@ fi
 # as root during `docker build` match the host user's UID/GID at runtime.
 # Only entries not already owned: a chown copies the file up into the
 # container layer on overlay2 even when it changes nothing, and on a restart
-# everything is already owned (CS-IMG-068).
+# everything is already owned (CS-IMG-068). chown -h: find selects a symlink
+# by the LINK's owner, and a plain chown would follow it — a build-time
+# ~/.local/bin/x -> /usr/bin/tool would hand /usr/bin/tool, which the root
+# part runs, to the session user (and re-hand it on every start, the link
+# itself staying root's).
 _cs_prune_args "$TARGET_HOME"
 find "$TARGET_HOME" "${_CS_PRUNE[@]}" \( ! -uid "$TARGET_UID" -o ! -gid "$TARGET_GID" \) -print0 \
-    | xargs -0 --no-run-if-empty chown "$TARGET_UID:$TARGET_GID" 2>/dev/null || true
+    | xargs -0 --no-run-if-empty chown -h "$TARGET_UID:$TARGET_GID" 2>/dev/null || true
 
 # Let the session user `pip install` into the base venv (CS-IMG-052). The venv
 # is built as root (and children may pip-install into it as root at build

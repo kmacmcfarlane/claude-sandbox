@@ -1166,8 +1166,8 @@ ENV PATH="/home/claude/go/bin:$PATH"
 The entrypoint runs as root on every start of a container (a `docker start` of a stopped one
 included), so it trusts nothing from the container environment: it runs under `bash -p` (no
 `BASH_ENV`), on a fixed `PATH=/usr/sbin:/usr/bin:/sbin:/bin` with `LD_PRELOAD`,
-`LD_LIBRARY_PATH` and `LD_AUDIT` dropped, and hands the session its own `PATH` back at the
-privilege drop. The `LD_*` three are not restored for the session — set them in your shell
+`LD_LIBRARY_PATH`, `LD_AUDIT`, `GCONV_PATH` and `LOCPATH` dropped, and hands the session its own `PATH` back at the
+privilege drop. Those five are not restored for the session — set them in your shell
 profile if you need them. A second run in the same container finds its work done (the user
 already renamed, the home already moved) and changes nothing.
 
@@ -1290,7 +1290,7 @@ SSH, git, Docker socket, AWS and package-cache mounts are all opt-in. Enable the
 
 ### UID/GID mapping
 
-The entrypoint remaps the `claude` user inside the container to match your host UID/GID, so files created or modified by Claude have correct ownership — no root-owned files left behind. It also recursively chowns all non-bind-mounted files under the home directory, so files created as root during `docker build` (in child Dockerfiles) are owned by the runtime user. Likewise it hands the directories of the base Python venv (`/opt/claude-sandbox/venv`, built as root) to the runtime user, so `pip install <package>` works in a session — the installs are per-container and die with it; put permanent ones in the child Dockerfile. Only entries not already owned are touched, so a restart of the same container chowns nothing. Because the entrypoint runs as root on every start and `~/.local/bin` and `venv/bin` (both user-writable) come first on the image `PATH`, the root part runs on a fixed distribution-only `PATH` under `bash -p` with `LD_PRELOAD`/`LD_LIBRARY_PATH`/`LD_AUDIT` dropped; the session gets its `PATH` back, not the `LD_*` variables.
+The entrypoint remaps the `claude` user inside the container to match your host UID/GID, so files created or modified by Claude have correct ownership — no root-owned files left behind. It also recursively chowns all non-bind-mounted files under the home directory, so files created as root during `docker build` (in child Dockerfiles) are owned by the runtime user. Likewise it hands the directories of the base Python venv (`/opt/claude-sandbox/venv`, built as root) to the runtime user, so `pip install <package>` works in a session — the installs are per-container and die with it; put permanent ones in the child Dockerfile. Only entries not already owned are touched, so a restart of the same container chowns nothing. Because the entrypoint runs as root on every start and `~/.local/bin` and `venv/bin` (both user-writable) come first on the image `PATH`, the root part runs on a fixed distribution-only `PATH` under `bash -p` with `LD_PRELOAD`/`LD_LIBRARY_PATH`/`LD_AUDIT`/`GCONV_PATH`/`LOCPATH` dropped; the session gets its `PATH` back, not those variables. The home chown never follows a symlink (`chown -h`): a build-time link from `~/.local/bin` to a system tool keeps that tool root-owned.
 
 ### Session registry and PID classes
 

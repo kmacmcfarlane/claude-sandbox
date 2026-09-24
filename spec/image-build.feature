@@ -650,6 +650,8 @@ Feature: Image build lifecycle (CS-IMG)
       the loader honours them for every root-run tool and for gosu itself, whose exec
       happens before the privilege drop (they had already loaded into this bash — a
       launcher-side refusal is the only cure for that, and is out of scope here)
+    And it unsets GCONV_PATH and LOCPATH the same way: glibc loads gconv modules and
+      locale data from them lazily into every root-run tool
     And its shebang is "#!/bin/bash -p": privileged mode neither sources $BASH_ENV or
       $ENV nor imports functions, SHELLOPTS, BASHOPTS, CDPATH or GLOBIGNORE from the
       environment, so an env file naming a session-writable BASH_ENV cannot run as
@@ -678,6 +680,12 @@ Feature: Image build lifecycle (CS-IMG)
     And the home chown lists only entries not already owned by the host UID:GID, as the
       venv chown does (CS-IMG-052) — a chown copies a file up into the container layer
       on overlay2 even when it changes nothing — so a restart chowns nothing
+    And it chowns with -h: find selects a symlink by the link's own owner and a plain
+      chown follows it, so a build-time ~/.local/bin/x -> /usr/bin/tool would hand
+      /usr/bin/tool — which the root part runs on its fixed PATH — to the session user,
+      and again on every start (the link itself stayed root's). The link becomes the
+      user's, its target keeps its owner. The venv chown acts on directories only
+      (-type d never matches a link) and the relocation's mv moves a link, not its target
     And the session comes back up as the host user with the same uid, home and PATH
     # Measured in a scratch image at HOST_UID 1000 and 1234 (2026-09-24): with the old
     # entrypoint a restart ran the planted ~/.local/bin/awk and the BASH_ENV file as
