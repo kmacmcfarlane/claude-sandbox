@@ -643,7 +643,10 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
       # A suffix, not a column: a column would print "-" on nearly every row
       # for a rare condition, and SESSIONS is where the killed processes were.
     And a legend line "(OOM) = a process in this container was killed by the
-      OOM killer; see memoryLimit" follows the table, only when a row is marked
+      OOM killer: its memoryLimit or the host running out of memory" follows
+      the table, only when a row is marked
+      # State.OOMKilled is set by docker's oom event, i.e. by any rise of the
+      # container's oom_kill (CS-LNCH-089 comment), so it cannot say which.
     And "sessions --json" carries "oomKilled": true on that object, and omits
       the key when false; each object also carries "memoryLimit" and
       "memoryLimitSource" when the container recorded them (CS-LNCH-093)
@@ -666,7 +669,8 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
     Then ONE "docker inspect" of that container runs, and before the drift
       check and the attach or join, one note goes to stderr:
       "Note: an earlier process in this container (session '<instance>') was
-      killed by the OOM killer; memoryLimit: <limit>."
+      killed by the OOM killer (the container's memoryLimit or the host running
+      out of memory); memoryLimit: <limit>."
     And <limit> is rendered from the container's create-time labels
       claude-sandbox.memorylimit and claude-sandbox.memorylimitsource
       (CS-LNCH-093) exactly as the exit report renders it: "16g (from <file>)",

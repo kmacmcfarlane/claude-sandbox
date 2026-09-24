@@ -176,18 +176,20 @@ var _ = Describe("oomreport", func() {
 	})
 
 	Describe("CS-LNCH-089: the report", func() {
-		It("names the kills, the limit, its source, swap and the remedies", func() {
+		It("names the kills, both causes, the limit, its source, swap and both remedies", func() {
 			Expect(oomreport.KilledReport(2, oomreport.Limit{Value: "16g", Source: "/ws/.claude-sandbox/config.yaml"})).To(Equal(
-				"claude-sandbox: this session was killed by the container's OOM killer (exit 137; 2 OOM kills).\n" +
+				"claude-sandbox: this session was killed by the OOM killer (exit 137; 2 OOM kills) — the container's memoryLimit or the host running out of memory.\n" +
 					"  memoryLimit: 16g (from /ws/.claude-sandbox/config.yaml); swap is off by design.\n" +
-					"  Remedies: raise memoryLimit in that file, or cap build/test parallelism (e.g. ginkgo --procs=N, go test -p N, make -jN).\n"))
+					"  At memoryLimit: raise memoryLimit in that file, or cap build/test parallelism (e.g. ginkgo --procs=N, go test -p N, make -jN).\n" +
+					"  Host out of memory: run fewer sandboxes at once or cap their parallelism; see \"When the host runs out of memory\" in the claude-sandbox README.\n" +
+					"  To tell which: the host's kernel log (journalctl -k) says \"Memory cgroup out of memory\" for a limit, plain \"Out of memory\" for the host.\n"))
 		})
 
 		It("is singular for one kill and names the default", func() {
 			r := oomreport.KilledReport(1, oomreport.Limit{Value: "8g", Source: oomreport.SourceDefault})
-			Expect(r).To(ContainSubstring("(exit 137; 1 OOM kill)."))
+			Expect(r).To(ContainSubstring("(exit 137; 1 OOM kill) — the container's memoryLimit or the host running out of memory."))
 			Expect(r).To(ContainSubstring("memoryLimit: 8g (the default; no config.yaml in the cascade sets it); swap is off by design."))
-			Expect(r).To(ContainSubstring("Remedies: set a higher memoryLimit in .claude-sandbox/config.yaml, or cap"))
+			Expect(r).To(ContainSubstring("At memoryLimit: set a higher memoryLimit in .claude-sandbox/config.yaml, or cap"))
 		})
 
 		It("says so when the container recorded no limit", func() {
@@ -197,9 +199,9 @@ var _ = Describe("oomreport", func() {
 
 	It("CS-LNCH-090: the survived note is one line", func() {
 		r := oomreport.SurvivedReport(3, oomreport.Limit{Value: "16g", Source: "/ws/.claude-sandbox/config.yaml"})
-		Expect(r).To(Equal("claude-sandbox: note: the container's OOM killer killed 3 processes during this session " +
-			"(memoryLimit 16g (from /ws/.claude-sandbox/config.yaml)); the session itself was not killed.\n"))
-		Expect(oomreport.SurvivedReport(1, oomreport.Limit{Value: "8g", Source: oomreport.SourceDefault})).To(ContainSubstring("killed 1 process during"))
+		Expect(r).To(Equal("claude-sandbox: note: the OOM killer killed 3 processes in this container during this session " +
+			"(the container's memoryLimit 16g (from /ws/.claude-sandbox/config.yaml) or the host running out of memory); the session itself was not killed.\n"))
+		Expect(oomreport.SurvivedReport(1, oomreport.Limit{Value: "8g", Source: oomreport.SourceDefault})).To(ContainSubstring("killed 1 process in this container during"))
 	})
 
 	It("CS-LNCH-092: the terminal reset undoes Claude Code's modes and never moves the cursor", func() {

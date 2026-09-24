@@ -1,5 +1,12 @@
-// Package oomreport tells a session killed by the container's OOM killer
-// apart from one that ended on its own (CS-LNCH-085..094, CS-SESS-059/060).
+// Package oomreport tells a session killed by the OOM killer apart from one
+// that ended on its own (CS-LNCH-085..094, CS-SESS-059/060).
+//
+// It cannot tell WHICH OOM killer: docker's oom event is containerd's
+// TaskOOM, published whenever the container's memory.events oom_kill rises,
+// and oom_kill counts kills by any OOM killer — the container's memoryLimit
+// or the host's global one, which --oom-score-adj (CS-LNCH-112) points at
+// sandboxes. The "oom" counter that rises only at the container's own limit
+// is gone with the --rm container, so the reports name both causes.
 //
 // The container runs with --rm, so it is gone before an inspect after exit
 // could read State.OOMKilled. The launcher therefore subscribes to the
@@ -307,19 +314,26 @@ const TerminalReset = "\x1b[?2026l" + // synchronized update off
 	"\x1b[?25h" // cursor visible
 
 // KilledReport is the report of a session the OOM killer ended
-// (CS-LNCH-089). kills is the number of oom events seen.
+// (CS-LNCH-089). kills is the number of oom events seen. It names both
+// causes, since the events cannot tell a limit kill from a host one.
 func KilledReport(kills int, lim Limit) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "claude-sandbox: this session was killed by the container's OOM killer (exit %d; %s).\n", OOMExit, plural(kills, "OOM kill"))
+	fmt.Fprintf(&b, "claude-sandbox: this session was killed by the OOM killer (exit %d; %s) — %s.\n", OOMExit, plural(kills, "OOM kill"), EitherCause)
 	fmt.Fprintf(&b, "  memoryLimit: %s; swap is off by design.\n", DescribeLimit(lim))
-	fmt.Fprintf(&b, "  Remedies: %s, or cap build/test parallelism (e.g. ginkgo --procs=N, go test -p N, make -jN).\n", remedy(lim))
+	fmt.Fprintf(&b, "  At memoryLimit: %s, or cap build/test parallelism (e.g. ginkgo --procs=N, go test -p N, make -jN).\n", remedy(lim))
+	b.WriteString("  Host out of memory: run fewer sandboxes at once or cap their parallelism; see \"When the host runs out of memory\" in the claude-sandbox README.\n")
+	b.WriteString("  To tell which: the host's kernel log (journalctl -k) says \"Memory cgroup out of memory\" for a limit, plain \"Out of memory\" for the host.\n")
 	return b.String()
 }
+
+// EitherCause names the two things an oom event can mean (CS-LNCH-089/090,
+// CS-SESS-061/063).
+const EitherCause = "the container's memoryLimit or the host running out of memory"
 
 // SurvivedReport is the one softer line for OOM kills the session outlived
 // (CS-LNCH-090).
 func SurvivedReport(kills int, lim Limit) string {
-	return fmt.Sprintf("claude-sandbox: note: the container's OOM killer killed %s during this session (memoryLimit %s); the session itself was not killed.\n",
+	return fmt.Sprintf("claude-sandbox: note: the OOM killer killed %s in this container during this session (the container's memoryLimit %s or the host running out of memory); the session itself was not killed.\n",
 		plural(kills, "process"), DescribeLimit(lim))
 }
 

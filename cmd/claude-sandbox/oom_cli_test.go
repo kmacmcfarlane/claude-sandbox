@@ -123,9 +123,11 @@ var _ = Describe("session child and OOM report (CS-LNCH-085..098)", func() {
 		Expect(args).To(ContainElements("claude-sandbox.memorylimit=16g", "claude-sandbox.memorylimitsource="+src))
 		Expect(args).To(ContainElements("CLAUDE_SANDBOX_MEMORY_LIMIT=16g", "CLAUDE_SANDBOX_MEMORY_LIMIT_SOURCE="+src))
 		Expect(f.errw.String()).To(HaveSuffix(
-			"claude-sandbox: this session was killed by the container's OOM killer (exit 137; 2 OOM kills).\n" +
+			"claude-sandbox: this session was killed by the OOM killer (exit 137; 2 OOM kills) — the container's memoryLimit or the host running out of memory.\n" +
 				"  memoryLimit: 16g (from " + src + "); swap is off by design.\n" +
-				"  Remedies: raise memoryLimit in that file, or cap build/test parallelism (e.g. ginkgo --procs=N, go test -p N, make -jN).\n"))
+				"  At memoryLimit: raise memoryLimit in that file, or cap build/test parallelism (e.g. ginkgo --procs=N, go test -p N, make -jN).\n" +
+				"  Host out of memory: run fewer sandboxes at once or cap their parallelism; see \"When the host runs out of memory\" in the claude-sandbox README.\n" +
+				"  To tell which: the host's kernel log (journalctl -k) says \"Memory cgroup out of memory\" for a limit, plain \"Out of memory\" for the host.\n"))
 		Expect(f.out.String()).NotTo(ContainSubstring("OOM"), "the report is on stderr")
 	})
 
@@ -134,7 +136,7 @@ var _ = Describe("session child and OOM report (CS-LNCH-085..098)", func() {
 		events(dockerEvent("oom", ""), dockerEvent("die", "137"))
 		Expect(f.run()).To(Equal(137))
 		Expect(f.launched().Args).To(ContainElement("claude-sandbox.memorylimitsource=default"))
-		Expect(f.errw.String()).To(ContainSubstring("(exit 137; 1 OOM kill)."))
+		Expect(f.errw.String()).To(ContainSubstring("(exit 137; 1 OOM kill) — "))
 		Expect(f.errw.String()).To(ContainSubstring("memoryLimit: 8g (the default; no config.yaml in the cascade sets it); swap is off by design."))
 	})
 
@@ -159,7 +161,7 @@ var _ = Describe("session child and OOM report (CS-LNCH-085..098)", func() {
 		events(dockerEvent("oom", ""), dockerEvent("oom", ""), dockerEvent("oom", ""), dockerEvent("die", "0"))
 		Expect(f.run()).To(Equal(0))
 		report := f.errw.String()[strings.Index(f.errw.String(), "claude-sandbox: "):]
-		Expect(report).To(HavePrefix("claude-sandbox: note: the container's OOM killer killed 3 processes during this session (memoryLimit 16g"))
+		Expect(report).To(HavePrefix("claude-sandbox: note: the OOM killer killed 3 processes in this container during this session (the container's memoryLimit 16g"))
 		Expect(strings.Count(report, "\n")).To(Equal(1))
 		Expect(report).NotTo(ContainSubstring("\x1b"), "never a terminal reset for the soft note")
 	})
@@ -284,7 +286,7 @@ var _ = Describe("session child and OOM report (CS-LNCH-085..098)", func() {
 			events(dockerEvent("oom", ""), dockerEvent("die", "137"))
 			Expect(f.run("headless", "--")).To(Equal(137))
 			Expect(f.out.String()).To(BeEmpty())
-			Expect(f.errw.String()).To(ContainSubstring("claude-sandbox: this session was killed by the container's OOM killer"))
+			Expect(f.errw.String()).To(ContainSubstring("claude-sandbox: this session was killed by the OOM killer"))
 			Expect(f.errw.String()).NotTo(ContainSubstring("\x1b"))
 		})
 
@@ -309,7 +311,7 @@ var _ = Describe("session child and OOM report (CS-LNCH-085..098)", func() {
 			Expect(f.run("--attach=otter")).To(Equal(137))
 			Expect(f.fake.CommandLines()).To(ContainElement(ContainSubstring("docker events --since ")))
 			Expect(f.sessionLine()).To(Equal("docker attach --detach-keys=ctrl-q,ctrl-q cs-a"))
-			Expect(f.errw.String()).To(ContainSubstring("killed by the container's OOM killer (exit 137; 1 OOM kill)."))
+			Expect(f.errw.String()).To(ContainSubstring("killed by the OOM killer (exit 137; 1 OOM kill) — the container's memoryLimit or the host running out of memory."))
 			Expect(f.errw.String()).To(ContainSubstring("memoryLimit: 16g (from /ws/.claude-sandbox/config.yaml)"))
 		})
 
@@ -324,14 +326,14 @@ var _ = Describe("session child and OOM report (CS-LNCH-085..098)", func() {
 			events(dockerEvent("oom", "", limitLabels...))
 			Expect(f.run("--join=otter")).To(Equal(137))
 			Expect(f.sessionLine()).To(HavePrefix("docker exec -it "))
-			Expect(f.errw.String()).To(ContainSubstring("this session was killed by the container's OOM killer (exit 137; 1 OOM kill)."))
+			Expect(f.errw.String()).To(ContainSubstring("this session was killed by the OOM killer (exit 137; 1 OOM kill) — "))
 			Expect(f.errw.String()).To(ContainSubstring("memoryLimit: 16g (from /ws/.claude-sandbox/config.yaml)"))
 		})
 
 		It("CS-SESS-060: an oom during a join that ended otherwise is the softer line", func() {
 			events(dockerEvent("oom", "", limitLabels...))
 			Expect(f.run("--join=otter")).To(Equal(0))
-			Expect(f.errw.String()).To(ContainSubstring("claude-sandbox: note: the container's OOM killer killed 1 process during this session"))
+			Expect(f.errw.String()).To(ContainSubstring("claude-sandbox: note: the OOM killer killed 1 process in this container during this session"))
 		})
 
 		It("CS-SESS-060: exit 137 without an oom event prints nothing", func() {

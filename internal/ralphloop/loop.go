@@ -341,7 +341,7 @@ func (l *Loop) initRunlog() error {
 // onto run-logger's latest unannotated entry for iter in the current run, or
 // as a minimal entry when run-logger wrote none and the outcome is not ok.
 // Best-effort: a runlog it cannot read or write is left alone.
-func (l *Loop) recordOutcome(iter int, outcome Outcome, oomKills int) {
+func (l *Loop) recordOutcome(iter int, outcome Outcome, oomKills int, cause OOMCause) {
 	raw, err := os.ReadFile(l.RunlogFile)
 	if err != nil {
 		return
@@ -379,6 +379,7 @@ func (l *Loop) recordOutcome(iter int, outcome Outcome, oomKills int) {
 	if outcome == OutcomeOOM {
 		entry["claudeExit"] = l.claudeExit
 		entry["oomKills"] = oomKills
+		entry["oomCause"] = string(cause)
 	}
 	out, err := json.MarshalIndent(runs, "", "  ")
 	if err != nil {
@@ -475,13 +476,16 @@ func (l *Loop) run() int {
 		// run-logger writes "ok" when claude's stdout merely closes.
 		var outcome Outcome
 		oomKills := 0
+		var oomCause OOMCause
 		if !l.timedOut && IsOOM(l.claudeExit, oomBefore.n, oomBefore.ok, oomAfter.n, oomAfter.ok) {
 			outcome = OutcomeOOM
 			oomKills = oomAfter.n - oomBefore.n
+			// CS-RLP-030: why — words only; the handling below is the same.
+			oomCause = CauseOf(oomBefore.limitHits, oomBefore.limitOK, oomAfter.limitHits, oomAfter.limitOK)
 		} else {
 			outcome = Classify(rc, l.QuotaFile, l.StderrFile, l.MarkerFile)
 		}
-		l.recordOutcome(iter, outcome, oomKills) // CS-RLP-029
+		l.recordOutcome(iter, outcome, oomKills, oomCause) // CS-RLP-029
 		// CS-RLP-026: only an iteration that COMPLETES with a non-oom outcome
 		// resets the streak; quota parks and rate-limit retries re-run the
 		// same iteration and leave it alone.
@@ -492,7 +496,7 @@ func (l *Loop) run() int {
 		switch outcome {
 		case OutcomeOOM:
 			oomStreak++
-			msg := l.oomMessage(iter, oomKills)
+			msg := l.oomMessage(iter, oomKills, oomCause)
 			if oomStreak > 1 {
 				// CS-RLP-027: a second consecutive oom stops the loop.
 				fmt.Fprintf(l.Out, "[oom] %s The retry was OOM-killed too. Exiting.\n", msg)

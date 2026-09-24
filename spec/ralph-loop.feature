@@ -202,10 +202,18 @@ Feature: Ralph loop lifecycle (CS-RLP)
   # sees the cgroup's oom_kill counter rise. Before this, the pipeline's
   # run-logger still wrote "ok" to the quota-status file and the iteration was
   # silently classified ok.
+  #
+  # Since CS-LNCH-112 (--oom-score-adj 500) a HOST-wide OOM usually kills a
+  # sandbox process too, and that kill also bumps the container's oom_kill:
+  # cgroup-v2.rst defines oom_kill as "the number of processes belonging to
+  # this cgroup killed by any kind of OOM killer", while "oom" counts only the
+  # times "the cgroup's memory usage was reached the limit and allocation was
+  # about to fail". oom_kill decides WHETHER an iteration was OOM-killed;
+  # "oom" decides WHY (CS-RLP-030).
 
   Scenario: CS-RLP-023 The loop samples the cgroup oom_kill counter around every iteration
     Then before each iteration and again right after it, the loop reads the
-      oom_kill line of <cgroup-dir>/memory.events
+      oom_kill and oom lines of <cgroup-dir>/memory.events
     And <cgroup-dir> is /sys/fs/cgroup (the container's own cgroup v2 root),
       an injected seam in tests
     And the claude exit code used for OOM classification is claude's OWN exit
@@ -264,9 +272,13 @@ Feature: Ralph loop lifecycle (CS-RLP)
       notification path (CS-RQT-013), and exits 137
     And there is no second back-off
 
-  Scenario: CS-RLP-028 The OOM message names memoryLimit and the remedies
-    Then the message states that claude was killed by the container's OOM killer,
-      with the iteration, exit 137 and how many OOM kills the iteration saw
+  Scenario: CS-RLP-028 The OOM message names the cause, memoryLimit and the remedies
+    Then the message names the iteration, exit 137 and how many OOM kills the
+      iteration saw, and words the kill by its cause (CS-RLP-030):
+      | cause   | says                                                                                             |
+      | limit   | claude was killed by the container's OOM killer: the container hit its memoryLimit              |
+      | host    | claude was killed by the host's OOM killer: the host ran out of memory while the container was under its memoryLimit |
+      | unknown | claude was killed by the OOM killer: the container's memoryLimit or the host running out of memory |
     And it names the memoryLimit in effect, read from <cgroup-dir>/memory.max
       and formatted in memoryLimit notation:
       | memory.max  | shown                   |
@@ -275,15 +287,38 @@ Feature: Ralph loop lifecycle (CS-RLP)
       | max         | unlimited               |
       | (unreadable)| unknown                 |
     And it says swap is off by design
-    And it names the remedies: raise memoryLimit in .claude-sandbox/config.yaml,
-      or cap build/test parallelism (e.g. ginkgo --procs=N, go test -p N, make -jN)
+    And the remedies follow the cause:
+      | cause   | remedies                                                                                      |
+      | limit   | raise memoryLimit in .claude-sandbox/config.yaml, or cap build/test parallelism (e.g. ginkgo --procs=N, go test -p N, make -jN) |
+      | host    | "raising memoryLimit will not help"; run fewer sandboxes at once or cap their build/test parallelism (e.g. ...), and the README section "When the host runs out of memory" |
+      | unknown | both of the above, each labelled with the case it fixes                                       |
+    And the back-off, the single retry and the stop on a second consecutive oom
+      (CS-RLP-026/027) are the same for every cause
+    # A host OOM is as likely to be transient (another sandbox's build) as a
+    # limit hit is to recur, and the retry already stops after one more kill,
+    # so the cause changes the words, not the behaviour.
+
+  Scenario: CS-RLP-030 The oom counter tells the container's limit from the host
+    Given an iteration classified oom (CS-RLP-024)
+    When the oom line of memory.events rose across the iteration
+    Then the cause is "limit": the container reached its own memory.max
+    When the oom line was readable before and after and did not rise
+    Then the cause is "host": the kill came from outside the container's limit —
+      the kernel's global OOM killer, or a parent cgroup's limit
+    When the oom line was missing or unparseable in either sample
+    Then the cause is "unknown"
+    And the cause never changes the classification: oom_kill alone decides
+      whether the outcome is oom (CS-RLP-024/025)
+    # An iteration in which the limit killed a test binary AND the host killed
+    # claude reads as "limit": the counters cannot say which kill was claude's.
 
   Scenario: CS-RLP-029 Every classified outcome is recorded in runlog.json
     When an iteration is classified
     Then run-logger's entry for that iteration in the current run gets an
       "outcome" field (ok, quota_exhausted, rate_limit, watchdog_timeout,
       iteration_timeout, error or oom)
-    And an oom entry also carries "claudeExit" (137) and "oomKills" (the counter delta)
+    And an oom entry also carries "claudeExit" (137), "oomKills" (the counter
+      delta) and "oomCause" ("limit", "host" or "unknown"; CS-RLP-030)
     And a retried iteration's second entry is annotated separately
       (the latest entry for iteration N that has no outcome yet)
     When run-logger wrote no entry (interactive mode, or it never flushed)
