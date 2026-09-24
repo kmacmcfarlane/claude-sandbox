@@ -385,6 +385,13 @@ var _ = Describe("sessions (CS-SESS)", func() {
 			Expect(f.sessionLine()).To(ContainSubstring("docker attach"))
 		})
 
+		It("CS-SESS-025: a container without an instance label is named by its mode", func() {
+			running(psRowFull("cs-a", "Up 1 hour", f.proj, "", "", "stalehash1234", "[]"))
+			f.env.Prompter = &prompt.Scripted{IsTTY: true, Answers: []string{"q"}}
+			Expect(f.run("--attach")).To(Equal(0))
+			Expect(f.errw.String()).To(ContainSubstring("Session 'claude' was started with different configuration"))
+		})
+
 		It("CS-SESS-025: [n] launches a new container with the current config instead", func() {
 			running(psRowFull("cs-a", "Up 1 hour", f.proj, "otter", "", "stalehash1234", "[]"))
 			f.env.Prompter = &prompt.Scripted{IsTTY: true, Answers: []string{"n"}}

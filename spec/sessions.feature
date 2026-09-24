@@ -312,6 +312,8 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
   Scenario: CS-SESS-025 Drift requires an explicit choice before attach or join
     Given the recomputed hash differs from the chosen session's label
     Then the drifted files are named, distinguishing changed, added, and removed
+    And the session is named by its instance, or by its mode for a container
+      without an instance label (as CS-SESS-063 does), never ''
     And it is stated that attaching will not apply those changes
     And the choices offered are:
       | key | action                              |

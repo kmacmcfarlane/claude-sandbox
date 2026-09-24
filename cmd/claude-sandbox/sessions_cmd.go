@@ -615,7 +615,7 @@ func confirmDrift(env *Env, s sessions.Session, wantHash string, wantInputs []la
 		// compare against, so do not invent drift.
 		return true, false, nil
 	}
-	fmt.Fprintf(env.Err, "\nSession '%s' was started with different configuration:\n", s.Instance)
+	fmt.Fprintf(env.Err, "\nSession '%s' was started with different configuration:\n", sessionLabel(s))
 	changes := launch.Drift(s.Inputs, wantInputs)
 	if len(changes) == 0 {
 		fmt.Fprintln(env.Err, "  (the effective configuration differs; the specific files are not recorded)")
