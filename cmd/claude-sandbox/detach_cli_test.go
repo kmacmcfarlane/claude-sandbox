@@ -1,12 +1,13 @@
 package main
 
-// Spec: spec/launch.feature CS-LNCH-113..118 and spec/sessions.feature
+// Spec: spec/launch.feature CS-LNCH-113..119 and spec/sessions.feature
 // CS-SESS-028/036 — "--detach": the container is created as for an attached
 // launch, started with a plain "docker start", and the launcher exits 0 with
 // the command that attaches. Everything runs through execx.Fake; the fixture's
 // TempRoot and CacheDir are scratch directories.
 
 import (
+	"slices"
 	"strings"
 	"time"
 
@@ -29,9 +30,31 @@ func startCalls(f *cliFixture) [][]string {
 	return out
 }
 
-var _ = Describe("detached launch (CS-LNCH-113..118)", func() {
+var _ = Describe("detached launch (CS-LNCH-113..119)", func() {
 	var f *cliFixture
-	BeforeEach(func() { f = newCLIFixture() })
+	// state is what "docker inspect" reports after the settle; evts is the
+	// container's event stream (CS-LNCH-119).
+	var state string
+	var evts []string
+	BeforeEach(func() {
+		f = newCLIFixture()
+		state, evts = "running", nil
+		f.fake.OnFunc("docker inspect --type container", func(execx.Cmd) (string, error) {
+			if state == "" {
+				return "", execx.Fail(1)
+			}
+			return state + " 2026-09-24T00:00:00Z\n", nil
+		})
+		f.fake.OnFunc("docker events", func(c execx.Cmd) (string, error) {
+			name := ""
+			for _, a := range c.Args {
+				if v, ok := strings.CutPrefix(a, "container="); ok {
+					name = v
+				}
+			}
+			return strings.ReplaceAll(strings.Join(evts, ""), thisContainer, name), nil
+		})
+	})
 
 	It("CS-LNCH-113: creates as an attached launch does, then starts without attaching and prints the attach command", func() {
 		Expect(f.run("--detach")).To(Equal(0), f.errw.String())
@@ -40,13 +63,16 @@ var _ = Describe("detached launch (CS-LNCH-113..118)", func() {
 		name := nameOf(f.launched().Args)
 		Expect(startCalls(f)).To(Equal([][]string{{"start", name}}), "no -a, no -i, no --detach-keys")
 		Expect(f.fake.Session).To(BeNil(), "no session child")
-		Expect(f.fake.CommandLines()).NotTo(ContainElement(HavePrefix("docker events ")), "no OOM watcher")
+		lines := f.fake.CommandLines()
+		Expect(lines).To(ContainElement(HavePrefix("docker events ")), "the settle's die watch (CS-LNCH-119)")
+		Expect(slices.IndexFunc(lines, func(l string) bool { return strings.HasPrefix(l, "docker events ") })).
+			To(BeNumerically("<", slices.Index(lines, "docker start "+name)), "subscribed before the start")
 
 		instance := labelValue(f.launched().Args, "claude-sandbox.instance")
 		Expect(instance).NotTo(BeEmpty())
 		Expect(f.out.String()).To(HaveSuffix(
 			"Started '" + instance + "' (" + name + ") in the background.\n" +
-				"Attach: claude-sandbox --attach=" + instance + "   (from " + f.proj + "; detach again with ctrl-q,ctrl-q)\n"))
+				"Attach: cd " + f.proj + " && claude-sandbox --attach=" + instance + "   (detach again with ctrl-q,ctrl-q)\n"))
 	})
 
 	It("CS-LNCH-113: the hint names the configured detach keys; docker's own start output is not shown", func() {
@@ -96,13 +122,22 @@ var _ = Describe("detached launch (CS-LNCH-113..118)", func() {
 	})
 
 	It("CS-LNCH-116: a start that never ran the container is cleaned up and exits 1", func() {
-		f.fake.On("docker inspect --type container", "created 2026-09-24T00:00:00Z\n", nil)
+		state = "created"
 		Expect(f.run("--detach")).To(Equal(1))
 		name := nameOf(f.launched().Args)
 		Expect(f.fake.CommandLines()).To(ContainElement("docker rm " + name))
 		Expect(exists(shadowDirOf(f.launched().Args))).To(BeFalse())
-		Expect(f.errw.String()).To(ContainSubstring("never ran"))
+		Expect(f.errw.String()).To(ContainSubstring("never ran; removed it."))
 		Expect(f.out.String()).NotTo(ContainSubstring("Attach:"))
+	})
+
+	It("CS-LNCH-116: a never-ran container whose removal fails says so and keeps the directory", func() {
+		state = "created"
+		f.fake.On("docker rm", "", execx.Fail(1))
+		Expect(f.run("--detach")).To(Equal(1))
+		Expect(f.errw.String()).To(ContainSubstring("removing it failed"))
+		Expect(f.errw.String()).NotTo(ContainSubstring("removed it."))
+		Expect(exists(shadowDirOf(f.launched().Args))).To(BeTrue())
 	})
 
 	It("CS-LNCH-116: the shadow directory stays when the reservation cannot be removed", func() {
@@ -113,7 +148,6 @@ var _ = Describe("detached launch (CS-LNCH-113..118)", func() {
 	})
 
 	It("CS-LNCH-117: the shadow directory is kept at launch and swept by a later launch once the container is gone", func() {
-		f.fake.On("docker inspect --type container", "running 2026-09-24T00:00:00Z\n", nil)
 		Expect(f.run("--detach")).To(Equal(0), f.errw.String())
 		dir := shadowDirOf(f.launched().Args)
 		Expect(dir).NotTo(BeEmpty())
@@ -141,6 +175,68 @@ var _ = Describe("detached launch (CS-LNCH-113..118)", func() {
 		Expect(attached).NotTo(ContainElement(HavePrefix(launch.LabelDetached + "=")))
 		Expect(labelValue(detached, "claude-sandbox.confighash")).To(Equal(labelValue(attached, "claude-sandbox.confighash")))
 	})
+
+	It("CS-LNCH-119: a container that dies during the settle is an error with docker's exit code, no hint, and no shadow directory left", func() {
+		evts = []string{dockerEvent("die", "2")}
+		Expect(f.run("--detach", "--", "--bogus-claude-flag")).To(Equal(1))
+		name := nameOf(f.launched().Args)
+		Expect(f.errw.String()).To(ContainSubstring("(" + name + ") stopped right after it started (exit 2)"))
+		Expect(f.errw.String()).To(ContainSubstring("Rerun without --detach to see why."))
+		Expect(f.out.String()).NotTo(ContainSubstring("Attach:"))
+		Expect(f.out.String()).NotTo(ContainSubstring("Started"))
+		Expect(exists(shadowDirOf(f.launched().Args))).To(BeFalse(), "a dead --rm container mounts nothing")
+	})
+
+	It("CS-LNCH-119: an OOM kill during the settle is named", func() {
+		evts = []string{dockerEvent("oom", ""), dockerEvent("die", "137")}
+		Expect(f.run("--detach")).To(Equal(1))
+		Expect(f.errw.String()).To(ContainSubstring("(exit 137, killed by the OOM killer)"))
+	})
+
+	It("CS-LNCH-119: another container's die (a name prefix match) is not ours", func() {
+		evts = []string{namedEvent(thisContainer+"0", "die", "1")}
+		Expect(f.run("--detach")).To(Equal(0), f.errw.String())
+		Expect(f.out.String()).To(ContainSubstring("Started "))
+	})
+
+	DescribeTable("CS-LNCH-119: a container not up after the settle is the same failure",
+		func(st, detail string) {
+			state = st
+			Expect(f.run("--detach")).To(Equal(1))
+			Expect(f.errw.String()).To(ContainSubstring("stopped right after it started (" + detail + ")"))
+			Expect(f.out.String()).NotTo(ContainSubstring("Attach:"))
+		},
+		Entry("exited", "exited", "state exited"),
+		Entry("dead", "dead", "state dead"),
+		Entry("removing", "removing", "state removing"),
+		Entry("gone", "", "the container is gone"),
+	)
+
+	DescribeTable("CS-LNCH-119: paused and restarting count as up",
+		func(st string) {
+			state = st
+			Expect(f.run("--detach")).To(Equal(0), f.errw.String())
+			Expect(f.out.String()).To(ContainSubstring("Attach: "))
+		},
+		Entry("paused", "paused"),
+		Entry("restarting", "restarting"),
+	)
+
+	DescribeTable("CS-LNCH-113: the attach command is the notify-webhook's copy-paste shape",
+		func(project, home, want string) {
+			Expect(attachCommand(project, home, "otter")).To(Equal(want))
+		},
+		Entry("under home", "/home/u/src/repo", "/home/u", "cd ~/src/repo && claude-sandbox --attach=otter"),
+		Entry("home itself", "/home/u", "/home/u", "cd ~ && claude-sandbox --attach=otter"),
+		Entry("outside home", "/srv/repo", "/home/u", "cd /srv/repo && claude-sandbox --attach=otter"),
+		Entry("quoted", "/home/u/my repo's", "/home/u", `cd ~/'my repo'\''s' && claude-sandbox --attach=otter`),
+		Entry("root home", "/srv/repo", "/", "cd /srv/repo && claude-sandbox --attach=otter"),
+		Entry("backslash: no cd", `/srv/a\b`, "/home/u", "claude-sandbox --attach=otter"),
+		Entry("backtick: no cd", "/srv/a`b", "/home/u", "claude-sandbox --attach=otter"),
+		Entry("control char: no cd", "/srv/a\nb", "/home/u", "claude-sandbox --attach=otter"),
+		Entry("relative: no cd", "srv/a", "/home/u", "claude-sandbox --attach=otter"),
+		Entry("over 300 bytes: no cd", "/"+strings.Repeat("a", 300), "/home/u", "claude-sandbox --attach=otter"),
+	)
 
 	It("CS-SESS-036: a detached start carries no detach keys; the later attach does", func() {
 		Expect(f.run("--detach")).To(Equal(0), f.errw.String())

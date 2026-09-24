@@ -254,12 +254,12 @@ Docker cannot report whether another client is attached, so attaching to a sessi
 ### Starting detached
 
 `--detach` starts a new session with no terminal attached — from an IDE, a script or a unit
-file — and exits 0 once it runs:
+file — and exits 0 once it is running:
 
 ```bash
 claude-sandbox --detach -- "/librarian-mode start"
 # Started 'otter' (claude-sandbox-…-otter) in the background.
-# Attach: claude-sandbox --attach=otter   (from /home/you/proj; detach again with ctrl-q,ctrl-q)
+# Attach: cd ~/proj && claude-sandbox --attach=otter   (detach again with ctrl-q,ctrl-q)
 ```
 
 The container is exactly the one an attached launch makes — created with a TTY and `--rm`
@@ -272,15 +272,27 @@ It is refused (exit 2) with `--ralph`, `--attach`, `--join`, `--branch` (claude'
 would wait in a session nobody sees; pass `--resume=<id> --fork-session` after `--` instead) and
 `headless`.
 
-Nothing waits on a detached session, so nothing reports how it ends: there is no
-[OOM report](#the-session-child) at launch. A later `--attach` watches as usual, and
-`sessions` marks an OOM kill for as long as the container exists. Because the container is
-`--rm`, `/exit` still removes it. Its shadow directory stays while it runs and is swept by a
-later launch once the container is gone ([Shadow directory cleanup](#shadow-directory-cleanup)).
+`docker start` without a client returns as soon as the process exists, so the launcher
+watches the container for up to 2 seconds before it reports success: a session that dies in
+that window — a bad claude flag after `--`, an entrypoint failure — is reported as
+`Error: 'otter' (…) stopped right after it started (exit 2); its output went with it. Rerun
+without --detach to see why.` and the launch exits 1, as it does when the container is not
+running, paused or restarting after the wait. **Exit 0 therefore means only that the container
+was up 2 seconds in**, not that the session stays healthy: because the container is `--rm`, a
+session that dies later — or `/exit` — removes it together with its output, and the next
+`--attach` finds nothing. Rerun without `--detach` to watch one that keeps dying.
+
+Past that window nothing waits on a detached session, so nothing reports how it ends: there
+is no [OOM report](#the-session-child). A later `--attach` watches as usual, and `sessions`
+marks an OOM kill for as long as the container exists. The shadow directory stays while the
+container runs and is swept by a later launch once it is gone
+([Shadow directory cleanup](#shadow-directory-cleanup)).
 A `docker start` that fails, or that leaves the container never started, removes the
 reservation and exits non-zero without an attach hint. The container carries the label
 `claude-sandbox.detached=1`, which is not part of the config-drift hash.
-Spec: `spec/launch.feature` CS-LNCH-113..118.
+The `Attach:` line is the same copy-paste command the notification ping gives: `cd` into the
+project (`$HOME` shortened to `~`, quoted when needed) because `--attach` looks only at the
+current project's sessions. Spec: `spec/launch.feature` CS-LNCH-113..119.
 
 ### Non-interactive use
 

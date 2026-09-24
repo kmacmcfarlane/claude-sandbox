@@ -14,8 +14,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
@@ -235,9 +237,7 @@ func startReserved(env *Env, plan *launch.Plan, headless bool) error {
 		headless: headless,
 	})
 	if err != nil || end.neverStarted {
-		if sessions.RemoveReservation(env.Runner, plan.ContainerName) == nil && plan.ShadowDir != "" {
-			os.RemoveAll(plan.ShadowDir)
-		}
+		removeReservation(env, plan)
 		if err != nil {
 			return err
 		}
@@ -248,50 +248,132 @@ func startReserved(env *Env, plan *launch.Plan, headless bool) error {
 	return sessionExit(end.code)
 }
 
+// detachedSettle is how long a --detach launch watches its container after
+// "docker start" returned (CS-LNCH-119). Without -a, docker start returns once
+// the process exists; a claude that exits at once (a bad passthrough flag, an
+// entrypoint failure) dies within it, and with --rm its container and output
+// are gone before anyone could attach. DieWait is the precedent.
+var detachedSettle = oomreport.DieWait
+
 // startDetached starts the reserved container without attaching to it
-// (CS-LNCH-113): a plain "docker start", no session child, no events
-// subscription, no OOM report — nobody is attached to see one. The launcher
-// then exits 0 with the command that attaches.
+// (CS-LNCH-113): a plain "docker start", no session child, and no OOM report
+// for the session's life — nobody is attached to see one. The launcher
+// watches the container's die events for detachedSettle only, then checks it
+// is still up (CS-LNCH-119), and exits 0 with the command that attaches.
 //
 // The shadow directory stays (CS-LNCH-117): the running container mounts it,
 // and no launcher is left to see its die (CS-LNCH-094). Once the --rm
-// container is gone, a later launch's sweep removes it (CS-LNCH-081). A start
-// that failed, or that returned with the container still "created", is
-// cleaned up as an attached one is (CS-LNCH-116): the reservation, then —
-// only once it is gone — the directory.
-func startDetached(env *Env, plan *launch.Plan, projectDir string) error {
+// container is gone, a later launch's sweep removes it (CS-LNCH-081). A die
+// seen during the settle removes it at once, as CS-LNCH-094 does. A start that
+// failed, or that left the container "created", is cleaned up as an attached
+// one is (CS-LNCH-116): the reservation, then — only once it is gone — the
+// directory.
+func startDetached(env *Env, plan *launch.Plan, projectDir, home string) error {
+	// Subscribed before the start, from a moment before it, so a die at once
+	// cannot be missed; matched by exact name (CS-LNCH-087/095).
+	w := oomreport.Start(env.Runner, plan.ContainerName, env.now())
+	defer w.Stop()
+
 	err := env.Runner.Run(execx.Cmd{
 		Name: "docker", Args: plan.DetachedStartArgs(),
 		// docker echoes the container name on stdout; its errors go to stderr.
 		Stdout: io.Discard, Stderr: env.Err,
 	})
-	neverStarted := false
-	if err == nil {
-		state, _ := sessions.Inspect(env.Runner, plan.ContainerName)
-		neverStarted = state == sessions.StateCreated
-	}
-	if err != nil || neverStarted {
-		if sessions.RemoveReservation(env.Runner, plan.ContainerName) == nil && plan.ShadowDir != "" {
-			os.RemoveAll(plan.ShadowDir)
+	if err != nil {
+		removeReservation(env, plan)
+		if code := execx.ExitCode(err); code > 0 {
+			return sessionExit(code)
 		}
-		if err != nil {
-			if code := execx.ExitCode(err); code > 0 {
-				return sessionExit(code)
-			}
-			return exitErr(2, "Error: docker start %s: %v", plan.ContainerName, err)
-		}
-		return exitErr(1, "Error: docker start %s returned but the container never ran; removed it.", plan.ContainerName)
+		return exitErr(2, "Error: docker start %s: %v", plan.ContainerName, err)
 	}
+
 	who := plan.ContainerName
 	if plan.Instance != "" {
 		who = "'" + plan.Instance + "' (" + plan.ContainerName + ")"
 	}
+	died := func(detail string) error {
+		return exitErr(1, "Error: %s stopped right after it started (%s); its output went with it. "+
+			"Rerun without --detach to see why.", who, detail)
+	}
+
+	o, _ := w.Await(detachedSettle, oomreport.Died, nil)
+	if o.Died {
+		// A --rm container that died is gone: nothing mounts the directory.
+		if plan.ShadowDir != "" {
+			os.RemoveAll(plan.ShadowDir)
+		}
+		detail := fmt.Sprintf("exit %d", o.ExitCode)
+		if o.OOMKills > 0 {
+			detail += ", killed by the OOM killer"
+		}
+		return died(detail)
+	}
+	switch state, _ := sessions.Inspect(env.Runner, plan.ContainerName); state {
+	case "running", "paused", "restarting":
+	case sessions.StateCreated:
+		if removeReservation(env, plan) {
+			return exitErr(1, "Error: docker start %s returned but the container never ran; removed it.", plan.ContainerName)
+		}
+		return exitErr(1, "Error: docker start %s returned but the container never ran; removing it failed, so a later launch will.", plan.ContainerName)
+	case "":
+		return died("the container is gone")
+	default:
+		return died("state " + state)
+	}
+
 	fmt.Fprintf(env.Out, "Started %s in the background.\n", who)
 	if plan.Instance != "" {
-		fmt.Fprintf(env.Out, "Attach: claude-sandbox --attach=%s   (from %s; detach again with %s)\n",
-			plan.Instance, projectDir, plan.DetachKeys)
+		fmt.Fprintf(env.Out, "Attach: %s   (detach again with %s)\n",
+			attachCommand(projectDir, home, plan.Instance), plan.DetachKeys)
 	}
 	return nil
+}
+
+// removeReservation removes a never-started container and then, only once it
+// is gone, the launch's shadow directory: a container that still exists may
+// still mount it (CS-LNCH-057/083/096). It reports whether the container was
+// removed.
+func removeReservation(env *Env, plan *launch.Plan) bool {
+	if sessions.RemoveReservation(env.Runner, plan.ContainerName) != nil {
+		return false
+	}
+	if plan.ShadowDir != "" {
+		os.RemoveAll(plan.ShadowDir)
+	}
+	return true
+}
+
+// shellSafe is the set of characters a path can hold unquoted.
+var shellSafe = regexp.MustCompile(`^[A-Za-z0-9._/+@:=,-]+$`)
+
+// attachCommand is the copy-paste command that attaches to instance: "--attach"
+// looks only at the current project's sessions (CS-SESS-030), so it is
+// prefixed with "cd <project> &&" — $HOME shortened to ~, shell-quoted when
+// needed. The same shape bin/notify-webhook builds (CS-LNCH-111): the cd is
+// omitted for a path that is not absolute, is longer than 300 bytes, or holds
+// a control character, a backtick or a backslash (fish honours \' inside
+// single quotes, so no quoting is safe for it).
+func attachCommand(projectDir, home, instance string) string {
+	cmd := "claude-sandbox --attach=" + instance
+	if !strings.HasPrefix(projectDir, "/") || len(projectDir) > 300 ||
+		strings.ContainsAny(projectDir, "`\\\x7f") || strings.IndexFunc(projectDir, func(r rune) bool { return r < 0x20 }) >= 0 {
+		return cmd
+	}
+	shq := func(p string) string {
+		if shellSafe.MatchString(p) {
+			return p
+		}
+		return "'" + strings.ReplaceAll(p, "'", `'\''`) + "'"
+	}
+	path := shq(projectDir)
+	if home != "" && home != "/" {
+		if projectDir == home {
+			path = "~"
+		} else if rest, ok := strings.CutPrefix(projectDir, home+"/"); ok {
+			path = "~/" + shq(rest)
+		}
+	}
+	return "cd " + path + " && " + cmd
 }
 
 // pruneShadowDirs removes the shadow directories of earlier launches that no

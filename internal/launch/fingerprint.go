@@ -111,7 +111,9 @@ func (in *Inputs) configFingerprint(p *Plan, ha hostAccess, sharedPeerRegistry b
 
 	// Excluded on purpose: model, passthrough args, --limit, the instance noun,
 	// the pid class (CS-LNCH-040), the worktree name and the config key behind
-	// it (CS-LNCH-044, json:"-") and the container name. Those are per-session
+	// it (CS-LNCH-044, json:"-"), --detach (Inputs.Detached, CS-LNCH-118:
+	// how the first client connects, not what the container is) and the
+	// container name. Those are per-session
 	// choices, not the environment, and would make every new session look like
 	// drift. The model and the worktree are reported separately, since
 	// attaching cannot change them (CS-SESS-027, CS-SESS-047).

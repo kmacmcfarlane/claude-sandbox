@@ -1464,14 +1464,18 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     And then "docker start <container>" runs as a plain command: no -a, no -i,
       no --detach-keys (it attaches nothing, so there is nothing to detach), its
       stdout (docker echoes the name) discarded and its stderr shown
-    And no session child runs and no "docker events" subscription is made
-    And stdout gets:
+    And no session child runs; "docker events" is watched only for the short
+      settle of CS-LNCH-119
+    And once the container is still up after the settle, stdout gets:
       """
       Started '<noun>' (<container>) in the background.
-      Attach: claude-sandbox --attach=<noun>   (from <project dir>; detach again with <keys>)
+      Attach: cd <project dir> && claude-sandbox --attach=<noun>   (detach again with <keys>)
       """
       where <keys> is the resolved detachKeys sequence (CS-SESS-036), which the
-      later attach carries
+      later attach carries, and <project dir> is written as bin/notify-webhook
+      writes it (CS-LNCH-111): $HOME shortened to ~, shell-quoted when needed,
+      and "cd … &&" left out for a path that is not absolute, is over 300
+      bytes, or holds a control character, a backtick or a backslash
     And the launcher exits 0 while the session keeps running
     And a positional initial prompt ("-- '/librarian-mode start'") reaches the
       container's claude command exactly as it would attached
@@ -1500,7 +1504,8 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     Then the reservation is removed with "docker rm" and, once that succeeded,
       the shadow directory (CS-LNCH-057/083/096)
     And the launcher exits with docker's status (1 when docker start succeeded
-      but never ran it), printing no attach hint
+      but never ran it), printing no attach hint; the never-ran message says
+      whether the removal succeeded
     And the stale-reservation sweep (CS-SESS-052) stays the backstop when the
       removal fails
 
@@ -1510,9 +1515,10 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       launcher is left to see the container's die (CS-LNCH-094 needs one)
     And once the --rm container has exited and is gone, a later launch's sweep
       removes it (CS-LNCH-081: no container names it, older than one hour)
-    And nothing reports an OOM kill at launch time; a later --attach runs the
-      session child and reports one that ends the session (CS-SESS-059), and
-      "sessions" marks an OOM kill while the container still exists (CS-SESS-061)
+    And past the settle (CS-LNCH-119) nothing reports how the session ends: a
+      later --attach runs the session child and reports an OOM kill that ends
+      the session (CS-SESS-059), and "sessions" marks an OOM kill while the
+      container still exists (CS-SESS-061)
 
   Scenario: CS-LNCH-118 A detached session is an ordinary session afterwards
     Then a detached container's mode label stays "claude", so it is an attach,
@@ -1522,3 +1528,25 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       launch carries no such label
     And --detach is a per-session choice, not the environment: it is not part
       of the config hash, so attaching to a detached container shows no drift
+
+  Scenario: CS-LNCH-119 A detached launch reports a session that dies at once
+    # Without -a, "docker start" returns as soon as the process exists; the
+    # entrypoint's remap and chown still run, so an inspect right after it
+    # reads "running" even when claude is about to exit (a bad passthrough
+    # flag, an entrypoint failure). With --rm the container and its output
+    # are then gone, and the next --attach finds nothing.
+    When a detached launch starts its container
+    Then it subscribes to the container's die (and oom) events BEFORE
+      "docker start", from a moment before it, keeping only events whose name
+      is exactly the container's (CS-LNCH-087/095)
+    And it waits up to 2 s (DieWait) for a die
+    And on a die it prints one error line naming the session, docker's exit
+      code (and an OOM kill when one was seen) and "Rerun without --detach to
+      see why", prints no attach hint, removes the shadow directory (nothing
+      mounts it any more) and exits 1
+    And with no die, "docker inspect" must then report running, paused or
+      restarting; "exited", "dead", "removing", or no container at all is the
+      same failure; "created" is CS-LNCH-116
+    And exit 0 means only that the container was up after the settle, not that
+      the session stays healthy: one that dies later disappears with its
+      output, as an attached session's container does after a detach

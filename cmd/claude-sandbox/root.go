@@ -1068,7 +1068,7 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 		return err
 	}
 	if f.Detach {
-		return startDetached(env, plan, projectDir)
+		return startDetached(env, plan, projectDir, home)
 	}
 	return startReserved(env, plan, headless)
 }
