@@ -385,6 +385,13 @@ var _ = Describe("sessions (CS-SESS)", func() {
 			Expect(f.sessionLine()).To(ContainSubstring("docker attach"))
 		})
 
+		It("CS-SESS-025: a container without an instance label is named by its mode", func() {
+			running(psRowFull("cs-a", "Up 1 hour", f.proj, "", "", "stalehash1234", "[]"))
+			f.env.Prompter = &prompt.Scripted{IsTTY: true, Answers: []string{"q"}}
+			Expect(f.run("--attach")).To(Equal(0))
+			Expect(f.errw.String()).To(ContainSubstring("Session 'claude' was started with different configuration"))
+		})
+
 		It("CS-SESS-025: [n] launches a new container with the current config instead", func() {
 			running(psRowFull("cs-a", "Up 1 hour", f.proj, "otter", "", "stalehash1234", "[]"))
 			f.env.Prompter = &prompt.Scripted{IsTTY: true, Answers: []string{"n"}}
@@ -441,6 +448,47 @@ var _ = Describe("sessions (CS-SESS)", func() {
 			f.env.Prompter = &prompt.Scripted{IsTTY: false}
 			Expect(f.run("--attach=otter", "--model", "opus")).To(Equal(0))
 			Expect(f.errw.String()).To(ContainSubstring("cannot change a running session"))
+		})
+
+		It("CS-SESS-025: the no-terminal drift error names an unlabelled container by its mode", func() {
+			running(psRowFull("cs-a", "Up 1 hour", f.proj, "", "", "stalehash1234", "[]"))
+			f.env.Prompter = &prompt.Scripted{IsTTY: false}
+			Expect(f.run("--attach")).To(Equal(3))
+			Expect(f.errw.String()).To(ContainSubstring("since session 'claude' started"))
+			Expect(f.errw.String()).NotTo(ContainSubstring("session ''"))
+		})
+
+		It("CS-SESS-027: the model warning names an unlabelled container by its mode", func() {
+			hash := currentHash(f)
+			running(psRowFull("cs-a", "Up 1 hour", f.proj, "", "sonnet", hash, "[]"))
+			f.env.Prompter = &prompt.Scripted{IsTTY: false}
+			Expect(f.run("--attach", "--model", "opus")).To(Equal(0))
+			Expect(f.errw.String()).To(ContainSubstring("Note: session 'claude' is running model sonnet"))
+			Expect(f.errw.String()).NotTo(ContainSubstring("session ''"))
+			Expect(f.out.String()).To(ContainSubstring("Attaching to claude. Press "))
+		})
+
+		It("CS-SESS-063: the decision's [a] names an unlabelled only session by its mode", func() {
+			hash := currentHash(f)
+			running(psRowFull("cs-a", "Up 1 hour", f.proj, "", "", hash, "[]"))
+			f.env.Prompter = &prompt.Scripted{IsTTY: true, Answers: []string{"a"}}
+			Expect(f.run()).To(Equal(0))
+			Expect(f.errw.String()).To(ContainSubstring("Using the only running session: claude\n"))
+			Expect(f.out.String()).To(ContainSubstring("Attaching to claude. Press "))
+		})
+
+		It("CS-SESS-063: sessionLabel falls back from instance to mode to container name", func() {
+			Expect(sessionLabel(sessions.Session{Name: "cs-a", Mode: "claude", Instance: "otter"})).To(Equal("otter"))
+			Expect(sessionLabel(sessions.Session{Name: "cs-a", Mode: "claude"})).To(Equal("claude"))
+			Expect(sessionLabel(sessions.Session{Name: "cs-a"})).To(Equal("cs-a"))
+		})
+
+		It("CS-SESS-063: an unlabelled container joined is named by its mode", func() {
+			hash := currentHash(f)
+			running(psRowFull("cs-a", "Up 1 hour", f.proj, "", "", hash, "[]"))
+			f.env.Prompter = &prompt.Scripted{IsTTY: false}
+			Expect(f.run("--join")).To(Equal(0))
+			Expect(f.out.String()).To(ContainSubstring("Starting a new session inside claude.\n"))
 		})
 
 		It("CS-SESS-027: join passes the requested model to the new process", func() {

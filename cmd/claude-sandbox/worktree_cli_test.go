@@ -286,6 +286,15 @@ var _ = Describe("worktree mode (CS-LNCH-041..047, CS-SESS-045..047)", func() {
 			Expect(f.errw.String()).NotTo(ContainSubstring("cannot change"))
 		})
 
+		It("CS-SESS-047: a container without an instance label is named by its mode", func() {
+			gitProject(f)
+			running(psRow("cs-a", "Up 1 hour", f.proj, ""))
+			noTTY()
+			Expect(f.run("--attach")).To(Equal(0), f.errw.String())
+			Expect(f.errw.String()).To(ContainSubstring("Note: session 'claude' runs in the shared checkout."))
+			Expect(f.errw.String()).NotTo(ContainSubstring("session ''"))
+		})
+
 		It("CS-SESS-047: attach states the running session cannot be changed when the request differs", func() {
 			gitProject(f)
 			running(psRowWorktree("cs-a", "Up 1 hour", f.proj, "otter", "otter"))
