@@ -436,9 +436,23 @@ var _ = Describe("baked sources", func() {
 			"a venv on another device (a mount of the venv, /opt or /opt/claude-sandbox) is skipped")
 		Expect(block).To(ContainSubstring(`! mountpoint -q "$VENV_DIR"`), "a mounted venv is skipped")
 		// ...and every mount point below it is pruned, read from mountinfo.
-		Expect(block).To(ContainSubstring(`[[ "$mp" == "$VENV_DIR"/* ]] && VENV_PRUNE+=(-path "$mp" -prune -o)`))
-		Expect(block).To(ContainSubstring(`done < <(awk '{print $5}' /proc/self/mountinfo)`))
-		Expect(block).To(ContainSubstring(`find "$VENV_DIR" -xdev "${VENV_PRUNE[@]}" -type d`))
+		Expect(block).To(ContainSubstring(`_cs_prune_args "$VENV_DIR"`))
+		Expect(block).To(ContainSubstring(`find "$VENV_DIR" -xdev "${_CS_PRUNE[@]}" -type d`))
+
+		// Mount points are read once from mountinfo and DECODED (\040 = space,
+		// \134 = backslash), and every consumer uses the decoded list.
+		Expect(ep).To(ContainSubstring("while IFS= read -r _mp; do\n    printf -v _mp '%b' \"$_mp\"\n    _CS_MOUNT_POINTS+=(\"$_mp\")\ndone < <(awk '{print $5}' /proc/self/mountinfo)\n"))
+		Expect(strings.Count(ep, "/proc/self/mountinfo)")).To(Equal(1), "no consumer reads mountinfo raw")
+		Expect(ep).To(ContainSubstring(`for _mp in "${_CS_MOUNT_POINTS[@]}"; do`), "the home relocation's mount check")
+		// The shared prune helper escapes find -path's glob characters,
+		// backslash first, and matches the directory literally.
+		helper := ep[strings.Index(ep, "_cs_prune_args() {"):]
+		helper = helper[:strings.Index(helper, "\n}\n")]
+		Expect(helper).To(ContainSubstring(`[[ "$mp" == "$1"/* ]] || continue`))
+		Expect(helper).To(ContainSubstring(`mp=${mp//\\/\\\\}; mp=${mp//\*/\\*}; mp=${mp//\?/\\?}; mp=${mp//\[/\\[}`))
+		Expect(helper).To(ContainSubstring(`_CS_PRUNE+=(-path "$mp" -prune -o)`))
+		// The home chown uses the same helper.
+		Expect(ep).To(ContainSubstring("_cs_prune_args \"$TARGET_HOME\"\nfind \"$TARGET_HOME\" \"${_CS_PRUNE[@]}\" -print0"))
 		Expect(block).To(ContainSubstring(`-exec chown "$TARGET_UID:$TARGET_GID" {} +`))
 		Expect(block).NotTo(ContainSubstring("VIRTUAL_ENV"), "never a path an env file can set")
 		Expect(block).NotTo(ContainSubstring("-type f"), "files keep their owner (no overlay2 copy-up)")

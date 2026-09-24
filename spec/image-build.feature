@@ -618,6 +618,11 @@ Feature: Image build lifecycle (CS-IMG)
       host's), and every mount point below the venv, read from
       /proc/self/mountinfo, is pruned — -xdev alone still lists a mount point
       directory itself, and when the venv is a mount -xdev takes that mount's device
+    And both the venv chown and the home chown (and the home relocation's mount
+      check) take mount points from /proc/self/mountinfo DECODED (the kernel writes
+      a space as \040 and a backslash as \134) and escape find -path's glob
+      characters (\ * ? [, backslash first), so a mount named "sp ace", "br[1]",
+      "st*r" or "b\s" is pruned and keeps its host owner
     And container-context.md says the installs are per-container: they die with it
     # Measured on the base venv (190 dirs, 1753 entries): ~10 ms. `pip install
     # --user` is no alternative: the venv has include-system-site-packages =
