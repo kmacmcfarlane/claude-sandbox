@@ -231,8 +231,19 @@ func (l Layout) RefusedWarning() string {
 // exit-78 message give (CS-GCFG-026/038), to run with every Claude session
 // exited. A later feature adds checked commands (locking, verification).
 const (
-	LinkCmd   = "mv ~/.claude.json ~/.claude/.claude.json && ln -s .claude/.claude.json ~/.claude.json"
-	UnlinkCmd = "rm ~/.claude.json && mv ~/.claude/.claude.json ~/.claude.json"
+	//
+	// Both are GUARDED: they do nothing unless the layout is the one they
+	// expect. Unguarded, the undo step deletes the only config when the
+	// operator already reverted by hand, and the link step run on an existing
+	// (dangling) link moves the link into ~/.claude/ and builds a chain, or
+	// overwrites an existing target. No "mv -n": its exit status differs
+	// across coreutils versions.
+	LinkCmd = "test -f ~/.claude.json && ! test -L ~/.claude.json && ! test -e ~/.claude/.claude.json && ! test -L ~/.claude/.claude.json" +
+		" && mv ~/.claude.json ~/.claude/.claude.json && ln -s .claude/.claude.json ~/.claude.json"
+	UnlinkCmd = "test -L ~/.claude.json && test -f ~/.claude/.claude.json && ! test -L ~/.claude/.claude.json" +
+		" && rm ~/.claude.json && mv ~/.claude/.claude.json ~/.claude.json"
+	// keepCopy is said before either step.
+	keepCopy = "copy ~/.claude.json somewhere outside ~/.claude/ first"
 )
 
 // SiblingLinkNote is the CS-GCFG-027 note: with CLAUDE_CONFIG_DIR set, a
@@ -255,8 +266,8 @@ func (l Layout) SplitBrainWarning() string {
 		}
 		return "unknown"
 	}
-	return fmt.Sprintf("WARNING: two global config files: %s (a regular file, modified %s) and %s (modified %s). With CLAUDE_CONFIG_DIR unset Claude Code uses %s; the other is stale — typically a tool replaced the link by rename. With every Claude session exited (host and sandboxes), merge what you need into %s by hand, remove the stale %s, and then either keep the legacy layout or restore the link: %s. A later claude-sandbox release adds checked commands for this.\n",
-		l.Link, mtime(l.Link), l.Target, mtime(l.Target), l.Link, l.Link, l.Target, LinkCmd)
+	return fmt.Sprintf("WARNING: two global config files: %s (a regular file, modified %s) and %s (modified %s). With CLAUDE_CONFIG_DIR unset Claude Code uses %s; the other is stale — typically a tool replaced the link by rename. With every Claude session exited (host and sandboxes), %s; merge what you need into %s by hand, remove the stale %s, and then either keep the legacy layout or restore the link (the step does nothing unless the layout is as expected): %s. A later claude-sandbox release adds checked commands for this.\n",
+		l.Link, mtime(l.Link), l.Target, mtime(l.Target), l.Link, keepCopy, l.Link, l.Target, LinkCmd)
 }
 
 // ExitMessage is the launcher's host-side explanation of a session that
@@ -267,12 +278,15 @@ func ExitMessage(container string) string {
 		container = "<container>"
 	}
 	return fmt.Sprintf("The session exited with %d, likely the global-config link check (see the %q line above).\n"+
-		"  Fix, with every Claude session exited (host and sandboxes): make ~/.claude.json a symlink to .claude/.claude.json\n"+
-		"  with ~/.claude/.claude.json a regular file (%s),\n"+
-		"  or undo the link (%s), then relaunch.\n"+
+		"  Fix, with every Claude session exited (host and sandboxes) — %s. Each step does nothing\n"+
+		"  unless the layout is the one it expects. Make ~/.claude.json a symlink to .claude/.claude.json:\n"+
+		"    %s\n"+
+		"  or undo the link:\n"+
+		"    %s\n"+
+		"  then relaunch.\n"+
 		"  A kept container whose link target moved or vanished fails on every start: docker rm %s, then relaunch.\n"+
 		"  A later claude-sandbox release adds checked commands for this.\n",
-		ExitLink, LinkPrefix, LinkCmd, UnlinkCmd, container)
+		ExitLink, LinkPrefix, keepCopy, LinkCmd, UnlinkCmd, container)
 }
 
 // LinkOps are EnsureLink's filesystem seams. A nil *LinkOps, or a nil field,

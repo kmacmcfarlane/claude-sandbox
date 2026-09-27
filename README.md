@@ -1303,14 +1303,16 @@ Switching the host layout while sessions run: a running legacy container keeps t
 
 The launcher only detects the layout; it never changes the host file on its own. **Switching by hand** — a one-time step, and only with every Claude session exited, host and sandboxes (`tmux kill-server` does not stop sandboxes: use `/exit`, or `docker stop` each one). A Claude process writing the file mid-switch loses its write or splits the config. A later release adds checked commands that lock, verify and refuse while sessions run; until then:
 
+First copy `~/.claude.json` somewhere outside `~/.claude/`. Each step below is guarded: it does nothing (and exits non-zero) unless the layout is exactly the one it expects, so it cannot delete your only config after a manual revert, turn an existing link into a chain, or overwrite an existing `~/.claude/.claude.json`.
+
 ```bash
-# to link (after this, ~/.claude.json is a symlink into ~/.claude/)
-mv ~/.claude.json ~/.claude/.claude.json && ln -s .claude/.claude.json ~/.claude.json
-# to undo
-rm ~/.claude.json && mv ~/.claude/.claude.json ~/.claude.json
+# to link: only when ~/.claude.json is a regular file and ~/.claude/.claude.json does not exist
+test -f ~/.claude.json && ! test -L ~/.claude.json && ! test -e ~/.claude/.claude.json && ! test -L ~/.claude/.claude.json && mv ~/.claude.json ~/.claude/.claude.json && ln -s .claude/.claude.json ~/.claude.json
+# to undo: only when ~/.claude.json is a link and ~/.claude/.claude.json a regular file
+test -L ~/.claude.json && test -f ~/.claude/.claude.json && ! test -L ~/.claude/.claude.json && rm ~/.claude.json && mv ~/.claude/.claude.json ~/.claude.json
 ```
 
-Keep a copy of `~/.claude.json` somewhere outside `~/.claude/` before either step. After switching, and after each Claude Code update, check on the host and in a sandbox that `/rename`, `/model` and accepting a trust dialog leave `~/.claude.json` a symlink while `~/.claude/.claude.json` changes.
+If a step does nothing, look at what `ls -l ~/.claude.json ~/.claude/.claude.json` shows before doing anything by hand. After switching, and after each Claude Code update, check on the host and in a sandbox that `/rename`, `/model` and accepting a trust dialog leave `~/.claude.json` a symlink while `~/.claude/.claude.json` changes.
 
 **If the link cannot be made in the container** (the target moved or vanished, `$HOME` is not writable, a directory sits at `~/.claude.json`), the session refuses to start rather than run on a private or default config: the container prints one line starting `claude-sandbox: global config link:` and exits **78**, and the launcher adds what to do — with every session exited, restore either layout with the steps above and relaunch; for a kept container whose target moved, `docker rm <name>` and relaunch. A regular `~/.claude.json` supplied by the image is not deleted: it is kept as `~/.claude.json.replaced-<ms>-<pid>-<rand>` before the link replaces it. The container never takes the link target from anywhere but the launcher: it must be exactly `~/.claude/.claude.json`, and an env file that sets `CLAUDE_SANDBOX_GLOBAL_CONFIG` is overridden (one warning).
 

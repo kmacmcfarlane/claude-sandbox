@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -403,10 +404,83 @@ var _ = Describe("ExitMessage (CS-GCFG-038/039)", func() {
 		Expect(m).To(HavePrefix("The session exited with 78, likely the global-config link check"))
 		Expect(m).To(ContainSubstring(`"claude-sandbox: global config link:"`))
 		Expect(m).To(ContainSubstring("every Claude session exited"))
-		Expect(m).To(ContainSubstring("mv ~/.claude.json ~/.claude/.claude.json && ln -s .claude/.claude.json ~/.claude.json"))
-		Expect(m).To(ContainSubstring("rm ~/.claude.json && mv ~/.claude/.claude.json ~/.claude.json"))
+		Expect(m).To(ContainSubstring("copy ~/.claude.json somewhere outside ~/.claude/ first"))
+		// The guards (review round 2): exact text.
+		Expect(m).To(ContainSubstring("test -f ~/.claude.json && ! test -L ~/.claude.json && ! test -e ~/.claude/.claude.json && ! test -L ~/.claude/.claude.json && mv ~/.claude.json ~/.claude/.claude.json && ln -s .claude/.claude.json ~/.claude.json"))
+		Expect(m).To(ContainSubstring("test -L ~/.claude.json && test -f ~/.claude/.claude.json && ! test -L ~/.claude/.claude.json && rm ~/.claude.json && mv ~/.claude/.claude.json ~/.claude.json"))
+		Expect(m).NotTo(ContainSubstring("mv -n"))
 		Expect(m).NotTo(ContainSubstring("global-config migrate"))
 		Expect(m).To(ContainSubstring("docker rm claude-sandbox-x-otter"))
+	})
+
+	It("CS-GCFG-026: the split-brain warning says to keep a copy first and gives the guarded link step", func() {
+		home := scratchHome()
+		write(filepath.Join(home, ".claude.json"), "{}")
+		write(filepath.Join(home, ".claude", ".claude.json"), "{}")
+		w := globalcfg.Classify(home, "").SplitBrainWarning()
+		Expect(w).To(ContainSubstring("copy ~/.claude.json somewhere outside ~/.claude/ first"))
+		Expect(w).To(ContainSubstring(globalcfg.LinkCmd))
+		Expect(w).To(ContainSubstring("test -f ~/.claude.json && ! test -L ~/.claude.json"))
+	})
+
+	Describe("CS-GCFG-038: the printed steps, run in a scratch HOME", func() {
+		var home, link, target string
+		BeforeEach(func() {
+			home = scratchHome()
+			link = filepath.Join(home, ".claude.json")
+			target = filepath.Join(home, ".claude", ".claude.json")
+			Expect(os.MkdirAll(filepath.Dir(target), 0o755)).To(Succeed())
+		})
+		run := func(cmd string) error {
+			c := exec.Command("bash", "--noprofile", "--norc", "-c", cmd)
+			c.Env = []string{"HOME=" + home, "PATH=/usr/bin:/bin"}
+			return c.Run()
+		}
+		content := func(p string) string {
+			b, err := os.ReadFile(p)
+			Expect(err).NotTo(HaveOccurred())
+			return string(b)
+		}
+
+		It("CS-GCFG-038: undo after a manual revert deletes nothing", func() {
+			write(link, "the only config")
+			Expect(run(globalcfg.UnlinkCmd)).NotTo(Succeed())
+			Expect(content(link)).To(Equal("the only config"))
+		})
+
+		It("CS-GCFG-038: undo on a proper link restores the regular file", func() {
+			write(target, "cfg")
+			Expect(os.Symlink(".claude/.claude.json", link)).To(Succeed())
+			Expect(run(globalcfg.UnlinkCmd)).To(Succeed())
+			fi, err := os.Lstat(link)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(fi.Mode().IsRegular()).To(BeTrue())
+			Expect(content(link)).To(Equal("cfg"))
+		})
+
+		It("CS-GCFG-038: link on a dangling link changes nothing (no chain)", func() {
+			Expect(os.Symlink(".claude/.claude.json", link)).To(Succeed())
+			Expect(run(globalcfg.LinkCmd)).NotTo(Succeed())
+			text, _ := os.Readlink(link)
+			Expect(text).To(Equal(".claude/.claude.json"))
+			_, err := os.Lstat(target)
+			Expect(os.IsNotExist(err)).To(BeTrue(), "nothing moved into ~/.claude/")
+		})
+
+		It("CS-GCFG-038: link never overwrites an existing target", func() {
+			write(link, "new")
+			write(target, "existing")
+			Expect(run(globalcfg.LinkCmd)).NotTo(Succeed())
+			Expect(content(target)).To(Equal("existing"))
+			Expect(content(link)).To(Equal("new"))
+		})
+
+		It("CS-GCFG-038: link on a regular file with no target makes the linked layout", func() {
+			write(link, "cfg")
+			Expect(run(globalcfg.LinkCmd)).To(Succeed())
+			Expect(globalcfg.Classify(home, "").Mode).To(Equal(globalcfg.ModeLinked))
+			Expect(content(target)).To(Equal("cfg"))
+		})
 	})
 })
 
