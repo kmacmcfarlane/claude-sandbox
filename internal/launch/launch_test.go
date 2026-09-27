@@ -367,13 +367,22 @@ var _ = Describe("launch.Build", func() {
 		}
 	})
 
-	It("CS-LNCH-012: with CLAUDE_CONFIG_DIR set, the parent sibling is mounted as before", func() {
+	It("CS-LNCH-012: with CLAUDE_CONFIG_DIR set, a regular parent sibling is mounted as before; a symlinked one is not", func() {
 		alt := filepath.Join(home, "alt", ".claude")
 		mkdir(alt)
 		env["CLAUDE_CONFIG_DIR"] = alt
 		sib := filepath.Join(home, "alt", ".claude.json")
 		touch(sib, "{}")
 		Expect(build().Volumes).To(ContainElement(sib + ":" + sib))
+
+		real := filepath.Join(home, "alt", "real.json")
+		Expect(os.Rename(sib, real)).To(Succeed())
+		Expect(os.Symlink(real, sib)).To(Succeed())
+		for _, v := range build().Volumes {
+			Expect(v).NotTo(ContainSubstring(".json:"+sib), "no mount of the link")
+			Expect(v).NotTo(HavePrefix(real + ":"))
+			Expect(v).NotTo(HavePrefix(sib + ":"))
+		}
 	})
 
 	It("CS-LNCH-013: shadows .mcp.json with mcpServers key-merged, fragment servers winning", func() {

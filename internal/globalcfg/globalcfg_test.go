@@ -149,7 +149,6 @@ var _ = Describe("Classify (CS-GCFG-016..029)", func() {
 		Expect(l.Mode).To(Equal(globalcfg.ModeLegacy))
 		Expect(l.Regular).To(BeTrue())
 		Expect(l.SplitBrain).To(BeFalse())
-		Expect(l.LegacyNote()).To(HavePrefix("Note: " + link + " is a regular file (the legacy layout)"))
 	})
 
 	It("CS-GCFG-026: a regular file beside ~/.claude/.claude.json is split brain, named with both mtimes", func() {
@@ -164,7 +163,10 @@ var _ = Describe("Classify (CS-GCFG-016..029)", func() {
 		Expect(w).To(ContainSubstring("modified 2026-09-26T17:28:08Z"))
 		Expect(w).To(ContainSubstring(target))
 		Expect(w).To(ContainSubstring("Claude Code uses " + link))
-		Expect(w).To(ContainSubstring("global-config migrate"))
+		Expect(w).To(ContainSubstring("every Claude session exited"))
+		Expect(w).To(ContainSubstring(globalcfg.LinkCmd))
+		Expect(w).To(ContainSubstring("adds checked commands"))
+		Expect(w).NotTo(ContainSubstring("global-config migrate"), "no command this release does not ship")
 	})
 
 	It("CS-GCFG-027: CLAUDE_CONFIG_DIR set is out of scope, whatever the files", func() {
@@ -252,7 +254,10 @@ var _ = Describe("EnsureLink (CS-GCFG-033..037)", func() {
 		now := time.UnixMilli(1790000000123)
 		Expect(globalcfg.EnsureLink(home, target, warn, &globalcfg.LinkOps{Now: func() time.Time { return now }})).To(Succeed())
 		Expect(readlink()).To(Equal(target))
-		aside := link + ".replaced-1790000000123"
+		asides, _ := filepath.Glob(link + ".replaced-1790000000123-*")
+		Expect(asides).To(HaveLen(1))
+		aside := asides[0]
+		Expect(aside).To(MatchRegexp(`\.replaced-1790000000123-\d+-[0-9a-f]{8}$`))
 		b, err := os.ReadFile(aside)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(string(b)).To(Equal("image leftover"))
@@ -270,10 +275,29 @@ var _ = Describe("EnsureLink (CS-GCFG-033..037)", func() {
 			Link: func(string, string) error { return &os.LinkError{Op: "link", Err: syscall.EXDEV} },
 		}
 		Expect(globalcfg.EnsureLink(home, target, warn, ops)).To(Succeed())
-		b, err := os.ReadFile(link + ".replaced-42")
+		asides, _ := filepath.Glob(link + ".replaced-42-*")
+		Expect(asides).To(HaveLen(1))
+		b, err := os.ReadFile(asides[0])
 		Expect(err).NotTo(HaveOccurred())
 		Expect(string(b)).To(Equal("image leftover"))
 		Expect(readlink()).To(Equal(target))
+	})
+
+	It("CS-GCFG-035: when the hard link fails because a racing helper already linked, that is success", func() {
+		write(link, "image leftover")
+		ops := &globalcfg.LinkOps{
+			Link: func(string, string) error {
+				// The racer: moves the file away and puts the link in.
+				Expect(os.Remove(link)).To(Succeed())
+				Expect(os.Symlink(target, link)).To(Succeed())
+				return &os.LinkError{Op: "link", Err: syscall.ENOENT}
+			},
+			Symlink: func(string, string) error { Fail("no second swap"); return nil },
+		}
+		Expect(globalcfg.EnsureLink(home, target, warn, ops)).To(Succeed())
+		Expect(readlink()).To(Equal(target))
+		asides, _ := filepath.Glob(link + ".replaced-*")
+		Expect(asides).To(BeEmpty())
 	})
 
 	It("CS-GCFG-035: the path is never missing while a regular file is replaced", func() {
@@ -293,16 +317,29 @@ var _ = Describe("EnsureLink (CS-GCFG-033..037)", func() {
 		Expect(sawMissing).To(BeFalse())
 	})
 
-	It("CS-GCFG-036: fails for a missing or non-regular target, a relative target, an unset HOME, a directory in the way", func() {
-		missing := filepath.Join(home, ".claude", "gone.json")
-		err := globalcfg.EnsureLink(home, missing, warn, nil)
-		Expect(err).To(MatchError(ContainSubstring(missing + ": no such file or directory")))
+	It("CS-GCFG-036: fails for a target other than $HOME/.claude/.claude.json, a relative one, an unset HOME", func() {
+		other := filepath.Join(home, ".claude", "other.json")
+		write(other, "{}")
+		for _, t := range []string{other, ".claude/.claude.json", filepath.Join(home, ".ssh", "id_ed25519")} {
+			Expect(globalcfg.EnsureLink(home, t, warn, nil)).To(MatchError(ContainSubstring("must be "+target)), t)
+		}
+		_, lerr := os.Lstat(link)
+		Expect(errors.Is(lerr, os.ErrNotExist)).To(BeTrue(), "nothing made")
+		Expect(globalcfg.EnsureLink(home, filepath.Join(home, ".claude", "x", "..", ".claude.json"), warn, nil)).To(Succeed(), "compared cleaned")
+		Expect(globalcfg.EnsureLink("", target, warn, nil)).To(MatchError("HOME is not set"))
+	})
+
+	It("CS-GCFG-036: fails for a missing or non-regular target and a directory in the way", func() {
+		Expect(os.Remove(target)).To(Succeed())
+		err := globalcfg.EnsureLink(home, target, warn, nil)
+		Expect(err).To(MatchError(ContainSubstring(target + ": no such file or directory")))
 		_, lerr := os.Lstat(link)
 		Expect(errors.Is(lerr, os.ErrNotExist)).To(BeTrue(), "nothing made")
 
-		Expect(globalcfg.EnsureLink(home, filepath.Dir(target), warn, nil)).To(MatchError(ContainSubstring("not a regular file")))
-		Expect(globalcfg.EnsureLink(home, ".claude/.claude.json", warn, nil)).To(MatchError(ContainSubstring("not an absolute path")))
-		Expect(globalcfg.EnsureLink("", target, warn, nil)).To(MatchError("HOME is not set"))
+		Expect(os.MkdirAll(target, 0o755)).To(Succeed())
+		Expect(globalcfg.EnsureLink(home, target, warn, nil)).To(MatchError(ContainSubstring("not a regular file")))
+		Expect(os.Remove(target)).To(Succeed())
+		write(target, "{}")
 
 		Expect(os.MkdirAll(link, 0o755)).To(Succeed())
 		Expect(globalcfg.EnsureLink(home, target, warn, nil)).To(MatchError(ContainSubstring(link + ": neither a regular file nor a symlink")))
@@ -325,6 +362,20 @@ var _ = Describe("EnsureLink (CS-GCFG-033..037)", func() {
 		ops := &globalcfg.LinkOps{Rename: func(string, string) error { return &os.LinkError{Op: "rename", Err: syscall.EBUSY} }}
 		Expect(globalcfg.EnsureLink(home, target, warn, ops)).To(MatchError(link + ": device or resource busy"))
 		Expect(leftovers()).To(BeEmpty())
+	})
+
+	It("CS-GCFG-036: under go test the real home panics before anything is touched", func() {
+		real, err := os.UserHomeDir()
+		if err != nil || real == "" {
+			Skip("no home directory")
+		}
+		ops := &globalcfg.LinkOps{
+			Lstat:   func(string) (os.FileInfo, error) { Fail("touched the real home"); return nil, nil },
+			Symlink: func(string, string) error { Fail("touched the real home"); return nil },
+		}
+		Expect(func() {
+			_ = globalcfg.EnsureLink(real, filepath.Join(real, ".claude", ".claude.json"), warn, ops)
+		}).To(PanicWith(ContainSubstring("under the real home")))
 	})
 
 	It("CS-GCFG-037: racing helpers all succeed and leave the one correct link", func() {
@@ -351,8 +402,10 @@ var _ = Describe("ExitMessage (CS-GCFG-038/039)", func() {
 		m := globalcfg.ExitMessage("claude-sandbox-x-otter")
 		Expect(m).To(HavePrefix("The session exited with 78, likely the global-config link check"))
 		Expect(m).To(ContainSubstring(`"claude-sandbox: global config link:"`))
-		Expect(m).To(ContainSubstring("global-config migrate"))
-		Expect(m).To(ContainSubstring("global-config revert"))
+		Expect(m).To(ContainSubstring("every Claude session exited"))
+		Expect(m).To(ContainSubstring("mv ~/.claude.json ~/.claude/.claude.json && ln -s .claude/.claude.json ~/.claude.json"))
+		Expect(m).To(ContainSubstring("rm ~/.claude.json && mv ~/.claude/.claude.json ~/.claude.json"))
+		Expect(m).NotTo(ContainSubstring("global-config migrate"))
 		Expect(m).To(ContainSubstring("docker rm claude-sandbox-x-otter"))
 	})
 })

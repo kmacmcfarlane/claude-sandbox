@@ -27,8 +27,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/user"
 	"path/filepath"
 	"strings"
+	"testing"
 	"time"
 )
 
@@ -225,9 +227,18 @@ func (l Layout) RefusedWarning() string {
 		what, l.Problem, l.Link, l.Target)
 }
 
-// LegacyNote is the CS-GCFG-025 note of a host launch.
-func (l Layout) LegacyNote() string {
-	return fmt.Sprintf("Note: %s is a regular file (the legacy layout): every sandbox writes it in place, so concurrent sessions can tear it or reset it to defaults. The linked layout avoids that (claude-sandbox global-config migrate; README \"Global config (~/.claude.json)\").\n", l.Link)
+// LinkCmd and UnlinkCmd are the manual steps the split-brain warning and the
+// exit-78 message give (CS-GCFG-026/038), to run with every Claude session
+// exited. A later feature adds checked commands (locking, verification).
+const (
+	LinkCmd   = "mv ~/.claude.json ~/.claude/.claude.json && ln -s .claude/.claude.json ~/.claude.json"
+	UnlinkCmd = "rm ~/.claude.json && mv ~/.claude/.claude.json ~/.claude.json"
+)
+
+// SiblingLinkNote is the CS-GCFG-027 note: with CLAUDE_CONFIG_DIR set, a
+// symlinked <parent>/.claude.json is not mounted.
+func SiblingLinkNote(path string) string {
+	return fmt.Sprintf("Note: %s is a symlink; it is not mounted (a symlink is never single-file-mounted, and with CLAUDE_CONFIG_DIR set Claude Code reads $CLAUDE_CONFIG_DIR/.claude.json).\n", path)
 }
 
 // ConfigJSONNote is the CS-GCFG-029 note.
@@ -244,8 +255,8 @@ func (l Layout) SplitBrainWarning() string {
 		}
 		return "unknown"
 	}
-	return fmt.Sprintf("WARNING: two global config files: %s (a regular file, modified %s) and %s (modified %s). With CLAUDE_CONFIG_DIR unset Claude Code uses %s; the other is stale — typically a tool replaced the link by rename. Merge what you need by hand and restore the link (claude-sandbox global-config migrate), or remove the stale file.\n",
-		l.Link, mtime(l.Link), l.Target, mtime(l.Target), l.Link)
+	return fmt.Sprintf("WARNING: two global config files: %s (a regular file, modified %s) and %s (modified %s). With CLAUDE_CONFIG_DIR unset Claude Code uses %s; the other is stale — typically a tool replaced the link by rename. With every Claude session exited (host and sandboxes), merge what you need into %s by hand, remove the stale %s, and then either keep the legacy layout or restore the link: %s. A later claude-sandbox release adds checked commands for this.\n",
+		l.Link, mtime(l.Link), l.Target, mtime(l.Target), l.Link, l.Link, l.Target, LinkCmd)
 }
 
 // ExitMessage is the launcher's host-side explanation of a session that
@@ -256,10 +267,12 @@ func ExitMessage(container string) string {
 		container = "<container>"
 	}
 	return fmt.Sprintf("The session exited with %d, likely the global-config link check (see the %q line above).\n"+
-		"  Fix: make ~/.claude.json a symlink to .claude/.claude.json with ~/.claude/.claude.json a regular file\n"+
-		"  (claude-sandbox global-config migrate), or a regular file again (claude-sandbox global-config revert), then relaunch.\n"+
-		"  A kept container whose link target moved or vanished fails on every start: docker rm %s, then relaunch.\n",
-		ExitLink, LinkPrefix, container)
+		"  Fix, with every Claude session exited (host and sandboxes): make ~/.claude.json a symlink to .claude/.claude.json\n"+
+		"  with ~/.claude/.claude.json a regular file (%s),\n"+
+		"  or undo the link (%s), then relaunch.\n"+
+		"  A kept container whose link target moved or vanished fails on every start: docker rm %s, then relaunch.\n"+
+		"  A later claude-sandbox release adds checked commands for this.\n",
+		ExitLink, LinkPrefix, LinkCmd, UnlinkCmd, container)
 }
 
 // LinkOps are EnsureLink's filesystem seams. A nil *LinkOps, or a nil field,
@@ -306,15 +319,24 @@ func (o *LinkOps) fill() *LinkOps {
 // EnsureLink makes home/.claude.json a symlink whose text is target
 // (CS-GCFG-033..037). It is the pidslot helper's first step when EnvVar is
 // set. Every failure is returned; the caller refuses to exec (exit ExitLink).
-// A replaced regular file is kept at <link>.replaced-<ms>, named on warn.
+// A replaced regular file is kept at <link>.replaced-<ms>-<pid>-<rand>,
+// named on warn. Under go test it panics for the real home.
 func EnsureLink(home, target string, warn io.Writer, o *LinkOps) error {
 	ops := o.fill()
 	if home == "" {
 		return errors.New("HOME is not set")
 	}
-	if !filepath.IsAbs(target) {
-		return fmt.Errorf("%s=%q: not an absolute path", EnvVar, target)
+	if testing.Testing() && isRealHome(home) {
+		// The CS-LNCH-138 precedent: a forgotten fixture must fail loudly
+		// before anything is made under the operator's real home.
+		panic(fmt.Sprintf("globalcfg: a test would link %s under the real home; use a scratch HOME", filepath.Join(home, FileName)))
 	}
+	// CS-GCFG-036: the only target the linked layout ever names. Anything
+	// else (an env-file value, a stale container) is refused.
+	if want := filepath.Join(filepath.Clean(home), configDirName, FileName); filepath.Clean(target) != want {
+		return fmt.Errorf("%s=%q: must be %s", EnvVar, target, want)
+	}
+	target = filepath.Clean(target)
 	ti, err := ops.Lstat(target)
 	if err != nil {
 		return fmt.Errorf("%s: %w", target, unwrapPath(err))
@@ -336,8 +358,14 @@ func EnsureLink(home, target string, warn io.Writer, o *LinkOps) error {
 		// CS-GCFG-034: a wrong link is replaced by the swap below.
 	case fi.Mode().IsRegular():
 		// CS-GCFG-035: keep the bytes, with no moment the path is missing.
-		aside := fmt.Sprintf("%s.replaced-%d", link, ops.Now().UnixMilli())
+		aside := fmt.Sprintf("%s.replaced-%d-%d-%s", link, ops.Now().UnixMilli(), os.Getpid(), randHex())
 		if lerr := ops.Link(link, aside); lerr != nil {
+			// A racing helper may have swapped the link in meanwhile.
+			if fi2, err2 := ops.Lstat(link); err2 == nil && fi2.Mode()&os.ModeSymlink != 0 {
+				if text, rerr := ops.Readlink(link); rerr == nil && text == target {
+					return nil
+				}
+			}
 			if cerr := copyFileSync(link, aside); cerr != nil {
 				return fmt.Errorf("%s: moving the existing file aside to %s: %w", link, aside, cerr)
 			}
@@ -352,9 +380,7 @@ func EnsureLink(home, target string, warn io.Writer, o *LinkOps) error {
 // swapLink stages a uniquely named symlink beside link and renames it over
 // link: atomic, and racing callers each rename their own (CS-GCFG-037).
 func swapLink(ops *LinkOps, link, target string) error {
-	var b [4]byte
-	rand.Read(b[:])
-	tmp := fmt.Sprintf("%s.link-%d-%s", link, os.Getpid(), hex.EncodeToString(b[:]))
+	tmp := fmt.Sprintf("%s.link-%d-%s", link, os.Getpid(), randHex())
 	if err := ops.Symlink(target, tmp); err != nil {
 		return fmt.Errorf("%s: %w", tmp, unwrapPath(err))
 	}
@@ -363,6 +389,36 @@ func swapLink(ops *LinkOps, link, target string) error {
 		return fmt.Errorf("%s: %w", link, unwrapPath(err))
 	}
 	return nil
+}
+
+// randHex is 8 random hex digits for unique sibling names.
+func randHex() string {
+	var b [4]byte
+	rand.Read(b[:])
+	return hex.EncodeToString(b[:])
+}
+
+// isRealHome reports whether home is the invoking user's actual home, by
+// $HOME or by the user database (HOME can be unset under env -i).
+func isRealHome(home string) bool {
+	var reals []string
+	if h, err := os.UserHomeDir(); err == nil && h != "" {
+		reals = append(reals, h)
+	}
+	if u, err := user.Current(); err == nil && u.HomeDir != "" {
+		reals = append(reals, u.HomeDir)
+	}
+	for _, r := range reals {
+		a, errA := filepath.EvalSymlinks(home)
+		b, errB := filepath.EvalSymlinks(r)
+		if errA != nil || errB != nil {
+			a, b = filepath.Clean(home), filepath.Clean(r)
+		}
+		if a == b {
+			return true
+		}
+	}
+	return false
 }
 
 // unwrapPath drops the *PathError wrapper, whose path the caller names.

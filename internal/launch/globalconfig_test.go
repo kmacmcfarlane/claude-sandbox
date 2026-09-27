@@ -13,6 +13,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	"github.com/kmacmcfarlane/claude-sandbox/internal/cascade"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/globalcfg"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/launch"
 )
@@ -145,20 +146,29 @@ var _ = Describe("launch.Build: the global config (CS-GCFG)", func() {
 		}),
 	)
 
-	It("CS-GCFG-025: a regular file is mounted as before with one note on a host launch, none in a sandbox", func() {
+	It("CS-GCFG-025: a regular file is mounted as before, silently", func() {
 		touch(link, "{}")
 		p := build()
 		Expect(p.Volumes).To(ContainElement(link + ":" + link))
 		Expect(hasGlobalEnv(p)).To(BeFalse())
-		Expect(strings.Count(out.String(), "Note: "+link+" is a regular file (the legacy layout)")).To(Equal(1))
-		Expect(errw.String()).To(BeEmpty())
+		quiet()
+	})
 
-		out.Reset()
+	It("CS-GCFG-025: nested, the outer sandbox's single-file bind is mounted again; an image leftover is not", func() {
+		touch(link, "{}")
 		env["CLAUDE_SANDBOX_PROJECT_DIR"] = "/outer/proj"
 		env["PRE_COMMIT_HOME"] = filepath.Join(home, ".cache/claude-sandbox/pre-commit")
-		p = build()
+		in.MountInfo = func() (string, error) { return withBind(link), nil }
+		p := build()
 		Expect(p.Volumes).To(ContainElement(link + ":" + link))
-		Expect(out.String()).NotTo(ContainSubstring(link))
+		Expect(errw.String()).NotTo(ContainSubstring(link))
+
+		errw.Reset()
+		in.MountInfo = func() (string, error) { return rootOnly, nil }
+		p = build()
+		Expect(mountsClaudeJSON(p)).To(BeFalse())
+		Expect(strings.Count(errw.String(), "WARNING: "+link+" is not mounted: this launcher runs inside a sandbox")).To(Equal(1))
+		Expect(errw.String()).To(ContainSubstring("container's own root filesystem"))
 	})
 
 	It("CS-GCFG-025: nothing at ~/.claude.json mounts and prints nothing", func() {
@@ -179,21 +189,36 @@ var _ = Describe("launch.Build: the global config (CS-GCFG)", func() {
 		errw.Reset()
 		env["CLAUDE_SANDBOX_PROJECT_DIR"] = "/outer/proj"
 		env["PRE_COMMIT_HOME"] = filepath.Join(home, ".cache/claude-sandbox/pre-commit")
+		in.MountInfo = func() (string, error) { return withBind(link), nil }
 		build()
 		Expect(errw.String()).NotTo(ContainSubstring("two global config files"), "not repeated in a sandbox")
 	})
 
-	It("CS-GCFG-027: with CLAUDE_CONFIG_DIR set nothing is decided, warned or set", func() {
+	It("CS-GCFG-027: with CLAUDE_CONFIG_DIR set nothing is decided or set; a symlinked sibling is not mounted, with one note", func() {
 		linked()
-		touch(filepath.Join(home, "stray.json"), "{}")
 		env["CLAUDE_CONFIG_DIR"] = filepath.Join(home, ".claude")
 		p := build()
 		Expect(hasGlobalEnv(p)).To(BeFalse())
-		// The sibling of the config dir is still mounted when it exists
-		// (CS-LNCH-012, unchanged here); a link is followed by fileExists
-		// exactly as before.
-		Expect(p.Volumes).To(ContainElement(link + ":" + link))
-		quiet()
+		// After a migration CLAUDE_CONFIG_DIR=$HOME/.claude finds the
+		// ~/.claude.json LINK as its sibling: never single-file-mounted.
+		Expect(mountsClaudeJSON(p)).To(BeFalse())
+		Expect(strings.Count(out.String(), "Note: "+link+" is a symlink; it is not mounted")).To(Equal(1))
+		Expect(errw.String()).NotTo(ContainSubstring("claude.json"))
+	})
+
+	It("CS-GCFG-027: a planted link to any other file is not mounted either", func() {
+		secret := filepath.Join(home, ".ssh", "id_ed25519")
+		touch(secret, "key")
+		alt := filepath.Join(home, "work", ".claude-alt")
+		mkdir(alt)
+		env["CLAUDE_CONFIG_DIR"] = alt
+		sib := filepath.Join(home, "work", ".claude.json")
+		Expect(os.Symlink(secret, sib)).To(Succeed())
+		p := build()
+		for _, v := range p.Volumes {
+			Expect(v).NotTo(ContainSubstring("id_ed25519"))
+			Expect(v).NotTo(HavePrefix(sib + ":"))
+		}
 	})
 
 	It("CS-GCFG-028: a relative or ~ CLAUDE_CONFIG_DIR warns once", func() {
@@ -297,5 +322,30 @@ var _ = Describe("launch.Build: the global config (CS-GCFG)", func() {
 			Expect(p.EnvFlags).To(ContainElement(envFlag+target), kind)
 			Expect(mountsClaudeJSON(p)).To(BeFalse(), kind)
 		}
+	})
+
+	It("CS-GCFG-032: an env file's CLAUDE_SANDBOX_GLOBAL_CONFIG is overridden with an empty -e, with one warning", func() {
+		touch(link, "{}") // legacy
+		in.Env = []cascade.EnvFile{{Path: filepath.Join(proj, ".claude-sandbox/env"), Content: []byte(envFlag + target + "\n")}}
+		p := build()
+		Expect(p.EnvFlags).To(ContainElement(envFlag))
+		Expect(p.EnvFlags).NotTo(ContainElement(envFlag + target))
+		Expect(strings.Count(errw.String(), "WARNING: an env file sets CLAUDE_SANDBOX_GLOBAL_CONFIG")).To(Equal(1))
+		args := p.CreateArgs(proj)
+		Expect(args).To(ContainElements("-e", envFlag))
+	})
+
+	It("CS-GCFG-032: a linked launch's own -e already wins over an env file, silently", func() {
+		linked()
+		in.Env = []cascade.EnvFile{{Path: filepath.Join(proj, ".claude-sandbox/env"), Content: []byte(envFlag + "/elsewhere\n")}}
+		p := build()
+		Expect(p.EnvFlags).To(ContainElement(envFlag + target))
+		Expect(p.EnvFlags).NotTo(ContainElement(envFlag))
+		Expect(errw.String()).NotTo(ContainSubstring("an env file sets"))
+	})
+
+	It("CS-GCFG-032: without an env-file line nothing extra is passed", func() {
+		touch(link, "{}")
+		Expect(hasGlobalEnv(build())).To(BeFalse())
 	})
 })
