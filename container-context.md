@@ -174,4 +174,12 @@ restart Claude Code afterwards). Use `setup-lsp-plugins --check` to verify statu
   user-scope permission rules made here persist to the host and to every other
   sandbox. That includes `hooks` and permission `allow` rules, which then also
   run in the operator's host sessions, outside this sandbox.
+- **`~/.claude.json` may be a symlink into `~/.claude/`.** In the linked
+  layout (`CLAUDE_SANDBOX_GLOBAL_CONFIG` is set) it is a link, made at session
+  start, to `~/.claude/.claude.json` — the host's global config, shared live
+  with every sandbox and the host. Edit it only by writing a temp file in
+  `~/.claude/` and renaming it over the target; never replace the link itself
+  (a `jq … > tmp && mv tmp ~/.claude.json` silently splits the config). Without
+  that variable it is a single-file mount of the host file (the legacy layout),
+  or absent.
 - You do NOT have sudo or root access.

@@ -318,9 +318,19 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       sandbox runs without user settings
     And the launch continues in every case
 
-  Scenario: CS-LNCH-012 .claude.json sibling mounted read-write when present
-    Given $CONFIG_PARENT/.claude.json exists
-    Then it is mounted at the same path without :ro
+  @changed
+  Scenario: CS-LNCH-012 .claude.json sibling mounted read-write when it is a regular file
+    Given CLAUDE_CONFIG_DIR is unset and $HOME/.claude.json is a regular file (Lstat)
+    Then it is mounted at the same path without :ro (the legacy layout, CS-GCFG-025)
+    Given $HOME/.claude.json is a symlink
+    Then it is never single-file-mounted: a link to ~/.claude/.claude.json is
+      the linked layout (CS-GCFG-016), any other link is refused (CS-GCFG-019..023)
+    Given CLAUDE_CONFIG_DIR is set and $CONFIG_PARENT/.claude.json is a regular file (Lstat)
+    Then it is mounted at the same path without :ro, as before (CS-GCFG-027)
+    Given CLAUDE_CONFIG_DIR is set and $CONFIG_PARENT/.claude.json is a symlink
+    Then it is not mounted (one note, CS-GCFG-027)
+    # Was: any existing $CONFIG_PARENT/.claude.json, followed through a
+    # symlink by docker. See spec/global-config.feature.
 
   @changed
   Scenario: CS-LNCH-013 .mcp.json shadow merges sandbox MCP servers natively

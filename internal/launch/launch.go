@@ -20,6 +20,7 @@ import (
 	assets "github.com/kmacmcfarlane/claude-sandbox"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/cascade"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/globalcfg"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/hostdirs"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/imagebuild"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/oomreport"
@@ -326,7 +327,11 @@ func Build(in Inputs) (*Plan, error) {
 	// live through the config-dir bind above. The notification hooks ship as
 	// managed settings baked into the tools image and copied in by the cap
 	// (CS-LNCH-068, CS-IMG-024).
-	// CS-LNCH-012/013: siblings of the config dir.
+	// CS-LNCH-012, CS-GCFG-016..029: the global config file — the linked
+	// layout (no mount, the in-container link), the legacy single-file mount,
+	// or nothing.
+	globalLinked := in.assembleGlobalConfig(p, configDir)
+	// CS-LNCH-013: the .mcp.json sibling of the config dir.
 	if err := in.shadowSiblings(p, configDir); err != nil {
 		return nil, err
 	}
@@ -552,7 +557,7 @@ func Build(in Inputs) (*Plan, error) {
 	// is joining a container built from the config now on disk.
 	p.ConfigHash, p.ConfigInputs = in.configFingerprint(p, hostAccess{
 		SSH: ssh, Git: git, DockerSocket: dockerSocket, AWS: aws, PackageCaches: packageCaches,
-	}, bridged)
+	}, bridged, globalLinked)
 
 	// CS-LNCH-032: identity labels. Discovery filters on these rather than
 	// parsing container names, which are lossy.
@@ -851,12 +856,96 @@ func (in *Inputs) mountSettingsTarget(p *Plan, configDir string) {
 	p.Volumes = append(p.Volumes, fmt.Sprintf("%s:%s", target, target))
 }
 
+// assembleGlobalConfig decides how Claude Code's global config file reaches
+// the container (CS-LNCH-012, CS-GCFG-016..029) and reports whether the launch
+// is linked. Only the default layout (CLAUDE_CONFIG_DIR unset) is decided
+// here; with CLAUDE_CONFIG_DIR set Claude Code reads the file inside the
+// config-dir mount and the parent sibling mount stays as it was (CS-GCFG-027).
+//
+// Linked: nothing is mounted at $HOME/.claude.json; the container gets the
+// link target in globalcfg.EnvVar, and the pidslot helper makes the link on
+// the container's own overlay before claude starts (CS-GCFG-033). Claude Code
+// then writes by temp file + rename inside the config-dir mount — atomic.
+// Legacy: the regular file is single-file-mounted as before, silently. A
+// symlink is NEVER single-file-mounted: docker would mount its target,
+// re-creating the in-place writes this avoids.
+//
+// CS-GCFG-032: an env file (session-writable) never sets globalcfg.EnvVar —
+// a linked launch's own -e wins, and any other launch passes it empty, which
+// pidslot treats as unset (-e beats --env-file, the CS-LNCH-108 precedent).
+func (in *Inputs) assembleGlobalConfig(p *Plan, configDir string) bool {
+	linked := in.globalConfigLayout(p, configDir)
+	if !linked && in.envFilesDefine(globalcfg.EnvVar) {
+		p.EnvFlags = append(p.EnvFlags, globalcfg.EnvVar+"=")
+		fmt.Fprintf(in.Err, "WARNING: an env file sets %s; it is ignored — only the launcher sets it, from the host's ~/.claude.json layout.\n", globalcfg.EnvVar)
+	}
+	return linked
+}
+
+// mountRegularGlobal single-file-mounts path, a regular file (Lstat), unless
+// a nested launch cannot show the outer sandbox bound it in (CS-GCFG-025,
+// the CS-LNCH-163 rule): docker would bind a different, host-side path.
+func (in *Inputs) mountRegularGlobal(p *Plan, path string) {
+	if vis, why := in.nestedBindSourceOK(path); !vis {
+		fmt.Fprintf(in.Err, "WARNING: %s is not mounted: this launcher runs inside a sandbox that does not mount it at the same path (%s), so docker would bind a different host file; the session starts without the global config.\n", path, why)
+		return
+	}
+	p.Volumes = append(p.Volumes, fmt.Sprintf("%s:%s", path, path))
+}
+
+func (in *Inputs) globalConfigLayout(p *Plan, configDir string) bool {
+	host := !hostdirs.InSandbox(in.getenv)
+	if d := in.getenv("CLAUDE_CONFIG_DIR"); d != "" {
+		if globalcfg.SuspiciousConfigDir(d) {
+			fmt.Fprint(in.Err, globalcfg.ConfigDirWarning(d)) // CS-GCFG-028
+		}
+		// CS-GCFG-027, CS-LNCH-012: Claude Code does not read this file.
+		// Only a regular file (Lstat) is mounted: after a migration a tree
+		// with CLAUDE_CONFIG_DIR=$HOME/.claude finds the ~/.claude.json LINK
+		// here, and a session able to write the parent could plant a link to
+		// any file and have it mounted read-write.
+		claudeJSON := filepath.Join(filepath.Dir(configDir), globalcfg.FileName)
+		if fi, err := os.Lstat(claudeJSON); err == nil {
+			switch {
+			case fi.Mode().IsRegular():
+				in.mountRegularGlobal(p, claudeJSON)
+			case fi.Mode()&os.ModeSymlink != 0:
+				fmt.Fprint(in.Out, globalcfg.SiblingLinkNote(claudeJSON))
+			}
+		}
+		return false
+	}
+	l := globalcfg.Classify(in.Home, "")
+	mountLegacy := func() {
+		if l.Regular {
+			in.mountRegularGlobal(p, l.Link)
+		}
+	}
+	switch l.Mode {
+	case globalcfg.ModeLinked:
+		// CS-GCFG-016/017/018: the lexical target, which the same-path
+		// config-dir mount (CS-LNCH-008) resolves identically inside. An env
+		// flag: never hashed; the layout is hashed as globalConfig=linked.
+		p.EnvFlags = append(p.EnvFlags, globalcfg.EnvVar+"="+l.Target)
+		return true
+	case globalcfg.ModeLegacy:
+		mountLegacy() // CS-GCFG-025: silent; the unmigrated note ships with migrate
+		if host && l.SplitBrain {
+			fmt.Fprint(in.Err, l.SplitBrainWarning()) // CS-GCFG-026
+		}
+	case globalcfg.ModeConfigJSON:
+		mountLegacy() // CS-GCFG-029
+		if host {
+			fmt.Fprint(in.Out, l.ConfigJSONNote())
+		}
+	case globalcfg.ModeRefused:
+		fmt.Fprint(in.Err, l.RefusedWarning()) // CS-GCFG-019..024
+	}
+	return false
+}
+
 func (in *Inputs) shadowSiblings(p *Plan, configDir string) error {
 	parent := filepath.Dir(configDir)
-	claudeJSON := filepath.Join(parent, ".claude.json")
-	if fileExists(claudeJSON) {
-		p.Volumes = append(p.Volumes, fmt.Sprintf("%s:%s", claudeJSON, claudeJSON))
-	}
 	hostMCP := filepath.Join(parent, ".mcp.json")
 	target := filepath.Join(parent, ".mcp.json")
 	if raw, err := os.ReadFile(hostMCP); err == nil {

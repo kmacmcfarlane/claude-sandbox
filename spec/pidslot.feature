@@ -35,6 +35,10 @@ Feature: PID classes — unique session pids across sandboxes (CS-PID)
     Then the helper warns and execs <cmd> directly
     Given the burn exceeds 512 forks without reaching the residue
     Then the helper warns and execs <cmd> directly
+    # One deliberate exception: the global-config link (CS-GCFG-033..036).
+    # When CLAUDE_SANDBOX_GLOBAL_CONFIG is set and the link cannot be made,
+    # the helper execs nothing and exits 78 — a session on a private or
+    # defaults config is the damage the link exists to prevent.
 
   Scenario: CS-PID-004 The launcher allocates a class without replacement
     Given running sandbox containers on the host carry claude-sandbox.pidclass labels

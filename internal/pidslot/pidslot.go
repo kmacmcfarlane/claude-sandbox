@@ -22,6 +22,8 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+
+	"github.com/kmacmcfarlane/claude-sandbox/internal/globalcfg"
 )
 
 const (
@@ -52,6 +54,9 @@ type Ops struct {
 	LookPath func(string) (string, error)
 	Getenv   func(string) string
 	Stderr   io.Writer
+	// GlobalConfig are the filesystem seams of the global-config link
+	// (CS-GCFG-033); nil means the real calls.
+	GlobalConfig *globalcfg.LinkOps
 }
 
 // Real returns the operating-system implementations.
@@ -146,6 +151,18 @@ func Run(ops Ops, argv []string) int {
 	if len(argv) == 0 {
 		fmt.Fprintln(ops.Stderr, "Error: pidslot needs a command: claude-sandbox pidslot -- <cmd...>")
 		return 2
+	}
+	// CS-GCFG-033..036: the linked global-config layout's in-container link,
+	// made first, as the session user, on every path that reaches claude (the
+	// entrypoint's primary — interactive, detached, headless, branch, ralph —
+	// and a join's docker exec). Unlike every failure below, which warns and
+	// execs anyway (CS-PID-003), this one is FATAL: a claude on a private or
+	// defaults config is the damage the link exists to prevent.
+	if target := ops.Getenv(globalcfg.EnvVar); target != "" {
+		if err := globalcfg.EnsureLink(ops.Getenv("HOME"), target, ops.Stderr, ops.GlobalConfig); err != nil {
+			fmt.Fprintf(ops.Stderr, "%s %v\n", globalcfg.LinkPrefix, err)
+			return globalcfg.ExitLink
+		}
 	}
 	direct := func(reason string) int {
 		fmt.Fprintf(ops.Stderr, "Warning: pid class not applied (%s); this session may be invisible to sibling sandboxes.\n", reason)

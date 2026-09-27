@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/globalcfg"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/hostdirs"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/launch"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/oomreport"
@@ -323,6 +324,11 @@ func startDetached(env *Env, plan *launch.Plan, projectDir, home string) error {
 		detail := fmt.Sprintf("exit %d", o.ExitCode)
 		if o.OOMKills > 0 {
 			detail += ", killed by the OOM killer"
+		}
+		if o.ExitCode == globalcfg.ExitLink {
+			// CS-GCFG-040: the container's output went with it, so the
+			// explanation is all the operator gets.
+			fmt.Fprint(env.Err, globalcfg.ExitMessage(plan.ContainerName))
 		}
 		return died(detail)
 	}

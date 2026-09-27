@@ -36,3 +36,4 @@ references the scenario it implements by ID.
 | `completion.feature` | shell completion scripts, `__complete` routing, flag/value completion |
 | `pidslot.feature` | PID classes: unique session pids across sandboxes (peer registry) |
 | `host-dirs.feature` | launcher host dirs: cache/state roots, owned-directory rule, in-sandbox test |
+| `global-config.feature` | the global config file (`~/.claude.json`): linked vs legacy layout, the in-container link, exit 78 |
