@@ -86,12 +86,16 @@ Feature: Global config (~/.claude.json) — the linked layout (CS-GCFG)
 
   # ---- the legacy layout, and when the feature stands aside ----
 
-  Scenario: CS-GCFG-025 A regular file is the legacy layout: mounted as before, with one note per host launch
-    Given $HOME/.claude.json is a regular file
-    Then it is bind-mounted read-write at the same path (CS-LNCH-012), and nothing else changes
-    And a host launch prints one "Note:" line: the file is written in place by
-      every sandbox, and the linked layout (README "Global config") avoids that
-    And a launch inside a sandbox prints no note (the outer launch did)
+  Scenario: CS-GCFG-025 A regular file is the legacy layout: mounted as before, silently
+    Given $HOME/.claude.json is a regular file (Lstat)
+    Then it is bind-mounted read-write at the same path (CS-LNCH-012), and nothing is printed
+    # The per-launch "unmigrated" note belongs with the migrate command that
+    # a later feature adds; this feature names no command it does not ship.
+    Given a launcher inside a sandbox, and $HOME/.claude.json is a regular file
+      whose covering mount in /proc/self/mountinfo is the container's root
+      filesystem or a tmpfs (an image leftover, not the outer sandbox's bind)
+    Then it is not mounted, with one WARNING (the CS-LNCH-163 rule): docker
+      would bind a different, host-side path
     Given $HOME/.claude.json does not exist
     Then nothing is mounted and nothing is printed, as before
     # The legacy branch mounts only what Lstat reports as a REGULAR file; it
@@ -105,19 +109,28 @@ Feature: Global config (~/.claude.json) — the linked layout (CS-GCFG)
     And $HOME/.claude.json is a regular file and $HOME/.claude/.claude.json exists
     Then one WARNING names both files and their modification times, says
       Claude Code uses $HOME/.claude.json here and the other is stale, and
-      names the fixes: merge by hand and restore the link (migrate), or
-      remove the stale one
-    And it replaces the legacy note for that launch; the file is still mounted as legacy
+      gives the manual fixes with every Claude session exited first: merge by
+      hand, then either restore the link
+      ("mv ~/.claude.json ~/.claude/.claude.json && ln -s .claude/.claude.json ~/.claude.json")
+      or remove the stale ~/.claude/.claude.json; a later feature adds checked commands
+    And the file is still mounted as legacy
     And a launch inside a sandbox does not repeat it
 
   Scenario: CS-GCFG-027 CLAUDE_CONFIG_DIR set: the feature does nothing
     Given CLAUDE_CONFIG_DIR is set to an absolute path in the launcher's environment
-    Then no linked decision is made, CLAUDE_SANDBOX_GLOBAL_CONFIG is never set,
-      and no note, split-brain or link warning is printed
-    And the <parent>/.claude.json sibling mount is unchanged (CS-LNCH-012)
+    Then no linked decision is made, CLAUDE_SANDBOX_GLOBAL_CONFIG is set to
+      nothing (CS-GCFG-032), and no split-brain or link warning is printed
+    And the <parent>/.claude.json sibling is mounted only when Lstat reports a
+      regular file (CS-LNCH-012), under the same nested rule as CS-GCFG-025
+    Given that sibling is a symlink
+    Then it is not mounted, with one "Note:" line
     # Claude Code then reads $CLAUDE_CONFIG_DIR/.claude.json, inside the
     # config-dir mount: renames there are already atomic and the lock is
-    # shared. That includes CLAUDE_CONFIG_DIR == $HOME/.claude.
+    # shared. That includes CLAUDE_CONFIG_DIR == $HOME/.claude — which, after
+    # a migration, finds the new ~/.claude.json LINK as its sibling: following
+    # it would single-file-mount ~/.claude/.claude.json and bring back the
+    # in-place writes, and a sandbox able to write the parent dir could plant
+    # ".claude.json -> ~/.ssh/<key>" and have it mounted read-write.
 
   Scenario: CS-GCFG-028 A relative or ~ CLAUDE_CONFIG_DIR gets one warning
     Given CLAUDE_CONFIG_DIR is relative, or a path element starts with "~"
@@ -163,6 +176,13 @@ Feature: Global config (~/.claude.json) — the linked layout (CS-GCFG)
     When a session joins with docker exec
     Then the exec runs "claude-sandbox pidslot -- claude", which inherits the
       variable from the container and checks the link again
+    Given a cascade env file defines CLAUDE_SANDBOX_GLOBAL_CONFIG (env files
+      are session-writable)
+    Then it never reaches the container: a linked launch's own -e wins, and
+      any other launch gets "-e CLAUDE_SANDBOX_GLOBAL_CONFIG=" (empty, which
+      pidslot treats as unset) plus one WARNING naming the key
+    # -e beats --env-file (the CS-LNCH-108 stand-down precedent), detected by
+    # the same docker-faithful reader.
 
   # ---- the in-container link (pidslot) ----
 
@@ -183,20 +203,25 @@ Feature: Global config (~/.claude.json) — the linked layout (CS-GCFG)
   Scenario: CS-GCFG-035 An image-supplied regular file is moved aside, never deleted
     Given $HOME/.claude.json is a regular file (a build-time leftover: linked
       mode mounts nothing there, so it is never host data)
-    Then it is hard-linked to $HOME/.claude.json.replaced-<ms> first, then
-      the temp link is renamed over it, and one warning names the copy
-    And if the hard link fails, it is copied and fsynced there instead
+    Then it is hard-linked to $HOME/.claude.json.replaced-<ms>-<pid>-<rand>
+      first, then the temp link is renamed over it, and one warning names the copy
+    And if the hard link fails, the path is looked at again: already the
+      correct link (a racing helper won) is success; otherwise it is copied
+      and fsynced there instead
     # Link, then rename: at every instant the path names the old file or the
     # link, so a claude starting concurrently never takes the ENOENT path.
 
   Scenario: CS-GCFG-036 The link fails closed with exit 78
     Given CLAUDE_SANDBOX_GLOBAL_CONFIG=T is set
     And T is missing or not a regular file (a kept container whose target
-      moved or vanished), or T is not absolute, or $HOME is unset,
+      moved or vanished), or T is not exactly $HOME/.claude/.claude.json
+      (cleaned), or $HOME is unset,
       or $HOME/.claude.json is a directory, or the link cannot be made
       ($HOME not writable)
     Then pidslot prints one line starting "claude-sandbox: global config link:"
       naming the path and the error, execs nothing, and exits 78 (EX_CONFIG)
+    # Under go test EnsureLink panics when $HOME is the invoking user's real
+    # home (the CS-LNCH-138 precedent), so no fixture can touch ~/.claude.json.
     # Unlike every other pidslot failure (CS-PID-003), which warns and execs:
     # a claude on a private or defaults config is the damage this feature
     # exists to prevent. 78 is reserved: the launcher's own codes are 2, 3, 4.
@@ -214,9 +239,12 @@ Feature: Global config (~/.claude.json) — the linked layout (CS-GCFG)
       headless launch ends with status 78
     Then the launcher prints on stderr that it LIKELY was the global-config
       link check (pointing at the "claude-sandbox: global config link:" line),
-      and the fix: restore the linked layout (migrate) or the legacy one
-      (revert), then relaunch; for a kept container whose link target moved
-      or vanished, "docker rm <name>" then relaunch
+      and the manual fixes, with every Claude session exited first: restore
+      the link ("mv ~/.claude.json ~/.claude/.claude.json && ln -s .claude/.claude.json ~/.claude.json")
+      or undo it ("rm ~/.claude.json && mv ~/.claude/.claude.json ~/.claude.json"),
+      then relaunch; for a kept container whose link target moved or
+      vanished, "docker rm <name>" then relaunch; a later feature adds
+      checked commands
     And the launcher still exits 78
     # "Likely": the launcher infers it from the status alone and never parses
     # the session's output, so a claude or tool that exits 78 on its own gets
