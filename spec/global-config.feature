@@ -109,17 +109,19 @@ Feature: Global config (~/.claude.json) — the linked layout (CS-GCFG)
     And $HOME/.claude.json is a regular file and $HOME/.claude/.claude.json exists
     Then one WARNING names both files and their modification times, says
       Claude Code uses $HOME/.claude.json here and the other is stale, and
-      gives the manual fixes with every Claude session exited first: merge by
-      hand, then either restore the link
-      ("mv ~/.claude.json ~/.claude/.claude.json && ln -s .claude/.claude.json ~/.claude.json")
-      or remove the stale ~/.claude/.claude.json; a later feature adds checked commands
+      gives the manual fixes with every Claude session exited first and a
+      copy of ~/.claude.json kept outside ~/.claude/: merge by hand, remove
+      the stale ~/.claude/.claude.json, then keep the legacy layout or
+      restore the link with the guarded link step of CS-GCFG-038; a later
+      feature adds checked commands
     And the file is still mounted as legacy
     And a launch inside a sandbox does not repeat it
 
   Scenario: CS-GCFG-027 CLAUDE_CONFIG_DIR set: the feature does nothing
     Given CLAUDE_CONFIG_DIR is set to an absolute path in the launcher's environment
-    Then no linked decision is made, CLAUDE_SANDBOX_GLOBAL_CONFIG is set to
-      nothing (CS-GCFG-032), and no split-brain or link warning is printed
+    Then no linked decision is made, CLAUDE_SANDBOX_GLOBAL_CONFIG is not set
+      by the launcher (an env-file value is overridden empty, CS-GCFG-032),
+      and no split-brain or link warning is printed
     And the <parent>/.claude.json sibling is mounted only when Lstat reports a
       regular file (CS-LNCH-012), under the same nested rule as CS-GCFG-025
     Given that sibling is a symlink
@@ -239,12 +241,19 @@ Feature: Global config (~/.claude.json) — the linked layout (CS-GCFG)
       headless launch ends with status 78
     Then the launcher prints on stderr that it LIKELY was the global-config
       link check (pointing at the "claude-sandbox: global config link:" line),
-      and the manual fixes, with every Claude session exited first: restore
-      the link ("mv ~/.claude.json ~/.claude/.claude.json && ln -s .claude/.claude.json ~/.claude.json")
-      or undo it ("rm ~/.claude.json && mv ~/.claude/.claude.json ~/.claude.json"),
+      and the manual fixes, with every Claude session exited first and a copy
+      of ~/.claude.json kept outside ~/.claude/, each step GUARDED so it does
+      nothing unless the layout is the one it expects:
+      link — "test -f ~/.claude.json && ! test -L ~/.claude.json && ! test -e ~/.claude/.claude.json && ! test -L ~/.claude/.claude.json && mv ~/.claude.json ~/.claude/.claude.json && ln -s .claude/.claude.json ~/.claude.json"
+      undo — "test -L ~/.claude.json && test -f ~/.claude/.claude.json && ! test -L ~/.claude/.claude.json && rm ~/.claude.json && mv ~/.claude/.claude.json ~/.claude.json"
       then relaunch; for a kept container whose link target moved or
       vanished, "docker rm <name>" then relaunch; a later feature adds
       checked commands
+    # Unguarded, the undo step deletes the only config when the operator has
+    # already reverted by hand (a regular ~/.claude.json, no target), and the
+    # link step, run on an existing (dangling) link, moves the link into
+    # ~/.claude/ and builds a chain, or overwrites an existing target. No
+    # "mv -n": its exit status differs across coreutils versions.
     And the launcher still exits 78
     # "Likely": the launcher infers it from the status alone and never parses
     # the session's output, so a claude or tool that exits 78 on its own gets
