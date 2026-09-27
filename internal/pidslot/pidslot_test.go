@@ -3,11 +3,14 @@ package pidslot_test
 import (
 	"bytes"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	"github.com/kmacmcfarlane/claude-sandbox/internal/globalcfg"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/pidslot"
 )
 
@@ -150,5 +153,64 @@ var _ = Describe("pid classes (CS-PID)", func() {
 		k, ok := pidslot.ParseClass(" 255 ")
 		Expect(ok).To(BeTrue())
 		Expect(k).To(Equal(255))
+	})
+})
+
+// Spec: spec/global-config.feature CS-GCFG-033/036 — the global-config link is
+// the helper's first step, and its failure is fatal (unlike CS-PID-003).
+var _ = Describe("the global-config link (CS-GCFG)", func() {
+	var home, target string
+	BeforeEach(func() {
+		base, err := filepath.EvalSymlinks(GinkgoT().TempDir())
+		Expect(err).NotTo(HaveOccurred())
+		home = filepath.Join(base, "home")
+		target = filepath.Join(home, ".claude", ".claude.json")
+		Expect(os.MkdirAll(filepath.Dir(target), 0o755)).To(Succeed())
+	})
+
+	It("CS-GCFG-033: with the variable set, the link is made before any pid is burned", func() {
+		Expect(os.WriteFile(target, []byte("{}"), 0o600)).To(Succeed())
+		f := newFixture(7)
+		f.env[pidslot.EnvVar] = "150"
+		f.env[globalcfg.EnvVar] = target
+		f.env["HOME"] = home
+		var forksAtLink = -1
+		f.ops.GlobalConfig = &globalcfg.LinkOps{Rename: func(a, b string) error {
+			forksAtLink = f.c.forks
+			return os.Rename(a, b)
+		}}
+		Expect(pidslot.Run(f.ops, []string{"claude"})).To(Equal(0))
+		Expect(forksAtLink).To(Equal(0), "linked before the burn")
+		Expect(os.Readlink(filepath.Join(home, ".claude.json"))).To(Equal(target))
+		Expect(f.execs).To(HaveLen(1))
+		Expect(f.stderr.String()).To(BeEmpty())
+	})
+
+	It("CS-GCFG-033: with the variable unset, nothing is checked or made", func() {
+		f := newFixture(7)
+		f.env[pidslot.EnvVar] = "150"
+		f.env["HOME"] = home
+		Expect(pidslot.Run(f.ops, []string{"claude"})).To(Equal(0))
+		_, err := os.Lstat(filepath.Join(home, ".claude.json"))
+		Expect(os.IsNotExist(err)).To(BeTrue())
+	})
+
+	It("CS-GCFG-036: a missing target refuses to exec: one prefixed line, exit 78, nothing burned or exec'd", func() {
+		f := newFixture(7)
+		f.env[pidslot.EnvVar] = "150"
+		f.env[globalcfg.EnvVar] = target
+		f.env["HOME"] = home
+		Expect(pidslot.Run(f.ops, []string{"claude"})).To(Equal(78))
+		Expect(f.execs).To(BeEmpty())
+		Expect(f.c.forks).To(BeZero())
+		Expect(f.stderr.String()).To(Equal("claude-sandbox: global config link: " + target + ": no such file or directory\n"))
+	})
+
+	It("CS-GCFG-036: even with no pid class (where the helper would warn and exec directly) a failure is fatal", func() {
+		f := newFixture(7)
+		f.env[globalcfg.EnvVar] = target
+		Expect(pidslot.Run(f.ops, []string{"claude"})).To(Equal(globalcfg.ExitLink))
+		Expect(f.execs).To(BeEmpty())
+		Expect(f.stderr.String()).To(HavePrefix(globalcfg.LinkPrefix + " "))
 	})
 })

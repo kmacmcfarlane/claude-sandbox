@@ -12,6 +12,7 @@ import (
 	"io"
 
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/globalcfg"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/oomreport"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/sessions"
 )
@@ -108,6 +109,11 @@ func runSession(env *Env, c execx.Cmd, container string, o sessionOpts) (session
 		// CS-LNCH-097: a signal after the child exited asks for the exit
 		// now — with the child's status, silently.
 		return end, nil
+	}
+	if end.code == globalcfg.ExitLink {
+		// CS-GCFG-038/039: pidslot refused to start claude without the
+		// global-config link. Inferred from the status alone, hence "likely".
+		fmt.Fprint(env.Err, globalcfg.ExitMessage(container))
 	}
 	lim := out.Limit
 	if lim.Value == "" {

@@ -54,7 +54,7 @@ func shortDigest(b []byte) string {
 
 // configFingerprint hashes the effective launch and returns the hash plus the
 // per-file digests used to explain a mismatch.
-func (in *Inputs) configFingerprint(p *Plan, ha hostAccess, sharedPeerRegistry bool) (string, []InputDigest) {
+func (in *Inputs) configFingerprint(p *Plan, ha hostAccess, sharedPeerRegistry, globalLinked bool) (string, []InputDigest) {
 	inputs := make([]InputDigest, 0, len(in.Env)+len(in.shadowDigests)+2)
 
 	// (1) The merged cascade config. Canonical JSON of the post-merge struct:
@@ -101,6 +101,16 @@ func (in *Inputs) configFingerprint(p *Plan, ha hostAccess, sharedPeerRegistry b
 	// session whose bridge stood down (CS-LNCH-054/055/107) launched exactly as
 	// with the key off and hashes like one.
 	fmt.Fprintf(&env, "sharedPeerRegistry=%t\n", sharedPeerRegistry)
+	// CS-GCFG-030: the global config layout. Only a LINKED launch adds the
+	// line, so legacy, missing, refused and CLAUDE_CONFIG_DIR launches hash
+	// exactly as before this feature. The mount set above moves with it (a
+	// linked launch has no .claude.json mount); the line makes the dependency
+	// explicit. A container launched before a migrate holds the old inode, and
+	// one launched linked has no file after a revert: attach reports drift in
+	// both directions (CS-GCFG-031).
+	if globalLinked {
+		env.WriteString("globalConfig=linked\n")
+	}
 	fmt.Fprintf(&env, "uid=%d gid=%d user=%s home=%s\n", in.HostUID, in.HostGID, in.HostUser, in.Home)
 	fmt.Fprintf(&env, "memory=%s\n", p.MemoryLimit)
 	// CS-LNCH-112: the APPLIED value (cascade.Config.OOMScoreAdj is json:"-"),

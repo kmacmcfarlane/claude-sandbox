@@ -343,7 +343,7 @@ var _ = Describe("launch.Build", func() {
 		})
 	})
 
-	It("CS-LNCH-012: mounts the .claude.json sibling read-write when present", func() {
+	It("CS-LNCH-012: mounts the .claude.json sibling read-write when it is a regular file", func() {
 		cj := filepath.Join(home, ".claude.json")
 		touch(cj, "{}")
 		p := build()
@@ -354,6 +354,26 @@ var _ = Describe("launch.Build", func() {
 		p := build()
 		cj := filepath.Join(home, ".claude.json")
 		Expect(p.Volumes).NotTo(ContainElement(cj + ":" + cj))
+	})
+
+	It("CS-LNCH-012: never single-file-mounts a symlinked .claude.json or its target", func() {
+		other := filepath.Join(home, "dotfiles", "claude.json")
+		touch(other, "{}")
+		cj := filepath.Join(home, ".claude.json")
+		Expect(os.Symlink(other, cj)).To(Succeed())
+		p := build()
+		for _, v := range p.Volumes {
+			Expect(v).NotTo(ContainSubstring("claude.json:"), "no -v for the link or its target")
+		}
+	})
+
+	It("CS-LNCH-012: with CLAUDE_CONFIG_DIR set, the parent sibling is mounted as before", func() {
+		alt := filepath.Join(home, "alt", ".claude")
+		mkdir(alt)
+		env["CLAUDE_CONFIG_DIR"] = alt
+		sib := filepath.Join(home, "alt", ".claude.json")
+		touch(sib, "{}")
+		Expect(build().Volumes).To(ContainElement(sib + ":" + sib))
 	})
 
 	It("CS-LNCH-013: shadows .mcp.json with mcpServers key-merged, fragment servers winning", func() {

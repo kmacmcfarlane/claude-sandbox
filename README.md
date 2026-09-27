@@ -1270,7 +1270,7 @@ claude-sandbox completion powershell | Out-String | Invoke-Expression
 The container only has access to:
 - The project directory (read/write)
 - `~/.claude/` — auth tokens, project memories, sessions, `settings.json` (read/write). `settings.json` is the host file itself, not a copy: plugin installs and enable/disable, `/model`, `/effort` and user-scope permission rules made in a sandbox persist to the host and to the next sandbox. That includes `hooks` and permission `allow` rules, which then also run in your host sessions, outside the sandbox. If `settings.json` is a symlink (for example into a dotfiles repo), its resolved target is also bind-mounted **read-write** at its own path, so the link resolves inside the container and writes land in the target (Claude Code's rename onto a single-file mount fails with `EBUSY` and it falls back to writing in place). A target already under a same-path mount is not mounted again — and if that mount is read-only (`~/.ssh` with `--ssh`, a `mounts:` entry without `writable: true`), the link resolves but settings changes made in the session fail, and one warning says so. A dangling link, a target that is not a regular file (a directory, say), or a target whose path contains `:` (docker's `-v` cannot carry it) prints one warning and the sandbox runs without user settings; the launch itself never fails over it. The sandbox notification hooks come from managed settings baked into the image, not from this file (see [Notification hooks](#notification-hooks))
-- `~/.claude.json` — global state, OAuth account (read/write)
+- `~/.claude.json` — global state, OAuth account (read/write): a link into `~/.claude/` in the linked layout, a single-file mount in the legacy one (see [Global config](#global-config-claudejson))
 - `~/.mcp.json` — user-scope MCP server config (read-only)
 - `~/.gitconfig` — git identity (read-only, opt-in via `--git`)
 - `~/.ssh/` — SSH keys for git remotes (read-only, opt-in via `--ssh`)
@@ -1283,6 +1283,27 @@ The container only has access to:
 When `CLAUDE_CONFIG_DIR` relocates the config directory (e.g. via direnv), `.claude.json` and `.mcp.json` are mounted from the parent of that directory — mirroring the standard `$HOME/.claude/` + `$HOME/.claude.json` + `$HOME/.mcp.json` layout.
 
 It cannot see or modify anything else on the host filesystem.
+
+### Global config (`~/.claude.json`)
+
+Claude Code keeps its global state — the OAuth account, onboarding, per-project trust and history — in one file. With `CLAUDE_CONFIG_DIR` unset (the default layout) that file is `~/.claude.json`, beside `~/.claude/` rather than inside it. How it reaches a sandbox depends on what `~/.claude.json` is on the host:
+
+- **Linked layout** — `~/.claude.json` is a symlink straight to `~/.claude/.claude.json`, which is a regular file. The link text may be relative (`.claude/.claude.json`) or absolute. Nothing is mounted at `~/.claude.json`; the container gets `CLAUDE_SANDBOX_GLOBAL_CONFIG=<home>/.claude/.claude.json`, and before `claude` starts — the primary session, `--detach`, headless, `--branch`, ralph, and every `--join` — the in-container `claude-sandbox pidslot` step makes `~/.claude.json` the same link on the container's own filesystem. `~/.claude/` is already mounted read-write at the same path, so Claude Code writes the file the way it does on the host: a temp file beside the target, then a rename. Readers see the old file or the new one, never a torn or empty one. This is the layout to use when several sandboxes run at once.
+- **Legacy layout** — `~/.claude.json` is a regular file. It is bind-mounted into the container as a single file, as before, and every host launch prints one `Note:` line. Claude Code cannot rename onto a single-file mount, so it truncates and rewrites the shared file in place, and its lock (`~/.claude.json.lock`) is private to each container: concurrent sandboxes can tear the file, and a process that reads it while it is empty can write a fresh default config over it (onboarding and projects lost).
+- **Anything else** — a link through another link, a link to a different file, a dangling link, a link to a directory, a symlinked `~/.claude`, a directory at `~/.claude.json` — prints one WARNING and mounts **nothing**: the session starts without the global config (Claude Code's first-run path) on a container-local file. A symlink's target is never single-file-mounted, because that would bring back the in-place writes.
+- **Missing** — nothing is mounted, as before.
+
+Checks on the host layout:
+
+- **Split brain.** When `~/.claude.json` is a regular file while `~/.claude/.claude.json` also exists — what a tool that replaces the link by rename (`jq … > tmp && mv tmp ~/.claude.json`) leaves behind — each host launch prints one WARNING naming both files and their modification times. Claude Code uses `~/.claude.json`; merge what you need by hand and restore the link, or remove the stale file.
+- **`~/.claude/.config.json`** — if this older file exists, Claude Code uses it as the global config instead. `~/.claude.json` then stays in the legacy layout, with one `Note:`.
+- **`CLAUDE_CONFIG_DIR` set** — Claude Code reads `$CLAUDE_CONFIG_DIR/.claude.json`, inside the config-dir mount, where renames are already atomic and the lock is shared. None of the above applies. A relative value, or one with a `~` in it, prints one WARNING: Claude Code would resolve it against its working directory.
+
+Switching the host layout while sessions run: a running legacy container keeps the old file's inode, and a running linked container follows the link. Exit every session, switch, then relaunch; `--attach`/`--join` report config drift for containers launched under the other layout (the layout is part of the config hash). A launcher binary older than this change follows the link and single-file-mounts its target — update every launcher on the host (other checkouts, a pinned path in Paseo) before relying on the linked layout.
+
+The launcher only detects the layout; it never changes the host file on its own. The switch is a one-time step with every Claude session exited, host and sandboxes (`claude-sandbox global-config migrate`, and `revert` to go back). After switching, and after each Claude Code update, check on the host and in a sandbox that `/rename`, `/model` and accepting a trust dialog leave `~/.claude.json` a symlink while `~/.claude/.claude.json` changes.
+
+**If the link cannot be made in the container** (the target moved or vanished, `$HOME` is not writable, a directory sits at `~/.claude.json`), the session refuses to start rather than run on a private or default config: the container prints one line starting `claude-sandbox: global config link:` and exits **78**, and the launcher adds what to do — restore either layout and relaunch; for a kept container whose target moved, `docker rm <name>` and relaunch. A regular `~/.claude.json` supplied by the image is not deleted: it is kept as `~/.claude.json.replaced-<ms>` before the link replaces it.
 
 ### Same-path volume mounting
 
@@ -1391,7 +1412,7 @@ process group (it does not get one of its own) and shares the launcher's stdin, 
 stderr, so the terminal reaches it exactly as before. The launcher stays alive to report an OOM
 kill (see [Memory limit](#memory-limit)). What changes:
 
-- **Exit code.** The launcher exits with docker's status, or 128+n when docker died of signal n.
+- **Exit code.** The launcher exits with docker's status, or 128+n when docker died of signal n. A status of 78 also prints what the global-config link check needs (see [Global config](#global-config-claudejson)).
 - **Signals.** SIGTERM and SIGHUP sent to the launcher are forwarded to docker, and an exit
   they cause is silent and immediate (no report), which is what an SDK client such as Paseo
   expects when it stops a session. SIGINT and SIGQUIT generated by the terminal (while
@@ -1651,6 +1672,7 @@ internal/
   scaffold/        Embedded scaffold seeding
   imagebuild/      Base/CLI/child/cap image staleness + builds, update check, cache-budget warning
   launch/          Mount assembly, shadow injections, docker create/start argv, launch lock
+  globalcfg/       ~/.claude.json layout (linked/legacy) and the in-container link
   ralphloop/       Ralph loop: iterations, lock, quota handling, pipeline
   execx/, prompt/  Command-runner and prompt seams (injected in tests)
 spec/              Gherkin behavioral spec — scenario IDs referenced by the Ginkgo tests
