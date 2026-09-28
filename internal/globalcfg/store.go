@@ -164,8 +164,9 @@ func syncDir(dir string) {
 	}
 }
 
-// isRealStateRoot reports whether root is the invoking user's real state
-// root (the default or the XDG one), for the go test guard.
+// isRealStateRoot reports whether root is, or lies inside, the invoking
+// user's real state root (the default or the XDG one), compared with
+// symlinks resolved, for the go test guard.
 func isRealStateRoot(root string) bool {
 	var homes []string
 	if h, err := os.UserHomeDir(); err == nil && h != "" {
@@ -174,13 +175,32 @@ func isRealStateRoot(root string) bool {
 	if u, err := user.Current(); err == nil && u.HomeDir != "" {
 		homes = append(homes, u.HomeDir)
 	}
-	root = filepath.Clean(root)
+	root = resolvePath(root)
 	for _, h := range homes {
 		for _, r := range []string{hostdirs.StateRoot(h, os.Getenv), hostdirs.StateRoot(h, nil)} {
-			if root == filepath.Clean(r) {
+			r = resolvePath(r)
+			if root == r || strings.HasPrefix(root, r+string(filepath.Separator)) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// resolvePath is p with symlinks resolved as far as it exists: the deepest
+// existing ancestor is resolved and the rest appended.
+func resolvePath(p string) string {
+	p = filepath.Clean(p)
+	rest := ""
+	for {
+		if r, err := filepath.EvalSymlinks(p); err == nil {
+			return filepath.Join(r, rest)
+		}
+		parent := filepath.Dir(p)
+		if parent == p {
+			return filepath.Join(p, rest)
+		}
+		rest = filepath.Join(filepath.Base(p), rest)
+		p = parent
+	}
 }

@@ -8,9 +8,11 @@ package globalcfg_test
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -381,7 +383,48 @@ var _ = Describe("global-config migrate (CS-GCFG-041..051)", func() {
 			Expect(isLink(f.link)).To(BeFalse())
 			Expect(read(f.link)).To(Equal(`{"changed":true}`))
 			Expect(exists(f.target)).To(BeFalse(), "the copy it made is removed")
+			Expect(f.entries(globalcfg.PreMigratePrefix)).To(BeEmpty(), "and this run's pre-migration copy")
 			Expect(leftoversIn(f.home)).To(BeEmpty())
+		})
+
+		It("CS-GCFG-041, CS-GCFG-051: aborted attempts never evict an earlier migration's copy", func() {
+			Expect(globalcfg.Migrate(f.opts())).To(Succeed())
+			Expect(globalcfg.Revert(f.opts())).To(Succeed())
+			first := f.entries(globalcfg.PreMigratePrefix)
+			Expect(first).To(HaveLen(1))
+			for i := 0; i < 4; i++ {
+				time.Sleep(2 * time.Millisecond)
+				o := f.opts()
+				o.BeforeSwap = func() { write(f.link, fmt.Sprintf(`{"attempt":%d}`, i)) }
+				Expect(globalcfg.Migrate(o)).NotTo(Succeed())
+			}
+			Expect(f.entries(globalcfg.PreMigratePrefix)).To(Equal(first))
+		})
+
+		It("CS-GCFG-050: a caught signal before the rename aborts cleanly and removes the lock", func() {
+			o := f.opts()
+			o.Signals = []os.Signal{syscall.SIGUSR1}
+			o.BeforeSwap = func() {
+				Expect(syscall.Kill(os.Getpid(), syscall.SIGUSR1)).To(Succeed())
+				time.Sleep(50 * time.Millisecond) // delivery is asynchronous
+			}
+			expectRefused(globalcfg.Migrate(o), "interrupted")
+			Expect(isLink(f.link)).To(BeFalse())
+			Expect(read(f.link)).To(Equal(cfg))
+			Expect(exists(f.target)).To(BeFalse())
+			Expect(exists(f.link + ".lock")).To(BeFalse())
+			Expect(f.entries(globalcfg.PreMigratePrefix)).To(BeEmpty())
+		})
+
+		It("CS-GCFG-050: the default lock wait outlasts the stale age", func() {
+			Expect(globalcfg.LockWait).To(BeNumerically(">", globalcfg.LockStale))
+		})
+
+		It("CS-GCFG-041, CS-GCFG-043: a reused identical target is set to 0600", func() {
+			write(f.target, cfg)
+			Expect(os.Chmod(f.target, 0o644)).To(Succeed())
+			Expect(globalcfg.Migrate(f.opts())).To(Succeed())
+			Expect(mode(f.target)).To(Equal(os.FileMode(0o600)))
 		})
 
 		It("CS-GCFG-051: an identical target that was already there is not removed by an abort", func() {
@@ -437,6 +480,40 @@ var _ = Describe("global-config revert (CS-GCFG-046, CS-GCFG-047, CS-GCFG-052)",
 		Expect(read(parked[0])).To(Equal(cfg))
 		Expect(f.out.String()).To(ContainSubstring("kept at " + parked[0]))
 		Expect(leftoversIn(f.home)).To(BeEmpty())
+	})
+
+	It("CS-GCFG-052: a link changed just before the rename aborts the revert", func() {
+		other := filepath.Join(f.home, "other.json")
+		write(other, cfg)
+		o := f.opts()
+		o.BeforeSwap = func() {
+			Expect(os.Remove(f.link)).To(Succeed())
+			Expect(os.Symlink("other.json", f.link)).To(Succeed())
+		}
+		expectRefused(globalcfg.Revert(o), "changed during the revert")
+		Expect(isLink(f.link)).To(BeTrue())
+		Expect(read(f.target)).To(Equal(cfg))
+		Expect(leftoversIn(f.home)).To(BeEmpty())
+	})
+
+	It("CS-GCFG-052: an interrupted revert (two identical regular files) is finished", func() {
+		Expect(os.Remove(f.link)).To(Succeed())
+		write(f.link, cfg) // the rename happened; the target was never parked
+		Expect(globalcfg.Revert(f.opts())).To(Succeed(), f.errw.String())
+		Expect(f.out.String()).To(ContainSubstring("Finished an interrupted revert"))
+		Expect(exists(f.target)).To(BeFalse())
+		Expect(read(f.link)).To(Equal(cfg))
+		Expect(f.entries(globalcfg.RevertedPrefix)).To(HaveLen(1))
+		Expect(leftoversIn(f.home)).To(BeEmpty(), "the lock is released")
+	})
+
+	It("CS-GCFG-052: finishing an interrupted revert still refuses while a linked container exists", func() {
+		Expect(os.Remove(f.link)).To(Succeed())
+		write(f.link, cfg)
+		f.fake.On("docker ps", "cs-linked\x1f/proj\n", nil)
+		f.fake.On("docker inspect", `/cs-linked`+"\x1f"+`["CLAUDE_SANDBOX_GLOBAL_CONFIG=`+f.target+`"]`+"\n", nil)
+		expectRefused(globalcfg.Revert(f.opts()), "cs-linked")
+		Expect(exists(f.target)).To(BeTrue())
 	})
 
 	It("CS-GCFG-052: the link must be the same file as the target (-ef)", func() {
@@ -582,6 +659,38 @@ var _ = Describe("the command guards (CS-GCFG-044, CS-GCFG-053)", func() {
 		Expect(func() { globalcfg.Accept(globalcfg.AcceptOptions{Home: realHome, StateRoot: f.state}) }).To(PanicWith(ContainSubstring("real home")))
 		realState := filepath.Join(realHome, ".local", "state", "claude-sandbox")
 		Expect(func() { globalcfg.OpenStore(realState, f.link, nil) }).To(PanicWith(ContainSubstring("real state root")))
+		Expect(func() { globalcfg.OpenStore(filepath.Join(realState, "sub"), f.link, nil) }).To(PanicWith(ContainSubstring("real state root")), "inside it")
+		alias := filepath.Join(filepath.Dir(f.state), "home-alias")
+		Expect(os.Symlink(realHome, alias)).To(Succeed())
+		Expect(func() { globalcfg.OpenStore(filepath.Join(alias, ".local", "state", "claude-sandbox"), f.link, nil) }).To(PanicWith(ContainSubstring("real state root")), "through a symlink")
+	})
+})
+
+var _ = Describe("another spelling of the same file (CS-GCFG-045, CS-GCFG-046)", func() {
+	var f *swapFixture
+	var alias string
+	BeforeEach(func() {
+		f = newSwapFixture()
+		// The home reached through a symlinked ancestor, as /var/home/rt is
+		// reached as /home/rt on some hosts.
+		alias = filepath.Join(filepath.Dir(f.home), "alias-home")
+		Expect(os.Symlink(f.home, alias)).To(Succeed())
+	})
+
+	It("CS-GCFG-045: a mount of the file by another spelling refuses migrate", func() {
+		write(f.link, cfg)
+		f.fake.On("docker ps", "cs-alias\x1f"+filepath.Join(alias, ".claude.json")+"\n", nil)
+		expectRefused(globalcfg.Migrate(f.opts()), "cs-alias")
+		Expect(read(f.link)).To(Equal(cfg))
+	})
+
+	It("CS-GCFG-046: a linked container naming the target by another spelling refuses revert", func() {
+		write(f.target, cfg)
+		Expect(os.Symlink(".claude/.claude.json", f.link)).To(Succeed())
+		f.fake.On("docker ps", "cs-alias\x1f/proj\n", nil)
+		f.fake.On("docker inspect", `/cs-alias`+"\x1f"+`["CLAUDE_SANDBOX_GLOBAL_CONFIG=`+filepath.Join(alias, ".claude", ".claude.json")+`"]`+"\n", nil)
+		expectRefused(globalcfg.Revert(f.opts()), "cs-alias")
+		Expect(isLink(f.link)).To(BeTrue())
 	})
 })
 

@@ -17,6 +17,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -37,9 +38,11 @@ const (
 	// Claude Code's ELOCKED retry budget (10-20 s).
 	SwapBound = 5 * time.Second
 	// LockWait is how long a fresh lock held by another process is waited
-	// for; LockStale is Claude Code's staleness rule (proper-lockfile), and
-	// LockRefresh its mtime refresh (CS-GCFG-050).
-	LockWait    = 5 * time.Second
+	// for: longer than LockStale, Claude Code's staleness rule
+	// (proper-lockfile), so a lock a crashed claude left a moment ago is
+	// reclaimed rather than refused. LockRefresh is its mtime refresh
+	// (CS-GCFG-050).
+	LockWait    = LockStale + 2*time.Second
 	LockStale   = 10 * time.Second
 	LockRefresh = 5 * time.Second
 	// VersionTimeout bounds "claude --version" (CS-GCFG-049).
@@ -82,6 +85,9 @@ type SwapOptions struct {
 	// BeforeSwap runs under the lock just before the final re-stat (a test
 	// hook for CS-GCFG-051).
 	BeforeSwap func()
+	// Signals are caught while the lock is held (CS-GCFG-050); nil means
+	// SIGINT, SIGTERM and SIGHUP. Tests use a signal the runner ignores.
+	Signals []os.Signal
 	// DirOps are the store directories' seams.
 	DirOps *hostdirs.Ops
 }
@@ -110,6 +116,9 @@ func (o *SwapOptions) fill() {
 	}
 	if o.Err == nil {
 		o.Err = io.Discard
+	}
+	if o.Signals == nil {
+		o.Signals = []os.Signal{syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP}
 	}
 }
 
@@ -212,7 +221,15 @@ func Migrate(o SwapOptions) error {
 	if err != nil {
 		return refuse("keeping the pre-migration copy: %v; nothing was changed.", err)
 	}
-	store.Prune(PreMigratePrefix, KeepPreMigrate)
+	swapped := false
+	defer func() {
+		// An aborted attempt leaves the source in place, identical to this
+		// copy: remove it, so aborts never evict an earlier migration's
+		// copy through the cap.
+		if !swapped {
+			os.Remove(pre)
+		}
+	}()
 
 	created := false
 	undo := func() {
@@ -223,6 +240,9 @@ func Migrate(o SwapOptions) error {
 	if _, err := os.Lstat(l.Target); err == nil {
 		if err := sameBytes(l.Target, data); err != nil {
 			return refuse("%s appeared or changed during the migration and differs from %s; nothing was changed.", l.Target, l.Link)
+		}
+		if err := os.Chmod(l.Target, 0o600); err != nil {
+			return refuse("restricting %s to 0600: %v; nothing was changed.", l.Target, unwrapPath(err))
 		}
 	} else {
 		if err := writeExcl(l.Target, data); err != nil {
@@ -241,6 +261,10 @@ func Migrate(o SwapOptions) error {
 		undo()
 		return refuse("the migration took longer than %s under the lock; nothing was changed. Run it again.", o.Bound)
 	}
+	if sig := lock.interrupted(); sig != nil {
+		undo()
+		return refuse("interrupted (%v) before the swap; nothing was changed.", sig)
+	}
 	tmp := fmt.Sprintf("%s.migrate-%d", l.Link, o.Now().UnixMilli())
 	if err := os.Symlink(LinkText, tmp); err != nil {
 		undo()
@@ -251,7 +275,9 @@ func Migrate(o SwapOptions) error {
 		undo()
 		return refuse("replacing %s with the link: %v; nothing was changed.", l.Link, unwrapPath(err))
 	}
+	swapped = true
 	syncDir(o.Home)
+	store.Prune(PreMigratePrefix, KeepPreMigrate)
 	fmt.Fprintf(o.Out, "Migrated: %s is now a link to %s, which holds the global config.\n", l.Link, LinkText)
 	fmt.Fprintf(o.Out, "  Pre-migration copy: %s\n", pre)
 	fmt.Fprintf(o.Out, "  Update every claude-sandbox launcher on this host (other checkouts, a pinned path in Paseo): an older one follows the link and single-file-mounts its target.\n")
@@ -272,6 +298,9 @@ func Revert(o SwapOptions) error {
 		fmt.Fprintf(o.Out, "%s is already a regular file (the legacy layout); nothing to do.\n", l.Link)
 		return nil
 	case l.Mode == ModeLegacy:
+		if identicalFiles(l.Link, l.Target) {
+			return o.finishRevert(l)
+		}
 		return refuse("%s is a regular file and %s also exists (split brain); there is no link to revert. Claude Code uses %s: move the stale %s away (keep a copy).", l.Link, l.Target, l.Link, l.Target)
 	case l.Mode == ModeConfigJSON:
 		return refuse("%s exists, so Claude Code uses it as the global config; revert does not apply.", filepath.Join(ConfigDir(o.Home), LegacyConfigName))
@@ -328,6 +357,14 @@ func Revert(o SwapOptions) error {
 		os.Remove(tmp)
 		return refuse("the revert took longer than %s under the lock; nothing was changed. Run it again.", o.Bound)
 	}
+	if l2 := Classify(o.Home, ""); l2.Mode != ModeLinked || sameFile(l.Link, l.Target) != nil {
+		os.Remove(tmp)
+		return refuse("%s changed during the revert; nothing was changed. Run it again.", l.Link)
+	}
+	if sig := lock.interrupted(); sig != nil {
+		os.Remove(tmp)
+		return refuse("interrupted (%v) before the swap; nothing was changed.", sig)
+	}
 	if err := os.Rename(tmp, l.Link); err != nil {
 		os.Remove(tmp)
 		return refuse("replacing the link %s: %v; nothing was changed.", l.Link, unwrapPath(err))
@@ -343,6 +380,46 @@ func Revert(o SwapOptions) error {
 	fmt.Fprintf(o.Out, "  The linked file %s is kept at %s\n", l.Target, parked)
 	fmt.Fprintf(o.Out, "  Relaunch your sandboxes.\n")
 	return nil
+}
+
+// finishRevert completes a revert that was killed after its rename and
+// before it parked the target: both files are regular and byte-identical
+// (CS-GCFG-052). Same container checks and lock as a revert.
+func (o *SwapOptions) finishRevert(l Layout) error {
+	if err := o.checkContainers(l, true); err != nil {
+		return err
+	}
+	store, err := OpenStore(o.StateRoot, l.Link, o.DirOps)
+	if err != nil {
+		return refuse("the state directory: %v", err)
+	}
+	lock, err := o.acquireLock(l.Link)
+	if err != nil {
+		return err
+	}
+	defer lock.release()
+	if !identicalFiles(l.Link, l.Target) {
+		return refuse("%s and %s changed before the lock was taken; nothing was changed. Run it again.", l.Link, l.Target)
+	}
+	parked, err := parkTarget(store, l.Target, o.Now())
+	if err != nil {
+		return fmt.Errorf("finishing the interrupted revert: %s could not be moved away (%v); it is still there", l.Target, err)
+	}
+	fmt.Fprintf(o.Out, "Finished an interrupted revert: %s is a regular file (the legacy layout), and the identical %s is kept at %s\n", l.Link, l.Target, parked)
+	return nil
+}
+
+// identicalFiles reports whether a and b are both regular files (Lstat) with
+// the same bytes.
+func identicalFiles(a, b string) bool {
+	for _, p := range []string{a, b} {
+		fi, err := os.Lstat(p)
+		if err != nil || !fi.Mode().IsRegular() {
+			return false
+		}
+	}
+	data, err := os.ReadFile(a)
+	return err == nil && sameBytes(b, data) == nil
 }
 
 // parkTarget copies target into the store as reverted-<ms> (fsynced and
@@ -451,6 +528,20 @@ type heldLock struct {
 	path string
 	stop chan struct{}
 	done chan struct{}
+	// sig receives the caught signals while the lock is held: they no
+	// longer kill the process, so the lock is always released (CS-GCFG-050).
+	sig chan os.Signal
+}
+
+// interrupted returns a signal caught since the lock was taken, or nil.
+func (h *heldLock) interrupted() os.Signal {
+	select {
+	case s := <-h.sig:
+		h.sig <- s // keep it for a later check
+		return s
+	default:
+		return nil
+	}
 }
 
 // acquireLock takes <link>.lock the way Claude Code (proper-lockfile) does:
@@ -468,6 +559,12 @@ func (o *SwapOptions) acquireLock(link string) (*heldLock, error) {
 			return nil, refuse("taking the lock %s: %v; nothing was changed.", path, unwrapPath(err))
 		}
 		if fi, serr := os.Lstat(path); serr == nil && time.Since(fi.ModTime()) > o.LockStale {
+			// Look again right before removing: a holder that refreshed its
+			// mtime meanwhile keeps its lock. A refresh between this look and
+			// the removal is still lost — the race proper-lockfile has too.
+			if fi2, serr2 := os.Lstat(path); serr2 != nil || time.Since(fi2.ModTime()) <= o.LockStale {
+				continue
+			}
 			if rerr := os.Remove(path); rerr != nil && !errors.Is(rerr, fs.ErrNotExist) {
 				return nil, refuse("removing the stale lock %s: %v; nothing was changed.", path, unwrapPath(rerr))
 			}
@@ -478,7 +575,8 @@ func (o *SwapOptions) acquireLock(link string) (*heldLock, error) {
 		}
 		o.Sleep(50 * time.Millisecond)
 	}
-	h := &heldLock{path: path, stop: make(chan struct{}), done: make(chan struct{})}
+	h := &heldLock{path: path, stop: make(chan struct{}), done: make(chan struct{}), sig: make(chan os.Signal, 1)}
+	signal.Notify(h.sig, o.Signals...)
 	go func() {
 		defer close(h.done)
 		t := time.NewTicker(o.LockRefresh)
@@ -500,6 +598,7 @@ func (h *heldLock) release() {
 	close(h.stop)
 	<-h.done
 	os.Remove(h.path)
+	signal.Stop(h.sig)
 }
 
 // ---- the container checks (CS-GCFG-045..047) ----
@@ -557,8 +656,26 @@ func containersUsing(r execx.Runner, paths []string, envTarget string) ([]string
 		return nil, fmt.Errorf("docker ps: %v", err)
 	}
 	want := map[string]bool{}
+	var wantFI []os.FileInfo
 	for _, p := range paths {
 		want[filepath.Clean(p)] = true
+		if fi, err := os.Lstat(p); err == nil && fi.Mode().IsRegular() {
+			wantFI = append(wantFI, fi)
+		}
+	}
+	// sameAsWanted: the same file by another spelling (a HOME reached
+	// through a symlinked ancestor), by device and inode.
+	sameAsWanted := func(p string, among []os.FileInfo) bool {
+		fi, err := os.Stat(p)
+		if err != nil {
+			return false
+		}
+		for _, w := range among {
+			if os.SameFile(fi, w) {
+				return true
+			}
+		}
+		return false
 	}
 	var names, users []string
 	seen := map[string]bool{}
@@ -576,7 +693,7 @@ func containersUsing(r execx.Runner, paths []string, envTarget string) ([]string
 		}
 		names = append(names, name)
 		for _, m := range strings.Split(mounts, ",") {
-			if m = strings.TrimSpace(m); m != "" && want[filepath.Clean(m)] {
+			if m = strings.TrimSpace(m); m != "" && (want[filepath.Clean(m)] || (filepath.IsAbs(m) && sameAsWanted(m, wantFI))) {
 				add(name)
 			}
 		}
@@ -591,6 +708,10 @@ func containersUsing(r execx.Runner, paths []string, envTarget string) ([]string
 	if ierr != nil && strings.TrimSpace(iout) == "" {
 		return nil, fmt.Errorf("docker inspect: %v", ierr)
 	}
+	var targetFI []os.FileInfo
+	if fi, err := os.Lstat(envTarget); err == nil && fi.Mode().IsRegular() {
+		targetFI = append(targetFI, fi)
+	}
 	for _, line := range strings.Split(iout, "\n") {
 		name, envJSON, ok := strings.Cut(strings.TrimRight(line, "\r"), "\x1f")
 		if !ok {
@@ -601,7 +722,11 @@ func containersUsing(r execx.Runner, paths []string, envTarget string) ([]string
 			continue
 		}
 		for _, e := range envs {
-			if v, ok := strings.CutPrefix(e, EnvVar+"="); ok && v != "" && filepath.Clean(v) == filepath.Clean(envTarget) {
+			v, ok := strings.CutPrefix(e, EnvVar+"=")
+			if !ok || v == "" || !filepath.IsAbs(v) {
+				continue
+			}
+			if filepath.Clean(v) == filepath.Clean(envTarget) || sameAsWanted(v, targetFI) {
 				add(strings.TrimPrefix(strings.TrimSpace(name), "/"))
 			}
 		}
