@@ -291,7 +291,8 @@ Feature: Global config (~/.claude.json) — the linked layout (CS-GCFG)
       mtime), checks that the bytes parse, keeps a pre-migration copy
       StateRoot/global-config/<key>/pre-migrate-<ms> (CS-GCFG-053), writes
       $HOME/.claude/.claude.json with O_EXCL, mode 0600 and fsync, and
-      compares its bytes with the source
+      compares its bytes with the source (an identical existing target,
+      CS-GCFG-043, is set to mode 0600 instead)
     And it re-stats the source (CS-GCFG-051), then makes
       symlink(".claude/.claude.json", "$HOME/.claude.json.migrate-<ms>") and
       renames it onto $HOME/.claude.json: at no instant is the path missing
@@ -299,6 +300,8 @@ Feature: Global config (~/.claude.json) — the linked layout (CS-GCFG)
     And it prints what it did, the pre-migration copy, that every
       claude-sandbox launcher on the host must be updated (an older one
       follows the link and single-file-mounts its target), and the smoke test
+    And only now are the pre-migrate-* copies pruned to the newest 3, so
+      aborted attempts never evict an earlier migration's copy
     And it exits 0
 
   Scenario: CS-GCFG-042 migrate refuses every layout it cannot migrate, changing nothing
@@ -322,7 +325,8 @@ Feature: Global config (~/.claude.json) — the linked layout (CS-GCFG)
   Scenario: CS-GCFG-043 An existing ~/.claude/.claude.json is used only when it is identical
     Given $HOME/.claude.json and $HOME/.claude/.claude.json are both regular files
     When migrate runs
-    Then identical bytes: the existing file is kept and only the link is made
+    Then identical bytes: the existing file is kept (its mode set to 0600)
+      and only the link is made
     And different bytes: migrate refuses naming both files (the split brain of
       CS-GCFG-026), and neither file changes
 
@@ -339,12 +343,16 @@ Feature: Global config (~/.claude.json) — the linked layout (CS-GCFG)
       paused, created, exited and kept ones alike (docker start re-resolves a
       bind source), from any launcher version
     And each container's mount list is split into entries, and an entry
-      matches only when its cleaned source equals $HOME/.claude.json or
-      $HOME/.claude/.claude.json exactly (no substring match)
+      matches when its cleaned source equals $HOME/.claude.json or
+      $HOME/.claude/.claude.json exactly (no substring match), or names the
+      same file by another spelling (stat of the source and lstat of the
+      file give one device and inode: a HOME reached through a symlinked
+      ancestor)
     And when any matches it refuses, naming each container and "exit them
       (/exit, or docker stop / docker rm), or --force"
     And when the listing itself fails it refuses the same way (it cannot
-      verify), naming the error
+      verify), naming the error; --force skips it with one WARNING
+      (CS-GCFG-047)
     # tmux kill-server does not stop sandboxes: a container survives its
     # terminal.
 
@@ -353,16 +361,20 @@ Feature: Global config (~/.claude.json) — the linked layout (CS-GCFG)
     When revert runs
     Then it reads every listed container's environment in ONE "docker
       inspect" call and counts a container whose CLAUDE_SANDBOX_GLOBAL_CONFIG
-      names exactly $HOME/.claude/.claude.json (a linked launch mounts
-      nothing, so the mount check cannot see it); an empty value (the
-      override of a non-linked launch) or another home's target does not
-      count
+      names $HOME/.claude/.claude.json — lexically, or as the same file by
+      another spelling (a HOME reached through a symlinked ancestor) — (a
+      linked launch mounts nothing, so the mount check cannot see it); an
+      empty value (the override of a non-linked launch) or another home's
+      target does not count
     And the inspect's stdout is parsed even when it exits non-zero (a
       container removed since the listing; the CS-SESS-061 precedent)
     And any such container refuses the revert as CS-GCFG-045 does
 
   Scenario: CS-GCFG-047 --force overrides the container refusals with a warning naming them
     Given containers that CS-GCFG-045 or CS-GCFG-046 would refuse on
+    When the container listing cannot be read and --force is given
+    Then one WARNING says it cannot tell whether a container uses the file,
+      and the command proceeds
     When migrate --force runs
     Then one WARNING names them and says they keep the old inode of
       ~/.claude.json: their writes are lost and they never see the migrated
@@ -400,9 +412,18 @@ Feature: Global config (~/.claude.json) — the linked layout (CS-GCFG)
     Then it takes $HOME/.claude.json.lock the way Claude Code does: mkdir; an
       existing lock whose mtime is older than 10 s is stale and is removed
       and retried; the mtime is refreshed every 5 s while held
-    And a fresh lock held by another process past the wait (5 s) refuses,
-      changing nothing
-    And the lock is removed on every exit path after it was taken
+    And a fresh lock is waited for up to 12 s — longer than the 10 s stale
+      age, so a lock left by a claude that crashed a moment ago is reclaimed
+      rather than refused; a lock still fresh after that refuses, changing
+      nothing
+    And just before removing a stale lock it looks at it again, and keeps it
+      when its mtime was refreshed meanwhile (proper-lockfile has the same
+      remaining race between that look and the removal)
+    And the lock is removed on every exit path after it was taken: SIGINT,
+      SIGTERM and SIGHUP are caught while it is held, so a signal before the
+      rename aborts the swap cleanly (as CS-GCFG-051) and one after it lets
+      the command finish; only SIGKILL leaves the lock, which the next taker
+      reclaims as stale after 10 s
     # Host claude's locked savers then wait (they retry ELOCKED for 10-20 s)
     # rather than write mid-swap. Residual, by design: its unlocked writers
     # (synchronous exit-time saves, the Configuration-error Reset) take no
@@ -413,8 +434,10 @@ Feature: Global config (~/.claude.json) — the linked layout (CS-GCFG)
     Given migrate or revert holds the lock
     When the source's (inode, size, mtime) at the final re-stat differ from
       what was recorded under the lock
-    Then it aborts: the copy it made is removed, and the link, the source and
-      the target are as they were
+    Then it aborts: the target file it created (never an existing identical
+      one) and this run's pre-migration copy (identical to the source it
+      leaves in place) are removed, and the link, the source and the target
+      are as they were
     When the steps under the lock take longer than 5 s
     Then it aborts the same way before the rename
     # 5 s keeps the lock well inside Claude Code's ELOCKED retry budget, so a
@@ -429,8 +452,9 @@ Feature: Global config (~/.claude.json) — the linked layout (CS-GCFG)
       and inode — the shell's -ef), and again under the lock
     And under the lock it copies $HOME/.claude/.claude.json to
       $HOME/.claude.json.revert-<ms> (O_EXCL, 0600, fsync, bytes compared),
-      re-stats the target (CS-GCFG-051), and renames the copy onto
-      $HOME/.claude.json
+      re-stats the target (CS-GCFG-051), checks once more that
+      $HOME/.claude.json is still the link to the same file, and renames the
+      copy onto $HOME/.claude.json
     And it then moves $HOME/.claude/.claude.json to
       StateRoot/global-config/<key>/reverted-<ms> (copied, fsynced, compared,
       then unlinked), so nothing stale is left in the container-visible
@@ -439,8 +463,13 @@ Feature: Global config (~/.claude.json) — the linked layout (CS-GCFG)
     Given $HOME/.claude.json is already a regular file and
       $HOME/.claude/.claude.json does not exist
     Then revert prints that the layout is already legacy and exits 0
-    Given any other layout (split brain, a refused link, missing,
-      .config.json present)
+    Given $HOME/.claude.json and $HOME/.claude/.claude.json are both regular
+      files with identical bytes (a revert killed after its rename, before
+      it parked the target)
+    Then revert finishes it: after the container checks and under the lock
+      it parks $HOME/.claude/.claude.json as above and exits 0
+    Given any other layout (split brain with different bytes, a refused
+      link, missing, .config.json present)
     Then revert refuses naming the problem and changes nothing
 
   Scenario: CS-GCFG-053 The kept copies are owner-only and capped
