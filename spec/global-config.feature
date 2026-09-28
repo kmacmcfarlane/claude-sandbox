@@ -39,14 +39,19 @@ Feature: Global config (~/.claude.json) — the linked layout (CS-GCFG)
 
   Scenario: CS-GCFG-001 The check runs on host launches, around the session, and nowhere else
     Given a launch on the host (hostdirs.InSandbox is false)
-    Then the check runs once just before the session child starts — a new
-      container (interactive, --branch, ralph, headless, --detach), an attach
-      and a join alike
+    Then the check runs once before the session — for a new container
+      (interactive, --branch, ralph, headless, --detach) after the image work
+      and before the launch lock and "docker create", so it never widens the
+      window between the create and the start (CS-SESS-052); for an attach
+      and a join just before the session child starts
     And once more after the PRIMARY session ends — a new container's or an
-      attach's, not a join's — unless the session ended by a signal the
-      launcher forwarded (an SDK client expects a prompt exit, CS-LNCH-091),
-      the reserved container never started (CS-LNCH-096), or the launch was
-      --detach (nothing watches the session)
+      attach's, not a join's — while the session's signal handlers are still
+      installed, so a signal during it still exits with the child's status
+      (CS-LNCH-097); not when the session ended by a signal the launcher
+      forwarded or one arrived in the die wait, the reserved container never
+      started (CS-LNCH-096), the launch was --detach (nothing watches the
+      session) or headless (an SDK client ends it with a SIGTERM right after
+      the result; the next launch's check catches the damage)
     And it changes nothing about the container: no mount, env, label or
       fingerprint input
     And every message goes to stderr, so a headless launch's stdout stays
@@ -99,9 +104,18 @@ Feature: Global config (~/.claude.json) — the linked layout (CS-GCFG)
     Then a new snapshot is written and the newest 5 are kept
     And the age is read from the <ms> in the name (the file's mtime when the
       name has none)
+    And the look at the newest snapshot, the write and the prune happen under
+      a non-blocking flock on <key>/.snapshot.lock, the newest snapshot being
+      read again once it is held: of many launches at once (a restore burst)
+      one writes and the others skip the snapshot — never the check — so the
+      store never fills with same-second copies that push out older hours
+    And a snapshot another launch removed first is not an error, and a
+      .tmp-* file older than 1 h (a writer killed mid-write) is removed
 
   Scenario: CS-GCFG-007 What counts as damage
-    Given the newest snapshot is the baseline
+    Given the baseline is the newest snapshot that parses as a JSON object (a
+      newer one that does not is skipped, and never named as the restore
+      source)
     Then the file is damaged when any of these holds:
       | the file does not parse as a JSON object (after CS-GCFG-004)      |
       | the file is missing (and a baseline exists)                        |
@@ -115,8 +129,8 @@ Feature: Global config (~/.claude.json) — the linked layout (CS-GCFG)
   Scenario: CS-GCFG-008 Damage gets one warning, and nothing is written
     Given the file is damaged
     Then one WARNING names the file and each finding as key names and counts
-      only (projects "47 -> 5"), never a value
-    And it names the newest snapshot and when it was taken
+      only ("projects fell from 47 to 5"), never a value
+    And it names the baseline snapshot and when it was taken
     And it gives the restore command for the layout (CS-GCFG-009..011) and
       "claude-sandbox global-config accept" for a change that was intended
       (CS-GCFG-012)
@@ -127,19 +141,31 @@ Feature: Global config (~/.claude.json) — the linked layout (CS-GCFG)
 
   Scenario: CS-GCFG-009 Restore command, linked layout: an atomic rename in the mounted dir
     Given the default layout is linked (CS-GCFG-016), or a link that names
-      $HOME/.claude/.claude.json directly is dangling
+      $HOME/.claude/.claude.json directly is dangling (its target does not
+      exist: Lstat ENOENT)
     Then the command is
       "cp <snapshot> ~/.claude/.claude.json.restore && mv -f ~/.claude/.claude.json.restore ~/.claude/.claude.json"
       (with the absolute paths, shell-quoted): every session sees the whole
       file at once, and the link is left as it is
 
   Scenario: CS-GCFG-010 Restore command, legacy layout: cp in place, with every session exited
-    Given $HOME/.claude.json is a regular file or missing (CLAUDE_CONFIG_DIR unset)
+    Given $HOME/.claude.json is a regular file (CLAUDE_CONFIG_DIR unset)
     Then the command is "cp <snapshot> ~/.claude.json" (absolute, shell-quoted)
     And the warning says to exit every Claude session first — host and
       sandboxes; tmux kill-server does not stop a sandbox — because an
       in-place write is itself a torn-read trigger, and that cp keeps the
       inode every running sandbox has mounted (a rename would orphan them)
+    Given $HOME/.claude.json is missing and $HOME/.claude/.claude.json is a
+      regular file (the link of a migrated layout was deleted)
+    Then no cp is given — it would make a split brain from an older snapshot
+      while the live file sits in ~/.claude/ — the warning says the link is
+      gone, and the command is "ln -s .claude/.claude.json ~/.claude.json"
+      (the home path absolute, shell-quoted)
+    Given $HOME/.claude.json is missing and $HOME/.claude/.claude.json is not
+    Then the command is the cp above, and the warning says to exit every
+      Claude session first because a running legacy sandbox still holds the
+      deleted file and would never see the restored one — not the inode
+      reason, since there is no inode left to keep
 
   Scenario: CS-GCFG-011 Restore command, other layouts
     Given the file is $CLAUDE_CONFIG_DIR/.claude.json or <config dir>/.config.json,
@@ -148,10 +174,14 @@ Feature: Global config (~/.claude.json) — the linked layout (CS-GCFG)
       that directory (inside the config-dir mount, so the rename is atomic)
     Given that file is a symlink
     Then the legacy cp form of CS-GCFG-010 is given, with its preface
-    Given the default layout is a refused link that does not name
-      $HOME/.claude/.claude.json (CS-GCFG-019..024)
-    Then no command is given: the warning says to fix the layout first (the
-      warning above names the problem) and then restore from the snapshot
+    Given the default layout is any other refused state (CS-GCFG-019..024):
+      a link that does not name $HOME/.claude/.claude.json, or one that does
+      while its target exists but is not a regular file (a directory, where
+      mv -f would move the file into it; a symlink, which it would replace),
+      or a symlinked config dir
+    Then no command is given: the warning names the problem itself (an attach
+      or a join prints no layout warning of its own) and says to fix the
+      layout first and then restore from the snapshot
 
   Scenario: CS-GCFG-012 accept is the way to say a change was intended
     Given the damage warning after a deliberate change (a /logout, an API-key
@@ -162,9 +192,10 @@ Feature: Global config (~/.claude.json) — the linked layout (CS-GCFG)
     And nothing re-baselines by itself: an automatic accept after N warnings
       would also accept a real reset the operator ignored N times
 
-  Scenario: CS-GCFG-013 With no baseline, only an unparseable file is reported
+  Scenario: CS-GCFG-013 With no baseline, only an unparseable or unreadable file is reported
     Given the store holds no snapshot of the file
-    When the file does not parse (after CS-GCFG-004)
+    When the file does not parse (after CS-GCFG-004), or cannot be read for
+      any reason but its absence (EACCES, EISDIR — also after the retries)
     Then one WARNING says so, that there is no snapshot to restore from, and
       that Claude Code keeps copies in its backups/ directory beside the
       config; nothing is written
@@ -184,6 +215,7 @@ Feature: Global config (~/.claude.json) — the linked layout (CS-GCFG)
       directory is a symlink or another uid's, CS-GCFG-053) or a snapshot
       cannot be written
     Then one WARNING names the error, and the launch goes on
+    And contention for the snapshot lock (CS-GCFG-006) prints nothing
     And under go test the check panics before reading anything when $HOME
       is the invoking user's real home or the state root is the real one
 
