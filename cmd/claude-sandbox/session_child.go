@@ -52,6 +52,11 @@ type sessionEnd struct {
 	// neverStarted is true when a reserved container is still "created"
 	// after its "docker start" returned (CS-LNCH-096).
 	neverStarted bool
+	// interrupted is true when a signal ended the session on purpose — one
+	// the launcher forwarded (CS-LNCH-091) or one in the die wait
+	// (CS-LNCH-097): the caller exits promptly, without the health re-check
+	// (CS-GCFG-001).
+	interrupted bool
 }
 
 // isTerminal is Env.IsTerminal with the real check as its default.
@@ -81,6 +86,7 @@ func runSession(env *Env, c execx.Cmd, container string, o sessionOpts) (session
 		// CS-LNCH-091: whoever sent the signal ended the session on
 		// purpose, and an SDK client expects a prompt exit: no die wait, no
 		// report. The shadow directory is left to a later launch's sweep.
+		end.interrupted = true
 		return end, nil
 	}
 
@@ -108,6 +114,7 @@ func runSession(env *Env, c execx.Cmd, container string, o sessionOpts) (session
 	if stopped {
 		// CS-LNCH-097: a signal after the child exited asks for the exit
 		// now — with the child's status, silently.
+		end.interrupted = true
 		return end, nil
 	}
 	if end.code == globalcfg.ExitLink {

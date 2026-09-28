@@ -238,6 +238,8 @@ func pidClassFrom(found []sessions.Session) string {
 // event was seen (CS-LNCH-094); after a detach or a signal-initiated exit it
 // stays, for a later launch's sweep.
 func startReserved(env *Env, plan *launch.Plan, headless bool) error {
+	// CS-GCFG-001: the health check before the session, and again after it.
+	pre := checkGlobalConfig(env, nil)
 	end, err := runSession(env, plan.StartCmd(), plan.ContainerName, sessionOpts{
 		kind:     reservedSession,
 		fallback: oomreport.Limit{Value: plan.MemoryLimit, Source: plan.MemoryLimitSource},
@@ -251,6 +253,9 @@ func startReserved(env *Env, plan *launch.Plan, headless bool) error {
 	}
 	if end.gone && plan.ShadowDir != "" {
 		os.RemoveAll(plan.ShadowDir)
+	}
+	if !end.neverStarted && !end.interrupted {
+		checkGlobalConfig(env, pre)
 	}
 	return sessionExit(end.code)
 }
@@ -276,6 +281,8 @@ var detachedSettle = oomreport.DieWait
 // one is (CS-LNCH-116): the reservation, then — only once it is gone — the
 // directory.
 func startDetached(env *Env, plan *launch.Plan, projectDir, home string) error {
+	// CS-GCFG-001: before the start only — nothing watches a detached session.
+	checkGlobalConfig(env, nil)
 	// Subscribed before the start, from a moment before it, so a die at once
 	// cannot be missed; matched by exact name (CS-LNCH-087/095).
 	w := oomreport.Start(env.Runner, plan.ContainerName, env.now())

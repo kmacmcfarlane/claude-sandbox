@@ -3,8 +3,8 @@ package globalcfg
 // The copies the host commands keep (CS-GCFG-053): StateRoot/global-config/
 // <key>/, owner-only, never mounted into a container. <key> is derived from
 // the LEXICAL global-file path Claude Code resolves, so it survives a
-// migrate and a host "mv" over the link. The launcher's health check (a
-// separate feature) reads and extends the same store: accept's snapshot-*
+// migrate and a host "mv" over the link. The launcher's health check
+// (CS-GCFG-001..015, health.go) reads and extends the same store: accept's snapshot-*
 // files are its baselines.
 
 import (

@@ -532,12 +532,17 @@ func attachTo(env *Env, s sessions.Session, configuredKeys string) error {
 	// Docker cannot report whether another client is already attached, so this
 	// cannot be prevented — only mentioned.
 	fmt.Fprintln(env.Out, "If someone else is already attached, you will share the terminal.")
+	// CS-GCFG-001: the health check before the session, and again after it.
+	pre := checkGlobalConfig(env, nil)
 	end, err := runSession(env, execx.Cmd{
 		Name: "docker",
 		Args: []string{"attach", "--detach-keys=" + detachKeys, s.Name},
 	}, s.Name, sessionOpts{kind: primarySession})
 	if err != nil {
 		return err
+	}
+	if !end.interrupted {
+		checkGlobalConfig(env, pre)
 	}
 	return sessionExit(end.code)
 }
@@ -584,6 +589,8 @@ func joinInto(env *Env, s sessions.Session, projectDir, hostUser, model, configu
 		args = append(args, "--model", model)
 	}
 	args = append(args, f.Passthrough...)
+	// CS-GCFG-001: before the session only — a join is not the primary.
+	checkGlobalConfig(env, nil)
 	// CS-SESS-060: judged by the exec's own status, since the container
 	// normally outlives it.
 	end, err := runSession(env, execx.Cmd{Name: "docker", Args: args}, s.Name, sessionOpts{kind: joinedSession})

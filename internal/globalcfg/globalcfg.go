@@ -17,8 +17,9 @@
 // Classify is the host-side decision (the launcher); EnsureLink is the
 // in-container half (the pidslot helper). Migrate, Revert and Accept are the
 // host commands (claude-sandbox global-config ..., CS-GCFG-041..055), and
-// Store the owner-only copies they keep under StateRoot; the launcher's
-// health check builds on the same store.
+// Store the owner-only copies they keep under StateRoot. CheckHealth is the
+// launcher's warn-only health check (CS-GCFG-001..015), which keeps its
+// last-good snapshots in the same store.
 package globalcfg
 
 import (
