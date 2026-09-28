@@ -40,6 +40,11 @@ type sessionOpts struct {
 	// headless suppresses the terminal reset: its stdio is an SDK client's
 	// pipe (CS-LNCH-092).
 	headless bool
+	// after runs once the session ended and its reports are printed, while
+	// the signal handlers are still installed, so a signal during it still
+	// exits with the child's status (CS-GCFG-001, CS-LNCH-097). Not run
+	// after a forwarded or late signal, or a start that never ran.
+	after func()
 }
 
 // sessionEnd is how a session child ended.
@@ -129,6 +134,11 @@ func runSession(env *Env, c execx.Cmd, container string, o sessionOpts) (session
 		fmt.Fprint(env.Err, oomreport.KilledReport(out.OOMKills, lim))
 	case oomreport.Survived:
 		fmt.Fprint(env.Err, oomreport.SurvivedReport(out.OOMKills, lim))
+	}
+	if o.after != nil {
+		// Still under the session's handlers (deferred res.Done): a signal
+		// now lands on Late and is dropped, and the child's status stands.
+		o.after()
 	}
 	return end, nil
 }

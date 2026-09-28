@@ -71,6 +71,11 @@ type Env struct {
 	// absolute, else $HOME/.local/state/claude-sandbox. Tests point it at a
 	// scratch directory; stateDir() panics under go test when it is unset.
 	StateDir string
+	// SkipGlobalConfigCheck turns the global-config health check off
+	// (CS-GCFG-001). Test-only: a test of a real-home guard further down the
+	// launch path sets it, since the check's own guard (CS-GCFG-015) would
+	// panic first. Never set outside tests.
+	SkipGlobalConfigCheck bool
 	// Executable is the binary the detached checker runs as; nil means
 	// os.Executable. The checker is started through Runner.Start with
 	// Cmd.Detach, so under execx.Fake nothing is spawned.
@@ -1146,6 +1151,10 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 		Detached: f.Detach,
 		Out:      env.Out, Err: env.Err,
 	}
+	// CS-GCFG-001: the global-config health check, after the image work and
+	// before the lock and the create, so it never widens the window between
+	// the create and the start (CS-SESS-052).
+	pre := checkGlobalConfig(env, nil)
 	// Reserve under the host lock: re-validate the noun, pick the pid class,
 	// docker create (CS-SESS-048). The lock is released before the start.
 	plan, err := reserveContainer(env, in, wt, f.Ralph, shadowRoot)
@@ -1155,7 +1164,7 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 	if f.Detach {
 		return startDetached(env, plan, projectDir, home)
 	}
-	return startReserved(env, plan, headless)
+	return startReserved(env, plan, headless, pre)
 }
 
 // cacheBudgetCheckCmd is the hidden subcommand the detached checker runs as

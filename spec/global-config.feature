@@ -16,13 +16,208 @@ Feature: Global config (~/.claude.json) — the linked layout (CS-GCFG)
   <target>.tmp.* beside the target and renames it there, which is atomic, so
   no reader ever sees a torn or empty file. The lock stays per container
   (lost updates within a few ms remain possible; upstream).
-  CS-GCFG-016..040 are the launcher and in-container half; they work with a
-  layout made by hand. CS-GCFG-041..055 are the host commands that switch the
-  layout with checks (claude-sandbox global-config migrate|revert) and record
-  a baseline (accept). The launcher's health check is a separate feature.
+  CS-GCFG-001..015 are the launcher's health check: it reads the global file
+  on every host launch, keeps last-good snapshots, and warns — never
+  restores — when the file looks damaged. CS-GCFG-016..040 are the launcher
+  and in-container half of the linked layout; they work with a layout made
+  by hand. CS-GCFG-041..055 are the host commands that switch the layout
+  with checks (claude-sandbox global-config migrate|revert) and record a
+  baseline (accept).
   Background: the claude-json-concurrent-writes investigation (00..03).
   Go home: internal/globalcfg, internal/launch, internal/pidslot,
   cmd/claude-sandbox.
+
+  # ==== the launcher's health check (warn only) ====
+  # Claude Code keeps 5 backups of the file, at most one a minute, so a
+  # defaults write is followed within minutes by 5 backups of the damage.
+  # The launcher keeps its own last-good snapshots, in the store the host
+  # commands use (CS-GCFG-053): StateRoot/global-config/<key>/snapshot-<ms>,
+  # <key> derived from the LEXICAL global-file path. It detects; it never
+  # rewrites the file (operator decision 56: warn and print the
+  # layout-correct restore command, never restore automatically; accept
+  # re-baselines).
+
+  Scenario: CS-GCFG-001 The check runs on host launches, around the session, and nowhere else
+    Given a launch on the host (hostdirs.InSandbox is false)
+    Then the check runs once before the session — for a new container
+      (interactive, --branch, ralph, headless, --detach) after the image work
+      and before the launch lock and "docker create", so it never widens the
+      window between the create and the start (CS-SESS-052); for an attach
+      and a join just before the session child starts
+    And once more after the PRIMARY session ends — a new container's or an
+      attach's, not a join's — while the session's signal handlers are still
+      installed, so a signal during it still exits with the child's status
+      (CS-LNCH-097); not when the session ended by a signal the launcher
+      forwarded or one arrived in the die wait, the reserved container never
+      started (CS-LNCH-096), the launch was --detach (nothing watches the
+      session) or headless (an SDK client ends it with a SIGTERM right after
+      the result; the next launch's check catches the damage)
+    And it changes nothing about the container: no mount, env, label or
+      fingerprint input
+    And every message goes to stderr, so a headless launch's stdout stays
+      claude's alone (CS-LNCH-060)
+    Given a launcher inside a sandbox
+    Then the check does not run: $HOME and StateRoot there are the
+      container's own
+
+  Scenario: CS-GCFG-002 The file is the one Claude Code resolves; the check stands aside when it cannot tell
+    When the check runs
+    Then it resolves the global file as "global-config accept" does
+      (CS-GCFG-054): <config dir>/.config.json when it exists, else
+      $CLAUDE_CONFIG_DIR/.claude.json when CLAUDE_CONFIG_DIR is set, else
+      $HOME/.claude.json — the path lexically, the bytes read through a link
+    Given CLAUDE_CODE_CUSTOM_OAUTH_URL is set (Claude Code uses another file),
+      or CLAUDE_CONFIG_DIR is relative or holds a "~" (CS-GCFG-028 already
+      warns), or HOME is not an absolute path
+    Then the check does nothing and prints nothing
+
+  Scenario: CS-GCFG-003 Snapshots are kept per file, by lexical path
+    Given launches alternate between the default layout and a
+      CLAUDE_CONFIG_DIR tree
+    Then each global file is compared only with its own snapshots, and none
+      is reported as damaged for being different from the other
+    And the key of $HOME/.claude.json is the same before and after a migrate
+      and after a host "mv" over the link, so the baseline survives both
+
+  Scenario: CS-GCFG-004 A read that does not parse is retried before it counts
+    Given the file does not parse as a JSON object (a 0-byte or torn read of a
+      legacy file being rewritten in place)
+    When the check reads it
+    Then it reads again 150 ms and 350 ms after the first read; the first
+      read that parses is the one judged
+    And only a third failure counts as "does not parse"
+    And a file that parses at once is read exactly once: the healthy path
+      costs one read of one file
+
+  Scenario: CS-GCFG-005 The first healthy read becomes the baseline
+    Given the file parses and the store holds no snapshot of it
+    When the check runs
+    Then it writes snapshot-<ms> (0600, the CS-GCFG-053 writer) silently: that
+      is the baseline later launches compare with
+
+  Scenario: CS-GCFG-006 A healthy file is snapshotted at most once an hour, and 5 are kept
+    Given the file is healthy against the newest snapshot
+    When that snapshot is less than 1 h old
+    Then nothing is written — a content change alone never snapshots
+      (numStartups changes on every launch)
+    When it is 1 h old or older
+    Then a new snapshot is written and the newest 5 are kept
+    And the age is read from the <ms> in the name (the file's mtime when the
+      name has none)
+    And the look at the newest snapshot, the write and the prune happen under
+      a non-blocking flock on <key>/.snapshot.lock, the newest snapshot being
+      read again once it is held: of many launches at once (a restore burst)
+      one writes and the others skip the snapshot — never the check — so the
+      store never fills with same-second copies that push out older hours
+    And a snapshot another launch removed first is not an error, and a
+      .tmp-* file older than 1 h (a writer killed mid-write) is removed
+
+  Scenario: CS-GCFG-007 What counts as damage
+    Given the baseline is the newest snapshot that parses as a JSON object (a
+      newer one that does not is skipped, and never named as the restore
+      source)
+    Then the file is damaged when any of these holds:
+      | the file does not parse as a JSON object (after CS-GCFG-004)      |
+      | the file is missing (and a baseline exists)                        |
+      | the baseline has oauthAccount and the file has not                 |
+      | the baseline has hasCompletedOnboarding true and the file has not  |
+      | projects fell below half of the baseline's count                   |
+      | the baseline has firstStartTime and the file's differs or is gone  |
+    And anything else — new keys, a changed numStartups, more projects, a
+      few projects fewer — is healthy
+
+  Scenario: CS-GCFG-008 Damage gets one warning, and nothing is written
+    Given the file is damaged
+    Then one WARNING names the file and each finding as key names and counts
+      only ("projects fell from 47 to 5"), never a value
+    And it names the baseline snapshot and when it was taken
+    And it gives the restore command for the layout (CS-GCFG-009..011) and
+      "claude-sandbox global-config accept" for a change that was intended
+      (CS-GCFG-012)
+    And the global file is never written, and no snapshot is written while
+      it is damaged, so the baseline stays the last good copy and the
+      warning repeats on every launch until the file is restored or accepted
+    And the launch goes on
+
+  Scenario: CS-GCFG-009 Restore command, linked layout: an atomic rename in the mounted dir
+    Given the default layout is linked (CS-GCFG-016), or a link that names
+      $HOME/.claude/.claude.json directly is dangling (its target does not
+      exist: Lstat ENOENT)
+    Then the command is
+      "cp <snapshot> ~/.claude/.claude.json.restore && mv -f ~/.claude/.claude.json.restore ~/.claude/.claude.json"
+      (with the absolute paths, shell-quoted): every session sees the whole
+      file at once, and the link is left as it is
+
+  Scenario: CS-GCFG-010 Restore command, legacy layout: cp in place, with every session exited
+    Given $HOME/.claude.json is a regular file (CLAUDE_CONFIG_DIR unset)
+    Then the command is "cp <snapshot> ~/.claude.json" (absolute, shell-quoted)
+    And the warning says to exit every Claude session first — host and
+      sandboxes; tmux kill-server does not stop a sandbox — because an
+      in-place write is itself a torn-read trigger, and that cp keeps the
+      inode every running sandbox has mounted (a rename would orphan them)
+    Given $HOME/.claude.json is missing and $HOME/.claude/.claude.json is a
+      regular file (the link of a migrated layout was deleted)
+    Then no cp is given — it would make a split brain from an older snapshot
+      while the live file sits in ~/.claude/ — the warning says the link is
+      gone, and the command is "ln -s .claude/.claude.json ~/.claude.json"
+      (the home path absolute, shell-quoted)
+    Given $HOME/.claude.json is missing and $HOME/.claude/.claude.json is not
+    Then the command is the cp above, and the warning says to exit every
+      Claude session first because a running legacy sandbox still holds the
+      deleted file and would never see the restored one — not the inode
+      reason, since there is no inode left to keep
+
+  Scenario: CS-GCFG-011 Restore command, other layouts
+    Given the file is $CLAUDE_CONFIG_DIR/.claude.json or <config dir>/.config.json,
+      and it is not a symlink
+    Then the command is a "<file>.restore" copy and "mv -f" onto the file, in
+      that directory (inside the config-dir mount, so the rename is atomic)
+    Given that file is a symlink
+    Then the legacy cp form of CS-GCFG-010 is given, with its preface
+    Given the default layout is any other refused state (CS-GCFG-019..024):
+      a link that does not name $HOME/.claude/.claude.json, or one that does
+      while its target exists but is not a regular file (a directory, where
+      mv -f would move the file into it; a symlink, which it would replace),
+      or a symlinked config dir
+    Then no command is given: the warning names the problem itself (an attach
+      or a join prints no layout warning of its own) and says to fix the
+      layout first and then restore from the snapshot
+
+  Scenario: CS-GCFG-012 accept is the way to say a change was intended
+    Given the damage warning after a deliberate change (a /logout, an API-key
+      switch, a project purge)
+    When the operator runs "claude-sandbox global-config accept" (CS-GCFG-054)
+    Then its snapshot is the newest, so the next launch compares with it and
+      is healthy
+    And nothing re-baselines by itself: an automatic accept after N warnings
+      would also accept a real reset the operator ignored N times
+
+  Scenario: CS-GCFG-013 With no baseline, only an unparseable or unreadable file is reported
+    Given the store holds no snapshot of the file
+    When the file does not parse (after CS-GCFG-004), or cannot be read for
+      any reason but its absence (EACCES, EISDIR — also after the retries)
+    Then one WARNING says so, that there is no snapshot to restore from, and
+      that Claude Code keeps copies in its backups/ directory beside the
+      config; nothing is written
+    When the file is missing
+    Then nothing is printed (a first run)
+
+  Scenario: CS-GCFG-014 Damage during a session is reported when it ends, once
+    Given the check before the session found the file healthy
+    When the file is damaged while the session runs
+    Then the check after the session prints the CS-GCFG-008 warning
+    Given the check before the session already warned
+    When the check after it finds the same findings
+    Then it does not repeat them; different findings are printed
+
+  Scenario: CS-GCFG-015 The check never fails a launch, and never touches real files in tests
+    Given the store cannot be opened (StateRoot, global-config or the key
+      directory is a symlink or another uid's, CS-GCFG-053) or a snapshot
+      cannot be written
+    Then one WARNING names the error, and the launch goes on
+    And contention for the snapshot lock (CS-GCFG-006) prints nothing
+    And under go test the check panics before reading anything when $HOME
+      is the invoking user's real home or the state root is the real one
 
   # ---- the layout decision, on the host (default layout only) ----
 
@@ -498,7 +693,7 @@ Feature: Global config (~/.claude.json) — the linked layout (CS-GCFG)
       only, compared with the previous snapshot: top-level keys added and
       removed, the project count old -> new, oauthAccount present or absent,
       hasCompletedOnboarding true or false — never a value
-    # The launcher's health check (a separate feature) compares launches
+    # The launcher's health check (CS-GCFG-001..015) compares launches
     # against the newest snapshot; accept is how the operator says a change
     # (a /logout, an API-key switch, a project purge) was intended.
 

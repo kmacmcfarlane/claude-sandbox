@@ -3,8 +3,8 @@ package globalcfg
 // The copies the host commands keep (CS-GCFG-053): StateRoot/global-config/
 // <key>/, owner-only, never mounted into a container. <key> is derived from
 // the LEXICAL global-file path Claude Code resolves, so it survives a
-// migrate and a host "mv" over the link. The launcher's health check (a
-// separate feature) reads and extends the same store: accept's snapshot-*
+// migrate and a host "mv" over the link. The launcher's health check
+// (CS-GCFG-001..015, health.go) reads and extends the same store: accept's snapshot-*
 // files are its baselines.
 
 import (
@@ -13,12 +13,14 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/user"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -70,7 +72,50 @@ func OpenStore(stateRoot, globalFile string, ops *hostdirs.Ops) (*Store, error) 
 			return nil, fmt.Errorf("%s: %v", d, err)
 		}
 	}
-	return &Store{Dir: dir}, nil
+	st := &Store{Dir: dir}
+	st.removeStaleTemps(time.Now())
+	return st, nil
+}
+
+// staleTempAge is how old a .tmp-* file must be before OpenStore removes it
+// as the leftover of a writer killed mid-write (CS-GCFG-006).
+const staleTempAge = time.Hour
+
+// removeStaleTemps removes .tmp-* files older than staleTempAge. Best effort.
+func (s *Store) removeStaleTemps(now time.Time) {
+	ents, err := os.ReadDir(s.Dir)
+	if err != nil {
+		return
+	}
+	for _, e := range ents {
+		if !strings.HasPrefix(e.Name(), ".tmp-") || !e.Type().IsRegular() {
+			continue
+		}
+		if fi, err := e.Info(); err == nil && now.Sub(fi.ModTime()) >= staleTempAge {
+			os.Remove(filepath.Join(s.Dir, e.Name()))
+		}
+	}
+}
+
+// SnapshotLockName is the store's snapshot lock file (CS-GCFG-006).
+const SnapshotLockName = ".snapshot.lock"
+
+// TryLock takes a non-blocking exclusive flock on the store's snapshot lock.
+// ok is false when another process holds it, or the lock cannot be taken;
+// the caller then skips the snapshot. unlock releases it.
+func (s *Store) TryLock() (unlock func(), ok bool) {
+	f, err := os.OpenFile(filepath.Join(s.Dir, SnapshotLockName), os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return func() {}, false
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		f.Close()
+		return func() {}, false
+	}
+	return func() {
+		syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		f.Close()
+	}, true
 }
 
 // Write keeps data as <prefix><ms>: a 0600 temp file in the store's
@@ -148,7 +193,8 @@ func (s *Store) Prune(prefix string, keep int) error {
 	var errs []error
 	for i, p := range s.List(prefix) {
 		if i >= keep {
-			if err := os.Remove(p); err != nil {
+			// Another launch may have pruned it first (CS-GCFG-006).
+			if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
 				errs = append(errs, err)
 			}
 		}

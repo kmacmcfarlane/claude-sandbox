@@ -1,10 +1,10 @@
 package globalcfg
 
 // "claude-sandbox global-config accept" (CS-GCFG-054): record the current
-// global config as the baseline snapshot. The launcher's health check (a
-// separate feature) compares launches against the newest snapshot-* in the
-// same store; this is the part of it the host commands need, and the seam it
-// builds on: ResolveGlobalFile, OpenStore, Summarize.
+// global config as the baseline snapshot. The launcher's health check
+// (CS-GCFG-001..015, health.go) compares launches against the newest
+// snapshot-* in the same store, through the same ResolveGlobalFile,
+// OpenStore and Summarize.
 
 import (
 	"encoding/json"

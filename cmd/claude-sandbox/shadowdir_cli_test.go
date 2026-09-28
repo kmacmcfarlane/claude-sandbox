@@ -391,6 +391,9 @@ var _ = Describe("host sweep of nested shadow directories (CS-LNCH-166)", func()
 			}
 			return f.envmap[k]
 		}
+		// The global-config health check runs earlier and has its own
+		// real-home guard (CS-GCFG-015); this test is about the sweep's.
+		f.env.SkipGlobalConfigCheck = true
 		Expect(func() { f.run() }).To(PanicWith(ContainSubstring("would sweep the real")))
 	})
 })
