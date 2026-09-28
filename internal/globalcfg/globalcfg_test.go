@@ -152,7 +152,7 @@ var _ = Describe("Classify (CS-GCFG-016..029)", func() {
 		Expect(l.SplitBrain).To(BeFalse())
 	})
 
-	It("CS-GCFG-026: a regular file beside ~/.claude/.claude.json is split brain, named with both mtimes", func() {
+	It("CS-GCFG-026, CS-GCFG-055: a regular file beside ~/.claude/.claude.json is split brain, named with both mtimes", func() {
 		write(link, "{}")
 		write(target, "{}")
 		Expect(os.Chtimes(link, time.Now(), time.Date(2026, 9, 26, 17, 28, 8, 0, time.UTC))).To(Succeed())
@@ -166,8 +166,10 @@ var _ = Describe("Classify (CS-GCFG-016..029)", func() {
 		Expect(w).To(ContainSubstring("Claude Code uses " + link))
 		Expect(w).To(ContainSubstring("every Claude session exited"))
 		Expect(w).To(ContainSubstring(globalcfg.LinkCmd))
-		Expect(w).To(ContainSubstring("adds checked commands"))
-		Expect(w).NotTo(ContainSubstring("global-config migrate"), "no command this release does not ship")
+		// CS-GCFG-055: the command first, the manual step as a fallback line.
+		Expect(w).To(ContainSubstring("restore the link with: claude-sandbox global-config migrate\n"))
+		Expect(w).To(ContainSubstring("\n  Fallback, for a launcher without that command"))
+		Expect(strings.Index(w, "global-config migrate")).To(BeNumerically("<", strings.Index(w, globalcfg.LinkCmd)))
 	})
 
 	It("CS-GCFG-027: CLAUDE_CONFIG_DIR set is out of scope, whatever the files", func() {
@@ -399,7 +401,7 @@ var _ = Describe("EnsureLink (CS-GCFG-033..037)", func() {
 })
 
 var _ = Describe("ExitMessage (CS-GCFG-038/039)", func() {
-	It("CS-GCFG-038, CS-GCFG-039: says likely, points at the prefix, names both fixes and docker rm", func() {
+	It("CS-GCFG-038, CS-GCFG-039, CS-GCFG-055: says likely, points at the prefix, names both fixes and docker rm", func() {
 		m := globalcfg.ExitMessage("claude-sandbox-x-otter")
 		Expect(m).To(HavePrefix("The session exited with 78, likely the global-config link check"))
 		Expect(m).To(ContainSubstring(`"claude-sandbox: global config link:"`))
@@ -409,7 +411,11 @@ var _ = Describe("ExitMessage (CS-GCFG-038/039)", func() {
 		Expect(m).To(ContainSubstring("test -f ~/.claude.json && ! test -L ~/.claude.json && ! test -e ~/.claude/.claude.json && ! test -L ~/.claude/.claude.json && mv ~/.claude.json ~/.claude/.claude.json && ln -s .claude/.claude.json ~/.claude.json"))
 		Expect(m).To(ContainSubstring("test -L ~/.claude.json && test -f ~/.claude/.claude.json && ! test -L ~/.claude/.claude.json && rm ~/.claude.json && mv ~/.claude/.claude.json ~/.claude.json"))
 		Expect(m).NotTo(ContainSubstring("mv -n"))
-		Expect(m).NotTo(ContainSubstring("global-config migrate"))
+		// CS-GCFG-055: the checked commands come first, the steps are the fallback.
+		Expect(m).To(ContainSubstring("\n    claude-sandbox global-config migrate\n"))
+		Expect(m).To(ContainSubstring("\n    claude-sandbox global-config revert\n"))
+		Expect(m).To(ContainSubstring("Fallback, for a launcher without those commands"))
+		Expect(strings.Index(m, "global-config revert")).To(BeNumerically("<", strings.Index(m, "Fallback")))
 		Expect(m).To(ContainSubstring("docker rm claude-sandbox-x-otter"))
 	})
 

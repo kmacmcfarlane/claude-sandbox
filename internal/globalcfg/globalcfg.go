@@ -15,9 +15,10 @@
 // there — atomically.
 //
 // Classify is the host-side decision (the launcher); EnsureLink is the
-// in-container half (the pidslot helper). The health check and the
-// migrate/revert commands build on this package (Classify's Link, Target and
-// Resolved are the paths they need).
+// in-container half (the pidslot helper). Migrate, Revert and Accept are the
+// host commands (claude-sandbox global-config ..., CS-GCFG-041..055), and
+// Store the owner-only copies they keep under StateRoot; the launcher's
+// health check builds on the same store.
 package globalcfg
 
 import (
@@ -227,9 +228,17 @@ func (l Layout) RefusedWarning() string {
 		what, l.Problem, l.Link, l.Target)
 }
 
+// MigrateCmd and RevertCmd are the checked commands (CS-GCFG-041..052) the
+// split-brain warning and the exit-78 message name first (CS-GCFG-055).
+const (
+	MigrateCmd = "claude-sandbox global-config migrate"
+	RevertCmd  = "claude-sandbox global-config revert"
+)
+
 // LinkCmd and UnlinkCmd are the manual steps the split-brain warning and the
-// exit-78 message give (CS-GCFG-026/038), to run with every Claude session
-// exited. A later feature adds checked commands (locking, verification).
+// exit-78 message keep as a fallback line (CS-GCFG-026/038/055), for a host
+// whose launcher predates the commands, to run with every Claude session
+// exited.
 const (
 	//
 	// Both are GUARDED: they do nothing unless the layout is the one they
@@ -266,8 +275,9 @@ func (l Layout) SplitBrainWarning() string {
 		}
 		return "unknown"
 	}
-	return fmt.Sprintf("WARNING: two global config files: %s (a regular file, modified %s) and %s (modified %s). With CLAUDE_CONFIG_DIR unset Claude Code uses %s; the other is stale — typically a tool replaced the link by rename. With every Claude session exited (host and sandboxes), %s; merge what you need into %s by hand, remove the stale %s, and then either keep the legacy layout or restore the link (the step does nothing unless the layout is as expected): %s. A later claude-sandbox release adds checked commands for this.\n",
-		l.Link, mtime(l.Link), l.Target, mtime(l.Target), l.Link, keepCopy, l.Link, l.Target, LinkCmd)
+	return fmt.Sprintf("WARNING: two global config files: %s (a regular file, modified %s) and %s (modified %s). With CLAUDE_CONFIG_DIR unset Claude Code uses %s; the other is stale — typically a tool replaced the link by rename. With every Claude session exited (host and sandboxes), %s; merge what you need into %s by hand, remove the stale %s, and then either keep the legacy layout or restore the link with: %s\n"+
+		"  Fallback, for a launcher without that command (the step does nothing unless the layout is as expected): %s\n",
+		l.Link, mtime(l.Link), l.Target, mtime(l.Target), l.Link, keepCopy, l.Link, l.Target, MigrateCmd, LinkCmd)
 }
 
 // ExitMessage is the launcher's host-side explanation of a session that
@@ -278,15 +288,18 @@ func ExitMessage(container string) string {
 		container = "<container>"
 	}
 	return fmt.Sprintf("The session exited with %d, likely the global-config link check (see the %q line above).\n"+
-		"  Fix, with every Claude session exited (host and sandboxes) — %s. Each step does nothing\n"+
-		"  unless the layout is the one it expects. Make ~/.claude.json a symlink to .claude/.claude.json:\n"+
+		"  Fix, with every Claude session exited (host and sandboxes): make the linked layout with\n"+
 		"    %s\n"+
-		"  or undo the link:\n"+
+		"  or go back to the legacy layout with\n"+
 		"    %s\n"+
 		"  then relaunch.\n"+
 		"  A kept container whose link target moved or vanished fails on every start: docker rm %s, then relaunch.\n"+
-		"  A later claude-sandbox release adds checked commands for this.\n",
-		ExitLink, LinkPrefix, keepCopy, LinkCmd, UnlinkCmd, container)
+		"  Fallback, for a launcher without those commands — %s. Each step does nothing\n"+
+		"  unless the layout is the one it expects. Make ~/.claude.json a symlink to .claude/.claude.json:\n"+
+		"    %s\n"+
+		"  or undo the link:\n"+
+		"    %s\n",
+		ExitLink, LinkPrefix, MigrateCmd, RevertCmd, container, keepCopy, LinkCmd, UnlinkCmd)
 }
 
 // LinkOps are EnsureLink's filesystem seams. A nil *LinkOps, or a nil field,
