@@ -353,8 +353,10 @@ Feature: Global config (~/.claude.json) — the linked layout (CS-GCFG)
     When revert runs
     Then it reads every listed container's environment in ONE "docker
       inspect" call and counts a container whose CLAUDE_SANDBOX_GLOBAL_CONFIG
-      is non-empty (a linked launch mounts nothing, so the mount check cannot
-      see it)
+      names exactly $HOME/.claude/.claude.json (a linked launch mounts
+      nothing, so the mount check cannot see it); an empty value (the
+      override of a non-linked launch) or another home's target does not
+      count
     And the inspect's stdout is parsed even when it exits non-zero (a
       container removed since the listing; the CS-SESS-061 precedent)
     And any such container refuses the revert as CS-GCFG-045 does
