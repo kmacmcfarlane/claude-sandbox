@@ -1817,6 +1817,9 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     And a SIGTERM, SIGHUP, SIGINT or SIGQUIT arriving then ends the wait at
       once: nothing is printed and the launcher exits with the child's status,
       never 143
+    And a signal already received wins over a die, the end of the events
+      stream or the timeout that is ready at the same moment: the wait looks
+      for one before judging anything, never leaving the choice to chance
 
   Scenario: CS-LNCH-098 The events watcher dies with the launcher
     Then "docker events" runs in its own process group, so the terminal's

@@ -186,7 +186,21 @@ func (w *Watch) read(r io.Reader) {
 func (w *Watch) Await(timeout time.Duration, done func(Outcome) bool, stop <-chan os.Signal) (o Outcome, stopped bool) {
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
+	// CS-LNCH-097: a signal already received wins. select picks at random
+	// among ready cases, so a signal pending together with a die, the
+	// stream's end or the timer is looked for first, every time.
+	signalled := func() bool {
+		select {
+		case <-stop:
+			return true
+		default:
+			return false
+		}
+	}
 	for {
+		if signalled() {
+			return w.Snapshot(), true
+		}
 		o = w.Snapshot()
 		if done(o) {
 			return o, false
@@ -194,8 +208,14 @@ func (w *Watch) Await(timeout time.Duration, done func(Outcome) bool, stop <-cha
 		select {
 		case <-w.changed:
 		case <-w.ended:
+			if signalled() {
+				return w.Snapshot(), true
+			}
 			return w.Snapshot(), false
 		case <-timer.C:
+			if signalled() {
+				return w.Snapshot(), true
+			}
 			return w.Snapshot(), false
 		case <-stop:
 			return w.Snapshot(), true

@@ -143,6 +143,22 @@ var _ = Describe("oomreport", func() {
 		Expect(time.Since(start)).To(BeNumerically("<", 100*time.Millisecond))
 	})
 
+	It("CS-LNCH-097: a pending signal wins over a die and a stream end that are ready too — every time", func() {
+		for i := 0; i < 200; i++ {
+			for _, stream := range []string{"", ev("die", "0")} {
+				w, _ := watch(stream)
+				// Let the stream be read to its end, so ended (and the die)
+				// are ready alongside the signal.
+				w.Await(time.Second, oomreport.Never, nil)
+				stop := make(chan os.Signal, 1)
+				stop <- syscall.SIGINT
+				_, stopped := w.AwaitDeath(stop)
+				Expect(stopped).To(BeTrue(), "iteration %d, stream %q", i, stream)
+				w.Stop()
+			}
+		}
+	})
+
 	It("CS-SESS-060: a joined 137 stops waiting at the container's die, then only the grace", func() {
 		w := oomreport.Start(&scripted{lines: []string{ev("die", "137")}}, "cs-x", time.Now())
 		defer w.Stop()
