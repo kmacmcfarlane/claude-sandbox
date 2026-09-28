@@ -148,7 +148,7 @@ func Main(args []string) int {
 // path so "claude-sandbox --rebuild init" errors instead of routing to init.
 func isSubcommand(a string) bool {
 	switch a {
-	case "init", "init-ralph", "ralph", "help", "completion", "sessions", "pidslot", "headless", cacheBudgetCheckCmd, imagebuild.PrefetchSubcommand:
+	case "init", "init-ralph", "ralph", "help", "completion", "sessions", "pidslot", "headless", "global-config", cacheBudgetCheckCmd, imagebuild.PrefetchSubcommand:
 		return true
 	// CS-COMP-002/003: the hidden commands the generated completion scripts
 	// call on every keystroke. Without these they fall through to runLaunch,
@@ -224,7 +224,7 @@ func newRootCmd(env *Env) *cobra.Command {
 	}
 	ralphCmd := newRalphCmd(env)
 	registerRalphCompletions(ralphCmd)
-	root.AddCommand(newInitCmd(env, false), newInitCmd(env, true), ralphCmd, newSessionsCmd(env), newPidslotCmd(env), newHeadlessCmd(env), newCacheBudgetCheckCmd(env), newCLIPrefetchCmd(env))
+	root.AddCommand(newInitCmd(env, false), newInitCmd(env, true), ralphCmd, newSessionsCmd(env), newGlobalConfigCmd(env), newPidslotCmd(env), newHeadlessCmd(env), newCacheBudgetCheckCmd(env), newCLIPrefetchCmd(env))
 	// CS-INIT-002: a rejected flag names itself and lists the command's valid
 	// options (inherited by init/init-ralph/ralph).
 	root.SetFlagErrorFunc(func(c *cobra.Command, err error) error {
@@ -275,6 +275,11 @@ Commands (bootstrap the project, then exit — launcher flags do not apply):
   headless [flags] -- ARGS  Launch claude for an SDK client such as Paseo: no TTY, stdout
                             carries only claude's output, never prompts, always a new
                             container; everything after -- goes to claude verbatim
+  global-config migrate|revert [--force]
+                            Host only, every Claude session exited: make ~/.claude.json a
+                            link to ~/.claude/.claude.json (migrate), or a regular file
+                            again (revert); refuses while a container uses the file
+  global-config accept      Record the current global config as the baseline snapshot
   completion SHELL          Print a shell completion script (bash, zsh, fish, powershell)
                             e.g. source <(claude-sandbox completion zsh)
      --track-in-host / --no-track-in-host              set trackInHost (skip the prompt)
