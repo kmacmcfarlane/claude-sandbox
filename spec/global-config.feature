@@ -16,9 +16,10 @@ Feature: Global config (~/.claude.json) — the linked layout (CS-GCFG)
   <target>.tmp.* beside the target and renames it there, which is atomic, so
   no reader ever sees a torn or empty file. The lock stays per container
   (lost updates within a few ms remain possible; upstream).
-  This feature is the launcher and in-container half. The one-time host
-  migration (global-config migrate|revert) and the launcher's health check
-  are separate features; this one works with a layout made by hand.
+  CS-GCFG-016..040 are the launcher and in-container half; they work with a
+  layout made by hand. CS-GCFG-041..055 are the host commands that switch the
+  layout with checks (claude-sandbox global-config migrate|revert) and record
+  a baseline (accept). The launcher's health check is a separate feature.
   Background: the claude-json-concurrent-writes investigation (00..03).
   Go home: internal/globalcfg, internal/launch, internal/pidslot,
   cmd/claude-sandbox.
@@ -89,8 +90,8 @@ Feature: Global config (~/.claude.json) — the linked layout (CS-GCFG)
   Scenario: CS-GCFG-025 A regular file is the legacy layout: mounted as before, silently
     Given $HOME/.claude.json is a regular file (Lstat)
     Then it is bind-mounted read-write at the same path (CS-LNCH-012), and nothing is printed
-    # The per-launch "unmigrated" note belongs with the migrate command that
-    # a later feature adds; this feature names no command it does not ship.
+    # No per-launch "unmigrated" note: operator decision 57 deferred it, even
+    # now that the migrate command (CS-GCFG-041) ships.
     Given a launcher inside a sandbox, and $HOME/.claude.json is a regular file
       whose covering mount in /proc/self/mountinfo is the container's root
       filesystem or a tmpfs (an image leftover, not the outer sandbox's bind)
@@ -112,8 +113,9 @@ Feature: Global config (~/.claude.json) — the linked layout (CS-GCFG)
       gives the manual fixes with every Claude session exited first and a
       copy of ~/.claude.json kept outside ~/.claude/: merge by hand, remove
       the stale ~/.claude/.claude.json, then keep the legacy layout or
-      restore the link with the guarded link step of CS-GCFG-038; a later
-      feature adds checked commands
+      run "claude-sandbox global-config migrate" (CS-GCFG-041) to restore
+      the link; the guarded manual link step of CS-GCFG-038 stays as a
+      fallback line (CS-GCFG-055)
     And the file is still mounted as legacy
     And a launch inside a sandbox does not repeat it
 
@@ -247,8 +249,9 @@ Feature: Global config (~/.claude.json) — the linked layout (CS-GCFG)
       link — "test -f ~/.claude.json && ! test -L ~/.claude.json && ! test -e ~/.claude/.claude.json && ! test -L ~/.claude/.claude.json && mv ~/.claude.json ~/.claude/.claude.json && ln -s .claude/.claude.json ~/.claude.json"
       undo — "test -L ~/.claude.json && test -f ~/.claude/.claude.json && ! test -L ~/.claude/.claude.json && rm ~/.claude.json && mv ~/.claude/.claude.json ~/.claude.json"
       then relaunch; for a kept container whose link target moved or
-      vanished, "docker rm <name>" then relaunch; a later feature adds
-      checked commands
+      vanished, "docker rm <name>" then relaunch; the checked commands
+      "claude-sandbox global-config migrate" and "... revert" come first and
+      the guarded steps are the fallback (CS-GCFG-055)
     # Unguarded, the undo step deletes the only config when the operator has
     # already reverted by hand (a regular ~/.claude.json, no target), and the
     # link step, run on an existing (dangling) link, moves the link into
@@ -267,3 +270,212 @@ Feature: Global config (~/.claude.json) — the linked layout (CS-GCFG)
     Given a --detach launch whose container dies with exit 78 within the settle (CS-LNCH-119)
     Then the launcher prints the CS-GCFG-038 explanation before its
       "stopped right after it started (exit 78)" error, and exits 1
+
+  # ==== the host commands: global-config migrate | revert | accept ====
+  # Run by the operator on the host, once. Order for migrate and revert:
+  # the refusals that need no lock (sandbox, layout, containers), then the
+  # advisory checks, then Claude Code's own lock, then the bounded swap.
+  # Copies they keep live under StateRoot/global-config/<key>/ (never in the
+  # container-visible config dir), where <key> is the first 12 hex digits of
+  # sha256 of the LEXICAL global-file path Claude Code resolves — for
+  # migrate and revert always $HOME/.claude.json — so the key survives a
+  # migrate and a host "mv" over the link.
+  # Refusals exit 1 and change nothing; a usage error exits 2.
+
+  Scenario: CS-GCFG-041 migrate moves a legacy ~/.claude.json into the linked layout
+    Given CLAUDE_CONFIG_DIR is unset and no container mounts the file
+    And $HOME/.claude.json is a regular file that parses as JSON
+    And $HOME/.claude is a real directory and $HOME/.claude/.claude.json does not exist
+    When "claude-sandbox global-config migrate" runs on the host
+    Then under the lock (CS-GCFG-050) it records the source's (inode, size,
+      mtime), checks that the bytes parse, keeps a pre-migration copy
+      StateRoot/global-config/<key>/pre-migrate-<ms> (CS-GCFG-053), writes
+      $HOME/.claude/.claude.json with O_EXCL, mode 0600 and fsync, and
+      compares its bytes with the source
+    And it re-stats the source (CS-GCFG-051), then makes
+      symlink(".claude/.claude.json", "$HOME/.claude.json.migrate-<ms>") and
+      renames it onto $HOME/.claude.json: at no instant is the path missing
+    And Classify now reports the linked layout (CS-GCFG-016)
+    And it prints what it did, the pre-migration copy, that every
+      claude-sandbox launcher on the host must be updated (an older one
+      follows the link and single-file-mounts its target), and the smoke test
+    And it exits 0
+
+  Scenario: CS-GCFG-042 migrate refuses every layout it cannot migrate, changing nothing
+    Given CLAUDE_CONFIG_DIR is set
+    Then migrate and revert refuse naming its value and a direnv .envrc as a
+      likely source: Claude Code already keeps the file inside that
+      directory, and there is nothing to link
+    Given $HOME/.claude/.config.json exists
+    Then migrate refuses: Claude Code uses that file instead
+    Given $HOME/.claude.json is already the link of CS-GCFG-016
+    Then migrate prints that the layout is already linked and exits 0
+    Given $HOME/.claude.json is missing, a refused link (CS-GCFG-019..024), or
+      a regular file that does not parse
+    Then migrate refuses naming the problem
+    Given $HOME/.claude is missing or a symlink, or $HOME/.claude/.claude.json
+      exists and is not a regular file
+    Then migrate refuses naming it
+    # Every refusal happens before the lock, the copies and the swap; the
+    # files are left exactly as they were.
+
+  Scenario: CS-GCFG-043 An existing ~/.claude/.claude.json is used only when it is identical
+    Given $HOME/.claude.json and $HOME/.claude/.claude.json are both regular files
+    When migrate runs
+    Then identical bytes: the existing file is kept and only the link is made
+    And different bytes: migrate refuses naming both files (the split brain of
+      CS-GCFG-026), and neither file changes
+
+  Scenario: CS-GCFG-044 The commands refuse inside a sandbox
+    Given CLAUDE_SANDBOX_PROJECT_DIR is set (hostdirs.InSandbox)
+    When "global-config migrate", "revert" or "accept" runs
+    Then it refuses before reading or writing anything: $HOME and StateRoot
+      there are the container's own
+
+  Scenario: CS-GCFG-045 migrate and revert refuse while a container mounts the file
+    When migrate or revert runs
+    Then it lists every container on the host once, with no label filter:
+      "docker ps -a --no-trunc --format {{.Names}}<US>{{.Mounts}}" — running,
+      paused, created, exited and kept ones alike (docker start re-resolves a
+      bind source), from any launcher version
+    And each container's mount list is split into entries, and an entry
+      matches only when its cleaned source equals $HOME/.claude.json or
+      $HOME/.claude/.claude.json exactly (no substring match)
+    And when any matches it refuses, naming each container and "exit them
+      (/exit, or docker stop / docker rm), or --force"
+    And when the listing itself fails it refuses the same way (it cannot
+      verify), naming the error
+    # tmux kill-server does not stop sandboxes: a container survives its
+    # terminal.
+
+  Scenario: CS-GCFG-046 revert also refuses while a linked container exists
+    Given the listing of CS-GCFG-045 names at least one container
+    When revert runs
+    Then it reads every listed container's environment in ONE "docker
+      inspect" call and counts a container whose CLAUDE_SANDBOX_GLOBAL_CONFIG
+      is non-empty (a linked launch mounts nothing, so the mount check cannot
+      see it)
+    And the inspect's stdout is parsed even when it exits non-zero (a
+      container removed since the listing; the CS-SESS-061 precedent)
+    And any such container refuses the revert as CS-GCFG-045 does
+
+  Scenario: CS-GCFG-047 --force overrides the container refusals with a warning naming them
+    Given containers that CS-GCFG-045 or CS-GCFG-046 would refuse on
+    When migrate --force runs
+    Then one WARNING names them and says they keep the old inode of
+      ~/.claude.json: their writes are lost and they never see the migrated
+      file; stop and relaunch them (attach and join report drift)
+    When revert --force runs
+    Then one WARNING names them and says linked containers still running
+      keep a link to ~/.claude/.claude.json, which revert moves away: their
+      saves are dropped, or re-create ~/.claude/.claude.json as a
+      defaults-based file that the split-brain warning (CS-GCFG-026) then
+      flags; stop and relaunch them
+    And the command then proceeds
+
+  Scenario: CS-GCFG-048 Host claude processes get an advisory warning
+    Given "pgrep -u <uid> -x claude" lists processes on the host
+    When migrate or revert runs
+    Then one WARNING names their count and pids and says to exit them first:
+      the lock keeps their locked saves out, but an unlocked exit-time save
+      can still land in the swap's gap and be lost
+    And the command proceeds (the lock, not this check, protects the swap)
+    And no pgrep, or no match, prints nothing
+
+  Scenario: CS-GCFG-049 migrate warns when the host claude is not the verified version
+    When migrate runs, it runs "claude --version" on the host (PATH lookup),
+      giving up after 5 s
+    Then a version other than the one the linked layout was verified with
+      (2.1.283) prints one WARNING naming both and the smoke test (/rename,
+      /model and a trust dialog leave ~/.claude.json a symlink while
+      ~/.claude/.claude.json changes, on the host and in a sandbox)
+    And an unreadable version prints the same WARNING with "unknown"
+    And no claude on PATH prints nothing
+    And it never refuses: a newer host CLI is the common case
+
+  Scenario: CS-GCFG-050 migrate and revert hold Claude Code's own lock for the swap
+    When migrate or revert reaches the swap
+    Then it takes $HOME/.claude.json.lock the way Claude Code does: mkdir; an
+      existing lock whose mtime is older than 10 s is stale and is removed
+      and retried; the mtime is refreshed every 5 s while held
+    And a fresh lock held by another process past the wait (5 s) refuses,
+      changing nothing
+    And the lock is removed on every exit path after it was taken
+    # Host claude's locked savers then wait (they retry ELOCKED for 10-20 s)
+    # rather than write mid-swap. Residual, by design: its unlocked writers
+    # (synchronous exit-time saves, the Configuration-error Reset) take no
+    # lock, and a write from one of them between the final re-stat and the
+    # rename is lost — a window of microseconds.
+
+  Scenario: CS-GCFG-051 A change to the source during the swap aborts it, and so does the 5 s bound
+    Given migrate or revert holds the lock
+    When the source's (inode, size, mtime) at the final re-stat differ from
+      what was recorded under the lock
+    Then it aborts: the copy it made is removed, and the link, the source and
+      the target are as they were
+    When the steps under the lock take longer than 5 s
+    Then it aborts the same way before the rename
+    # 5 s keeps the lock well inside Claude Code's ELOCKED retry budget, so a
+    # host session's locked save waits instead of being skipped.
+
+  Scenario: CS-GCFG-052 revert restores the regular file, after checking the link
+    Given $HOME/.claude.json is the link of CS-GCFG-016
+    When "claude-sandbox global-config revert" runs
+    Then before touching anything it verifies that the link names
+      $HOME/.claude/.claude.json lexically AND that both paths are the same
+      file (stat through the link and lstat of the target give one device
+      and inode — the shell's -ef), and again under the lock
+    And under the lock it copies $HOME/.claude/.claude.json to
+      $HOME/.claude.json.revert-<ms> (O_EXCL, 0600, fsync, bytes compared),
+      re-stats the target (CS-GCFG-051), and renames the copy onto
+      $HOME/.claude.json
+    And it then moves $HOME/.claude/.claude.json to
+      StateRoot/global-config/<key>/reverted-<ms> (copied, fsynced, compared,
+      then unlinked), so nothing stale is left in the container-visible
+      config dir and Classify reports the legacy layout with no split brain
+    And it prints what it did and where the linked copy is kept, and exits 0
+    Given $HOME/.claude.json is already a regular file and
+      $HOME/.claude/.claude.json does not exist
+    Then revert prints that the layout is already legacy and exits 0
+    Given any other layout (split brain, a refused link, missing,
+      .config.json present)
+    Then revert refuses naming the problem and changes nothing
+
+  Scenario: CS-GCFG-053 The kept copies are owner-only and capped
+    When migrate, revert or accept writes a copy under StateRoot
+    Then StateRoot, StateRoot/global-config and the <key> directory are made
+      by hostdirs.EnsureOwnedDir (0700; a symlink or another uid's directory
+      refuses the command before anything else is written)
+    And every copy is written as a 0600 temp file in that directory, fsynced,
+      then renamed into place
+    And after each successful write the newest 3 pre-migrate-*, the newest 3
+      reverted-* and the newest 5 snapshot-* (accept) are kept
+    And under go test every writer panics when $HOME is the invoking user's
+      real home or the state root is the real one, before anything is written
+
+  Scenario: CS-GCFG-054 accept records the current global config as the baseline
+    When "claude-sandbox global-config accept" runs on the host
+    Then it resolves the global file as Claude Code does:
+      <config dir>/.config.json when it exists, else
+      $CLAUDE_CONFIG_DIR/.claude.json when CLAUDE_CONFIG_DIR is set, else
+      $HOME/.claude.json — read through a link
+    And a relative or "~" CLAUDE_CONFIG_DIR (CS-GCFG-028), a set
+      CLAUDE_CODE_CUSTOM_OAUTH_URL (another file name), a missing file or one
+      that does not parse as a JSON object refuses
+    And otherwise it writes StateRoot/global-config/<key>/snapshot-<ms>
+      (CS-GCFG-053) and prints what it accepted as key names and counts
+      only, compared with the previous snapshot: top-level keys added and
+      removed, the project count old -> new, oauthAccount present or absent,
+      hasCompletedOnboarding true or false — never a value
+    # The launcher's health check (a separate feature) compares launches
+    # against the newest snapshot; accept is how the operator says a change
+    # (a /logout, an API-key switch, a project purge) was intended.
+
+  Scenario: CS-GCFG-055 The launcher's messages name the commands, with the manual steps as a fallback
+    Given the split-brain warning (CS-GCFG-026) or the exit-78 message (CS-GCFG-038)
+    Then it names "claude-sandbox global-config migrate" (and, for exit 78,
+      "claude-sandbox global-config revert") as the fix
+    And it keeps the guarded manual steps on a separate fallback line, for a
+      host whose launcher predates the commands
+    And no launch prints a per-launch "unmigrated" reminder (operator
+      decision 57: later)
