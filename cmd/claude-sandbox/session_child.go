@@ -40,6 +40,11 @@ type sessionOpts struct {
 	// headless suppresses the terminal reset: its stdio is an SDK client's
 	// pipe (CS-LNCH-092).
 	headless bool
+	// after runs once the session ended and its reports are printed, while
+	// the signal handlers are still installed, so a signal during it still
+	// exits with the child's status (CS-GCFG-001, CS-LNCH-097). Not run
+	// after a forwarded or late signal, or a start that never ran.
+	after func()
 }
 
 // sessionEnd is how a session child ended.
@@ -52,11 +57,6 @@ type sessionEnd struct {
 	// neverStarted is true when a reserved container is still "created"
 	// after its "docker start" returned (CS-LNCH-096).
 	neverStarted bool
-	// interrupted is true when a signal ended the session on purpose — one
-	// the launcher forwarded (CS-LNCH-091) or one in the die wait
-	// (CS-LNCH-097): the caller exits promptly, without the health re-check
-	// (CS-GCFG-001).
-	interrupted bool
 }
 
 // isTerminal is Env.IsTerminal with the real check as its default.
@@ -86,7 +86,6 @@ func runSession(env *Env, c execx.Cmd, container string, o sessionOpts) (session
 		// CS-LNCH-091: whoever sent the signal ended the session on
 		// purpose, and an SDK client expects a prompt exit: no die wait, no
 		// report. The shadow directory is left to a later launch's sweep.
-		end.interrupted = true
 		return end, nil
 	}
 
@@ -114,7 +113,6 @@ func runSession(env *Env, c execx.Cmd, container string, o sessionOpts) (session
 	if stopped {
 		// CS-LNCH-097: a signal after the child exited asks for the exit
 		// now — with the child's status, silently.
-		end.interrupted = true
 		return end, nil
 	}
 	if end.code == globalcfg.ExitLink {
@@ -136,6 +134,11 @@ func runSession(env *Env, c execx.Cmd, container string, o sessionOpts) (session
 		fmt.Fprint(env.Err, oomreport.KilledReport(out.OOMKills, lim))
 	case oomreport.Survived:
 		fmt.Fprint(env.Err, oomreport.SurvivedReport(out.OOMKills, lim))
+	}
+	if o.after != nil {
+		// Still under the session's handlers (deferred res.Done): a signal
+		// now lands on Late and is dropped, and the child's status stands.
+		o.after()
 	}
 	return end, nil
 }

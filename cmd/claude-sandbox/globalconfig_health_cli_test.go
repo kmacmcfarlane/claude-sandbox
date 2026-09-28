@@ -48,6 +48,34 @@ var _ = Describe("global-config health check wiring (CS-GCFG-001, CS-GCFG-014)",
 	}
 	warnings := func() int { return strings.Count(f.errw.String(), "looks damaged") }
 
+	It("CS-GCFG-001: a new container's check runs before the launch lock and docker create", func() {
+		withBaseline()
+		writeFile(file, damaged)
+		atCreate := -1
+		f.fake.OnFunc("docker create", func(execx.Cmd) (string, error) {
+			atCreate = warnings()
+			return "", nil
+		})
+		Expect(f.run()).To(Equal(0), f.errw.String())
+		Expect(atCreate).To(Equal(1), "the warning was printed before the create")
+	})
+
+	It("CS-GCFG-001: the check after the session runs while the session's signal handlers are installed", func() {
+		withBaseline()
+		f.fake.On("docker inspect --type container", "exited 2026-09-24T00:00:00Z\n", nil)
+		damageDuring("docker start", nil)
+		released := -1
+		f.env.Err = writerFunc(func(p []byte) (int, error) {
+			if strings.Contains(string(p), "looks damaged") {
+				released = f.fake.Released
+			}
+			return f.errw.Write(p)
+		})
+		Expect(f.run()).To(Equal(0), f.errw.String())
+		Expect(warnings()).To(Equal(1))
+		Expect(released).To(Equal(0), "printed before SessionResult.Done")
+	})
+
 	It("CS-GCFG-001: a new container's launch snapshots before the session; nothing about the container changes", func() {
 		writeFile(file, good)
 		Expect(f.run()).To(Equal(0), f.errw.String())
@@ -95,11 +123,28 @@ var _ = Describe("global-config health check wiring (CS-GCFG-001, CS-GCFG-014)",
 		Expect(f.out.String()).To(BeEmpty())
 	})
 
-	It("CS-GCFG-001: a signal the launcher forwarded skips the check after the session", func() {
+	It("CS-GCFG-001: headless has no check after the session", func() {
+		withBaseline()
+		f.fake.On("docker inspect --type container", "exited 2026-09-24T00:00:00Z\n", nil)
+		damageDuring("docker start", nil)
+		Expect(f.run("headless", "--")).To(Equal(0), f.errw.String())
+		Expect(warnings()).To(BeZero())
+	})
+
+	It("CS-GCFG-001: a signal the launcher forwarded, or one in the die wait, skips the check after the session", func() {
 		withBaseline()
 		f.fake.SessionSignal = syscall.SIGTERM
 		damageDuring("docker start", execx.Fail(143))
-		f.run("headless", "--")
+		f.run()
+		Expect(warnings()).To(BeZero())
+
+		g := newCLIFixture()
+		f, file = g, filepath.Join(g.home, ".claude.json")
+		withBaseline()
+		g.fake.LateSignal = syscall.SIGINT
+		g.fake.On("docker inspect --type container", "exited 2026-09-24T00:00:00Z\n", nil)
+		damageDuring("docker start", nil)
+		g.run()
 		Expect(warnings()).To(BeZero())
 	})
 
@@ -145,3 +190,8 @@ var _ = Describe("global-config health check wiring (CS-GCFG-001, CS-GCFG-014)",
 		Expect(f.errw.String()).NotTo(ContainSubstring("global config " + file))
 	})
 })
+
+// writerFunc adapts a function to io.Writer.
+type writerFunc func([]byte) (int, error)
+
+func (w writerFunc) Write(p []byte) (int, error) { return w(p) }

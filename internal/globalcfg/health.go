@@ -135,15 +135,9 @@ func CheckHealth(o HealthOptions) *Health {
 		fmt.Fprintf(o.Err, "WARNING: global-config health check skipped: the state directory: %v\n", err)
 		return h
 	}
-	baseline := store.Newest(SnapshotPrefix)
-	var base *configFacts
-	if baseline != "" {
-		if b, rerr := os.ReadFile(baseline); rerr == nil {
-			if bf, ferr := readFacts(b); ferr == nil {
-				base = &bf
-			}
-		}
-	}
+	// CS-GCFG-007: the baseline is the newest snapshot that parses; a newer
+	// one that does not is skipped, never compared with nor named.
+	baseline, base := parseableBaseline(store)
 
 	switch {
 	case missing && baseline == "":
@@ -160,17 +154,28 @@ func CheckHealth(o HealthOptions) *Health {
 
 	if len(h.Findings) == 0 {
 		// CS-GCFG-005/006: healthy — snapshot when there is none, or the
-		// newest is at least SnapshotInterval old.
-		if baseline == "" || o.Now().Sub(snapshotTime(baseline)) >= SnapshotInterval {
-			snap, werr := store.Write(SnapshotPrefix, data, o.Now())
-			if werr != nil {
-				fmt.Fprintf(o.Err, "WARNING: global-config health check: writing a snapshot of %s: %v\n", file, werr)
-				return h
-			}
-			h.Snapshot = snap
-			if perr := store.Prune(SnapshotPrefix, KeepSnapshots); perr != nil {
-				fmt.Fprintf(o.Err, "WARNING: global-config health check: pruning old snapshots: %v\n", perr)
-			}
+		// newest is at least SnapshotInterval old. Cheap look first, then
+		// under the store's snapshot lock, looking again: of a burst of
+		// launches one writes, the others skip the snapshot.
+		if !snapshotDue(store, o.Now()) {
+			return h
+		}
+		unlock, ok := store.TryLock()
+		if !ok {
+			return h // contention: another launch is snapshotting
+		}
+		defer unlock()
+		if !snapshotDue(store, o.Now()) {
+			return h
+		}
+		snap, werr := store.Write(SnapshotPrefix, data, o.Now())
+		if werr != nil {
+			fmt.Fprintf(o.Err, "WARNING: global-config health check: writing a snapshot of %s: %v\n", file, werr)
+			return h
+		}
+		h.Snapshot = snap
+		if perr := store.Prune(SnapshotPrefix, KeepSnapshots); perr != nil {
+			fmt.Fprintf(o.Err, "WARNING: global-config health check: pruning old snapshots: %v\n", perr)
 		}
 		return h
 	}
@@ -189,6 +194,28 @@ func CheckHealth(o HealthOptions) *Health {
 	}
 	fmt.Fprint(o.Err, damageWarning(o, file, h.Findings, baseline))
 	return h
+}
+
+// parseableBaseline is the newest snapshot that parses as a JSON object, and
+// its facts; "" and nil when there is none (CS-GCFG-007).
+func parseableBaseline(store *Store) (string, *configFacts) {
+	for _, p := range store.List(SnapshotPrefix) {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		if f, ferr := readFacts(b); ferr == nil {
+			return p, &f
+		}
+	}
+	return "", nil
+}
+
+// snapshotDue reports whether the store's newest snapshot is missing or at
+// least SnapshotInterval old (CS-GCFG-006).
+func snapshotDue(store *Store, now time.Time) bool {
+	newest := store.Newest(SnapshotPrefix)
+	return newest == "" || now.Sub(snapshotTime(newest)) >= SnapshotInterval
 }
 
 // readWithRetry reads file and parses it, re-reading after each of
@@ -302,18 +329,35 @@ func restoreCommand(o HealthOptions, file, snapshot string) (string, string) {
 		return "copy the snapshot beside the file and rename it into place (atomic: every session sees the whole file at once):",
 			fmt.Sprintf("cp %s %s && mv -f %s %s", ShellQuote(snapshot), ShellQuote(tmp), ShellQuote(tmp), ShellQuote(dst))
 	}
+	const exitFirst = "first exit every Claude session, host and sandboxes (tmux kill-server does not stop a sandbox)"
 	inPlace := func(dst string) (string, string) {
-		return "first exit every Claude session, host and sandboxes (tmux kill-server does not stop a sandbox): an in-place write while one runs can itself be read torn. Then copy the snapshot over the file in place (cp keeps the inode every running sandbox has mounted; a rename would orphan them):",
+		return exitFirst + ": an in-place write while one runs can itself be read torn. Then copy the snapshot over the file in place (cp keeps the inode every running sandbox has mounted; a rename would orphan them):",
 			fmt.Sprintf("cp %s %s", ShellQuote(snapshot), ShellQuote(dst))
 	}
 	defaultFile := filepath.Join(filepath.Clean(o.Home), FileName)
 	if file == defaultFile {
 		l := Classify(o.Home, "")
-		switch {
-		case l.Mode == ModeLinked, l.Mode == ModeRefused && l.Resolved == l.Target:
+		switch l.Mode {
+		case ModeLinked:
 			return atomic(l.Target) // CS-GCFG-009
-		case l.Mode == ModeRefused:
-			return "first fix the layout of " + file + " (the warning above names the problem), then restore from the snapshot above.", ""
+		case ModeRefused:
+			if l.Resolved == l.Target {
+				if _, err := os.Lstat(l.Target); errors.Is(err, fs.ErrNotExist) {
+					return atomic(l.Target) // CS-GCFG-009: a dangling link
+				}
+			}
+			// CS-GCFG-011: attach and join print no layout warning, so
+			// the problem is named here.
+			return fmt.Sprintf("first fix the layout of %s (%s), then restore from the snapshot above.", file, l.Problem), ""
+		case ModeMissing:
+			if ti, err := os.Lstat(l.Target); err == nil && ti.Mode().IsRegular() {
+				// CS-GCFG-010: the link of a migrated layout was deleted;
+				// the live file is newer than any snapshot.
+				return fmt.Sprintf("the link is gone: %s is the live file (newer than the snapshot), so do not copy the snapshot; restore the link:", l.Target),
+					fmt.Sprintf("ln -s %s %s", LinkText, ShellQuote(file))
+			}
+			return exitFirst + ": a running legacy sandbox still holds the deleted file and would never see the restored one. Then copy the snapshot back:",
+				fmt.Sprintf("cp %s %s", ShellQuote(snapshot), ShellQuote(file))
 		}
 		return inPlace(file) // CS-GCFG-010
 	}

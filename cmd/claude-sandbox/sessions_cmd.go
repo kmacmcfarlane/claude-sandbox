@@ -537,12 +537,9 @@ func attachTo(env *Env, s sessions.Session, configuredKeys string) error {
 	end, err := runSession(env, execx.Cmd{
 		Name: "docker",
 		Args: []string{"attach", "--detach-keys=" + detachKeys, s.Name},
-	}, s.Name, sessionOpts{kind: primarySession})
+	}, s.Name, sessionOpts{kind: primarySession, after: func() { checkGlobalConfig(env, pre) }})
 	if err != nil {
 		return err
-	}
-	if !end.interrupted {
-		checkGlobalConfig(env, pre)
 	}
 	return sessionExit(end.code)
 }

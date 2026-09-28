@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -210,6 +212,61 @@ var _ = Describe("global-config health check (CS-GCFG-001..015)", func() {
 			Expect(f.errw.String()).To(BeEmpty())
 		})
 
+		It("CS-GCFG-006: while another launch holds the snapshot lock, the snapshot is skipped silently, the check is not", func() {
+			write(f.link, healthy)
+			store, err := globalcfg.OpenStore(f.state, f.link, nil)
+			Expect(err).NotTo(HaveOccurred())
+			unlock, ok := store.TryLock()
+			Expect(ok).To(BeTrue())
+			h := f.check()
+			Expect(h.File).To(Equal(f.link))
+			Expect(h.Snapshot).To(BeEmpty())
+			Expect(f.snapshots(f.link)).To(BeEmpty())
+			Expect(f.errw.String()).To(BeEmpty())
+			unlock()
+			Expect(f.check().Snapshot).NotTo(BeEmpty())
+		})
+
+		It("CS-GCFG-006: a burst of healthy checks past the hour writes one snapshot", func() {
+			baseline()
+			f.now = f.now.Add(2 * time.Hour)
+			var wg sync.WaitGroup
+			var mu sync.Mutex
+			var outs []string
+			for i := 0; i < 8; i++ {
+				wg.Add(1)
+				go func(i int) {
+					defer GinkgoRecover()
+					defer wg.Done()
+					var errw bytes.Buffer
+					globalcfg.CheckHealth(globalcfg.HealthOptions{
+						Home: f.home, StateRoot: f.state, Err: &errw,
+						Getenv: func(string) string { return "" },
+						// distinct milliseconds, so no two names collide
+						Now: func() time.Time { return f.now.Add(time.Duration(i) * time.Millisecond) },
+					})
+					mu.Lock()
+					outs = append(outs, errw.String())
+					mu.Unlock()
+				}(i)
+			}
+			wg.Wait()
+			Expect(f.snapshots(f.link)).To(HaveLen(2), "one new snapshot for the burst")
+			Expect(strings.Join(outs, "")).To(BeEmpty())
+		})
+
+		It("CS-GCFG-006: .tmp-* files older than an hour are removed when the store is opened; newer ones stay", func() {
+			dir := filepath.Join(f.state, globalcfg.StoreDirName, globalcfg.StoreKey(f.link))
+			old, fresh := filepath.Join(dir, ".tmp-old"), filepath.Join(dir, ".tmp-fresh")
+			write(old, "x")
+			write(fresh, "x")
+			Expect(os.Chtimes(old, time.Now(), time.Now().Add(-2*time.Hour))).To(Succeed())
+			_, err := globalcfg.OpenStore(f.state, f.link, nil)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(exists(old)).To(BeFalse())
+			Expect(exists(fresh)).To(BeTrue())
+		})
+
 		It("CS-GCFG-006: a snapshot name without a time is aged by its mtime", func() {
 			write(f.link, healthy)
 			dir := filepath.Join(f.state, globalcfg.StoreDirName, globalcfg.StoreKey(f.link))
@@ -241,6 +298,19 @@ var _ = Describe("global-config health check (CS-GCFG-001..015)", func() {
 			Entry("CS-GCFG-007: new keys, numStartups, more projects: healthy", strings.Replace(strings.Replace(healthy, "918273", "1", 1), `"d":{}}`, `"d":{},"e":{}},"newKey":1`, 1), []string(nil)),
 			Entry("CS-GCFG-007: half the projects is still healthy", strings.Replace(healthy, `{"a":{},"b":{},"c":{},"d":{}}`, `{"a":{},"b":{}}`, 1), []string(nil)),
 		)
+
+		It("CS-GCFG-007: a newer snapshot that does not parse is skipped, as baseline and as restore source", func() {
+			baseline()
+			good := f.snapshots(f.link)[0]
+			dir := filepath.Dir(good)
+			bad := filepath.Join(dir, globalcfg.SnapshotPrefix+"9999999999999")
+			write(bad, `{"torn`)
+			write(f.link, `{}`)
+			h := f.check()
+			Expect(h.Findings).To(ContainElement("oauthAccount is gone"))
+			Expect(f.errw.String()).To(ContainSubstring("Last good snapshot: " + good))
+			Expect(f.errw.String()).NotTo(ContainSubstring(bad))
+		})
 
 		It("CS-GCFG-007: a missing file with a baseline is damage", func() {
 			baseline()
@@ -306,6 +376,31 @@ var _ = Describe("global-config health check (CS-GCFG-001..015)", func() {
 			Expect(w).NotTo(ContainSubstring("mv -f"))
 		})
 
+		It("CS-GCFG-010: a deleted link of a migrated layout gets ln -s, never a cp over the live file", func() {
+			write(f.target, healthy)
+			Expect(os.Symlink(".claude/.claude.json", f.link)).To(Succeed())
+			f.check()
+			Expect(os.Remove(f.link)).To(Succeed())
+			f.check()
+			w := f.errw.String()
+			Expect(w).To(ContainSubstring("it is missing"))
+			Expect(w).To(ContainSubstring("the link is gone: " + f.target + " is the live file"))
+			Expect(w).To(ContainSubstring("    ln -s .claude/.claude.json " + f.link + "\n"))
+			Expect(w).NotTo(ContainSubstring("    cp "))
+		})
+
+		It("CS-GCFG-010: a missing legacy file gets the cp without the inode reason", func() {
+			baseline()
+			snap := f.snapshots(f.link)[0]
+			Expect(os.Remove(f.link)).To(Succeed())
+			f.check()
+			w := f.errw.String()
+			Expect(w).To(ContainSubstring("first exit every Claude session"))
+			Expect(w).To(ContainSubstring("still holds the deleted file"))
+			Expect(w).NotTo(ContainSubstring("keeps the inode"))
+			Expect(w).To(ContainSubstring("    cp " + snap + " " + f.link + "\n"))
+		})
+
 		It("CS-GCFG-010: paths that need it are shell-quoted", func() {
 			Expect(globalcfg.ShellQuote("/home/a b/it's")).To(Equal(`'/home/a b/it'\''s'`))
 			Expect(globalcfg.ShellQuote("/home/rt/.claude.json")).To(Equal("/home/rt/.claude.json"))
@@ -340,8 +435,19 @@ var _ = Describe("global-config health check (CS-GCFG-001..015)", func() {
 			Expect(os.Symlink("other.json", f.link)).To(Succeed())
 			f.check()
 			w := f.errw.String()
-			Expect(w).To(ContainSubstring("first fix the layout of " + f.link))
+			Expect(w).To(ContainSubstring("first fix the layout of " + f.link + " (it must name " + f.target))
 			Expect(w).NotTo(ContainSubstring("    cp "))
+		})
+
+		It("CS-GCFG-011: a link to ~/.claude/.claude.json that is a directory gets no command, and the problem is named", func() {
+			baseline()
+			Expect(os.Remove(f.link)).To(Succeed())
+			Expect(os.MkdirAll(f.target, 0o700)).To(Succeed())
+			Expect(os.Symlink(".claude/.claude.json", f.link)).To(Succeed())
+			f.check()
+			w := f.errw.String()
+			Expect(w).To(ContainSubstring("first fix the layout of " + f.link + " (the target is not a regular file (a directory))"))
+			Expect(w).NotTo(ContainSubstring("mv -f"))
 		})
 	})
 
@@ -369,6 +475,16 @@ var _ = Describe("global-config health check (CS-GCFG-001..015)", func() {
 			w := f.errw.String()
 			Expect(w).To(ContainSubstring("WARNING: the global config " + f.link + ": it does not parse as a JSON object (3 reads), and there is no snapshot of it to restore from. Claude Code keeps copies in " + filepath.Join(f.home, ".claude", "backups") + "/. Nothing was changed."))
 			Expect(f.snapshots(f.link)).To(BeEmpty())
+		})
+
+		It("CS-GCFG-013: a file that cannot be read (not ENOENT) warns too, after the retries", func() {
+			f.readFile = func(string) ([]byte, error) {
+				return nil, &os.PathError{Op: "open", Path: f.link, Err: syscall.EACCES}
+			}
+			h := f.check()
+			Expect(f.reads).To(Equal(3))
+			Expect(h.Findings).To(Equal([]string{"it cannot be read (permission denied)"}))
+			Expect(f.errw.String()).To(ContainSubstring("it cannot be read (permission denied), and there is no snapshot"))
 		})
 
 		It("CS-GCFG-013: a missing file is a first run: silent", func() {
@@ -418,6 +534,8 @@ var _ = Describe("global-config health check (CS-GCFG-001..015)", func() {
 			write(f.link, healthy)
 			dir := filepath.Join(f.state, globalcfg.StoreDirName, globalcfg.StoreKey(f.link))
 			Expect(os.MkdirAll(dir, 0o700)).To(Succeed())
+			// The lock file exists, so the lock is taken; the write then fails.
+			write(filepath.Join(dir, globalcfg.SnapshotLockName), "")
 			Expect(os.Chmod(dir, 0o500)).To(Succeed())
 			DeferCleanup(func() { os.Chmod(dir, 0o700) })
 			if os.Getuid() == 0 {

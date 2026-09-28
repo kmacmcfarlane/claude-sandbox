@@ -237,14 +237,21 @@ func pidClassFrom(found []sessions.Session) string {
 // (CS-LNCH-096). After a session, the directory goes once the container's die
 // event was seen (CS-LNCH-094); after a detach or a signal-initiated exit it
 // stays, for a later launch's sweep.
-func startReserved(env *Env, plan *launch.Plan, headless bool) error {
-	// CS-GCFG-001: the health check before the session, and again after it.
-	pre := checkGlobalConfig(env, nil)
-	end, err := runSession(env, plan.StartCmd(), plan.ContainerName, sessionOpts{
+// pre is the global-config health check launchWith ran before the create
+// (CS-GCFG-001); the check after a non-headless session skips its findings
+// (CS-GCFG-014).
+func startReserved(env *Env, plan *launch.Plan, headless bool, pre *globalcfg.Health) error {
+	o := sessionOpts{
 		kind:     reservedSession,
 		fallback: oomreport.Limit{Value: plan.MemoryLimit, Source: plan.MemoryLimitSource},
 		headless: headless,
-	})
+	}
+	if !headless {
+		// CS-GCFG-001: not headless — an SDK client SIGTERMs right after the
+		// result, and the next launch's check catches the damage.
+		o.after = func() { checkGlobalConfig(env, pre) }
+	}
+	end, err := runSession(env, plan.StartCmd(), plan.ContainerName, o)
 	if err != nil || end.neverStarted {
 		removeReservation(env, plan)
 		if err != nil {
@@ -253,9 +260,6 @@ func startReserved(env *Env, plan *launch.Plan, headless bool) error {
 	}
 	if end.gone && plan.ShadowDir != "" {
 		os.RemoveAll(plan.ShadowDir)
-	}
-	if !end.neverStarted && !end.interrupted {
-		checkGlobalConfig(env, pre)
 	}
 	return sessionExit(end.code)
 }
@@ -281,8 +285,6 @@ var detachedSettle = oomreport.DieWait
 // one is (CS-LNCH-116): the reservation, then — only once it is gone — the
 // directory.
 func startDetached(env *Env, plan *launch.Plan, projectDir, home string) error {
-	// CS-GCFG-001: before the start only — nothing watches a detached session.
-	checkGlobalConfig(env, nil)
 	// Subscribed before the start, from a moment before it, so a die at once
 	// cannot be missed; matched by exact name (CS-LNCH-087/095).
 	w := oomreport.Start(env.Runner, plan.ContainerName, env.now())

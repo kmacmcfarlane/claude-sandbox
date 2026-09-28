@@ -15,7 +15,7 @@ import (
 // (CS-GCFG-014). Warn-only: every message goes to env.Err, which is stderr
 // for a headless launch too.
 func checkGlobalConfig(env *Env, prev *globalcfg.Health) *globalcfg.Health {
-	if hostdirs.InSandbox(env.Getenv) {
+	if env.SkipGlobalConfigCheck || hostdirs.InSandbox(env.Getenv) {
 		return nil
 	}
 	_, _, _, home := hostIdentity(env.Getenv)
