@@ -3,6 +3,8 @@ package tmuxpane
 import (
 	"strings"
 	"unicode"
+
+	"github.com/kmacmcfarlane/claude-sandbox/internal/registry"
 )
 
 // NameSourceUser is the registry name source of a name the user gave
@@ -50,7 +52,7 @@ func ResumeCommand(m Mark) string {
 	}
 	w = append(w, "--resume", shq(m.Conversation))
 	if m.Name != "" && m.NameSource == NameSourceUser {
-		w = append(w, "--name", shq(Printable(m.Name)))
+		w = append(w, "--name", shq(registry.Printable(m.Name)))
 	}
 	return strings.Join(w, " ")
 }
@@ -60,7 +62,7 @@ func ResumeCommand(m Mark) string {
 // say. resuming is the conversation the new launch resumes explicitly.
 func PendingNote(prior string, resuming string) string {
 	m, ok := ParseMark(prior)
-	if !ok || m.State != StatePending || !uuidRE.MatchString(m.Conversation) || strings.EqualFold(m.Conversation, resuming) {
+	if !ok || m.State != StatePending || !registry.IsUUID(m.Conversation) || strings.EqualFold(m.Conversation, resuming) {
 		return ""
 	}
 	if !printableMark(m) {
@@ -97,24 +99,6 @@ func printableMark(m Mark) bool {
 		}
 	}
 	return true
-}
-
-// Printable turns control characters into spaces, drops format characters
-// (Cf: bidi overrides, zero-width joiners), private-use (Co) and surrogate
-// (Cs) code points, and collapses whitespace, for text read from a mark or a
-// sandbox-writable registry record and shown to the operator (the
-// notify-webhook precedent; CS-TMUX-034).
-func Printable(s string) string {
-	s = strings.Map(func(r rune) rune {
-		switch {
-		case unicode.IsControl(r):
-			return ' '
-		case unicode.In(r, unicode.Cf, unicode.Co, unicode.Cs):
-			return -1
-		}
-		return r
-	}, s)
-	return strings.Join(strings.Fields(s), " ")
 }
 
 // shq quotes s for a POSIX shell when it needs it.

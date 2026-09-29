@@ -19,6 +19,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/registry"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/resumeguard"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/sessions"
 )
@@ -214,7 +215,7 @@ var _ = Describe("resume guard", func() {
 		})
 
 		It("CS-SESS-067: a malformed record at a watched class counts as open: retried 3 times only when a partial write could explain it", func() {
-			big := `{"pid":7,"sessionId":"` + otherID + `","pad":"` + strings.Repeat("x", resumeguard.MaxRecordSize) + `"}`
+			big := `{"pid":7,"sessionId":"` + otherID + `","pad":"` + strings.Repeat("x", registry.MaxRecordSize) + `"}`
 			partial := map[string]bool{"unparsable": true, "oversized": true}
 			cases := map[string]func(){
 				"unparsable":        func() { f.write(reg, 7, "{") },
@@ -247,7 +248,7 @@ var _ = Describe("resume guard", func() {
 
 		It("CS-SESS-067: a registry dir holding more than MaxEntries entries counts as open", func() {
 			Expect(os.MkdirAll(reg, 0o755)).To(Succeed())
-			for i := 0; i <= resumeguard.MaxEntries; i++ {
+			for i := 0; i <= registry.MaxEntries; i++ {
 				Expect(os.WriteFile(filepath.Join(reg, fmt.Sprintf("x%d", i)), nil, 0o644)).To(Succeed())
 			}
 			v := f.check(sandbox("cs-a", "running", "7", reg, "")).Run()

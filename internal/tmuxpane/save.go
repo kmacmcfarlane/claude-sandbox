@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/registry"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/sessions"
 )
 
@@ -279,9 +280,9 @@ func orGone(state string, found bool) string {
 }
 
 // registryCache reads each registry dir once per save.
-type registryCache map[string][]RegistryRecord
+type registryCache map[string][]registry.Record
 
-func (c registryCache) read(dir string, o SaveOptions) []RegistryRecord {
+func (c registryCache) read(dir string, o SaveOptions) []registry.Record {
 	if recs, ok := c[dir]; ok {
 		return recs
 	}
@@ -313,7 +314,7 @@ func registryDirs(m Mark, o SaveOptions) []string {
 }
 
 // resolve finds m's record in its registry dirs, in order.
-func resolve(m Mark, o SaveOptions, c registryCache) (RegistryRecord, bool) {
+func resolve(m Mark, o SaveOptions, c registryCache) (registry.Record, bool) {
 	for _, dir := range registryDirs(m, o) {
 		if !filepath.IsAbs(dir) {
 			continue
@@ -322,7 +323,7 @@ func resolve(m Mark, o SaveOptions, c registryCache) (RegistryRecord, bool) {
 			return r, true
 		}
 	}
-	return RegistryRecord{}, false
+	return registry.Record{}, false
 }
 
 // sidecarTarget is the state file the sidecar belongs to (CS-TMUX-037):
