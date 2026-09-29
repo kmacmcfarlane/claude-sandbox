@@ -1282,6 +1282,8 @@ The container only has access to:
 
 When `CLAUDE_CONFIG_DIR` relocates the config directory (e.g. via direnv), `.claude.json` and `.mcp.json` are mounted from the parent of that directory — mirroring the standard `$HOME/.claude/` + `$HOME/.claude.json` + `$HOME/.mcp.json` layout.
 
+The injected `CLAUDE.md`, `.mcp.json` and `gitconfig` are single files mounted over a path in the container. When that path lies inside a read-write mount of the same host path — `~/.claude/` itself, the project, or a `mounts:` entry with `writable: true` — and the file does not exist on the host, Docker would create an empty, root-owned placeholder there on the host, which you cannot remove. The launcher creates that placeholder first, as you: an empty file, mode `0600` (and any missing directories between the mount and the file, `0700`). An empty host `CLAUDE.md` is treated as missing. If it cannot be created as you (a symlink on the way, a directory owned by someone else, no write permission, or — for a launcher running inside a sandbox — a directory the outer sandbox does not mount), that one file is not injected: one warning names it, and the session starts without it. A placeholder Docker already left as root has to be removed with `sudo rm`.
+
 It cannot see or modify anything else on the host filesystem.
 
 ### Global config (`~/.claude.json`)

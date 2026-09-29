@@ -1842,6 +1842,8 @@ var _ = Describe("launch.Build", func() {
 			BeforeEach(func() {
 				env["CLAUDE_SANDBOX_PROJECT_DIR"] = "/outer/proj"
 				reads = 0
+				// The outer launch left the CLAUDE.md placeholder (CS-LNCH-169).
+				touch(filepath.Join(cfgDir, "CLAUDE.md"), "")
 				// Only the container's own root filesystem: nothing is bound.
 				in.MountInfo = func() (string, error) {
 					reads++
