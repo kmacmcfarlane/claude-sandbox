@@ -104,7 +104,10 @@ const SnapshotLockName = ".snapshot.lock"
 // ok is false when another process holds it, or the lock cannot be taken;
 // the caller then skips the snapshot. unlock releases it.
 func (s *Store) TryLock() (unlock func(), ok bool) {
-	f, err := os.OpenFile(filepath.Join(s.Dir, SnapshotLockName), os.O_RDWR|os.O_CREATE, 0o600)
+	// O_NOFOLLOW: a symlink planted at the lock's name is never followed
+	// (no file is created or opened at its target); the snapshot is then
+	// skipped like any lock that cannot be taken.
+	f, err := os.OpenFile(filepath.Join(s.Dir, SnapshotLockName), os.O_RDWR|os.O_CREATE|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
 		return func() {}, false
 	}

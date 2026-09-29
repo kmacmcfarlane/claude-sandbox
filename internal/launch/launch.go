@@ -76,6 +76,11 @@ type Inputs struct {
 	// a failure (CS-LNCH-107).
 	Chmod func(string, os.FileMode) error
 
+	// Getuid is the invoking user's uid, checked against the owner of a
+	// shadow destination's parent before a placeholder is created there
+	// (CS-LNCH-169/170). Nil means os.Getuid.
+	Getuid func() int
+
 	// Linked is the verified linked git worktree the project lies in, nil
 	// otherwise (CS-LNCH-070). Its common git dir is mounted read-write at
 	// its own path so git works in the container (CS-LNCH-071).
@@ -138,6 +143,10 @@ type Inputs struct {
 	// the config hash tracks what was actually mounted rather than the temp
 	// paths those files happen to live at (which differ every launch).
 	shadowDigests []InputDigest
+
+	// shadowMounts are the single-file shadow binds added so far, checked
+	// once every mount is known (prepareShadowDests, CS-LNCH-169..171).
+	shadowMounts []shadowMount
 }
 
 // ModeHeadless is the claude-sandbox.mode label value of a headless container
@@ -371,7 +380,7 @@ func Build(in Inputs) (*Plan, error) {
 	// CS-LNCH-012, CS-GCFG-016..029: the global config file — the linked
 	// layout (no mount, the in-container link), the legacy single-file mount,
 	// or nothing.
-	globalLinked := in.assembleGlobalConfig(p, configDir)
+	globalLinked := in.assembleGlobalConfig(p)
 	// CS-LNCH-013: the .mcp.json sibling of the config dir.
 	if err := in.shadowSiblings(p, configDir); err != nil {
 		return nil, err
@@ -592,6 +601,12 @@ func Build(in Inputs) (*Plan, error) {
 	if sharedPeers {
 		bridged = in.assembleSharedPeerRegistry(p, configDir)
 	}
+
+	// CS-LNCH-169..171: a missing shadow destination under a read-write
+	// same-path mount is created as the user (or its mount left out) before
+	// docker could create it on the host as root. Last, once every mount —
+	// cascade entries, caches, the peer registry — is known.
+	in.prepareShadowDests(p)
 
 	// CS-SESS-020/021: hash the effective configuration, then record it and the
 	// contributing files on the container so a later attach can tell whether it
@@ -857,9 +872,12 @@ func (in *Inputs) tempFile(name string, content []byte) (string, error) {
 
 func (in *Inputs) shadowClaudeMD(p *Plan, configDir string) error {
 	var buf strings.Builder
-	if raw, err := os.ReadFile(filepath.Join(configDir, "CLAUDE.md")); err == nil {
+	if raw, err := os.ReadFile(filepath.Join(configDir, "CLAUDE.md")); err == nil && len(raw) > 0 {
 		// Host memory + a blank line separator; without a host file the temp
-		// file is container-context.md alone (CS-LNCH-010).
+		// file is container-context.md alone (CS-LNCH-010). An empty one is
+		// the mount-point placeholder of CS-LNCH-169 and counts as missing,
+		// so the content (and the hash) is the same on the launch that made
+		// it and on every later one.
 		buf.Write(raw)
 		buf.WriteString("\n")
 	}
@@ -868,7 +886,7 @@ func (in *Inputs) shadowClaudeMD(p *Plan, configDir string) error {
 	if err != nil {
 		return err
 	}
-	p.Volumes = append(p.Volumes, fmt.Sprintf("%s:%s:ro", tmp, filepath.Join(configDir, "CLAUDE.md")))
+	in.addShadowMount(p, tmp, filepath.Join(configDir, "CLAUDE.md"), "CLAUDE.md", "the container context (and the host CLAUDE.md)", nil)
 	return nil
 }
 
@@ -925,7 +943,7 @@ func (in *Inputs) mountSettingsTarget(p *Plan, configDir string) {
 // the container (CS-LNCH-012, CS-GCFG-016..029) and reports whether the launch
 // is linked. Only the default layout (CLAUDE_CONFIG_DIR unset) is decided
 // here; with CLAUDE_CONFIG_DIR set Claude Code reads the file inside the
-// config-dir mount and the parent sibling mount stays as it was (CS-GCFG-027).
+// config-dir mount and nothing is mounted for it (CS-GCFG-027, CS-GCFG-056).
 //
 // Linked: nothing is mounted at $HOME/.claude.json; the container gets the
 // link target in globalcfg.EnvVar, and the pidslot helper makes the link on
@@ -938,8 +956,8 @@ func (in *Inputs) mountSettingsTarget(p *Plan, configDir string) {
 // CS-GCFG-032: an env file (session-writable) never sets globalcfg.EnvVar —
 // a linked launch's own -e wins, and any other launch passes it empty, which
 // pidslot treats as unset (-e beats --env-file, the CS-LNCH-108 precedent).
-func (in *Inputs) assembleGlobalConfig(p *Plan, configDir string) bool {
-	linked := in.globalConfigLayout(p, configDir)
+func (in *Inputs) assembleGlobalConfig(p *Plan) bool {
+	linked := in.globalConfigLayout(p)
 	if !linked && in.envFilesDefine(globalcfg.EnvVar) {
 		p.EnvFlags = append(p.EnvFlags, globalcfg.EnvVar+"=")
 		fmt.Fprintf(in.Err, "WARNING: an env file sets %s; it is ignored — only the launcher sets it, from the host's ~/.claude.json layout.\n", globalcfg.EnvVar)
@@ -958,26 +976,16 @@ func (in *Inputs) mountRegularGlobal(p *Plan, path string) {
 	p.Volumes = append(p.Volumes, fmt.Sprintf("%s:%s", path, path))
 }
 
-func (in *Inputs) globalConfigLayout(p *Plan, configDir string) bool {
+func (in *Inputs) globalConfigLayout(p *Plan) bool {
 	host := !hostdirs.InSandbox(in.getenv)
 	if d := in.getenv("CLAUDE_CONFIG_DIR"); d != "" {
 		if globalcfg.SuspiciousConfigDir(d) {
 			fmt.Fprint(in.Err, globalcfg.ConfigDirWarning(d)) // CS-GCFG-028
 		}
-		// CS-GCFG-027, CS-LNCH-012: Claude Code does not read this file.
-		// Only a regular file (Lstat) is mounted: after a migration a tree
-		// with CLAUDE_CONFIG_DIR=$HOME/.claude finds the ~/.claude.json LINK
-		// here, and a session able to write the parent could plant a link to
-		// any file and have it mounted read-write.
-		claudeJSON := filepath.Join(filepath.Dir(configDir), globalcfg.FileName)
-		if fi, err := os.Lstat(claudeJSON); err == nil {
-			switch {
-			case fi.Mode().IsRegular():
-				in.mountRegularGlobal(p, claudeJSON)
-			case fi.Mode()&os.ModeSymlink != 0:
-				fmt.Fprint(in.Out, globalcfg.SiblingLinkNote(claudeJSON))
-			}
-		}
+		// CS-GCFG-056, CS-LNCH-012: nothing is mounted beside the config
+		// dir. Claude Code reads $CLAUDE_CONFIG_DIR/.claude.json, inside
+		// the config-dir mount; <parent>/.claude.json is never read.
+		in.warnConfigDirGlobalLink(d) // CS-GCFG-059
 		return false
 	}
 	l := globalcfg.Classify(in.Home, "")
@@ -1009,6 +1017,45 @@ func (in *Inputs) globalConfigLayout(p *Plan, configDir string) bool {
 	return false
 }
 
+// warnConfigDirGlobalLink is CS-GCFG-059: $CLAUDE_CONFIG_DIR/.claude.json as
+// a symlink whose target lies outside the config dir (typically
+// ../.claude.json, which resolved only while the parent sibling was
+// mounted) dangles in the container, where Claude Code would write a
+// defaults file over it. One warning; nothing is mounted.
+func (in *Inputs) warnConfigDirGlobalLink(configDir string) {
+	if !filepath.IsAbs(configDir) {
+		return
+	}
+	dir := filepath.Clean(configDir)
+	link := filepath.Join(dir, globalcfg.FileName)
+	fi, err := os.Lstat(link)
+	if err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		return
+	}
+	text, err := os.Readlink(link)
+	if err != nil {
+		return
+	}
+	target := text
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(dir, target)
+	}
+	target = filepath.Clean(target)
+	dirs := []string{dir}
+	if real, err := filepath.EvalSymlinks(dir); err == nil {
+		dirs = append(dirs, real)
+	}
+	if real, err := filepath.EvalSymlinks(link); err == nil {
+		target = real
+	}
+	for _, d := range dirs {
+		if target == d || strings.HasPrefix(target, d+string(filepath.Separator)) {
+			return
+		}
+	}
+	fmt.Fprintf(in.Err, "WARNING: %s is a symlink to %s, outside the config dir; the container cannot see its target (only the config dir is mounted), so the session will not read that global config and Claude Code may write a fresh one over the link. Move the file into %s instead.\n", link, target, dir)
+}
+
 func (in *Inputs) shadowSiblings(p *Plan, configDir string) error {
 	parent := filepath.Dir(configDir)
 	hostMCP := filepath.Join(parent, ".mcp.json")
@@ -1024,7 +1071,9 @@ func (in *Inputs) shadowSiblings(p *Plan, configDir string) error {
 		fmt.Fprintf(in.Err, "WARNING: %s cannot be read (%v); the sandbox uses only its own MCP servers\n", hostMCP, err)
 	default:
 		body := bytes.TrimSpace(bytes.TrimPrefix(raw, []byte("\xEF\xBB\xBF")))
-		if len(body) == 0 || string(body) == "null" {
+		// CS-LNCH-167/169: "{}" (the placeholder) merges to the fragment
+		// as-is; saying so keeps its bytes, and the hash, unchanged.
+		if len(body) == 0 || string(body) == "null" || string(body) == "{}" {
 			break
 		}
 		merged, merr := mergeMCP(body, assets.MCPServers)
@@ -1039,7 +1088,7 @@ func (in *Inputs) shadowSiblings(p *Plan, configDir string) error {
 	if terr != nil {
 		return terr
 	}
-	p.Volumes = append(p.Volumes, fmt.Sprintf("%s:%s:ro", tmp, target))
+	in.addShadowMount(p, tmp, target, ".mcp.json", "the sandbox's MCP servers", mcpPlaceholder)
 	return nil
 }
 
@@ -1056,7 +1105,7 @@ func (in *Inputs) shadowGitconfig(p *Plan) error {
 	if err != nil {
 		return err
 	}
-	p.Volumes = append(p.Volumes, fmt.Sprintf("%s:%s:ro", tmp, src))
+	in.addShadowMount(p, tmp, src, "gitconfig", "the host git config", nil)
 	return nil
 }
 

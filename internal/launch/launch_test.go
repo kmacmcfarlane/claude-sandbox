@@ -367,19 +367,18 @@ var _ = Describe("launch.Build", func() {
 		}
 	})
 
-	It("CS-LNCH-012: with CLAUDE_CONFIG_DIR set, a regular parent sibling is mounted as before; a symlinked one is not", func() {
+	It("CS-LNCH-012: with CLAUDE_CONFIG_DIR set, no parent sibling is mounted, regular or symlinked", func() {
 		alt := filepath.Join(home, "alt", ".claude")
 		mkdir(alt)
 		env["CLAUDE_CONFIG_DIR"] = alt
 		sib := filepath.Join(home, "alt", ".claude.json")
 		touch(sib, "{}")
-		Expect(build().Volumes).To(ContainElement(sib + ":" + sib))
+		Expect(build().Volumes).NotTo(ContainElement(HavePrefix(sib + ":")))
 
 		real := filepath.Join(home, "alt", "real.json")
 		Expect(os.Rename(sib, real)).To(Succeed())
 		Expect(os.Symlink(real, sib)).To(Succeed())
 		for _, v := range build().Volumes {
-			Expect(v).NotTo(ContainSubstring(".json:"+sib), "no mount of the link")
 			Expect(v).NotTo(HavePrefix(real + ":"))
 			Expect(v).NotTo(HavePrefix(sib + ":"))
 		}
@@ -436,6 +435,8 @@ var _ = Describe("launch.Build", func() {
 		Entry("JSON null", "null\n"),
 		Entry("BOM and whitespace", "\xEF\xBB\xBF \n"),
 		Entry("BOM and null", "\xEF\xBB\xBFnull"),
+		Entry("the CS-LNCH-169 placeholder {}", "{}\n"),
+		Entry("BOM and {} with surrounding whitespace", "\xEF\xBB\xBF {} \n"),
 	)
 
 	It("CS-LNCH-167: a leading UTF-8 BOM before valid JSON still merges the host servers", func() {
@@ -1902,6 +1903,8 @@ var _ = Describe("launch.Build", func() {
 			BeforeEach(func() {
 				env["CLAUDE_SANDBOX_PROJECT_DIR"] = "/outer/proj"
 				reads = 0
+				// The outer launch left the CLAUDE.md placeholder (CS-LNCH-169).
+				touch(filepath.Join(cfgDir, "CLAUDE.md"), "")
 				// Only the container's own root filesystem: nothing is bound.
 				in.MountInfo = func() (string, error) {
 					reads++

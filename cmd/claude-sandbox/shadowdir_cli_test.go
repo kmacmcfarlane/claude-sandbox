@@ -199,6 +199,8 @@ var _ = Describe("nested launch shadow root (CS-LNCH-161/162)", func() {
 		f.env.TempRoot = ""
 		cct = filepath.Join(f.home, ".claude", "tmp")
 		Expect(os.MkdirAll(cct, 0o755)).To(Succeed())
+		// The outer launch left the CLAUDE.md placeholder (CS-LNCH-169).
+		Expect(os.WriteFile(filepath.Join(f.home, ".claude", "CLAUDE.md"), nil, 0o600)).To(Succeed())
 		f.envmap["CLAUDE_SANDBOX_PROJECT_DIR"] = f.proj
 		f.envmap["CLAUDE_CODE_TMPDIR"] = cct
 	})

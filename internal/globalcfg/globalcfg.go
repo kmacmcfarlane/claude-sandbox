@@ -256,12 +256,6 @@ const (
 	keepCopy = "copy ~/.claude.json somewhere outside ~/.claude/ first"
 )
 
-// SiblingLinkNote is the CS-GCFG-027 note: with CLAUDE_CONFIG_DIR set, a
-// symlinked <parent>/.claude.json is not mounted.
-func SiblingLinkNote(path string) string {
-	return fmt.Sprintf("Note: %s is a symlink; it is not mounted (a symlink is never single-file-mounted, and with CLAUDE_CONFIG_DIR set Claude Code reads $CLAUDE_CONFIG_DIR/.claude.json).\n", path)
-}
-
 // ConfigJSONNote is the CS-GCFG-029 note.
 func (l Layout) ConfigJSONNote() string {
 	return fmt.Sprintf("Note: %s exists, so Claude Code uses it as the global config; %s stays in the legacy layout.\n",

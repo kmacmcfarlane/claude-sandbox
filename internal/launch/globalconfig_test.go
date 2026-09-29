@@ -194,31 +194,122 @@ var _ = Describe("launch.Build: the global config (CS-GCFG)", func() {
 		Expect(errw.String()).NotTo(ContainSubstring("two global config files"), "not repeated in a sandbox")
 	})
 
-	It("CS-GCFG-027: with CLAUDE_CONFIG_DIR set nothing is decided or set; a symlinked sibling is not mounted, with one note", func() {
-		linked()
+	It("CS-GCFG-027: with CLAUDE_CONFIG_DIR set nothing is decided, set or mounted", func() {
+		touch(link, "{}")
+		touch(target, "{}")
 		env["CLAUDE_CONFIG_DIR"] = filepath.Join(home, ".claude")
 		p := build()
 		Expect(hasGlobalEnv(p)).To(BeFalse())
-		// After a migration CLAUDE_CONFIG_DIR=$HOME/.claude finds the
-		// ~/.claude.json LINK as its sibling: never single-file-mounted.
 		Expect(mountsClaudeJSON(p)).To(BeFalse())
-		Expect(strings.Count(out.String(), "Note: "+link+" is a symlink; it is not mounted")).To(Equal(1))
-		Expect(errw.String()).NotTo(ContainSubstring("claude.json"))
+		Expect(errw.String()).NotTo(ContainSubstring("claude.json"), "no split-brain or link warning")
+		Expect(out.String()).NotTo(ContainSubstring("claude.json"))
 	})
 
-	It("CS-GCFG-027: a planted link to any other file is not mounted either", func() {
+	It("CS-GCFG-056: with CLAUDE_CONFIG_DIR set, <parent>/.claude.json is never mounted, whatever it is", func() {
 		secret := filepath.Join(home, ".ssh", "id_ed25519")
 		touch(secret, "key")
-		alt := filepath.Join(home, "work", ".claude-alt")
+		cd := filepath.Join(home, "work", ".claude-alt")
+		mkdir(cd)
+		env["CLAUDE_CONFIG_DIR"] = cd
+		sib := filepath.Join(filepath.Dir(cd), ".claude.json")
+		for _, kind := range []string{"regular", "link-to-secret", "link-to-target", "absent"} {
+			os.Remove(sib)
+			switch kind {
+			case "regular":
+				touch(sib, "{}")
+			case "link-to-secret":
+				Expect(os.Symlink(secret, sib)).To(Succeed())
+			case "link-to-target":
+				touch(target, "{}")
+				Expect(os.Symlink(target, sib)).To(Succeed())
+			}
+			out.Reset()
+			errw.Reset()
+			p := build()
+			for _, v := range p.Volumes {
+				Expect(v).NotTo(ContainSubstring(".claude.json:"), kind)
+				Expect(v).NotTo(ContainSubstring("id_ed25519"), kind)
+			}
+			Expect(out.String()).NotTo(ContainSubstring("claude.json"), kind)
+			Expect(errw.String()).NotTo(ContainSubstring("claude.json"), kind)
+		}
+		// Relative and "~" values still mount nothing beside them. No files
+		// are made for them: they would resolve against the test's cwd.
+		for _, v := range []string{"rel/.claude", "~/.claude"} {
+			env["CLAUDE_CONFIG_DIR"] = v
+			for _, vol := range build().Volumes {
+				Expect(vol).NotTo(ContainSubstring(".claude.json:"), v)
+			}
+		}
+	})
+
+	It("CS-GCFG-057: a migrated host with CLAUDE_CONFIG_DIR=$HOME/.claude launches silently", func() {
+		linked()
+		env["CLAUDE_CONFIG_DIR"] = filepath.Join(home, ".claude")
+		for i := 0; i < 2; i++ {
+			out.Reset()
+			errw.Reset()
+			p := build()
+			Expect(hasGlobalEnv(p)).To(BeFalse())
+			Expect(mountsClaudeJSON(p)).To(BeFalse(), "no mount of its own")
+			cd := filepath.Join(home, ".claude")
+			Expect(p.Volumes).To(ContainElement(cd+":"+cd), "the config-dir mount carries ~/.claude/.claude.json")
+			Expect(p.Volumes).To(ContainElement(HaveSuffix(":"+filepath.Join(home, ".mcp.json")+":ro")), "CS-LNCH-013 still shadows .mcp.json")
+			Expect(out.String()).NotTo(ContainSubstring("claude.json"))
+			Expect(errw.String()).NotTo(ContainSubstring("claude.json"))
+		}
+	})
+
+	It("CS-GCFG-059: a config-dir .claude.json linking outside the config dir warns once and mounts nothing", func() {
+		alt := filepath.Join(home, "alt", ".claude")
 		mkdir(alt)
 		env["CLAUDE_CONFIG_DIR"] = alt
-		sib := filepath.Join(home, "work", ".claude.json")
-		Expect(os.Symlink(secret, sib)).To(Succeed())
-		p := build()
-		for _, v := range p.Volumes {
-			Expect(v).NotTo(ContainSubstring("id_ed25519"))
-			Expect(v).NotTo(HavePrefix(sib + ":"))
+		cj := filepath.Join(alt, ".claude.json")
+		parentFile := filepath.Join(home, "alt", ".claude.json")
+
+		// ../.claude.json, existing and dangling, relative and absolute.
+		for _, tc := range []struct{ text, make string }{
+			{"../.claude.json", parentFile},
+			{"../.claude.json", ""},
+			{parentFile, parentFile},
+		} {
+			os.Remove(cj)
+			os.Remove(parentFile)
+			if tc.make != "" {
+				touch(tc.make, "{}")
+			}
+			Expect(os.Symlink(tc.text, cj)).To(Succeed())
+			errw.Reset()
+			p := build()
+			Expect(strings.Count(errw.String(), "WARNING: "+cj+" is a symlink to "+parentFile)).To(Equal(1), tc.text)
+			Expect(errw.String()).To(ContainSubstring("the container cannot see its target"))
+			Expect(mountsClaudeJSON(p)).To(BeFalse(), tc.text)
 		}
+
+		// Inside the config dir, a regular file, or absent: silent.
+		os.Remove(cj)
+		touch(filepath.Join(alt, "real.json"), "{}")
+		Expect(os.Symlink("real.json", cj)).To(Succeed())
+		for _, step := range []func(){
+			func() {},
+			func() { os.Remove(cj); touch(cj, "{}") },
+			func() { os.Remove(cj) },
+		} {
+			step()
+			errw.Reset()
+			build()
+			Expect(errw.String()).NotTo(ContainSubstring(".claude.json"))
+		}
+	})
+
+	It("CS-GCFG-058: with CLAUDE_CONFIG_DIR set, the parent sibling no longer moves the config hash", func() {
+		alt := filepath.Join(home, "alt", ".claude")
+		mkdir(alt)
+		env["CLAUDE_CONFIG_DIR"] = alt
+		without := build().ConfigHash
+		touch(filepath.Join(home, "alt", ".claude.json"), "{}")
+		Expect(build().ConfigHash).To(Equal(without))
+		Expect(without).NotTo(BeEmpty())
 	})
 
 	It("CS-GCFG-028: a relative or ~ CLAUDE_CONFIG_DIR warns once", func() {

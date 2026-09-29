@@ -337,11 +337,20 @@ func restoreCommand(o HealthOptions, file, snapshot string) (string, string) {
 	defaultFile := filepath.Join(filepath.Clean(o.Home), FileName)
 	if file == defaultFile {
 		l := Classify(o.Home, "")
+		cfgDir := ConfigDir(o.Home)
+		// A symlinked ~/.claude refuses the linked layout (CS-GCFG-023): a
+		// link into it, or a restore of a dangling link's target through
+		// it, gives no layout the sandboxes can use, so those cases get no
+		// command (CS-GCFG-010/011).
+		cfgDirLinked := false
+		if ci, err := os.Lstat(cfgDir); err == nil && ci.Mode()&os.ModeSymlink != 0 {
+			cfgDirLinked = true
+		}
 		switch l.Mode {
 		case ModeLinked:
 			return atomic(l.Target) // CS-GCFG-009
 		case ModeRefused:
-			if l.Resolved == l.Target {
+			if l.Resolved == l.Target && !cfgDirLinked {
 				if _, err := os.Lstat(l.Target); errors.Is(err, fs.ErrNotExist) {
 					return atomic(l.Target) // CS-GCFG-009: a dangling link
 				}
@@ -351,6 +360,12 @@ func restoreCommand(o HealthOptions, file, snapshot string) (string, string) {
 			return fmt.Sprintf("first fix the layout of %s (%s), then restore from the snapshot above.", file, l.Problem), ""
 		case ModeMissing:
 			if ti, err := os.Lstat(l.Target); err == nil && ti.Mode().IsRegular() {
+				if cfgDirLinked {
+					// CS-GCFG-010: the link would be refused (CS-GCFG-023),
+					// and a cp would make a split brain from an older
+					// snapshot.
+					return fmt.Sprintf("first fix the layout: the link %s is gone and %s is the live file (newer than the snapshot), but the config dir %s is itself a symlink, so a new link to it would be refused. Make %s a real directory, then restore the link (do not copy the snapshot).", file, l.Target, cfgDir, cfgDir), ""
+				}
 				// CS-GCFG-010: the link of a migrated layout was deleted;
 				// the live file is newer than any snapshot.
 				return fmt.Sprintf("the link is gone: %s is the live file (newer than the snapshot), so do not copy the snapshot; restore the link:", l.Target),
