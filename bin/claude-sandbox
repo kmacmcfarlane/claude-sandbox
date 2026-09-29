@@ -25,7 +25,7 @@ case "${1-}" in
     __complete | __completeNoDesc)
         [ -x "$BIN" ] || exit 1
         export CLAUDE_SANDBOX_REPO_ROOT="$REPO_ROOT"
-        exec "$BIN" "$@"
+        exec -a claude-sandbox "$BIN" "$@"
         ;;
 esac
 
@@ -71,4 +71,9 @@ if [ "$needs_build" = true ]; then
 fi
 
 export CLAUDE_SANDBOX_REPO_ROOT="$REPO_ROOT"
-exec "$BIN" "$@"
+# argv[0] is "claude-sandbox", not the bin/dist path (spec/tmux.feature
+# CS-TMUX-001/002): tmux reports it as #{pane_current_command} and
+# tmux-resurrect's @resurrect-processes match reads it as the first word of the
+# saved command. The binary never derives anything from argv[0] but the
+# "ralph" switch; its repo root comes from CLAUDE_SANDBOX_REPO_ROOT.
+exec -a claude-sandbox "$BIN" "$@"
