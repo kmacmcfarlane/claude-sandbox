@@ -113,6 +113,11 @@ type Inputs struct {
 	// launch that a restore needs to know about, never their values.
 	LaunchFlags string
 
+	// Resume is the conversation this launch resumes explicitly, for the
+	// claude-sandbox.resume label the resume guard reads (CS-LNCH-110,
+	// tmuxpane.GuardedResumeID); "" for none, a fork, headless or ralph.
+	Resume string
+
 	// LookupEnv tells set-but-empty from unset for the headless env allowlist
 	// (CS-LNCH-063). Nil falls back to Getenv, where "" reads as unset.
 	LookupEnv func(string) (string, bool)
@@ -181,6 +186,13 @@ const (
 	// LabelLaunchFlags names the flags given at launch, names only.
 	LabelLaunchFlags = "claude-sandbox.launchflags"
 )
+
+// LabelResume names the conversation a container was created to resume
+// (CS-LNCH-110): set only when the passthrough resumes a canonical UUID
+// without forking it. The resume guard (CS-SESS-065) counts a container
+// carrying it as holding that conversation until its registry record shows
+// it switched away. Outside the config hash, like every label.
+const LabelResume = "claude-sandbox.resume"
 
 // HeadlessEnv is the exact list of variables a headless launch forwards from
 // its own environment (CS-LNCH-063): what the Claude Agent SDK and Paseo set
@@ -307,6 +319,9 @@ type Plan struct {
 	// ContainerID is the full id "docker create" printed (Reserve), "" when
 	// it printed none that looks like one.
 	ContainerID string
+	// Resume is the claude-sandbox.resume label's value, "" when unset
+	// (CS-LNCH-110).
+	Resume string
 
 	// ConfigHash identifies the effective configuration this container was
 	// launched with; ConfigInputs records the contributing files so drift can
@@ -699,6 +714,12 @@ func Build(in Inputs) (*Plan, error) {
 		LabelRegistry+"="+p.RegistryDir,
 		LabelLaunchFlags+"="+in.LaunchFlags,
 	)
+	// CS-LNCH-110: the resume guard's reservation marker, visible to the next
+	// launch's discovery as soon as docker create returns.
+	if in.Resume != "" {
+		p.Labels = append(p.Labels, LabelResume+"="+in.Resume)
+	}
+	p.Resume = in.Resume
 
 	return p, nil
 }

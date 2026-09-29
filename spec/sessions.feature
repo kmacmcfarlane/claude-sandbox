@@ -768,3 +768,119 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
     # to reach a waiting session, and attach reaches the container's PRIMARY
     # claude. A joined session is a docker exec that cannot be reattached, so its
     # ping must say so instead of pointing at a different session.
+
+  # ---- the resume guard: one conversation, one session ----
+  #
+  # Claude Code guards a conversation only against a holder in its own pid
+  # namespace, so two sandboxes (or a sandbox and the host) could open one
+  # transcript at once and interleave writes into it. A restore that resumes
+  # conversations unattended (plan sandbox-reboot-restore F4) makes that easy
+  # to do by accident. So a launch carrying the resume label (CS-LNCH-110)
+  # checks, inside the launch lock and before its docker create, that the
+  # conversation is not already open anywhere it can see, and refuses with
+  # exit 4 when it is. A launch without the label (no --resume <uuid>, a
+  # --fork-session, the picker, headless, ralph) never runs the check, so it
+  # behaves exactly as before. The way out is always named: attach to the
+  # holder, or fork with --fork-session. There is no override flag.
+
+  @new
+  Scenario: CS-SESS-065 A resume of a conversation open in another sandbox is refused with exit 4
+    Given a launch whose passthrough carries "--resume <id>" (CS-LNCH-110)
+    And another sandbox holds <id>, by either rule:
+      | rule | the other container                                                  |
+      | a    | is running, paused or a "created" reservation, carries claude-sandbox.resume=<id>, and has no registry record at its pid class yet, or one that still names <id> |
+      | b    | is running or paused and has a registry record at its pid class, started at or after the container's creation, whose sessionId is <id> (an in-session /resume onto it, or a join at class + 256·n) |
+    When the launch reaches the launch lock
+    Then it creates nothing, starts nothing, and exits 4 with:
+      """
+      Error: conversation <id> is already open in '<noun>' (<container>);
+             a second session on it would interleave writes into one transcript.
+             Attach to it:  cd <project> && claude-sandbox --attach=<noun>
+             Or fork it:    add --fork-session after -- (a new conversation id)
+      """
+    And the "Attach to it" line is printed only for a holder that can be
+      attached (mode claude, with a noun); a ralph or headless holder is named
+      by container only
+    And a labelled container whose registry records at its class (after its
+      creation) all name other ids has switched away: it does not hold <id>
+    And a record at the class that started before the container was created
+      is a leftover of an earlier container with the same class, and is ignored
+    And an exited kept container holds nothing: nothing runs in it
+    And exit 4 is new: 0-3 keep their meaning (3 = a decision needs a terminal)
+
+  @new
+  Scenario: CS-SESS-066 Registry records are read hardened, from the directory each container names
+    Given a running or paused sandbox
+    Then its records are read from its claude-sandbox.registry label (CS-LNCH-109)
+    And a container without that label (from before it) is looked up in
+      <CLAUDE_CONFIG_DIR or ~/.claude>/sessions and in
+      ~/.cache/claude-sandbox/peers/sessions
+    And each directory is opened once with O_DIRECTORY|O_NOFOLLOW, and each
+      record "<pid>.json" through that directory fd with O_NOFOLLOW|O_NONBLOCK
+    And a record counts only when it is a regular file of at most 64 KiB, its
+      JSON pid equals the <pid> of its file name, and its sessionId is a
+      canonical UUID
+    And a registry directory that does not exist holds no records
+    And only records whose pid % 256 equals the container's pid class are
+      looked at; a container without a pid class label has none
+
+  @new
+  Scenario: CS-SESS-067 The check fails closed: what cannot be read counts as open
+    Given a launch carrying the resume label
+    When "docker ps" discovery fails
+    Or the registry directory of any running or paused sandbox exists but cannot
+      be opened or listed (a symlink, a permission error, not a directory)
+    Or a record at a class being checked stays malformed (not a regular file,
+      over 64 KiB, unparsable, a pid mismatch, a sessionId that is not a UUID)
+      after 3 retries over about 1 s
+    Then the conversation counts as open, and the launch exits 4 with:
+      """
+      Error: cannot tell whether conversation <id> is already open elsewhere
+             (<reason>), so it is not resumed a second time.
+             Fix that and retry, or fork it: add --fork-session after --.
+      """
+    And plain launches (no resume label) keep today's behaviour: a discovery
+      failure still degrades to random picks and launches
+
+  @new
+  Scenario: CS-SESS-068 A claude running on the host holds its conversation too
+    Given a launch carrying the resume label, on Linux
+    Then the records in ~/.claude/sessions and in <config dir>/sessions are also
+      read, and one counts when all of these hold:
+      | field     | condition                                                        |
+      | pidDomain | equals "linux::" + readlink /proc/self/ns/pid (the launcher's own namespace) |
+      | sessionId | equals <id>                                                      |
+      | pid       | /proc/<pid> exists and is live (below)                           |
+    And liveness is read from /proc/<pid>/stat, split after the LAST ")" (a comm
+      may hold spaces and parentheses), field 22 (starttime) compared with the
+      record's procStart as a decimal string:
+      | /proc/<pid>                          | live? |
+      | absent                               | no                               |
+      | present, stat readable, same start   | yes                              |
+      | present, stat readable, other start  | no (the pid was reused)          |
+      | present, unreadable (hidepid, EACCES) or unparsable | yes (fails closed) |
+    And a live match refuses with exit 4:
+      """
+      Error: conversation <id> is already open in a claude process on this host (pid <pid>);
+             a second session on it would interleave writes into one transcript.
+             Or fork it:    add --fork-session after -- (a new conversation id)
+      """
+    And a record from a sandbox carries its container's own namespace and never
+      matches; a malformed record in these directories is skipped (its
+      pidDomain cannot be known), and an unreadable directory fails closed
+      (CS-SESS-067)
+    And a /proc/self/ns/pid that cannot be read fails closed
+    And on other systems the host check is skipped
+
+  @new
+  Scenario: CS-SESS-069 The check runs under the launch lock, and a labelled launch never runs without it
+    Given a launch carrying the resume label
+    Then the check runs inside the launch lock (CS-SESS-048), after discovery and
+      before docker create, on every create attempt
+    So of two launches racing to resume one conversation, the second sees the
+      first's reservation (rule a) and exits 4
+    When the launch lock cannot be taken (the 30 s timeout, or no home directory)
+    Then the launch does not take CS-SESS-048's "launch unserialized" fallback:
+      it creates nothing and exits 2 with
+      "Error: could not take the launch lock (<why>); not resuming <id> unserialized."
+    And a launch without the label never reads a registry directory or /proc
