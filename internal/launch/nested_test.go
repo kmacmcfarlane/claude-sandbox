@@ -46,6 +46,9 @@ var _ = Describe("nested launches: resolved bind sources (CS-LNCH-163/164)", fun
 		for _, d := range []string{home, proj, cfgDir, dotfiles} {
 			mkdir(d)
 		}
+		// The outer launch left the mount-point placeholder (CS-LNCH-169), so
+		// the CLAUDE.md shadow needs no host-visibility check here.
+		touch(filepath.Join(cfgDir, "CLAUDE.md"), "")
 		env = map[string]string{"CLAUDE_SANDBOX_PROJECT_DIR": "/outer/proj"}
 		errw = &bytes.Buffer{}
 		reads, mountinfo, mountErr = 0, rootOnly, nil

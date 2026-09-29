@@ -75,6 +75,11 @@ type Inputs struct {
 	// a failure (CS-LNCH-107).
 	Chmod func(string, os.FileMode) error
 
+	// Getuid is the invoking user's uid, checked against the owner of a
+	// shadow destination's parent before a placeholder is created there
+	// (CS-LNCH-169/170). Nil means os.Getuid.
+	Getuid func() int
+
 	// Linked is the verified linked git worktree the project lies in, nil
 	// otherwise (CS-LNCH-070). Its common git dir is mounted read-write at
 	// its own path so git works in the container (CS-LNCH-071).
@@ -132,6 +137,10 @@ type Inputs struct {
 	// the config hash tracks what was actually mounted rather than the temp
 	// paths those files happen to live at (which differ every launch).
 	shadowDigests []InputDigest
+
+	// shadowMounts are the single-file shadow binds added so far, checked
+	// once every mount is known (prepareShadowDests, CS-LNCH-169..171).
+	shadowMounts []shadowMount
 }
 
 // ModeHeadless is the claude-sandbox.mode label value of a headless container
@@ -554,6 +563,12 @@ func Build(in Inputs) (*Plan, error) {
 		bridged = in.assembleSharedPeerRegistry(p, configDir)
 	}
 
+	// CS-LNCH-169..171: a missing shadow destination under a read-write
+	// same-path mount is created as the user (or its mount left out) before
+	// docker could create it on the host as root. Last, once every mount —
+	// cascade entries, caches, the peer registry — is known.
+	in.prepareShadowDests(p)
+
 	// CS-SESS-020/021: hash the effective configuration, then record it and the
 	// contributing files on the container so a later attach can tell whether it
 	// is joining a container built from the config now on disk.
@@ -794,9 +809,12 @@ func (in *Inputs) tempFile(name string, content []byte) (string, error) {
 
 func (in *Inputs) shadowClaudeMD(p *Plan, configDir string) error {
 	var buf strings.Builder
-	if raw, err := os.ReadFile(filepath.Join(configDir, "CLAUDE.md")); err == nil {
+	if raw, err := os.ReadFile(filepath.Join(configDir, "CLAUDE.md")); err == nil && len(raw) > 0 {
 		// Host memory + a blank line separator; without a host file the temp
-		// file is container-context.md alone (CS-LNCH-010).
+		// file is container-context.md alone (CS-LNCH-010). An empty one is
+		// the mount-point placeholder of CS-LNCH-169 and counts as missing,
+		// so the content (and the hash) is the same on the launch that made
+		// it and on every later one.
 		buf.Write(raw)
 		buf.WriteString("\n")
 	}
@@ -805,7 +823,7 @@ func (in *Inputs) shadowClaudeMD(p *Plan, configDir string) error {
 	if err != nil {
 		return err
 	}
-	p.Volumes = append(p.Volumes, fmt.Sprintf("%s:%s:ro", tmp, filepath.Join(configDir, "CLAUDE.md")))
+	in.addShadowMount(p, tmp, filepath.Join(configDir, "CLAUDE.md"), "CLAUDE.md", "the container context (and the host CLAUDE.md)", nil)
 	return nil
 }
 
@@ -990,7 +1008,9 @@ func (in *Inputs) shadowSiblings(p *Plan, configDir string) error {
 		fmt.Fprintf(in.Err, "WARNING: %s cannot be read (%v); the sandbox uses only its own MCP servers\n", hostMCP, err)
 	default:
 		body := bytes.TrimSpace(bytes.TrimPrefix(raw, []byte("\xEF\xBB\xBF")))
-		if len(body) == 0 || string(body) == "null" {
+		// CS-LNCH-167/169: "{}" (the placeholder) merges to the fragment
+		// as-is; saying so keeps its bytes, and the hash, unchanged.
+		if len(body) == 0 || string(body) == "null" || string(body) == "{}" {
 			break
 		}
 		merged, merr := mergeMCP(body, assets.MCPServers)
@@ -1005,7 +1025,7 @@ func (in *Inputs) shadowSiblings(p *Plan, configDir string) error {
 	if terr != nil {
 		return terr
 	}
-	p.Volumes = append(p.Volumes, fmt.Sprintf("%s:%s:ro", tmp, target))
+	in.addShadowMount(p, tmp, target, ".mcp.json", "the sandbox's MCP servers", mcpPlaceholder)
 	return nil
 }
 
@@ -1022,7 +1042,7 @@ func (in *Inputs) shadowGitconfig(p *Plan) error {
 	if err != nil {
 		return err
 	}
-	p.Volumes = append(p.Volumes, fmt.Sprintf("%s:%s:ro", tmp, src))
+	in.addShadowMount(p, tmp, src, "gitconfig", "the host git config", nil)
 	return nil
 }
 

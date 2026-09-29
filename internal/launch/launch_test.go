@@ -435,6 +435,8 @@ var _ = Describe("launch.Build", func() {
 		Entry("JSON null", "null\n"),
 		Entry("BOM and whitespace", "\xEF\xBB\xBF \n"),
 		Entry("BOM and null", "\xEF\xBB\xBFnull"),
+		Entry("the CS-LNCH-169 placeholder {}", "{}\n"),
+		Entry("BOM and {} with surrounding whitespace", "\xEF\xBB\xBF {} \n"),
 	)
 
 	It("CS-LNCH-167: a leading UTF-8 BOM before valid JSON still merges the host servers", func() {
@@ -1841,6 +1843,8 @@ var _ = Describe("launch.Build", func() {
 			BeforeEach(func() {
 				env["CLAUDE_SANDBOX_PROJECT_DIR"] = "/outer/proj"
 				reads = 0
+				// The outer launch left the CLAUDE.md placeholder (CS-LNCH-169).
+				touch(filepath.Join(cfgDir, "CLAUDE.md"), "")
 				// Only the container's own root filesystem: nothing is bound.
 				in.MountInfo = func() (string, error) {
 					reads++
