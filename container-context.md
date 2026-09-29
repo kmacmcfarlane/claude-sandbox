@@ -20,9 +20,11 @@ may be installed via the child Dockerfile (`.claude-sandbox/Dockerfile`). Check
 
 ## Missing Tools
 
-If you need a tool that is not installed, **stop and ask the user** (via the
-AskUserQuestion tool) before attempting workarounds. The user can add it to the
-project's child Dockerfile (`.claude-sandbox/Dockerfile`) for a permanent fix.
+If you need a tool that is not installed, **stop and tell the operator** which
+tool is missing and where it belongs (the host, or the sandbox image) before
+attempting workarounds. The permanent fix for the image is the project's child
+Dockerfile (`.claude-sandbox/Dockerfile`). A skill with its own missing-tool
+rule, such as dev-flow research, follows that rule instead.
 
 ## LSP Setup
 
