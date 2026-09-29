@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -404,9 +405,17 @@ var _ = Describe("global-config migrate (CS-GCFG-041..051)", func() {
 		It("CS-GCFG-050: a caught signal before the rename aborts cleanly and removes the lock", func() {
 			o := f.opts()
 			o.Signals = []os.Signal{syscall.SIGUSR1}
+			var caught chan<- os.Signal
+			o.Notify = func(c chan<- os.Signal, sigs ...os.Signal) {
+				caught = c
+				signal.Notify(c, sigs...)
+			}
 			o.BeforeSwap = func() {
+				Expect(caught).NotTo(BeNil())
 				Expect(syscall.Kill(os.Getpid(), syscall.SIGUSR1)).To(Succeed())
-				time.Sleep(50 * time.Millisecond) // delivery is asynchronous
+				// Delivery is asynchronous: wait until it is on the lock's
+				// channel (buffered, 1), not for a fixed time.
+				Eventually(func() int { return len(caught) }).WithTimeout(10 * time.Second).WithPolling(time.Millisecond).Should(Equal(1))
 			}
 			expectRefused(globalcfg.Migrate(o), "interrupted")
 			Expect(isLink(f.link)).To(BeFalse())
@@ -414,6 +423,33 @@ var _ = Describe("global-config migrate (CS-GCFG-041..051)", func() {
 			Expect(exists(f.target)).To(BeFalse())
 			Expect(exists(f.link + ".lock")).To(BeFalse())
 			Expect(f.entries(globalcfg.PreMigratePrefix)).To(BeEmpty())
+		})
+
+		It("CS-GCFG-050: a signal inherited as ignored (nohup) stays ignored while the lock is held", func() {
+			signal.Ignore(syscall.SIGUSR2)
+			DeferCleanup(func() { signal.Reset(syscall.SIGUSR2) })
+			o := f.opts()
+			o.Signals = []os.Signal{syscall.SIGUSR2, syscall.SIGUSR1}
+			var registered [][]os.Signal
+			o.Notify = func(c chan<- os.Signal, sigs ...os.Signal) {
+				registered = append(registered, sigs)
+				signal.Notify(c, sigs...)
+			}
+			o.BeforeSwap = func() {
+				// Discarded by the kernel at once (SIG_IGN): nothing to wait for.
+				Expect(syscall.Kill(os.Getpid(), syscall.SIGUSR2)).To(Succeed())
+			}
+			Expect(globalcfg.Migrate(o)).To(Succeed(), "an ignored signal does not abort the swap")
+			Expect(registered).To(Equal([][]os.Signal{{syscall.SIGUSR1}}))
+		})
+
+		It("CS-GCFG-050: when every signal is inherited as ignored, nothing is registered (Notify with none would relay all)", func() {
+			signal.Ignore(syscall.SIGUSR2)
+			DeferCleanup(func() { signal.Reset(syscall.SIGUSR2) })
+			o := f.opts()
+			o.Signals = []os.Signal{syscall.SIGUSR2}
+			o.Notify = func(chan<- os.Signal, ...os.Signal) { Fail("Notify called with only ignored signals") }
+			Expect(globalcfg.Migrate(o)).To(Succeed())
 		})
 
 		It("CS-GCFG-050: the default lock wait outlasts the stale age", func() {
@@ -427,12 +463,14 @@ var _ = Describe("global-config migrate (CS-GCFG-041..051)", func() {
 			Expect(mode(f.target)).To(Equal(os.FileMode(0o600)))
 		})
 
-		It("CS-GCFG-051: an identical target that was already there is not removed by an abort", func() {
+		It("CS-GCFG-051: an identical target that was already there is not removed by an abort, and keeps 0600", func() {
 			write(f.target, cfg)
+			Expect(os.Chmod(f.target, 0o644)).To(Succeed())
 			o := f.opts()
 			o.BeforeSwap = func() { write(f.link, `{"changed":true}`) }
 			Expect(globalcfg.Migrate(o)).NotTo(Succeed())
 			Expect(read(f.target)).To(Equal(cfg))
+			Expect(mode(f.target)).To(Equal(os.FileMode(0o600)), "tightened, not re-widened")
 		})
 
 		It("CS-GCFG-051: steps under the lock past the 5 s bound abort before the rename", func() {
@@ -500,7 +538,10 @@ var _ = Describe("global-config revert (CS-GCFG-046, CS-GCFG-047, CS-GCFG-052)",
 		Expect(os.Remove(f.link)).To(Succeed())
 		write(f.link, cfg) // the rename happened; the target was never parked
 		Expect(globalcfg.Revert(f.opts())).To(Succeed(), f.errw.String())
-		Expect(f.out.String()).To(ContainSubstring("Finished an interrupted revert"))
+		Expect(f.out.String()).NotTo(ContainSubstring("interrupted"), "the files cannot tell a killed revert from a killed migrate or a manual copy")
+		parked := f.entries(globalcfg.RevertedPrefix)
+		Expect(parked).To(HaveLen(1))
+		Expect(f.out.String()).To(Equal("Found two identical files: kept " + f.link + " (the legacy layout) and parked the copy " + f.target + " at " + parked[0] + "\n"))
 		Expect(exists(f.target)).To(BeFalse())
 		Expect(read(f.link)).To(Equal(cfg))
 		Expect(f.entries(globalcfg.RevertedPrefix)).To(HaveLen(1))
@@ -682,6 +723,16 @@ var _ = Describe("another spelling of the same file (CS-GCFG-045, CS-GCFG-046)",
 		f.fake.On("docker ps", "cs-alias\x1f"+filepath.Join(alias, ".claude.json")+"\n", nil)
 		expectRefused(globalcfg.Migrate(f.opts()), "cs-alias")
 		Expect(read(f.link)).To(Equal(cfg))
+	})
+
+	It("CS-GCFG-045: a source with another name is never stat'ed, so it cannot match (or hang the command)", func() {
+		write(f.link, cfg)
+		// The same inode under another name: a hardlink outside $HOME.
+		other := filepath.Join(filepath.Dir(f.home), "elsewhere.json")
+		Expect(os.Link(f.link, other)).To(Succeed())
+		f.fake.On("docker ps", "cs-other\x1f"+other+"\n", nil)
+		Expect(globalcfg.Migrate(f.opts())).To(Succeed(), f.errw.String())
+		Expect(isLink(f.link)).To(BeTrue())
 	})
 
 	It("CS-GCFG-046: a linked container naming the target by another spelling refuses revert", func() {

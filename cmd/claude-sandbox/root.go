@@ -74,7 +74,8 @@ type Env struct {
 	// SkipGlobalConfigCheck turns the global-config health check off
 	// (CS-GCFG-001). Test-only: a test of a real-home guard further down the
 	// launch path sets it, since the check's own guard (CS-GCFG-015) would
-	// panic first. Never set outside tests.
+	// panic first. Honoured only under go test (testing.Testing()); a real
+	// build ignores it.
 	SkipGlobalConfigCheck bool
 	// Executable is the binary the detached checker runs as; nil means
 	// os.Executable. The checker is started through Runner.Start with
