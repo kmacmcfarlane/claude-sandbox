@@ -45,6 +45,11 @@ const (
 	// LabelKeep marks a kept container and records its restart policy
 	// (CS-SESS-070); an exited or restarting row is listed only with it.
 	LabelKeep = launch.LabelKeep
+	// LabelConfigDir, LabelRegistry and LabelLaunchFlags feed the tmux pane
+	// mark of an attach or join (CS-LNCH-109, CS-TMUX-012).
+	LabelConfigDir   = launch.LabelConfigDir
+	LabelRegistry    = launch.LabelRegistry
+	LabelLaunchFlags = launch.LabelLaunchFlags
 )
 
 // ModeRalph marks a ralph loop container.
@@ -94,9 +99,18 @@ type Session struct {
 	// Keep is the claude-sandbox.keep label: the restart policy of a kept
 	// container, "" for a --rm one (CS-SESS-070/074).
 	Keep string `json:"keep,omitempty"`
-	// CreatedAt is when the container was created; zero when unparsable. Only
-	// reservations need it, to recognise orphans (CS-SESS-052).
+	// CreatedAt is when the container was created; zero when unparsable.
+	// Reservations need it to recognise orphans (CS-SESS-052); the tmux pane
+	// mark of an attach records it (CS-TMUX-012).
 	CreatedAt time.Time `json:"-"`
+
+	// ID is the full container id ({{.ID}} under --no-trunc), "" from an
+	// older row. ConfigDirEnv, RegistryDir and LaunchFlags are the
+	// CS-LNCH-109 labels; RegistryDir is "" on a container that predates them.
+	ID           string `json:"-"`
+	ConfigDirEnv string `json:"-"`
+	RegistryDir  string `json:"-"`
+	LaunchFlags  string `json:"-"`
 }
 
 // StateCreated is docker's state for a container that exists but has never
@@ -168,6 +182,12 @@ var psFormat = strings.Join([]string{
 	`{{.Label "` + LabelMemoryLimit + `"}}`,
 	`{{.Label "` + LabelMemoryLimitSource + `"}}`,
 	`{{.Label "` + LabelKeep + `"}}`, // CS-SESS-070
+	// CS-TMUX-012 / CS-LNCH-109: the full id (the list runs with --no-trunc)
+	// and what an attach's pane mark needs.
+	"{{.ID}}",
+	`{{.Label "` + LabelConfigDir + `"}}`,
+	`{{.Label "` + LabelRegistry + `"}}`,
+	`{{.Label "` + LabelLaunchFlags + `"}}`,
 }, fieldSep)
 
 // psFieldCount is the minimum a row must carry; State and CreatedAt follow.
@@ -240,7 +260,10 @@ func list(r execx.Runner, filter string, count bool) ([]Session, error) {
 			"--filter", "label=" + filter,
 			"--filter", "status=" + StateCreated, "--filter", "status=running", "--filter", "status=paused",
 			"--filter", "status=" + StateExited, "--filter", "status=" + StateRestarting,
-			"--format", psFormat},
+			"--format", psFormat,
+			// Full ids for the tmux pane mark (CS-TMUX-012); labels and
+			// names are never truncated anyway.
+			"--no-trunc"},
 		Stderr: io.Discard,
 	})
 	if err != nil {
@@ -272,6 +295,10 @@ func list(r execx.Runner, filter string, count bool) ([]Session, error) {
 		}
 		if len(f) > 15 {
 			s.Keep = strings.TrimSpace(f[15])
+		}
+		if len(f) > 19 {
+			s.ID = strings.TrimSpace(f[16])
+			s.ConfigDirEnv, s.RegistryDir, s.LaunchFlags = f[17], f[18], f[19]
 		}
 		// An exited or restarting container is listed only when kept: a --rm
 		// one is being removed (CS-SESS-070).

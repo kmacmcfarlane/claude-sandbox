@@ -1407,6 +1407,61 @@ var _ = Describe("launch.Build", func() {
 			Expect(root).NotTo(BeADirectory())
 		})
 
+		Describe("CS-LNCH-109: the pane-mark labels", func() {
+			label := func(p *launch.Plan, key string) []string {
+				var vals []string
+				for _, l := range argPairs(p.CreateArgs(proj), "--label") {
+					if k, v, ok := strings.Cut(l, "="); ok && k == key {
+						vals = append(vals, v)
+					}
+				}
+				return vals
+			}
+
+			It("CS-LNCH-109: configdir is the RAW CLAUDE_CONFIG_DIR, empty when unset; registry is <config dir>/sessions", func() {
+				p := build()
+				Expect(label(p, launch.LabelConfigDir)).To(Equal([]string{""}))
+				Expect(label(p, launch.LabelRegistry)).To(Equal([]string{filepath.Join(cfgDir, "sessions")}))
+				Expect(p.RegistryDir).To(Equal(filepath.Join(cfgDir, "sessions")))
+				Expect(p.ConfigDir).To(Equal(cfgDir))
+				Expect(p.ConfigDirEnv).To(Equal(""))
+
+				other := filepath.Join(home, "work-claude")
+				mkdir(other)
+				env["CLAUDE_CONFIG_DIR"] = other
+				p = build()
+				Expect(label(p, launch.LabelConfigDir)).To(Equal([]string{other}))
+				Expect(label(p, launch.LabelRegistry)).To(Equal([]string{filepath.Join(other, "sessions")}))
+				Expect(p.ConfigDirEnv).To(Equal(other))
+			})
+
+			It("CS-LNCH-109: registry names the shared peers/sessions once the bridge applied", func() {
+				enable()
+				p := build()
+				Expect(label(p, launch.LabelRegistry)).To(Equal([]string{filepath.Join(root, "sessions")}))
+				Expect(p.RegistryDir).To(Equal(filepath.Join(root, "sessions")))
+			})
+
+			It("CS-LNCH-109: launchflags carries the names it is given, and none of the three is hashed", func() {
+				p := build()
+				Expect(label(p, launch.LabelLaunchFlags)).To(Equal([]string{""}))
+				hash, inputs := p.ConfigHash, p.ConfigInputs
+
+				in.LaunchFlags = "--model,--add-dir,--docker-socket"
+				other := filepath.Join(home, "work-claude")
+				mkdir(other)
+				env["CLAUDE_CONFIG_DIR"] = other
+				q := build()
+				Expect(label(q, launch.LabelLaunchFlags)).To(Equal([]string{"--model,--add-dir,--docker-socket"}))
+				// The config dir moves the mounts; compare only what the
+				// labels alone would change.
+				env["CLAUDE_CONFIG_DIR"] = ""
+				r := build()
+				Expect(r.ConfigHash).To(Equal(hash))
+				Expect(r.ConfigInputs).To(Equal(inputs))
+			})
+		})
+
 		It("CS-LNCH-049: with the key on, the argv is the key-off argv plus exactly the bridge entries", func() {
 			off := build().CreateArgs(proj)
 			enable()
@@ -1422,12 +1477,17 @@ var _ = Describe("launch.Build", func() {
 				}
 				rest = append(rest, on[i])
 			}
-			// The fingerprint label moves with the key by design (CS-LNCH-052).
+			// The fingerprint label moves with the key by design (CS-LNCH-052),
+			// and so does the registry label, which names the shared
+			// registry once the bridge applies (CS-LNCH-109).
 			mask := func(args []string) []string {
 				out := make([]string, len(args))
 				for i, a := range args {
 					if strings.HasPrefix(a, "claude-sandbox.confighash=") {
 						a = "claude-sandbox.confighash=<masked>"
+					}
+					if strings.HasPrefix(a, launch.LabelRegistry+"=") {
+						a = launch.LabelRegistry + "=<masked>"
 					}
 					out[i] = a
 				}

@@ -407,6 +407,57 @@ enable it only between trees you would let talk to each other. Unlike the model 
 worktree, it counts as **config drift**: a container launched without the bridge cannot be
 talked to across trees, and `--attach`/`--join` report the difference.
 
+### tmux pane marks
+
+Run inside tmux, every launch, `--attach` and `--join` records which sandbox its pane holds, in
+the pane user option `@claude-sandbox`, and removes it again when the session child returns
+(detach, exit, a signal). It is the first part of restoring sandbox panes after a tmux server
+restart or a reboot with tmux-resurrect (see [docs/tmux-session-restore.md](docs/tmux-session-restore.md));
+the save hook and `claude-sandbox tmux restore` that read it are still to come. Nothing
+changes outside tmux (`TMUX`/`TMUX_PANE` unset), in a launcher run inside a sandbox, for
+`headless` or for `--detach`, and a failing tmux never changes the launch: each tmux call is
+killed after 1 s, so a hung tmux server costs at most a few seconds, never the launch. The mark
+is removed on every ordinary exit; a launcher killed outright (or a Ctrl-C in the instant before
+the session starts) can leave a stale one, which the save hook will check against what the pane
+actually runs.
+
+```bash
+tmux show-options -p -v @claude-sandbox   # in a pane running a sandbox session
+```
+
+The mark is compact JSON (`"v": 1`, `"state": "active"`): the mode (`claude`, `join` or
+`ralph`), container name and full id, instance noun, project, where claude runs (`cwdRoot`),
+pid class, a start time, the config dir, the raw `CLAUDE_CONFIG_DIR` (`configDirEnv`, `""` when
+unset), the peer-registry dir, the worktree (`""` for the shared checkout; a `--join` whose
+worktree name claude generates records `"worktreeGenerated": true` instead, name unknown until the
+save hook fills it), a `--model` given
+on the command line, and two flag lists. A restore will replay the session's identity plus
+**`replay`**: the claude flags given at launch that `--resume` does not restore and that do not
+widen what the session may do (`--add-dir`, `--append-system-prompt[-file]`, `--agent`,
+`--effort`, `--disallowedTools`, `--tools`, `--strict-mcp-config`, `--bare`, `--restricted`,
+`--safe-mode`), with their values. **`unreplayed`** only *names* everything else given at
+launch that a restore will not pass — host-access and dangerous flags, the matching
+`CLAUDE_SANDBOX_*` switches set in the environment, other claude flags — so a restore can say
+what it left out; values are never recorded. The `replay` values themselves (an
+`--append-system-prompt` text, an `--add-dir` path) are stored verbatim in the pane option and,
+later, in the save hook's sidecar file, so never put a credential in them. Persistent choices
+belong in `config.yaml`, which a restore re-reads like any launch.
+
+An attach or join never saw the original launch, so every container also carries three
+labels (outside the config-drift hash): `claude-sandbox.configdir` (the raw
+`CLAUDE_CONFIG_DIR`, empty when unset), `claude-sandbox.registry` (the host dir its registry
+records land in — the shared `peers/sessions` when [the bridge](#messaging-between-sessions)
+applied) and `claude-sandbox.launchflags` (the flag names, comma-separated, names only). An
+attach's mark takes them from there; its `unreplayed` holds every name, since an attach never
+saw the values, and it records the container's model only when the launcher's `--model` was the
+one given (a claude `--model` after `--` is labelled `--model:claude` and listed as unreplayed). A container from before these labels gets `"flagsUnknown": true`.
+
+If a pane still carries a *pending* mark (a restore waiting to act) and you launch something
+else in it, the launcher prints one `Note: this pane was waiting to restore '<name>' (<id>);
+resume it with: <command>` line first (no command when a mark value holds a control character,
+or when its worktree name is not recorded yet); a start that fails puts that mark back. Spec:
+`spec/tmux.feature` CS-TMUX-010..019, `spec/launch.feature` CS-LNCH-109.
+
 ## Headless mode (Paseo and other SDK clients)
 
 `claude-sandbox headless` lets a program that drives Claude Code through the Claude Agent SDK
@@ -1716,6 +1767,7 @@ internal/
   launch/          Mount assembly, shadow injections, docker create/start argv, launch lock
   globalcfg/       ~/.claude.json layout (linked/legacy), the in-container link, global-config migrate/revert/accept, the launch health check
   ralphloop/       Ralph loop: iterations, lock, quota handling, pipeline
+  tmuxpane/        tmux pane mark: mark JSON, tmux argv, the restore replay allowlist + names-only flag scan
   execx/, prompt/  Command-runner and prompt seams (injected in tests)
 spec/              Gherkin behavioral spec — scenario IDs referenced by the Ginkgo tests
 scripts/check-spec-coverage.sh  CI check: every scenario ID appears in a test

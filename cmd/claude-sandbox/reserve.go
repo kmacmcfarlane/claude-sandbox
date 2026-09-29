@@ -240,11 +240,13 @@ func pidClassFrom(found []sessions.Session) string {
 // pre is the global-config health check launchWith ran before the create
 // (CS-GCFG-001); the check after a non-headless session skips its findings
 // (CS-GCFG-014).
-func startReserved(env *Env, plan *launch.Plan, headless bool, pre *globalcfg.Health) error {
+// mark is the pane mark for the session (CS-TMUX-011), nil for none.
+func startReserved(env *Env, plan *launch.Plan, headless bool, pre *globalcfg.Health, mark *paneMark) error {
 	o := sessionOpts{
 		kind:     reservedSession,
 		fallback: oomreport.Limit{Value: plan.MemoryLimit, Source: plan.MemoryLimitSource},
 		headless: headless,
+		mark:     mark,
 	}
 	if !headless {
 		// CS-GCFG-001: not headless — an SDK client SIGTERMs right after the

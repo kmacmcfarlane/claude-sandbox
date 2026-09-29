@@ -19,6 +19,7 @@ import (
 	"github.com/kmacmcfarlane/claude-sandbox/internal/launch"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/oomreport"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/sessions"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/tmuxpane"
 )
 
 // exitDecisionRequired is returned when a choice has to be made and no terminal
@@ -419,7 +420,8 @@ func joinExistingSession(env *Env, projectDir string, f *launchFlags, cfg *casca
 	if d.Action == actionAttach {
 		warnModelMismatch(env, d.Target, model)
 		noteWorktree(env, d.Target, wt)
-		return true, attachTo(env, d.Target, cfg.DetachKeys)
+		_, _, _, home := hostIdentity(env.Getenv)
+		return true, attachTo(env, d.Target, cfg.DetachKeys, attachMark(d.Target, home, wt.Root))
 	}
 	_, _, hostUser, _ := hostIdentity(env.Getenv)
 	return true, joinInto(env, d.Target, projectDir, hostUser, model, cfg.DetachKeys, resolveDangerous(env, f, cfg), f, wt)
@@ -526,7 +528,8 @@ func newInstance(env *Env, projectDir string, f *launchFlags, gitRoot string) st
 // attachTo runs `docker attach` as the session child (CS-SESS-031) and, like a
 // new session, reports an OOM kill that ends it (CS-SESS-059). The limit
 // comes from the container's own labels, carried by its events.
-func attachTo(env *Env, s sessions.Session, configuredKeys string) error {
+// mark is the pane mark for the attach (CS-TMUX-012), nil for none.
+func attachTo(env *Env, s sessions.Session, configuredKeys string, mark *paneMark) error {
 	detachKeys := launch.ResolveDetachKeys(configuredKeys)
 	fmt.Fprintf(env.Out, "Attaching to %s. Press %s to detach without stopping it.\n", sessionLabel(s), detachKeys)
 	// Docker cannot report whether another client is already attached, so this
@@ -537,7 +540,7 @@ func attachTo(env *Env, s sessions.Session, configuredKeys string) error {
 	end, err := runSession(env, execx.Cmd{
 		Name: "docker",
 		Args: []string{"attach", "--detach-keys=" + detachKeys, s.Name},
-	}, s.Name, sessionOpts{kind: primarySession, after: func() { checkGlobalConfig(env, pre) }})
+	}, s.Name, sessionOpts{kind: primarySession, after: func() { checkGlobalConfig(env, pre) }, mark: mark})
 	if err != nil {
 		return err
 	}
@@ -588,9 +591,12 @@ func joinInto(env *Env, s sessions.Session, projectDir, hostUser, model, configu
 	args = append(args, f.Passthrough...)
 	// CS-GCFG-001: before the session only — a join is not the primary.
 	checkGlobalConfig(env, nil)
+	// CS-TMUX-012: a join's pane mark, "since" taken before the exec.
+	_, _, _, home := hostIdentity(env.Getenv)
+	mark := joinMark(s, home, wt, launchRecord(env, f), env.now(), tmuxpane.ResumeID(f.Passthrough))
 	// CS-SESS-060: judged by the exec's own status, since the container
 	// normally outlives it.
-	end, err := runSession(env, execx.Cmd{Name: "docker", Args: args}, s.Name, sessionOpts{kind: joinedSession})
+	end, err := runSession(env, execx.Cmd{Name: "docker", Args: args}, s.Name, sessionOpts{kind: joinedSession, mark: mark})
 	if err != nil {
 		return err
 	}
