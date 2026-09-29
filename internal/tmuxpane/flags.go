@@ -309,33 +309,42 @@ var uuidRE = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[
 // ResumeID returns the conversation a passthrough resumes explicitly —
 // "--resume <id>", "--resume=<id>", "-r <id>", "-r<id>" with a canonical
 // UUID — scanning with ScanPassthrough's stop rules (plan 07 § 6, 08 § 4).
+// claude's parser keeps the LAST of several, so the scan does too, up to the
+// stop (CS-LNCH-110); "" when that last one has no id or a non-UUID one.
 func ResumeID(args []string) string {
-	for i := 0; i < len(args); i++ {
+	last := ""
+	for i := 0; i < len(args); {
 		a := args[i]
 		if a == "--" || !strings.HasPrefix(a, "-") || a == "-" {
-			return ""
+			break
 		}
 		name, hasValue := flagName(a)
 		if name == "--resume" || name == "-r" {
-			v := ""
+			// [value]: glued, or the next token unless it is a flag.
 			switch {
 			case hasValue && name == "--resume":
-				_, v, _ = strings.Cut(a, "=")
+				_, last, _ = strings.Cut(a, "=")
+				i++
 			case hasValue:
-				v = a[2:]
-			case i+1 < len(args):
-				v = args[i+1]
+				last = a[2:]
+				i++
+			case i+1 < len(args) && !strings.HasPrefix(args[i+1], "-"):
+				last = args[i+1]
+				i += 2
+			default:
+				last = ""
+				i++
 			}
-			if uuidRE.MatchString(v) {
-				return strings.ToLower(v)
-			}
-			return ""
+			continue
 		}
 		next, stop := step(args, i)
 		if stop {
-			return ""
+			break
 		}
-		i = next - 1 // the loop's i++ lands on next
+		i = next
+	}
+	if uuidRE.MatchString(last) {
+		return strings.ToLower(last)
 	}
 	return ""
 }

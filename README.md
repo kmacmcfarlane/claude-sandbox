@@ -252,17 +252,25 @@ Error: conversation 0b5e9c3a-… is already open in 'otter' (claude-sandbox-…-
   (its `claude-sandbox.resume` label, below), a running or paused sandbox's own claude — or a
   join in it — has it open (its peer registry record), or a live `claude` on the host has it
   open (a record in `~/.claude/sessions` in the host's pid namespace whose process is still the
-  one that wrote it). An exited kept container holds nothing.
+  one that wrote it). An exited kept container holds nothing. A sandbox's record that names the
+  conversation is confirmed first: one `docker top` of that container (bounded at 5 s), and the
+  record counts only when one of its processes has the record's start time — so a join that
+  was OOM-killed with the conversation open no longer blocks it. A failed `docker top` refuses.
+  A record written in the host's own pid namespace is always judged as the host's, even when it
+  sits in the container's registry directory.
 - **It fails closed.** When discovery (`docker ps`) fails, or a running sandbox's registry
-  directory or a record at its pid class cannot be read (a symlink, a FIFO, over 64 KiB, not
-  JSON — after 3 retries over about a second), the launch also exits 4, naming what could not
-  be read. The directory not existing at all is not a failure.
+  directory or a record at its pid class cannot be read (a symlink, a FIFO, a pid that does not
+  match its file name; unparsable JSON or over 64 KiB only after 3 retries over about a second,
+  since a partial write could explain those; a directory of more than 10000 entries), the
+  launch also exits 4, naming what could not be read. The directory not existing at all is not
+  a failure.
 - **The ways out** are the two the message names: attach to the holder, or fork with
   `--fork-session` (a fork gets a new id, so it is never checked). There is no override flag.
 - **Only these launches are checked:** an interactive or `--detach` launch whose claude
   arguments name a UUID to resume. A plain launch, `--continue`, the `--resume` picker (no id),
   a name instead of an id, `--branch`, `headless` and `--ralph` are never checked and behave
-  as before. The scan of claude's arguments stops at `--` and at the first prompt word; an
+  as before. When several `--resume`/`-r` are given, the last one counts, as in claude. The
+  scan of claude's arguments stops at `--` and at the first prompt word; an
   unknown claude flag followed by a word stops it early, so a `--fork-session` after such a
   flag is not seen and the launch is still checked.
 - **It runs inside the launch lock**, just before `docker create` (see
@@ -272,7 +280,7 @@ Error: conversation 0b5e9c3a-… is already open in 'otter' (claude-sandbox-…-
   `could not take the launch lock (…); not resuming <id> unserialized.`
 
 Every such container carries the label `claude-sandbox.resume=<uuid>` (lower case), outside
-the config-drift hash. Spec: `spec/sessions.feature` CS-SESS-065..069, `spec/launch.feature`
+the config-drift hash. Spec: `spec/sessions.feature` CS-SESS-065..069 and CS-SESS-089, `spec/launch.feature`
 CS-LNCH-110.
 
 ### Detaching

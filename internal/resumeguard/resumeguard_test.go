@@ -18,6 +18,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/resumeguard"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/sessions"
 )
@@ -42,7 +43,12 @@ func record(pid int, id string, startedAt time.Time, domain, procStart string) s
 type fixture struct {
 	home, config, proc string
 	sleeps             int
+	fake               *execx.Fake
 }
+
+// livePID is the host pid the fixture's "docker top" lists; its stat's
+// starttime is "1", the procStart record() fixtures carry by default.
+const livePID = 9001
 
 func newFixture() *fixture {
 	base, err := filepath.EvalSymlinks(GinkgoT().TempDir())
@@ -51,7 +57,21 @@ func newFixture() *fixture {
 	f.config = filepath.Join(f.home, ".claude")
 	Expect(os.MkdirAll(filepath.Join(f.proc, "self", "ns"), 0o755)).To(Succeed())
 	Expect(os.Symlink(hostNS, filepath.Join(f.proc, "self", "ns", "pid"))).To(Succeed())
+	f.fake = &execx.Fake{}
+	f.fake.On("docker top", fmt.Sprintf("PID\n%d\n", livePID), nil)
+	f.procStat(livePID, "1")
 	return f
+}
+
+// tops counts the docker top calls.
+func (f *fixture) tops() int {
+	n := 0
+	for _, l := range f.fake.CommandLines() {
+		if strings.HasPrefix(l, "docker top ") {
+			n++
+		}
+	}
+	return n
 }
 
 func (f *fixture) write(dir string, pid int, body string) {
@@ -71,7 +91,7 @@ func (f *fixture) procStat(pid int, start string) {
 func (f *fixture) check(ss ...sessions.Session) resumeguard.Check {
 	return resumeguard.Check{
 		ID: convID, Sessions: ss, Home: f.home, ConfigDir: f.config,
-		ProcRoot: f.proc, GOOS: "linux",
+		ProcRoot: f.proc, GOOS: "linux", Runner: f.fake,
 		Sleep: func(time.Duration) { f.sleeps++ },
 	}
 }
@@ -193,8 +213,9 @@ var _ = Describe("resume guard", func() {
 			Expect(f.check(sandbox("cs-a", "running", "7", file, "")).Run().Reason).NotTo(BeEmpty())
 		})
 
-		It("CS-SESS-067: a malformed record at a watched class is retried 3 times, then counts as open", func() {
+		It("CS-SESS-067: a malformed record at a watched class counts as open: retried 3 times only when a partial write could explain it", func() {
 			big := `{"pid":7,"sessionId":"` + otherID + `","pad":"` + strings.Repeat("x", resumeguard.MaxRecordSize) + `"}`
+			partial := map[string]bool{"unparsable": true, "oversized": true}
 			cases := map[string]func(){
 				"unparsable":        func() { f.write(reg, 7, "{") },
 				"pid mismatch":      func() { f.write(reg, 7, record(8, otherID, after, "d", "1")) },
@@ -216,8 +237,22 @@ var _ = Describe("resume guard", func() {
 				v := f.check(sandbox("cs-a", "running", "7", reg, "")).Run()
 				Expect(v.Open).To(BeTrue(), name)
 				Expect(v.Reason).To(ContainSubstring("7.json"), name)
-				Expect(f.sleeps).To(Equal(resumeguard.Retries), name)
+				if partial[name] {
+					Expect(f.sleeps).To(Equal(resumeguard.Retries), name)
+				} else {
+					Expect(f.sleeps).To(BeZero(), "%s fails at once", name)
+				}
 			}
+		})
+
+		It("CS-SESS-067: a registry dir holding more than MaxEntries entries counts as open", func() {
+			Expect(os.MkdirAll(reg, 0o755)).To(Succeed())
+			for i := 0; i <= resumeguard.MaxEntries; i++ {
+				Expect(os.WriteFile(filepath.Join(reg, fmt.Sprintf("x%d", i)), nil, 0o644)).To(Succeed())
+			}
+			v := f.check(sandbox("cs-a", "running", "7", reg, "")).Run()
+			Expect(v.Open).To(BeTrue())
+			Expect(v.Reason).To(ContainSubstring("more than"))
 		})
 
 		It("CS-SESS-067: a holder found elsewhere is named rather than the unreadable one", func() {
@@ -233,6 +268,72 @@ var _ = Describe("resume guard", func() {
 			Expect(v.Holder).NotTo(BeNil())
 			Expect(v.Holder.Name).To(Equal("cs-holder"))
 		})
+	})
+
+	Describe("CS-SESS-089: a matching record is confirmed alive", func() {
+		It("CS-SESS-089: one docker top on a match, and none when nothing matches", func() {
+			f.write(reg, 7, record(7, otherID, after, "d", "1"))
+			f.write(reg, 8, record(8, convID, after, "d", "1"))
+			Expect(f.check(sandbox("cs-a", "running", "7", reg, ""), sandbox("cs-b", "running", "9", reg, "")).Run().Open).To(BeFalse())
+			Expect(f.tops()).To(BeZero())
+
+			v := f.check(sandbox("cs-a", "running", "7", reg, ""), sandbox("cs-b", "running", "8", reg, "")).Run()
+			Expect(v.Holder).NotTo(BeNil())
+			Expect(v.Holder.Name).To(Equal("cs-b"))
+			Expect(f.fake.CommandLines()).To(Equal([]string{"docker top cs-b -o pid"}))
+		})
+
+		It("CS-SESS-089: a record whose process is gone holds nothing; a labelled container with no other record still holds by its label", func() {
+			f.write(reg, 7, record(7, convID, after, "d", "4242")) // no listed pid started at 4242
+			Expect(f.check(sandbox("cs-a", "running", "7", reg, "")).Run().Open).To(BeFalse())
+			Expect(f.check(sandbox("cs-a", "running", "7", reg, convID)).Run().Holder).NotTo(BeNil())
+			f.write(reg, 7+256, record(7+256, otherID, after, "d", "1"))
+			Expect(f.check(sandbox("cs-a", "running", "7", reg, convID)).Run().Open).To(BeFalse(), "switched away; the join on the id died")
+		})
+
+		It("CS-SESS-089: a listed pid whose stat cannot be read, or a record without procStart, cannot be ruled out", func() {
+			f.write(reg, 7, record(7, convID, after, "d", "4242"))
+			Expect(os.RemoveAll(filepath.Join(f.proc, fmt.Sprint(livePID), "stat"))).To(Succeed())
+			Expect(os.MkdirAll(filepath.Join(f.proc, fmt.Sprint(livePID), "stat"), 0o755)).To(Succeed())
+			Expect(f.check(sandbox("cs-a", "running", "7", reg, "")).Run().Holder).NotTo(BeNil())
+
+			g := newFixture()
+			greg := filepath.Join(g.home, "reg")
+			g.write(greg, 7, fmt.Sprintf(`{"pid":7,"sessionId":%q,"startedAt":%d}`, convID, after.UnixMilli()))
+			Expect(g.check(sandbox("cs-a", "running", "7", greg, "")).Run().Holder).NotTo(BeNil())
+			Expect(g.tops()).To(BeZero())
+		})
+
+		It("CS-SESS-089: a failed docker top fails closed, naming it", func() {
+			g := newFixture()
+			g.fake = &execx.Fake{}
+			g.fake.On("docker top", "", execx.Fail(1))
+			greg := filepath.Join(g.home, "reg")
+			g.write(greg, 7, record(7, convID, after, "d", "1"))
+			v := g.check(sandbox("cs-a", "running", "7", greg, "")).Run()
+			Expect(v.Open).To(BeTrue())
+			Expect(v.Holder).To(BeNil())
+			Expect(v.Reason).To(ContainSubstring("docker top cs-a"))
+		})
+
+		It("CS-SESS-065: a record in the launcher's own pid namespace belongs to host claude, not to the container", func() {
+			host := filepath.Join(f.config, "sessions")
+			f.write(host, 7+256, record(7+256, convID, after, "linux::"+hostNS, "777"))
+			// Not live on the host (no /proc/263): nothing holds it.
+			Expect(f.check(sandbox("cs-a", "running", "7", host, "")).Run().Open).To(BeFalse())
+			Expect(f.tops()).To(BeZero())
+		})
+	})
+
+	It("CS-SESS-066: under go test the real home and the real ~/.claude are never read", func() {
+		h, err := os.UserHomeDir()
+		Expect(err).NotTo(HaveOccurred())
+		c := f.check()
+		c.Home = h
+		Expect(func() { c.Run() }).To(Panic())
+		c = f.check()
+		c.ConfigDir = filepath.Join(h, ".claude")
+		Expect(func() { c.Run() }).To(Panic())
 	})
 
 	Describe("CS-SESS-068: a claude running on the host", func() {

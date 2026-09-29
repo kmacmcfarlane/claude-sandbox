@@ -163,6 +163,13 @@ var _ = Describe("tmuxpane", func() {
 			// label stays on, which fails safe (the refusal names --fork-session).
 			Expect(tmuxpane.ForkSession([]string{"--frobnicate", "x", "--fork-session"})).To(BeFalse())
 			Expect(tmuxpane.GuardedResumeID([]string{"--resume", convID, "--frobnicate", "x", "--fork-session"})).To(Equal(convID))
+			// claude keeps the LAST --resume/-r before the stop.
+			other := "53cd0872-ec39-41a3-86bd-b000abb5fb32"
+			Expect(tmuxpane.ResumeID([]string{"--resume", other, "-r", convID})).To(Equal(convID))
+			Expect(tmuxpane.ResumeID([]string{"-r" + other, "--verbose", "--resume=" + convID})).To(Equal(convID))
+			Expect(tmuxpane.ResumeID([]string{"--resume", convID, "--resume", "a-name"})).To(BeEmpty())
+			Expect(tmuxpane.ResumeID([]string{"--resume", convID, "--resume"})).To(BeEmpty(), "the picker last")
+			Expect(tmuxpane.ResumeID([]string{"--resume", convID, "prompt", "--resume", other})).To(Equal(convID), "after the stop does not count")
 			// A known flag's value is never a positional stop.
 			Expect(tmuxpane.ForkSession([]string{"--permission-mode", "plan", "--add-dir", "/a", "/b", "--fork-session"})).To(BeTrue())
 		})

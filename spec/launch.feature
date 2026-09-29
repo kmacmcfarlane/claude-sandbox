@@ -877,6 +877,9 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       the args --branch prepends) name a conversation with one of
       "--resume <id>", "--resume=<id>", "-r <id>", "-r<id>"
     And <id> is a canonical UUID (8-4-4-4-12 hex digits)
+    And when several appear before the stop, the LAST one is <id>, as in
+      claude's own parser; the label is not set when that last one has no id or
+      one that is not a canonical UUID
     Then docker create receives the label "claude-sandbox.resume=<id>", the id
       in lower case
     And the scan follows the pane mark's stop rules (CS-TMUX-013): it stops at a

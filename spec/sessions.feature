@@ -805,6 +805,12 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
       creation) all name other ids has switched away: it does not hold <id>
     And a record at the class that started before the container was created
       is a leftover of an earlier container with the same class, and is ignored
+    And a record whose pidDomain is the launcher's own ("linux::" + readlink
+      /proc/self/ns/pid) belongs to a claude on the host, not to the container,
+      even when the container's registry dir is the host's <config dir>/sessions
+      and its pid % 256 equals the class: only CS-SESS-068 judges it
+    And a record that names <id> counts only once its process is confirmed
+      alive (CS-SESS-089)
     And an exited kept container holds nothing: nothing runs in it
     And exit 4 is new: 0-3 keep their meaning (3 = a decision needs a terminal)
 
@@ -816,7 +822,10 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
       <CLAUDE_CONFIG_DIR or ~/.claude>/sessions and in
       ~/.cache/claude-sandbox/peers/sessions
     And each directory is opened once with O_DIRECTORY|O_NOFOLLOW, and each
-      record "<pid>.json" through that directory fd with O_NOFOLLOW|O_NONBLOCK
+      record "<pid>.json" through that directory fd with
+      O_NOFOLLOW|O_NONBLOCK|O_NOCTTY
+    And at most 10000 directory entries are read; a directory holding more
+      counts as unreadable (CS-SESS-067)
     And a record counts only when it is a regular file of at most 64 KiB, its
       JSON pid equals the <pid> of its file name, and its sessionId is a
       canonical UUID
@@ -830,9 +839,11 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
     When "docker ps" discovery fails
     Or the registry directory of any running or paused sandbox exists but cannot
       be opened or listed (a symlink, a permission error, not a directory)
-    Or a record at a class being checked stays malformed (not a regular file,
-      over 64 KiB, unparsable, a pid mismatch, a sessionId that is not a UUID)
-      after 3 retries over about 1 s
+    Or a record at a class being checked is malformed: one that a partial
+      write could explain (unparsable JSON, over 64 KiB) counts once it stays
+      so after 3 retries over about 1 s; any other (a symlink, not a regular
+      file, a pid mismatch, a sessionId that is not a UUID) counts at once
+    Or a registry directory holds more than 10000 entries
     Then the conversation counts as open, and the launch exits 4 with:
       """
       Error: cannot tell whether conversation <id> is already open elsewhere
@@ -884,3 +895,30 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
       it creates nothing and exits 2 with
       "Error: could not take the launch lock (<why>); not resuming <id> unserialized."
     And a launch without the label never reads a registry directory or /proc
+
+  @new
+  Scenario: CS-SESS-089 A registry record is confirmed alive before it holds a conversation
+    # A record outlives its process when claude dies without its exit handlers
+    # (an OOM-killed join, a SIGKILL), and the container keeps running. Without
+    # this check that stale record would refuse every resume of the id and tell
+    # the operator to attach to a session that no longer has it open.
+    Given a launch carrying the resume label
+    And a running or paused sandbox has a record at its class naming <id>
+      (CS-SESS-065 rule a or b)
+    When the guard finds that match, and only then
+    Then it runs ONE "docker top <container> -o pid" for that container, bounded
+      at 5 s and killed after it, never one per sandbox
+    And the record's process is alive when one of the listed host pids has
+      /proc/<pid>/stat field 22 (starttime) equal to the record's procStart
+      (starttime counts clock ticks since boot, the same in every pid namespace)
+    And a listed pid whose stat cannot be read or parsed cannot be ruled out:
+      the record counts as alive
+    And a record without a procStart cannot be ruled out either: it counts as
+      alive, and no docker top is run for it
+    When none of the listed pids is that process
+    Then the record is dropped: the sandbox does not hold <id> through it, and
+      a labelled sandbox with no other record at its class still holds it by
+      its label (rule a)
+    When "docker top" fails or times out
+    Then the check fails closed (CS-SESS-067), the reason naming
+      "docker top <container>"

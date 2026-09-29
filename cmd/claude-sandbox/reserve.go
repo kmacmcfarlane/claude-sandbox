@@ -244,7 +244,7 @@ func discoverForReservation(env *Env) ([]sessions.Session, error) {
 // or, when something could not be read, what — the check fails closed.
 func guardResume(env *Env, in launch.Inputs, found []sessions.Session, derr error) error {
 	v := resumeguard.Check{
-		ID: in.Resume, Sessions: found, DiscoveryErr: derr,
+		ID: in.Resume, Sessions: found, DiscoveryErr: derr, Runner: env.Runner,
 		Home: in.Home, ConfigDir: in.ConfigDir(), ProcRoot: env.ProcRoot,
 	}.Run()
 	if !v.Open {

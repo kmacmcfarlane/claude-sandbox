@@ -42,6 +42,16 @@ type Record struct {
 // JSON of its own pid and a canonical conversation id.
 var ErrMalformed = errors.New("malformed registry record")
 
+// ErrPartial additionally marks the malformed records a partial write could
+// explain — unparsable JSON, an oversized file — the only ones worth reading
+// again (CS-SESS-067). A symlink, a non-regular file, a pid mismatch or a
+// non-UUID sessionId is final.
+var ErrPartial = errors.New("possibly a partial write")
+
+// MaxEntries caps the directory entries read from one registry directory
+// (CS-SESS-066); a directory holding more counts as unreadable.
+const MaxEntries = 10000
+
 // recordName is a record's file name; the capture is its pid.
 var recordName = regexp.MustCompile(`^([0-9]{1,10})\.json$`)
 
@@ -81,9 +91,12 @@ type entry struct {
 
 // entries lists the record names in the directory.
 func (d *registryDir) entries() ([]entry, error) {
-	names, err := d.f.Readdirnames(-1)
-	if err != nil {
+	names, err := d.f.Readdirnames(MaxEntries + 1)
+	if err != nil && !(errors.Is(err, io.EOF) && len(names) == 0) {
 		return nil, &os.PathError{Op: "readdir", Path: d.path, Err: err}
+	}
+	if len(names) > MaxEntries {
+		return nil, fmt.Errorf("%s: more than %d entries", d.path, MaxEntries)
 	}
 	var out []entry
 	for _, n := range names {
@@ -105,7 +118,7 @@ func (d *registryDir) entries() ([]entry, error) {
 // the file name's and whose sessionId is a canonical UUID. A record that
 // vanished returns an error satisfying os.ErrNotExist.
 func (d *registryDir) read(e entry) (Record, error) {
-	fd, err := openat(int(d.f.Fd()), d.path, e.name, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC)
+	fd, err := openat(int(d.f.Fd()), d.path, e.name, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_NOCTTY|syscall.O_CLOEXEC)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return Record{}, &os.PathError{Op: "open", Path: e.name, Err: err}
@@ -123,18 +136,18 @@ func (d *registryDir) read(e entry) (Record, error) {
 		return Record{}, fmt.Errorf("%w: %s: not a regular file", ErrMalformed, e.name)
 	}
 	if st.Size() > MaxRecordSize {
-		return Record{}, fmt.Errorf("%w: %s: larger than %d bytes", ErrMalformed, e.name, MaxRecordSize)
+		return Record{}, fmt.Errorf("%w (%w): %s: larger than %d bytes", ErrMalformed, ErrPartial, e.name, MaxRecordSize)
 	}
 	data, err := io.ReadAll(io.LimitReader(f, MaxRecordSize+1))
 	if err != nil {
 		return Record{}, fmt.Errorf("%w: %s: %v", ErrMalformed, e.name, err)
 	}
 	if len(data) > MaxRecordSize {
-		return Record{}, fmt.Errorf("%w: %s: larger than %d bytes", ErrMalformed, e.name, MaxRecordSize)
+		return Record{}, fmt.Errorf("%w (%w): %s: larger than %d bytes", ErrMalformed, ErrPartial, e.name, MaxRecordSize)
 	}
 	var r Record
 	if err := json.Unmarshal(data, &r); err != nil {
-		return Record{}, fmt.Errorf("%w: %s: %v", ErrMalformed, e.name, err)
+		return Record{}, fmt.Errorf("%w (%w): %s: %v", ErrMalformed, ErrPartial, e.name, err)
 	}
 	if r.PID != e.pid {
 		return Record{}, fmt.Errorf("%w: %s: pid %d does not match its name", ErrMalformed, e.name, r.PID)

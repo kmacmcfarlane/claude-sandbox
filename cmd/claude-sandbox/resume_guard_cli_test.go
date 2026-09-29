@@ -139,6 +139,31 @@ var _ = Describe("the resume guard (CS-LNCH-110, CS-SESS-065..069)", func() {
 		Expect(f.errw.String()).To(ContainSubstring("Attach to it:  cd /elsewhere && claude-sandbox --attach=heron"))
 	})
 
+	It("CS-SESS-089: a stale record (its process gone) no longer blocks the resume; a failed docker top refuses naming it", func() {
+		reg := filepath.Join(f.home, "registry")
+		// A join that was OOM-killed with the id open: record at class+256.
+		writeFile(filepath.Join(reg, "263.json"), fmt.Sprintf(`{"pid":263,"sessionId":%q,"startedAt":%d,"procStart":"555"}`, guardID, time.Now().Add(time.Hour).UnixMilli()))
+		proc := filepath.Join(f.home, "proc")
+		Expect(os.MkdirAll(filepath.Join(proc, "self", "ns"), 0o755)).To(Succeed())
+		Expect(os.Symlink("pid:[42]", filepath.Join(proc, "self", "ns", "pid"))).To(Succeed())
+		writeFile(filepath.Join(proc, "9001", "stat"), "9001 (claude) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 777 1\n")
+		f.env.ProcRoot = proc
+		row := psRowResume("cs-other-heron", "/elsewhere", "claude", "heron", "7", "running", time.Now(), reg, "") + "\n"
+		f.fake.On("docker ps", row, nil)
+		f.fake.On("docker top cs-other-heron -o pid", "PID\n9001\n", nil)
+		Expect(f.run("--new", "--", "--resume", guardID)).To(Equal(0), f.errw.String())
+		Expect(creates(f)).To(HaveLen(1))
+
+		g := newCLIFixture()
+		writeFile(filepath.Join(reg, "263.json"), fmt.Sprintf(`{"pid":263,"sessionId":%q,"startedAt":%d,"procStart":"555"}`, guardID, time.Now().Add(time.Hour).UnixMilli()))
+		g.env.ProcRoot = proc
+		g.fake.On("docker ps", row, nil)
+		g.fake.On("docker top", "", execx.Fail(1))
+		Expect(g.run("--new", "--", "--resume", guardID)).To(Equal(4))
+		Expect(g.errw.String()).To(ContainSubstring("(docker top cs-other-heron: "))
+		Expect(creates(g)).To(BeEmpty())
+	})
+
 	Describe("CS-SESS-067: failing closed", func() {
 		It("CS-SESS-067: a failed discovery refuses a resume with exit 4, and still launches a plain session", func() {
 			// Discovery fails under the lock (earlier listings, before any
