@@ -170,8 +170,19 @@ func (s *syncBuffer) String() string {
 // and killed with the launcher (DieWithParent), and kills it after
 // CallTimeout. It returns stdout and whether tmux finished successfully.
 func (p Pane) run(args ...string) (string, bool) {
+	return bounded(p.Runner, CallTimeout, "tmux", args...)
+}
+
+// bounded runs name args through Runner.Start in its own process group,
+// killed with the caller (DieWithParent), and kills it after timeout. It
+// returns stdout and whether the command finished successfully. The save
+// hook's docker call shares it (CS-TMUX-032/040).
+func bounded(r execx.Runner, timeout time.Duration, name string, args ...string) (string, bool) {
+	if timeout <= 0 {
+		return "", false
+	}
 	var out syncBuffer
-	proc, err := p.Runner.Start(execx.Cmd{Name: "tmux", Args: args, Stdout: &out, Stderr: io.Discard, DieWithParent: true})
+	proc, err := r.Start(execx.Cmd{Name: name, Args: args, Stdout: &out, Stderr: io.Discard, DieWithParent: true})
 	if err != nil {
 		return "", false
 	}
@@ -180,11 +191,17 @@ func (p Pane) run(args ...string) (string, bool) {
 	select {
 	case werr := <-done:
 		return out.String(), werr == nil
-	case <-time.After(CallTimeout):
-		proc.Signal(os.Kill)
+	case <-time.After(timeout):
+		// The whole group: a grandchild holding the stdout pipe would
+		// otherwise keep Wait (and so this call) waiting (CS-TMUX-040).
+		if g, ok := proc.(execx.GroupKiller); ok {
+			g.KillGroup()
+		} else {
+			proc.Signal(os.Kill)
+		}
 		select {
 		case <-done:
-		case <-time.After(CallTimeout):
+		case <-time.After(timeout):
 		}
 		return "", false
 	}

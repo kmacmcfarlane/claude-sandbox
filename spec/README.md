@@ -37,4 +37,4 @@ references the scenario it implements by ID.
 | `pidslot.feature` | PID classes: unique session pids across sandboxes (peer registry) |
 | `host-dirs.feature` | launcher host dirs: cache/state roots, owned-directory rule, in-sandbox test |
 | `global-config.feature` | the global config file (`~/.claude.json`): linked vs legacy layout, the in-container link, exit 78 |
-| `tmux.feature` | tmux integration: the process name tmux-resurrect sees (shim argv0), the launcher's pane mark |
+| `tmux.feature` | tmux integration: the process name tmux-resurrect sees (shim argv0), the launcher's pane mark, the `tmux save` hook and its sidecar |
