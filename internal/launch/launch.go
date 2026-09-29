@@ -823,7 +823,7 @@ func (in *Inputs) shadowClaudeMD(p *Plan, configDir string) error {
 	if err != nil {
 		return err
 	}
-	in.addShadowMount(p, tmp, filepath.Join(configDir, "CLAUDE.md"), "CLAUDE.md", "the container context (and the host CLAUDE.md)")
+	in.addShadowMount(p, tmp, filepath.Join(configDir, "CLAUDE.md"), "CLAUDE.md", "the container context (and the host CLAUDE.md)", nil)
 	return nil
 }
 
@@ -1008,7 +1008,9 @@ func (in *Inputs) shadowSiblings(p *Plan, configDir string) error {
 		fmt.Fprintf(in.Err, "WARNING: %s cannot be read (%v); the sandbox uses only its own MCP servers\n", hostMCP, err)
 	default:
 		body := bytes.TrimSpace(bytes.TrimPrefix(raw, []byte("\xEF\xBB\xBF")))
-		if len(body) == 0 || string(body) == "null" {
+		// CS-LNCH-167/169: "{}" (the placeholder) merges to the fragment
+		// as-is; saying so keeps its bytes, and the hash, unchanged.
+		if len(body) == 0 || string(body) == "null" || string(body) == "{}" {
 			break
 		}
 		merged, merr := mergeMCP(body, assets.MCPServers)
@@ -1023,7 +1025,7 @@ func (in *Inputs) shadowSiblings(p *Plan, configDir string) error {
 	if terr != nil {
 		return terr
 	}
-	in.addShadowMount(p, tmp, target, ".mcp.json", "the sandbox's MCP servers")
+	in.addShadowMount(p, tmp, target, ".mcp.json", "the sandbox's MCP servers", mcpPlaceholder)
 	return nil
 }
 
@@ -1040,7 +1042,7 @@ func (in *Inputs) shadowGitconfig(p *Plan) error {
 	if err != nil {
 		return err
 	}
-	in.addShadowMount(p, tmp, src, "gitconfig", "the host git config")
+	in.addShadowMount(p, tmp, src, "gitconfig", "the host git config", nil)
 	return nil
 }
 

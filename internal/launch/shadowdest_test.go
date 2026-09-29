@@ -65,7 +65,13 @@ var _ = Describe("shadow destinations under a read-write same-path mount (CS-LNC
 		fi, err := os.Lstat(p)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(fi.Mode().IsRegular()).To(BeTrue())
-		Expect(fi.Size()).To(BeZero())
+		raw, err := os.ReadFile(p)
+		Expect(err).NotTo(HaveOccurred())
+		if filepath.Base(p) == ".mcp.json" {
+			Expect(string(raw)).To(Equal("{}\n"), "host Claude Code fails on an empty .mcp.json")
+		} else {
+			Expect(raw).To(BeEmpty())
+		}
 		Expect(fi.Mode().Perm()).To(Equal(os.FileMode(0o600)))
 		Expect(int(fi.Sys().(*syscall.Stat_t).Uid)).To(Equal(os.Getuid()))
 	}
@@ -82,16 +88,30 @@ var _ = Describe("shadow destinations under a read-write same-path mount (CS-LNC
 			Expect(out.String()).NotTo(ContainSubstring("CLAUDE.md"))
 		})
 
-		It("CS-LNCH-169: an empty host CLAUDE.md counts as missing, so the content and the hash are stable", func() {
+		It("CS-LNCH-169: the placeholders (empty CLAUDE.md, {} .mcp.json) count as missing, so the content and the hash are stable", func() {
 			first := build()
+			for _, name := range []string{"CLAUDE.md", ".mcp.json"} {
+				Expect(filepath.Join(in.TempDir, name)).To(BeAnExistingFile())
+			}
+			second := build()
 			raw, err := os.ReadFile(filepath.Join(in.TempDir, "CLAUDE.md"))
 			Expect(err).NotTo(HaveOccurred())
 			Expect(raw).To(Equal(assets.ContainerContext))
-			second := build()
-			raw, err = os.ReadFile(filepath.Join(in.TempDir, "CLAUDE.md"))
+			raw, err = os.ReadFile(filepath.Join(in.TempDir, ".mcp.json"))
 			Expect(err).NotTo(HaveOccurred())
-			Expect(raw).To(Equal(assets.ContainerContext))
+			Expect(raw).To(Equal(assets.MCPServers))
+			Expect(errw.String()).To(BeEmpty())
 			Expect(second.ConfigHash).To(Equal(first.ConfigHash))
+		})
+
+		It("CS-LNCH-169: a symlink on the way that points inside the covering mount is refused, not followed", func() {
+			inside := filepath.Join(ws, "inside")
+			mkdir(inside)
+			Expect(os.Symlink(inside, filepath.Join(ws, "link"))).To(Succeed())
+			env["CLAUDE_CONFIG_DIR"] = filepath.Join(ws, "link", ".claude") // absent
+			build()
+			Expect(filepath.Join(inside, ".mcp.json")).NotTo(BeAnExistingFile())
+			Expect(errw.String()).To(ContainSubstring("is a symlink"))
 		})
 
 		It("CS-LNCH-169: an existing destination is left as it is, a dangling symlink included", func() {

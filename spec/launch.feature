@@ -346,8 +346,10 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
   @new
   Scenario: CS-LNCH-167 an empty host .mcp.json is treated as a missing one
     # A BOM before valid JSON is stripped too, so the host servers still merge.
-    Given the host .mcp.json is empty, holds only whitespace, or holds only a
-      JSON null (a leading UTF-8 BOM is ignored in every case)
+    Given the host .mcp.json is empty, holds only whitespace, holds only a
+      JSON null, or holds exactly an empty object "{}" (the CS-LNCH-169
+      placeholder; surrounding whitespace allowed) — a leading UTF-8 BOM is
+      ignored in every case
     Then the fragment alone is mounted read-only over $CONFIG_PARENT/.mcp.json
     And nothing is printed and the launch continues
     And the host file is not modified
@@ -371,9 +373,13 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     # container path. When that path lies inside a read-write same-path bind
     # — the config dir's own mount (CS-LNCH-008), the project, a cascade
     # `mounts:` entry — and does not exist, runc creates the mount point
-    # THROUGH that bind: an empty, root-owned file appears on the HOST, which
-    # the user cannot remove (seen: <dir>/.mcp.json and <dir>/.claude/CLAUDE.md
-    # with CLAUDE_CONFIG_DIR=<dir>/.claude and a cascade mount of <dir>).
+    # THROUGH that bind: an empty, root-owned file appears on the HOST (seen:
+    # <dir>/.mcp.json and <dir>/.claude/CLAUDE.md with
+    # CLAUDE_CONFIG_DIR=<dir>/.claude and a cascade mount of <dir>). The user
+    # cannot edit such a file; `rm -f` removes it (the directory is the
+    # user's), `sudo rm` is needed only where docker also made the directory.
+    # An empty .mcp.json also breaks host Claude Code, which reads every
+    # ancestor's .mcp.json and records a fatal MCP error for it.
     Given a shadow file's destination D is not under any mount of this launch,
       or the deepest mount covering D is read-only or has host != container
     Then nothing is created and the shadow mount is added as before
@@ -381,16 +387,26 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     When D exists on the host (Lstat; any kind, a symlink included)
     Then nothing is created and the shadow mount is added as before
     When D does not exist
-    Then before docker create the launcher creates D as the invoking user: an
-      empty regular file, mode 0600, with O_EXCL|O_NOFOLLOW (a file that
-      appears meanwhile is accepted as it is)
+    Then before docker create the launcher creates D as the invoking user: a
+      regular file, mode 0600, with O_EXCL|O_NOFOLLOW (a file that appears
+      meanwhile is accepted as it is), holding "{}\n" for .mcp.json (host
+      Claude Code reads every ancestor's .mcp.json and fails on an empty one)
+      and nothing for CLAUDE.md and gitconfig
     And missing directories between the covering mount and D are created
       0700; an existing one below the covering mount that is a symlink or not
       a directory refuses, and D's parent must be owned by the invoking user
+    And the walk is escape-safe: every directory below the covering mount is
+      opened relative to the handle of the one above it, checked against the
+      Lstat that decided (a directory swapped for a symlink in between is
+      refused), and D is created relative to its parent's handle
     And the shadow mount is added as before and nothing is printed
     And an empty host CLAUDE.md (such a placeholder) counts as a missing one
-      for CS-LNCH-010, so the shadow content, and the drift fingerprint, are
-      the same on the launch that created it and on every later one
+      for CS-LNCH-010, and a "{}" .mcp.json as an empty one (CS-LNCH-167), so
+      the shadow content, and the drift fingerprint, are the same on the
+      launch that created it and on every later one
+    And a container launched before this rule, on a host holding docker's
+      empty CLAUDE.md, hashed that file's "\n" separator and so drifts once
+      on attach or join
     And the drift check (CS-SESS-020) builds the same plan, so it creates the
       same placeholder and reaches the same mount set
 

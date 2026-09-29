@@ -435,6 +435,8 @@ var _ = Describe("launch.Build", func() {
 		Entry("JSON null", "null\n"),
 		Entry("BOM and whitespace", "\xEF\xBB\xBF \n"),
 		Entry("BOM and null", "\xEF\xBB\xBFnull"),
+		Entry("the CS-LNCH-169 placeholder {}", "{}\n"),
+		Entry("BOM and {} with surrounding whitespace", "\xEF\xBB\xBF {} \n"),
 	)
 
 	It("CS-LNCH-167: a leading UTF-8 BOM before valid JSON still merges the host servers", func() {
