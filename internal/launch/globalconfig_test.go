@@ -260,7 +260,49 @@ var _ = Describe("launch.Build: the global config (CS-GCFG)", func() {
 		}
 	})
 
-	It("CS-GCFG-058: with CLAUDE_CONFIG_DIR set, the parent sibling no longer moves the config hash", func() {
+	It("CS-GCFG-059: a config-dir .claude.json linking outside the config dir warns once and mounts nothing", func() {
+		alt := filepath.Join(home, "alt", ".claude")
+		mkdir(alt)
+		env["CLAUDE_CONFIG_DIR"] = alt
+		cj := filepath.Join(alt, ".claude.json")
+		parentFile := filepath.Join(home, "alt", ".claude.json")
+
+		// ../.claude.json, existing and dangling, relative and absolute.
+		for _, tc := range []struct{ text, make string }{
+			{"../.claude.json", parentFile},
+			{"../.claude.json", ""},
+			{parentFile, parentFile},
+		} {
+			os.Remove(cj)
+			os.Remove(parentFile)
+			if tc.make != "" {
+				touch(tc.make, "{}")
+			}
+			Expect(os.Symlink(tc.text, cj)).To(Succeed())
+			errw.Reset()
+			p := build()
+			Expect(strings.Count(errw.String(), "WARNING: "+cj+" is a symlink to "+parentFile)).To(Equal(1), tc.text)
+			Expect(errw.String()).To(ContainSubstring("the container cannot see its target"))
+			Expect(mountsClaudeJSON(p)).To(BeFalse(), tc.text)
+		}
+
+		// Inside the config dir, a regular file, or absent: silent.
+		os.Remove(cj)
+		touch(filepath.Join(alt, "real.json"), "{}")
+		Expect(os.Symlink("real.json", cj)).To(Succeed())
+		for _, step := range []func(){
+			func() {},
+			func() { os.Remove(cj); touch(cj, "{}") },
+			func() { os.Remove(cj) },
+		} {
+			step()
+			errw.Reset()
+			build()
+			Expect(errw.String()).NotTo(ContainSubstring(".claude.json"))
+		}
+	})
+
+	It("CS-GCFG-058:with CLAUDE_CONFIG_DIR set, the parent sibling no longer moves the config hash", func() {
 		alt := filepath.Join(home, "alt", ".claude")
 		mkdir(alt)
 		env["CLAUDE_CONFIG_DIR"] = alt

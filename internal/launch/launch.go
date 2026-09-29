@@ -902,6 +902,7 @@ func (in *Inputs) globalConfigLayout(p *Plan) bool {
 		// CS-GCFG-056, CS-LNCH-012: nothing is mounted beside the config
 		// dir. Claude Code reads $CLAUDE_CONFIG_DIR/.claude.json, inside
 		// the config-dir mount; <parent>/.claude.json is never read.
+		in.warnConfigDirGlobalLink(d) // CS-GCFG-059
 		return false
 	}
 	l := globalcfg.Classify(in.Home, "")
@@ -931,6 +932,45 @@ func (in *Inputs) globalConfigLayout(p *Plan) bool {
 		fmt.Fprint(in.Err, l.RefusedWarning()) // CS-GCFG-019..024
 	}
 	return false
+}
+
+// warnConfigDirGlobalLink is CS-GCFG-059: $CLAUDE_CONFIG_DIR/.claude.json as
+// a symlink whose target lies outside the config dir (typically
+// ../.claude.json, which resolved only while the parent sibling was
+// mounted) dangles in the container, where Claude Code would write a
+// defaults file over it. One warning; nothing is mounted.
+func (in *Inputs) warnConfigDirGlobalLink(configDir string) {
+	if !filepath.IsAbs(configDir) {
+		return
+	}
+	dir := filepath.Clean(configDir)
+	link := filepath.Join(dir, globalcfg.FileName)
+	fi, err := os.Lstat(link)
+	if err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		return
+	}
+	text, err := os.Readlink(link)
+	if err != nil {
+		return
+	}
+	target := text
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(dir, target)
+	}
+	target = filepath.Clean(target)
+	dirs := []string{dir}
+	if real, err := filepath.EvalSymlinks(dir); err == nil {
+		dirs = append(dirs, real)
+	}
+	if real, err := filepath.EvalSymlinks(link); err == nil {
+		target = real
+	}
+	for _, d := range dirs {
+		if target == d || strings.HasPrefix(target, d+string(filepath.Separator)) {
+			return
+		}
+	}
+	fmt.Fprintf(in.Err, "WARNING: %s is a symlink to %s, outside the config dir; the container cannot see its target (only the config dir is mounted), so the session will not read that global config and Claude Code may write a fresh one over the link. Move the file into %s instead.\n", link, target, dir)
 }
 
 func (in *Inputs) shadowSiblings(p *Plan, configDir string) error {

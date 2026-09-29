@@ -22,7 +22,7 @@ Feature: Global config (~/.claude.json) — the linked layout (CS-GCFG)
   and in-container half of the linked layout; they work with a layout made
   by hand. CS-GCFG-041..055 are the host commands that switch the layout
   with checks (claude-sandbox global-config migrate|revert) and record a
-  baseline (accept). CS-GCFG-056..058 drop the dead <parent>/.claude.json
+  baseline (accept). CS-GCFG-056..059 drop the dead <parent>/.claude.json
   mount of trees that set CLAUDE_CONFIG_DIR.
   Background: the claude-json-concurrent-writes investigation (00..03).
   Go home: internal/globalcfg, internal/launch, internal/pidslot,
@@ -738,3 +738,19 @@ Feature: Global config (~/.claude.json) — the linked layout (CS-GCFG)
       (CS-LNCH-012 @changed); a relaunch clears it
     And with CLAUDE_CONFIG_DIR set, launches with and without a
       <parent>/.claude.json produce the same config hash
+
+  Scenario: CS-GCFG-059 A config-dir .claude.json linking outside the config dir warns
+    # Before CS-GCFG-056 an operator could make $CLAUDE_CONFIG_DIR/.claude.json
+    # a link to the parent's file (../.claude.json): it resolved in the
+    # container only because the sibling was mounted. Now it dangles there,
+    # and Claude Code would write a defaults file over it.
+    Given CLAUDE_CONFIG_DIR is set to an absolute path
+    And $CLAUDE_CONFIG_DIR/.claude.json is a symlink (Lstat) whose target,
+      resolved, lies outside the config dir (dangling targets resolved
+      lexically)
+    Then one WARNING names the link and its target and says the container
+      cannot see the target, so the session will not read that global config
+    And nothing is mounted for it
+    Given the link's target lies inside the config dir, or the file is a
+      regular file or absent
+    Then nothing is printed
