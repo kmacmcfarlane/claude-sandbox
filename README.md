@@ -497,7 +497,7 @@ ls ~/.local/share/tmux/resurrect/*.claude-sandbox.json   # after prefix + C-s
 
 Nothing reads the sidecars yet: `claude-sandbox tmux restore` is the next step, so keep
 claude-sandbox out of `@resurrect-processes` (see the tmux doc). Spec: `spec/tmux.feature`
-CS-TMUX-003, CS-TMUX-030..041.
+CS-TMUX-003, CS-TMUX-030..040, CS-TMUX-070.
 
 ## Headless mode (Paseo and other SDK clients)
 

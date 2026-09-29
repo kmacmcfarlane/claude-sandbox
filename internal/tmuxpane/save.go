@@ -190,7 +190,7 @@ func Save(stateFile string, o SaveOptions) (SaveResult, error) {
 			o.logf("deadline: %d mark write-back(s) left for the next save", res.Skipped)
 			break
 		}
-		// CS-TMUX-041: the pane may have been relaunched, unmarked or
+		// CS-TMUX-070: the pane may have been relaunched, unmarked or
 		// restored since the list; write back only over the same mark.
 		cur, ok := bounded(o.Runner, t, "tmux", "show-options", "-p", "-q", "-v", "-t", lp.id, Option)
 		if !ok {

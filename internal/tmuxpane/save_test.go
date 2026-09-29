@@ -307,6 +307,11 @@ var _ = Describe("tmux save hook (CS-TMUX-030..040)", func() {
 			Expect(run(mark(func(m *tmuxpane.Mark) { m.Mode = tmuxpane.ModeJoin })).Conversation).To(BeEmpty())
 		})
 
+		It("CS-TMUX-033: an attach mark with since 0 (creation time unknown) matches without a window", func() {
+			record(7, convID, proj, since, "", "")
+			Expect(run(mark(func(m *tmuxpane.Mark) { m.Since = 0 })).Conversation).To(Equal(convID))
+		})
+
 		It("CS-TMUX-033: a candidate naming the mark's current conversation wins over an earlier one", func() {
 			record(7, conv2, proj, since, "", "")
 			record(263, convID, proj, since+3000, "", "")
@@ -435,7 +440,7 @@ var _ = Describe("tmux save hook (CS-TMUX-030..040)", func() {
 			Expect(writeBacks()).To(BeEmpty())
 		})
 
-		It("CS-TMUX-041: a mark that changed between the list and the write is not overwritten", func() {
+		It("CS-TMUX-070: a mark that changed between the list and the write is not overwritten", func() {
 			record(7, convID, proj, since, "my task", "user")
 			m := mark(nil)
 			listPanes(paneRow("main", 1, 0, "%1", "claude-sandbox", &m))

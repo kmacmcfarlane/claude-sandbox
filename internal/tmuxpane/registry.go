@@ -156,8 +156,8 @@ const (
 // (CS-TMUX-033): pid % 256 == the mark's class, a cwd under the project or
 // cwdRoot, and a start inside the mark's window — since - 5 s to
 // since + PrimaryWindow for a primary, since to since + JoinWindow for a
-// join. A candidate naming the mark's current conversation wins; else the
-// earliest start. ok is false for a ralph mark and when nothing matches.
+// join; with since 0 (unknown) there is no window. A candidate naming the
+// mark's current conversation wins; else the earliest start. ok is false for a ralph mark and when nothing matches.
 func Match(m Mark, recs []RegistryRecord) (RegistryRecord, bool) {
 	class, err := strconv.Atoi(m.Class)
 	if err != nil || class < 0 || class > 255 {
@@ -175,7 +175,12 @@ func Match(m Mark, recs []RegistryRecord) (RegistryRecord, bool) {
 	var best RegistryRecord
 	found, current := false, false
 	for _, r := range recs {
-		if r.PID%256 != class || r.StartedAt < min || r.StartedAt > max {
+		if r.PID%256 != class {
+			continue
+		}
+		// since 0 is unknown (an attach whose container creation time could
+		// not be read): no window, class and cwd decide.
+		if m.Since != 0 && (r.StartedAt < min || r.StartedAt > max) {
 			continue
 		}
 		if !under(r.Cwd, m.Project) && !under(r.Cwd, m.CwdRoot) {

@@ -207,7 +207,7 @@ Feature: tmux integration (CS-TMUX)
   # and every tmux or docker call it waits on is bounded. Registry records are written
   # by code inside sandboxes (answer 31b): only the conversation id and the name
   # are taken from them, both validated. Window labels (decision 52, open) are not
-  # part of F3; the IDs 042 to 044 of this prefix stay reserved for them.
+  # part of F3; the IDs 041 to 044 of this prefix stay reserved for them.
 
   Scenario: CS-TMUX-030 the save hook's guards: host only, a resurrect state file, silent, exit 0
     Given the command "claude-sandbox tmux save <state-file>"
@@ -253,6 +253,8 @@ Feature: tmux integration (CS-TMUX)
       project or cwdRoot
     And for mode "claude" it started between since - 5 s and since + 120 s (tmuxpane.PrimaryWindow)
     And for mode "join" it started between since and since + 30 s (tmuxpane.JoinWindow)
+    And a mark whose "since" is 0 (an attach whose container creation time could not be read) has
+      no window: class and cwd decide
     And a candidate whose sessionId is the mark's current conversation wins; else the earliest start
     And so, when the pane's own record is missing or rejected, a later join's record in the same
       container (same class, class + 256·n, started after the window) is a miss, never the pane's
@@ -278,7 +280,7 @@ Feature: tmux integration (CS-TMUX)
     Then the row gets "conversation", "name" and "nameSource" from the record
     And when the mark changed, the hook writes it back with one
       "tmux set-option -p -t <pane_id> @claude-sandbox <json>" (bounded like every tmux call), under
-      the check of CS-TMUX-041
+      the check of CS-TMUX-070
     And no write-back runs for a pane whose mark is unchanged
     And when no record matches (none yet, the registry unreadable, a bad record), the row keeps the
       mark's own conversation, name and name source: the mark carries the last good id across gaps
@@ -320,7 +322,7 @@ Feature: tmux integration (CS-TMUX)
     And the hook starts no new call after 3 s from its start: the sidecar is written first, and mark
       write-backs still due at the deadline are skipped (the next save retries them)
 
-  Scenario: CS-TMUX-041 a write-back never overwrites a mark that changed since the list
+  Scenario: CS-TMUX-070 a write-back never overwrites a mark that changed since the list
     Given a kept active mark the hook would write back (CS-TMUX-035)
     Then right before the set-option it re-reads the pane's mark with one bounded
       "tmux show-options -p -q -v -t <pane_id> @claude-sandbox"
