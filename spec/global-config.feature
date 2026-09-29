@@ -22,7 +22,8 @@ Feature: Global config (~/.claude.json) — the linked layout (CS-GCFG)
   and in-container half of the linked layout; they work with a layout made
   by hand. CS-GCFG-041..055 are the host commands that switch the layout
   with checks (claude-sandbox global-config migrate|revert) and record a
-  baseline (accept).
+  baseline (accept). CS-GCFG-056..058 drop the dead <parent>/.claude.json
+  mount of trees that set CLAUDE_CONFIG_DIR.
   Background: the claude-json-concurrent-writes investigation (00..03).
   Go home: internal/globalcfg, internal/launch, internal/pidslot,
   cmd/claude-sandbox.
@@ -314,22 +315,18 @@ Feature: Global config (~/.claude.json) — the linked layout (CS-GCFG)
     And the file is still mounted as legacy
     And a launch inside a sandbox does not repeat it
 
+  @changed
   Scenario: CS-GCFG-027 CLAUDE_CONFIG_DIR set: the feature does nothing
     Given CLAUDE_CONFIG_DIR is set to an absolute path in the launcher's environment
     Then no linked decision is made, CLAUDE_SANDBOX_GLOBAL_CONFIG is not set
       by the launcher (an env-file value is overridden empty, CS-GCFG-032),
       and no split-brain or link warning is printed
-    And the <parent>/.claude.json sibling is mounted only when Lstat reports a
-      regular file (CS-LNCH-012), under the same nested rule as CS-GCFG-025
-    Given that sibling is a symlink
-    Then it is not mounted, with one "Note:" line
+    And no <parent>/.claude.json is mounted, whatever it is (CS-GCFG-056)
     # Claude Code then reads $CLAUDE_CONFIG_DIR/.claude.json, inside the
     # config-dir mount: renames there are already atomic and the lock is
-    # shared. That includes CLAUDE_CONFIG_DIR == $HOME/.claude — which, after
-    # a migration, finds the new ~/.claude.json LINK as its sibling: following
-    # it would single-file-mount ~/.claude/.claude.json and bring back the
-    # in-place writes, and a sandbox able to write the parent dir could plant
-    # ".claude.json -> ~/.ssh/<key>" and have it mounted read-write.
+    # shared. That includes CLAUDE_CONFIG_DIR == $HOME/.claude.
+    # Was: the <parent>/.claude.json sibling mounted when Lstat reported a
+    # regular file, and a symlinked one skipped with one "Note:" line.
 
   Scenario: CS-GCFG-028 A relative or ~ CLAUDE_CONFIG_DIR gets one warning
     Given CLAUDE_CONFIG_DIR is relative, or a path element starts with "~"
@@ -705,3 +702,39 @@ Feature: Global config (~/.claude.json) — the linked layout (CS-GCFG)
       host whose launcher predates the commands
     And no launch prints a per-launch "unmigrated" reminder (operator
       decision 57: later)
+
+  # ==== CLAUDE_CONFIG_DIR trees: no parent-sibling mount (F4) ====
+  # With CLAUDE_CONFIG_DIR set, Claude Code 2.1.283 reads
+  # $CLAUDE_CONFIG_DIR/.claude.json (or <config dir>/.config.json), never the
+  # .claude.json beside the config dir. The launcher used to mount that
+  # sibling "to mirror the standard layout"; it was dead, and after a
+  # migration a tree with CLAUDE_CONFIG_DIR=$HOME/.claude found the new
+  # ~/.claude.json LINK there and printed a note on every launch.
+
+  Scenario: CS-GCFG-056 With CLAUDE_CONFIG_DIR set, <parent>/.claude.json is never mounted
+    Given CLAUDE_CONFIG_DIR is set (absolute, relative or with a "~")
+    When <parent of the config dir>/.claude.json is a regular file, a symlink
+      (to ~/.claude/.claude.json or to any other file), or absent
+    Then no volume names it or a symlink's target
+    And nothing is printed about it: no "Note:" line, no warning
+    # A session able to write the parent dir could otherwise plant
+    # ".claude.json -> ~/.ssh/<key>"; with no mount at all there is nothing
+    # to plant.
+
+  Scenario: CS-GCFG-057 A migrated host with CLAUDE_CONFIG_DIR=$HOME/.claude launches silently
+    Given the host is in the linked layout ($HOME/.claude.json is a link to
+      $HOME/.claude/.claude.json, CS-GCFG-016)
+    And CLAUDE_CONFIG_DIR is $HOME/.claude
+    Then no launch prints anything about $HOME/.claude.json
+    And the file Claude Code reads, $HOME/.claude/.claude.json, reaches the
+      container through the config-dir mount (CS-LNCH-008) with no mount of
+      its own
+    And the .mcp.json beside the config dir is still shadowed (CS-LNCH-013)
+
+  Scenario: CS-GCFG-058 The dropped mount is drift once, and the sibling no longer moves the hash
+    Given a container launched with CLAUDE_CONFIG_DIR set and a regular
+      <parent>/.claude.json before this change
+    Then its mount set differed, so attach reports config drift once
+      (CS-LNCH-012 @changed); a relaunch clears it
+    And with CLAUDE_CONFIG_DIR set, launches with and without a
+      <parent>/.claude.json produce the same config hash

@@ -330,7 +330,7 @@ func Build(in Inputs) (*Plan, error) {
 	// CS-LNCH-012, CS-GCFG-016..029: the global config file — the linked
 	// layout (no mount, the in-container link), the legacy single-file mount,
 	// or nothing.
-	globalLinked := in.assembleGlobalConfig(p, configDir)
+	globalLinked := in.assembleGlobalConfig(p)
 	// CS-LNCH-013: the .mcp.json sibling of the config dir.
 	if err := in.shadowSiblings(p, configDir); err != nil {
 		return nil, err
@@ -860,7 +860,7 @@ func (in *Inputs) mountSettingsTarget(p *Plan, configDir string) {
 // the container (CS-LNCH-012, CS-GCFG-016..029) and reports whether the launch
 // is linked. Only the default layout (CLAUDE_CONFIG_DIR unset) is decided
 // here; with CLAUDE_CONFIG_DIR set Claude Code reads the file inside the
-// config-dir mount and the parent sibling mount stays as it was (CS-GCFG-027).
+// config-dir mount and nothing is mounted for it (CS-GCFG-027, CS-GCFG-056).
 //
 // Linked: nothing is mounted at $HOME/.claude.json; the container gets the
 // link target in globalcfg.EnvVar, and the pidslot helper makes the link on
@@ -873,8 +873,8 @@ func (in *Inputs) mountSettingsTarget(p *Plan, configDir string) {
 // CS-GCFG-032: an env file (session-writable) never sets globalcfg.EnvVar —
 // a linked launch's own -e wins, and any other launch passes it empty, which
 // pidslot treats as unset (-e beats --env-file, the CS-LNCH-108 precedent).
-func (in *Inputs) assembleGlobalConfig(p *Plan, configDir string) bool {
-	linked := in.globalConfigLayout(p, configDir)
+func (in *Inputs) assembleGlobalConfig(p *Plan) bool {
+	linked := in.globalConfigLayout(p)
 	if !linked && in.envFilesDefine(globalcfg.EnvVar) {
 		p.EnvFlags = append(p.EnvFlags, globalcfg.EnvVar+"=")
 		fmt.Fprintf(in.Err, "WARNING: an env file sets %s; it is ignored — only the launcher sets it, from the host's ~/.claude.json layout.\n", globalcfg.EnvVar)
@@ -893,26 +893,15 @@ func (in *Inputs) mountRegularGlobal(p *Plan, path string) {
 	p.Volumes = append(p.Volumes, fmt.Sprintf("%s:%s", path, path))
 }
 
-func (in *Inputs) globalConfigLayout(p *Plan, configDir string) bool {
+func (in *Inputs) globalConfigLayout(p *Plan) bool {
 	host := !hostdirs.InSandbox(in.getenv)
 	if d := in.getenv("CLAUDE_CONFIG_DIR"); d != "" {
 		if globalcfg.SuspiciousConfigDir(d) {
 			fmt.Fprint(in.Err, globalcfg.ConfigDirWarning(d)) // CS-GCFG-028
 		}
-		// CS-GCFG-027, CS-LNCH-012: Claude Code does not read this file.
-		// Only a regular file (Lstat) is mounted: after a migration a tree
-		// with CLAUDE_CONFIG_DIR=$HOME/.claude finds the ~/.claude.json LINK
-		// here, and a session able to write the parent could plant a link to
-		// any file and have it mounted read-write.
-		claudeJSON := filepath.Join(filepath.Dir(configDir), globalcfg.FileName)
-		if fi, err := os.Lstat(claudeJSON); err == nil {
-			switch {
-			case fi.Mode().IsRegular():
-				in.mountRegularGlobal(p, claudeJSON)
-			case fi.Mode()&os.ModeSymlink != 0:
-				fmt.Fprint(in.Out, globalcfg.SiblingLinkNote(claudeJSON))
-			}
-		}
+		// CS-GCFG-056, CS-LNCH-012: nothing is mounted beside the config
+		// dir. Claude Code reads $CLAUDE_CONFIG_DIR/.claude.json, inside
+		// the config-dir mount; <parent>/.claude.json is never read.
 		return false
 	}
 	l := globalcfg.Classify(in.Home, "")

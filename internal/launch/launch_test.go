@@ -367,19 +367,18 @@ var _ = Describe("launch.Build", func() {
 		}
 	})
 
-	It("CS-LNCH-012: with CLAUDE_CONFIG_DIR set, a regular parent sibling is mounted as before; a symlinked one is not", func() {
+	It("CS-LNCH-012: with CLAUDE_CONFIG_DIR set, no parent sibling is mounted, regular or symlinked", func() {
 		alt := filepath.Join(home, "alt", ".claude")
 		mkdir(alt)
 		env["CLAUDE_CONFIG_DIR"] = alt
 		sib := filepath.Join(home, "alt", ".claude.json")
 		touch(sib, "{}")
-		Expect(build().Volumes).To(ContainElement(sib + ":" + sib))
+		Expect(build().Volumes).NotTo(ContainElement(HavePrefix(sib + ":")))
 
 		real := filepath.Join(home, "alt", "real.json")
 		Expect(os.Rename(sib, real)).To(Succeed())
 		Expect(os.Symlink(real, sib)).To(Succeed())
 		for _, v := range build().Volumes {
-			Expect(v).NotTo(ContainSubstring(".json:"+sib), "no mount of the link")
 			Expect(v).NotTo(HavePrefix(real + ":"))
 			Expect(v).NotTo(HavePrefix(sib + ":"))
 		}
