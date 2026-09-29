@@ -233,6 +233,57 @@ To name the fork up front instead of `/rename`-ing afterwards, add claude's own 
 
 The launcher composes claude's own `--resume`/`--continue`/`--fork-session` and never reads the transcript files (their format is internal to Claude Code and version-unstable). Because branch always means a *new* container, `--branch` rejects `--attach`, `--join`, `--ralph`, and a passthrough `--resume`/`--continue`.
 
+### Resuming a conversation that is already open (exit 4)
+
+Claude Code only notices a conversation open twice when both sessions share a pid namespace,
+so two sandboxes — or a sandbox and a `claude` on the host — could resume one conversation and
+interleave writes into one transcript. A launch that names the conversation it resumes
+(`claude-sandbox -- --resume <uuid>`, also `--resume=<uuid>`, `-r <uuid>`, `-r<uuid>`) therefore
+checks first and **refuses with exit 4** when the conversation is already open:
+
+```
+Error: conversation 0b5e9c3a-… is already open in 'otter' (claude-sandbox-…-otter);
+       a second session on it would interleave writes into one transcript.
+       Attach to it:  cd ~/work/proj && claude-sandbox --attach=otter
+       Or fork it:    add --fork-session after -- (a new conversation id)
+```
+
+- **Open** means: another sandbox was created to resume it and has not switched away yet
+  (its `claude-sandbox.resume` label, below), a running or paused sandbox's own claude — or a
+  join in it — has it open (its peer registry record), or a live `claude` on the host has it
+  open (a record in `~/.claude/sessions` in the host's pid namespace whose process is still the
+  one that wrote it). An exited kept container holds nothing. A sandbox's record that names the
+  conversation is confirmed first: one `docker top` of that container (bounded at 5 s), and the
+  record is ruled out only when its processes can be seen and none has the record's start time
+  (a nested launcher, which cannot see host pids, never rules one out) — so a join that
+  was OOM-killed with the conversation open no longer blocks it. A failed `docker top` refuses.
+  A record written in the host's own pid namespace is always judged as the host's, even when it
+  sits in the container's registry directory.
+- **It fails closed.** When discovery (`docker ps`) fails, or a running sandbox's registry
+  directory or a record at its pid class cannot be read (a symlink, a FIFO, a pid that does not
+  match its file name; unparsable JSON or over 64 KiB only after 3 retries over about a second,
+  since a partial write could explain those; a directory of more than 10000 entries), the
+  launch also exits 4, naming what could not be read. The directory not existing at all is not
+  a failure.
+- **The ways out** are the two the message names: attach to the holder, or fork with
+  `--fork-session` (a fork gets a new id, so it is never checked). There is no override flag.
+- **Only these launches are checked:** an interactive or `--detach` launch whose claude
+  arguments name a UUID to resume. A plain launch, `--continue`, the `--resume` picker (no id),
+  a name instead of an id, `--branch`, `headless` and `--ralph` are never checked and behave
+  as before. When several `--resume`/`-r` are given, the last one counts, as in claude. The
+  scan of claude's arguments stops at `--` and at the first prompt word; an
+  unknown claude flag followed by a word stops it early, so a `--fork-session` after such a
+  flag is not seen and the launch is still checked.
+- **It runs inside the launch lock**, just before `docker create` (see
+  [Launch reservation](#launch-reservation)), so of two launches racing to resume one
+  conversation the second sees the first. A resuming launch that cannot take the lock does not
+  fall back to launching unserialized: it exits 2 with
+  `could not take the launch lock (…); not resuming <id> unserialized.`
+
+Every such container carries the label `claude-sandbox.resume=<uuid>` (lower case), outside
+the config-drift hash. Spec: `spec/sessions.feature` CS-SESS-065..069 and CS-SESS-089, `spec/launch.feature`
+CS-LNCH-110.
+
 ### Detaching
 
 Pressing **`ctrl-q` twice** detaches: the docker client exits, the container and the `claude` process keep running with the conversation intact, and `claude-sandbox --attach` picks it back up. The sequence applies to every session — one you launched, one you attached to, and one you joined.
@@ -311,7 +362,7 @@ claude-sandbox --no-session-check  # skip the prompt and launch
 
 `--no-session-check` skips the *decision*, not the instance-noun lookup — a new container still has to be named, and naming it without knowing which nouns are taken would reintroduce the collisions this exists to prevent.
 
-Bare `--attach` / `--join` work when there is exactly one candidate. Exit code 3 means specifically "a choice is needed and nobody can make it"; 2 remains a general error.
+Bare `--attach` / `--join` work when there is exactly one candidate. Exit code 3 means specifically "a choice is needed and nobody can make it"; 2 remains a general error. Exit code 4 means the conversation a launch resumes is already open in another session ([Resuming a conversation that is already open](#resuming-a-conversation-that-is-already-open-exit-4)).
 
 `--ralph` never prompts — it reports running sessions and proceeds, leaving concurrency to the ralph PID lock.
 
@@ -1527,14 +1578,17 @@ a mount error); that one is removed and the create retried once. Only docker's n
 (`Conflict. The container name … is already in use`) counts; `Conflicting options` flag errors
 are reported as they are. If the lock cannot be taken within 30 seconds, the launcher warns and
 launches without it: names stay unique (docker refuses a duplicate), but pid classes are then
-unprotected, so a launch at the same moment may get the same class.
+unprotected, so a launch at the same moment may get the same class. A launch that resumes a
+named conversation is the exception: it exits 2 instead, since its
+[resume check](#resuming-a-conversation-that-is-already-open-exit-4) runs under the lock.
 
 The lock is host-wide only for launches run **on the host**. `~/.cache/claude-sandbox` itself
 is not mounted into sandboxes (only subdirectories of it are, such as the package caches and
 the shared peer registry), so a launcher run inside one sandbox and a launcher run inside
 another take two different lock files. Their container names still stay unique, through the
 create conflict retry above, but two concurrent launches from inside different containers can
-get the same pid class.
+get the same pid class — and two such launches resuming one conversation at the same moment
+can both pass the resume check, since neither sees the other's reservation in time.
 Spec: `spec/sessions.feature` CS-SESS-048..054, `spec/launch.feature` CS-LNCH-057.
 
 #### The session child
@@ -1810,6 +1864,7 @@ internal/
   ralphloop/       Ralph loop: iterations, lock, quota handling, pipeline
   tmuxpane/        tmux pane mark: mark JSON, tmux argv, the restore replay allowlist + names-only flag scan;
                    the tmux save hook (registry reader, state-file parser, sidecar)
+  resumeguard/     Resume guard: is a conversation already open (sandbox labels, hardened registry reads, host claude)
   execx/, prompt/  Command-runner and prompt seams (injected in tests)
 spec/              Gherkin behavioral spec — scenario IDs referenced by the Ginkgo tests
 scripts/check-spec-coverage.sh  CI check: every scenario ID appears in a test

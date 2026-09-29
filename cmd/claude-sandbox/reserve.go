@@ -28,8 +28,14 @@ import (
 	"github.com/kmacmcfarlane/claude-sandbox/internal/hostdirs"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/launch"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/oomreport"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/resumeguard"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/sessions"
 )
+
+// exitResumeLive is the exit status of a launch refused because the
+// conversation it resumes is already open elsewhere (CS-SESS-065). 0-3 are
+// taken (3 = a decision needs a terminal, exitDecisionRequired).
+const exitResumeLive = 4
 
 // staleReservationAge is how old a created-but-never-started container must be
 // before a launch treats it as an orphan (CS-SESS-052). Create-to-start takes
@@ -59,23 +65,30 @@ const unlockedWarning = "Warning: could not take the launch lock (%s); launching
 
 // acquireLaunchLock takes the host launch lock and returns its release. A lock
 // that cannot be taken warns and degrades to an unserialized launch rather
-// than blocking one (the discovery-failure precedent).
-func acquireLaunchLock(env *Env, home string) func() {
+// than blocking one (the discovery-failure precedent) — except for a launch
+// resuming a conversation (resume != ""), whose guard means nothing without
+// the lock: it refuses with exit 2 instead (CS-SESS-069).
+func acquireLaunchLock(env *Env, home, resume string) (func(), error) {
+	unlocked := func(why any) (func(), error) {
+		if resume != "" {
+			return nil, exitErr(2, "Error: could not take the launch lock (%v); not resuming %s unserialized.", why, resume)
+		}
+		fmt.Fprintf(env.Err, unlockedWarning, why)
+		return func() {}, nil
+	}
 	lock := env.Lock
 	if lock == nil {
 		if home == "" {
 			// A relative lock path would lock per working directory, i.e. not at all.
-			fmt.Fprintf(env.Err, unlockedWarning, "no home directory")
-			return func() {}
+			return unlocked("no home directory")
 		}
 		lock = launch.FileLock{Path: launch.LaunchLockPath(home)}
 	}
 	release, err := lock.Acquire()
 	if err != nil {
-		fmt.Fprintf(env.Err, unlockedWarning, err)
-		return func() {}
+		return unlocked(err)
 	}
-	return release
+	return release, nil
 }
 
 func (env *Env) now() time.Time {
@@ -91,7 +104,10 @@ func (env *Env) now() time.Time {
 // shadowRoot is where its shadow directory is made (Env.shadowRoot,
 // CS-LNCH-161; "" = the temp root).
 func reserveContainer(env *Env, in launch.Inputs, wt worktreeChoice, ralph bool, shadowRoot string) (plan *launch.Plan, err error) {
-	release := acquireLaunchLock(env, in.Home)
+	release, err := acquireLaunchLock(env, in.Home, in.Resume)
+	if err != nil {
+		return nil, err
+	}
 	defer release()
 
 	// One shadow directory across attempts, so a retry rewrites the same files
@@ -119,7 +135,14 @@ func reserveContainer(env *Env, in launch.Inputs, wt worktreeChoice, ralph bool,
 	var lost []string // nouns a create conflict proved taken
 	reclaimed := false
 	for attempt := 1; ; attempt++ {
-		found := discoverForReservation(env)
+		found, derr := discoverForReservation(env)
+		if in.Resume != "" {
+			// CS-SESS-065..069: under the lock, before the create, on every
+			// attempt, so a launch racing this one is seen by its label.
+			if err := guardResume(env, in, found, derr); err != nil {
+				return nil, err
+			}
+		}
 		if attempt == 1 {
 			// After discovery, so the directories of the stale reservations it
 			// just removed are already unreferenced.
@@ -194,16 +217,17 @@ func reserveContainer(env *Env, in launch.Inputs, wt worktreeChoice, ralph bool,
 // reservations included (CS-SESS-050), and removes the stale reservations
 // among them (CS-SESS-052). Discovery failing must not block a launch: the
 // picks then fall back to random, as they always have.
-func discoverForReservation(env *Env) []sessions.Session {
+func discoverForReservation(env *Env) ([]sessions.Session, error) {
 	// Uncounted: session counts are not needed to pick, and counting would run
 	// one docker top per running sandbox inside the critical section.
 	found, err := sessions.DiscoverAllUncounted(env.Runner)
 	if err != nil {
-		return nil
+		// The error matters only to the resume guard, which fails closed.
+		return nil, err
 	}
 	stale := sessions.Stale(found, env.now(), staleReservationAge)
 	if len(stale) == 0 {
-		return found
+		return found, nil
 	}
 	removed := map[string]bool{}
 	for _, s := range stale {
@@ -212,7 +236,43 @@ func discoverForReservation(env *Env) []sessions.Session {
 			removed[s.Name] = true
 		}
 	}
-	return slices.DeleteFunc(found, func(s sessions.Session) bool { return removed[s.Name] })
+	return slices.DeleteFunc(found, func(s sessions.Session) bool { return removed[s.Name] }), nil
+}
+
+// guardResume refuses a launch that would resume a conversation already open
+// elsewhere (CS-SESS-065..068): exit 4, naming the holder and both ways out,
+// or, when something could not be read, what — the check fails closed.
+func guardResume(env *Env, in launch.Inputs, found []sessions.Session, derr error) error {
+	v := resumeguard.Check{
+		ID: in.Resume, Sessions: found, DiscoveryErr: derr, Runner: env.Runner,
+		Home: in.Home, ConfigDir: in.ConfigDir(), ProcRoot: env.ProcRoot,
+	}.Run()
+	if !v.Open {
+		return nil
+	}
+	const (
+		why  = "       a second session on it would interleave writes into one transcript.\n"
+		fork = "       Or fork it:    add --fork-session after -- (a new conversation id)"
+	)
+	switch {
+	case v.Holder != nil:
+		h := v.Holder
+		who := h.Name
+		if h.Instance != "" {
+			who = "'" + h.Instance + "' (" + h.Name + ")"
+		}
+		msg := fmt.Sprintf("Error: conversation %s is already open in %s;\n", in.Resume, who) + why
+		if h.Instance != "" && h.Mode != sessions.ModeRalph && h.Mode != sessions.ModeHeadless {
+			msg += "       Attach to it:  " + attachCommand(h.Project, in.Home, h.Instance) + "\n"
+		}
+		return exitErr(exitResumeLive, "%s", msg+fork)
+	case v.HostPID != 0:
+		return exitErr(exitResumeLive, "Error: conversation %s is already open in a claude process on this host (pid %d);\n%s%s",
+			in.Resume, v.HostPID, why, fork)
+	}
+	return exitErr(exitResumeLive, "Error: cannot tell whether conversation %s is already open elsewhere\n"+
+		"       (%s), so it is not resumed a second time.\n"+
+		"       Fix that and retry, or fork it: add --fork-session after --.", in.Resume, v.Reason)
 }
 
 // pidClassFrom picks the pid class for a container about to be launched

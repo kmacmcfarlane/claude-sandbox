@@ -867,6 +867,42 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     And no label carries a flag's value or an environment value other than the raw config dir
     And adding, changing or removing any of them changes neither confighash nor inputs
 
+  @new
+  Scenario: CS-LNCH-110 A launch that resumes a named conversation carries the resume label
+    # The resume guard (CS-SESS-065..069, plan sandbox-reboot-restore 06 § 4,
+    # 07 § 6, 08 § 4) needs every container that is about to open a known
+    # conversation to say so before its registry record exists: the label is
+    # visible to the next launch's discovery the moment "docker create" returns.
+    Given the claude arguments after the launcher flags (the passthrough, with
+      the args --branch prepends) name a conversation with one of
+      "--resume <id>", "--resume=<id>", "-r <id>", "-r<id>"
+    And <id> is a canonical UUID (8-4-4-4-12 hex digits)
+    And when several appear before the stop, the LAST one is <id>, as in
+      claude's own parser; the label is not set when that last one has no id or
+      one that is not a canonical UUID
+    Then docker create receives the label "claude-sandbox.resume=<id>", the id
+      in lower case
+    And the scan follows the pane mark's stop rules (CS-TMUX-013): it stops at a
+      bare "--" or at the first positional, never reads a known flag's value as
+      a positional, and stops at an unknown flag followed by a word
+    But no resume label is set when:
+      | case                                        | why                                            |
+      | "--fork-session" appears before the stop    | a fork gets a new id; forking a live conversation is legitimate |
+      | "--resume" or "-r" has no id (the picker)   | nothing is known to guard                      |
+      | the id is not a canonical UUID              | claude's own name search; nothing is known to guard |
+      | the resume flag comes after the stop        | it is a prompt word or claude's own "--" tail  |
+      | the launch is headless (CS-LNCH-058)        | SDK double resume is item b090, parked         |
+      | the launch is --ralph                       | ralph's claude takes no passthrough            |
+    And "--fork-session" after the stop (inside a prompt, after "--") neither
+      sets nor suppresses the label
+    And an unknown value-taking flag before "--fork-session" stops the scan
+      early, so the label stays on and the guard may refuse a legitimate fork:
+      that fails safe, and the refusal names --fork-session (CS-SESS-065)
+    And --branch's own "--resume --fork-session" / "--continue --fork-session"
+      never carry the label
+    And the label is outside the drift fingerprint: confighash and inputs are
+      the same with and without it
+
   Scenario: CS-LNCH-029 Container runtime environment
     Then docker create receives: -it --rm --init,
       -e HOST_UID/HOST_GID/HOST_USER/HOST_HOME of the calling user,

@@ -82,6 +82,9 @@ type Env struct {
 	// os.Executable. The checker is started through Runner.Start with
 	// Cmd.Detach, so under execx.Fake nothing is spawned.
 	Executable func() (string, error)
+	// ProcRoot is the /proc the resume guard reads for its host claude check
+	// (CS-SESS-068); "" means the real /proc.
+	ProcRoot string
 }
 
 // shadowRoot resolves where this launch makes its shadow directory
@@ -1157,7 +1160,10 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 		Detached: f.Detach,
 		// CS-LNCH-109: names only, for an attach's pane mark (CS-TMUX-012).
 		LaunchFlags: rec.LabelValue(),
-		Out:         env.Out, Err: env.Err,
+		// CS-LNCH-110: the conversation the resume guard protects; never for
+		// headless (item b090) or ralph (no passthrough reaches its claude).
+		Resume: resumeLabel(passthrough, headless, f.Ralph),
+		Out:    env.Out, Err: env.Err,
 	}
 	// CS-GCFG-001: the global-config health check, after the image work and
 	// before the lock and the create, so it never widens the window between
@@ -1180,6 +1186,16 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 		mark = newContainerMark(plan, wt.Root, rec, since, tmuxpane.ResumeID(passthrough))
 	}
 	return startReserved(env, plan, headless, pre, mark)
+}
+
+// resumeLabel is the claude-sandbox.resume label's value for a launch
+// (CS-LNCH-110): the passthrough's explicit, unforked resume of a canonical
+// UUID, "" for headless and ralph.
+func resumeLabel(passthrough []string, headless, ralph bool) string {
+	if headless || ralph {
+		return ""
+	}
+	return tmuxpane.GuardedResumeID(passthrough)
 }
 
 // cacheBudgetCheckCmd is the hidden subcommand the detached checker runs as

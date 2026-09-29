@@ -309,56 +309,108 @@ var uuidRE = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[
 // ResumeID returns the conversation a passthrough resumes explicitly —
 // "--resume <id>", "--resume=<id>", "-r <id>", "-r<id>" with a canonical
 // UUID — scanning with ScanPassthrough's stop rules (plan 07 § 6, 08 § 4).
+// claude's parser keeps the LAST of several, so the scan does too, up to the
+// stop (CS-LNCH-110); "" when that last one has no id or a non-UUID one.
 func ResumeID(args []string) string {
-	for i := 0; i < len(args); i++ {
+	last := ""
+	for i := 0; i < len(args); {
 		a := args[i]
 		if a == "--" || !strings.HasPrefix(a, "-") || a == "-" {
-			return ""
+			break
 		}
 		name, hasValue := flagName(a)
 		if name == "--resume" || name == "-r" {
-			v := ""
+			// [value]: glued, or the next token unless it is a flag.
 			switch {
 			case hasValue && name == "--resume":
-				_, v, _ = strings.Cut(a, "=")
+				_, last, _ = strings.Cut(a, "=")
+				i++
 			case hasValue:
-				v = a[2:]
-			case i+1 < len(args):
-				v = args[i+1]
+				last = a[2:]
+				i++
+			case i+1 < len(args) && !strings.HasPrefix(args[i+1], "-"):
+				last = args[i+1]
+				i += 2
+			default:
+				last = ""
+				i++
 			}
-			if uuidRE.MatchString(v) {
-				return strings.ToLower(v)
-			}
-			return ""
-		}
-		if hasValue {
 			continue
 		}
-		ar, ok := ReplayAllowlist[name]
-		if !ok {
-			if ar, ok = claudeArity[name]; !ok {
-				if !claudeBoolean[name] {
-					if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
-						return ""
-					}
-				}
-				continue
-			}
+		next, stop := step(args, i)
+		if stop {
+			break
 		}
-		switch ar {
-		case oneValue:
-			i++
-		case optionalValue:
-			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
-				i++
-			}
-		case variadic:
-			for i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
-				i++
-			}
-		}
+		i = next
+	}
+	if uuidRE.MatchString(last) {
+		return strings.ToLower(last)
 	}
 	return ""
+}
+
+// ForkSession reports whether a passthrough asks claude to fork
+// ("--fork-session") before the scan's stop (plan 08 § 4): one inside a
+// prompt or after "--" does not count.
+func ForkSession(args []string) bool {
+	for i := 0; i < len(args); {
+		a := args[i]
+		if a == "--" || !strings.HasPrefix(a, "-") || a == "-" {
+			return false
+		}
+		if name, _ := flagName(a); name == "--fork-session" {
+			return true
+		}
+		next, stop := step(args, i)
+		if stop {
+			return false
+		}
+		i = next
+	}
+	return false
+}
+
+// GuardedResumeID is the conversation the resume guard protects for a launch
+// (CS-LNCH-110, CS-SESS-065): the explicit ResumeID, unless the passthrough
+// forks it — a fork gets a new id, so it opens nothing already open. The
+// claude-sandbox.resume label carries it.
+func GuardedResumeID(args []string) string {
+	if ForkSession(args) {
+		return ""
+	}
+	return ResumeID(args)
+}
+
+// step returns the index after the flag token at i and its values, and
+// whether the scan must stop there: an unknown flag followed by a word, whose
+// arity the scan cannot know.
+func step(args []string, i int) (next int, stop bool) {
+	name, hasValue := flagName(args[i])
+	if hasValue {
+		return i + 1, false
+	}
+	ar, ok := ReplayAllowlist[name]
+	if !ok {
+		if ar, ok = claudeArity[name]; !ok {
+			if !claudeBoolean[name] && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				return i + 1, true
+			}
+			return i + 1, false
+		}
+	}
+	switch ar {
+	case oneValue:
+		i++
+	case optionalValue:
+		if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+			i++
+		}
+	case variadic:
+		for i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+			i++
+		}
+	}
+	return i + 1, false
 }
 
 func isAllowed(name string) bool {

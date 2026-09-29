@@ -50,6 +50,9 @@ const (
 	LabelConfigDir   = launch.LabelConfigDir
 	LabelRegistry    = launch.LabelRegistry
 	LabelLaunchFlags = launch.LabelLaunchFlags
+	// LabelResume is the conversation a container was created to resume, read
+	// by the resume guard (CS-LNCH-110, CS-SESS-065).
+	LabelResume = launch.LabelResume
 )
 
 // ModeRalph marks a ralph loop container.
@@ -111,6 +114,9 @@ type Session struct {
 	ConfigDirEnv string `json:"-"`
 	RegistryDir  string `json:"-"`
 	LaunchFlags  string `json:"-"`
+	// Resume is the claude-sandbox.resume label (CS-LNCH-110), "" when unset
+	// or on an older row.
+	Resume string `json:"-"`
 }
 
 // StateCreated is docker's state for a container that exists but has never
@@ -188,6 +194,7 @@ var psFormat = strings.Join([]string{
 	`{{.Label "` + LabelConfigDir + `"}}`,
 	`{{.Label "` + LabelRegistry + `"}}`,
 	`{{.Label "` + LabelLaunchFlags + `"}}`,
+	`{{.Label "` + LabelResume + `"}}`, // CS-SESS-065
 }, fieldSep)
 
 // psFieldCount is the minimum a row must carry; State and CreatedAt follow.
@@ -299,6 +306,9 @@ func list(r execx.Runner, filter string, count bool) ([]Session, error) {
 		if len(f) > 19 {
 			s.ID = strings.TrimSpace(f[16])
 			s.ConfigDirEnv, s.RegistryDir, s.LaunchFlags = f[17], f[18], f[19]
+		}
+		if len(f) > 20 {
+			s.Resume = strings.TrimSpace(f[20])
 		}
 		// An exited or restarting container is listed only when kept: a --rm
 		// one is being removed (CS-SESS-070).

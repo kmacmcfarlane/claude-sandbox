@@ -135,6 +135,44 @@ var _ = Describe("tmuxpane", func() {
 				Expect(tmuxpane.ResumeID(args)).To(BeEmpty(), "%v", args)
 			}
 		})
+
+		It("CS-LNCH-110: GuardedResumeID is the explicit resume unless the passthrough forks it before the stop", func() {
+			for _, args := range [][]string{
+				{"--resume", convID}, {"--resume=" + convID}, {"-r", convID}, {"-r" + convID},
+				// --fork-session after the stop neither sets nor suppresses it.
+				{"--resume", convID, "fix it --fork-session"},
+				{"--resume", convID, "--", "--fork-session"},
+				{"--resume", convID, "prompt", "--fork-session"},
+			} {
+				Expect(tmuxpane.GuardedResumeID(args)).To(Equal(convID), "%v", args)
+			}
+			for _, args := range [][]string{
+				{"--resume", convID, "--fork-session"},
+				{"--fork-session", "--resume", convID},
+				{"--fork-session", "-r" + convID},
+				{"--model", "opus", "--fork-session", "--resume=" + convID},
+				{"--resume"}, {"--resume", "my-session-name"},
+				{"prompt", "--resume", convID},
+				{"--", "--resume", convID},
+				// --branch's own forms never carry it.
+				{"--resume", "--fork-session"}, {"--continue", "--fork-session"},
+			} {
+				Expect(tmuxpane.GuardedResumeID(args)).To(BeEmpty(), "%v", args)
+			}
+			// An unknown value-taking flag stops the scan before the fork: the
+			// label stays on, which fails safe (the refusal names --fork-session).
+			Expect(tmuxpane.ForkSession([]string{"--frobnicate", "x", "--fork-session"})).To(BeFalse())
+			Expect(tmuxpane.GuardedResumeID([]string{"--resume", convID, "--frobnicate", "x", "--fork-session"})).To(Equal(convID))
+			// claude keeps the LAST --resume/-r before the stop.
+			other := "53cd0872-ec39-41a3-86bd-b000abb5fb32"
+			Expect(tmuxpane.ResumeID([]string{"--resume", other, "-r", convID})).To(Equal(convID))
+			Expect(tmuxpane.ResumeID([]string{"-r" + other, "--verbose", "--resume=" + convID})).To(Equal(convID))
+			Expect(tmuxpane.ResumeID([]string{"--resume", convID, "--resume", "a-name"})).To(BeEmpty())
+			Expect(tmuxpane.ResumeID([]string{"--resume", convID, "--resume"})).To(BeEmpty(), "the picker last")
+			Expect(tmuxpane.ResumeID([]string{"--resume", convID, "prompt", "--resume", other})).To(Equal(convID), "after the stop does not count")
+			// A known flag's value is never a positional stop.
+			Expect(tmuxpane.ForkSession([]string{"--permission-mode", "plan", "--add-dir", "/a", "/b", "--fork-session"})).To(BeTrue())
+		})
 	})
 
 	Describe("the mark", func() {
