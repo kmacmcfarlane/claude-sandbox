@@ -158,8 +158,8 @@ claude-sandbox will add:
 - A save hook (`@resurrect-hook-post-save-layout`, which receives the state
   file path) that records which conversation each sandbox pane is running.
   **Built:** `claude-sandbox tmux save` (see the README's "tmux save hook"),
-  wired with `set -g @resurrect-hook-post-save-layout 'claude-sandbox tmux save'`
-  before resurrect's `run-shell` line. On its own it only writes
+  wired with `set -g @resurrect-hook-post-save-layout 'claude-sandbox tmux save'`.
+  On its own it only writes
   `*.claude-sandbox.json` sidecars beside the saves; nothing reads them until
   the restore command below exists.
 - A `@resurrect-processes` entry whose substituted command, typed into the

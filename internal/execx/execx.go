@@ -143,6 +143,16 @@ func (p *sysProcess) Signal(sig os.Signal) error { return p.cmd.Process.Signal(s
 func (p *sysProcess) Wait() error                { return p.cmd.Wait() }
 func (p *sysProcess) Pid() int                   { return p.cmd.Process.Pid }
 
+// KillGroup SIGKILLs the process's whole group (Start gives it its own).
+func (p *sysProcess) KillGroup() error { return syscall.Kill(-p.cmd.Process.Pid, syscall.SIGKILL) }
+
+// GroupKiller is a Process that leads its own process group and can be
+// killed with everything it started. Fake processes do not implement it, so
+// a test never signals a real process group.
+type GroupKiller interface {
+	KillGroup() error
+}
+
 func (s System) Start(c Cmd) (Process, error) {
 	if c.DieWithParent {
 		return s.startTethered(c)
@@ -200,6 +210,11 @@ type tetheredProcess struct {
 func (p *tetheredProcess) Signal(sig os.Signal) error { return p.cmd.Process.Signal(sig) }
 func (p *tetheredProcess) Wait() error                { <-p.done; return p.err }
 func (p *tetheredProcess) Pid() int                   { return p.cmd.Process.Pid }
+
+// KillGroup SIGKILLs the process's whole group: a tethered process leads its
+// own, so a grandchild still holding a stdout pipe dies with it and Wait does
+// not wait on the pipe (CS-TMUX-040).
+func (p *tetheredProcess) KillGroup() error { return syscall.Kill(-p.cmd.Process.Pid, syscall.SIGKILL) }
 
 // startTethered starts c in its own process group with a parent-death
 // signal. Linux delivers that signal when the forking THREAD exits, so one

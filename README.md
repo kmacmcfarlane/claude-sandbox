@@ -461,7 +461,7 @@ or when its worktree name is not recorded yet); a start that fails puts that mar
 ### tmux save hook
 
 `claude-sandbox tmux save <state-file>` is a tmux-resurrect **post-save-layout hook**. Wire it
-with one line in `~/.tmux.conf`, **before** the `run-shell …/resurrect.tmux` line:
+with one line in `~/.tmux.conf` (resurrect reads it at save time, so anywhere in the file):
 
 ```tmux
 set -g @resurrect-hook-post-save-layout 'claude-sandbox tmux save'
@@ -469,12 +469,15 @@ set -g @resurrect-hook-post-save-layout 'claude-sandbox tmux save'
 
 resurrect runs it after every save (continuum's autosave included, every minute), from the
 tmux **server's** environment: check `tmux run-shell 'command -v claude-sandbox'` prints a path,
-and use the shim's absolute path in the line if it prints nothing. For each pane of that save
+and use the shim's absolute path in the line if it prints nothing. For `tmux save` the shim
+never builds: when the binary is missing or older than the sources (after a pull), the save hook
+does nothing until your next ordinary `claude-sandbox` launch rebuilds it. For each pane of that save
 whose mark says it runs a sandbox, the hook takes the conversation id and name from the host
 peer registry (`<registry dir>/<pid>.json`, matched by the mark's pid class, start time and
 directory; only the id — checked to be a UUID — and the name, control characters stripped, are
 taken from a record, since sandboxes write them), writes them back into the pane's mark (so the
-last good id survives a moment when no record can be read), and writes a sidecar beside the save:
+last good id survives a moment when no record can be read; never over a mark that changed in the
+meantime, such as a relaunch in that pane), and writes a sidecar beside the save:
 `tmux_resurrect_<time>.claude-sandbox.json` (mode 0600; rows of `session`, `window`, `pane` and
 the `mark`), in whichever directory resurrect saved to (it passes the path; by default
 `~/.local/share/tmux/resurrect`, or `~/.tmux/resurrect` if that exists, or `@resurrect-dir`).
@@ -494,7 +497,7 @@ ls ~/.local/share/tmux/resurrect/*.claude-sandbox.json   # after prefix + C-s
 
 Nothing reads the sidecars yet: `claude-sandbox tmux restore` is the next step, so keep
 claude-sandbox out of `@resurrect-processes` (see the tmux doc). Spec: `spec/tmux.feature`
-CS-TMUX-030..040.
+CS-TMUX-003, CS-TMUX-030..041.
 
 ## Headless mode (Paseo and other SDK clients)
 

@@ -37,6 +37,16 @@ Feature: tmux integration (CS-TMUX)
     # One process name for every shim path: a TAB press is short-lived, but the
     # launcher must never be named differently depending on how it was reached.
 
+  Scenario: CS-TMUX-003 the save hook's fast path never builds and never prints
+    Given bin/claude-sandbox is invoked as "tmux save <state-file>" (tmux-resurrect's post-save-layout
+      hook, run inside every save)
+    When bin/dist/claude-sandbox exists and no build source is newer than it
+    Then the shim execs it with argv[0] "claude-sandbox", stdout and stderr to /dev/null
+    When the binary is missing, or a build source is newer (after a pull)
+    Then the shim exits 0 at once, prints nothing and runs nothing: no build (unbounded, and it
+      prints "Building…"), and no stale binary (one from before the hook existed would read
+      "tmux save <file>" as a launch prompt); the next ordinary launch rebuilds and saves resume
+
   # ---- F1: the pane mark ----
   #
   # Every host launch, attach or join run inside tmux records, in a pane user
@@ -187,16 +197,17 @@ Feature: tmux integration (CS-TMUX)
   # inside save.sh as `eval "$hook $args"`, with the path of the state file it just
   # wrote as the one argument, BEFORE it compares that file with the one `last`
   # points at (an equal file is then deleted and `last` left alone). The operator
-  # wires it with one tmux.conf line, before resurrect's run-shell line:
+  # wires it with one tmux.conf line:
   #   set -g @resurrect-hook-post-save-layout 'claude-sandbox tmux save'
-  # The hook records, for each sandbox pane in that save, which conversation it
+  # (resurrect reads the option at save time, so its place in tmux.conf does not
+  # matter). The hook records, for each sandbox pane in that save, which conversation it
   # holds: the pane's mark (F1) plus the conversation id and name from the host
   # peer registry, written to a sidecar JSON beside the state file, which F4's
-  # `tmux restore` reads. Continuum saves every minute, so the hook is bounded,
-  # never prints, and never waits on tmux or docker. Registry records are written
+  # `tmux restore` reads. Continuum saves every minute, so the hook never prints
+  # and every tmux or docker call it waits on is bounded. Registry records are written
   # by code inside sandboxes (answer 31b): only the conversation id and the name
   # are taken from them, both validated. Window labels (decision 52, open) are not
-  # part of F3; the IDs 041 to 044 of this prefix stay reserved for them.
+  # part of F3; the IDs 042 to 044 of this prefix stay reserved for them.
 
   Scenario: CS-TMUX-030 the save hook's guards: host only, a resurrect state file, silent, exit 0
     Given the command "claude-sandbox tmux save <state-file>"
@@ -240,9 +251,12 @@ Feature: tmux integration (CS-TMUX)
       "~/.cache/claude-sandbox/peers/sessions"
     And a candidate record has pid % 256 == the mark's class and a cwd equal to or under the mark's
       project or cwdRoot
-    And for mode "claude" it has startedAt >= since - 5 s and the earliest startedAt wins (the primary
-      starts first; joins land at class + 256·n later)
-    And for mode "join" it has startedAt >= since and the earliest wins
+    And for mode "claude" it started between since - 5 s and since + 120 s (tmuxpane.PrimaryWindow)
+    And for mode "join" it started between since and since + 30 s (tmuxpane.JoinWindow)
+    And a candidate whose sessionId is the mark's current conversation wins; else the earliest start
+    And so, when the pane's own record is missing or rejected, a later join's record in the same
+      container (same class, class + 256·n, started after the window) is a miss, never the pane's
+      conversation: the mark keeps its own id
     And a "ralph" mark is not resolved (a ralph run is never resumed; its iterations come and go)
 
   Scenario: CS-TMUX-034 registry records are read defensively and give only an id and a name
@@ -251,8 +265,9 @@ Feature: tmux integration (CS-TMUX)
       "<digits>.json" relative to that fd with O_NOFOLLOW|O_NONBLOCK
     And a record counts only when it is a regular file of at most 64 KiB that parses, its "pid"
       equals the file name's, and its "sessionId" is a canonical UUID
-    And its "name" has control characters stripped and whitespace collapsed; a name longer than 200
-      characters or starting with "-" counts as absent
+    And its "name" has control characters turned into spaces, format characters (Unicode Cf: bidi
+      overrides, zero-width), private-use (Co) and surrogate (Cs) code points dropped, and whitespace
+      collapsed; a name longer than 200 characters or starting with "-" counts as absent
     And its "nameSource" is kept only when it is one of user, peer, derived, collision, auto, hook
       (Claude Code 2.1.284); only "user" is a name the user gave
     And nothing else from the record reaches the mark or the sidecar
@@ -262,12 +277,11 @@ Feature: tmux integration (CS-TMUX)
     Given a kept active mark and a matching record
     Then the row gets "conversation", "name" and "nameSource" from the record
     And when the mark changed, the hook writes it back with one
-      "tmux set-option -p -t <pane_id> @claude-sandbox <json>" (bounded like every tmux call)
+      "tmux set-option -p -t <pane_id> @claude-sandbox <json>" (bounded like every tmux call), under
+      the check of CS-TMUX-041
     And no write-back runs for a pane whose mark is unchanged
     And when no record matches (none yet, the registry unreadable, a bad record), the row keeps the
       mark's own conversation, name and name source: the mark carries the last good id across gaps
-    # A write-back can race the launcher's own unset at session end and leave the mark behind; the
-    # next save's liveness check (CS-TMUX-032) drops it, since the pane then runs a shell.
 
   Scenario: CS-TMUX-036 a generated worktree name is filled from the record's cwd
     Given a join mark with "worktree": "" and "worktreeGenerated": true (CS-TMUX-012)
@@ -301,6 +315,18 @@ Feature: tmux integration (CS-TMUX)
 
   Scenario: CS-TMUX-040 the hook is bounded at 3 s
     Given a tmux or docker call that hangs
-    Then each call is killed after 1 s (tmuxpane.CallTimeout), in its own process group
+    Then each call runs in its own process group and, after 1 s (tmuxpane.CallTimeout), that whole
+      group is killed (a grandchild holding the output pipe cannot hold the call a second timeout)
     And the hook starts no new call after 3 s from its start: the sidecar is written first, and mark
       write-backs still due at the deadline are skipped (the next save retries them)
+
+  Scenario: CS-TMUX-041 a write-back never overwrites a mark that changed since the list
+    Given a kept active mark the hook would write back (CS-TMUX-035)
+    Then right before the set-option it re-reads the pane's mark with one bounded
+      "tmux show-options -p -q -v -t <pane_id> @claude-sandbox"
+    And it writes back only when that mark is still the one list-panes returned
+    And when the pane was relaunched, unmarked or restored in between (another mark, or none), or the
+      re-read fails, it writes nothing (the next save resolves the new mark)
+    # The re-read narrows the race to the moment between two tmux calls. A tmux-side compare-and-set
+    # (if-shell -F) was not used: the mark is JSON, which tmux's format and command quoting would
+    # have to carry verbatim.

@@ -192,7 +192,13 @@ func bounded(r execx.Runner, timeout time.Duration, name string, args ...string)
 	case werr := <-done:
 		return out.String(), werr == nil
 	case <-time.After(timeout):
-		proc.Signal(os.Kill)
+		// The whole group: a grandchild holding the stdout pipe would
+		// otherwise keep Wait (and so this call) waiting (CS-TMUX-040).
+		if g, ok := proc.(execx.GroupKiller); ok {
+			g.KillGroup()
+		} else {
+			proc.Signal(os.Kill)
+		}
 		select {
 		case <-done:
 		case <-time.After(timeout):

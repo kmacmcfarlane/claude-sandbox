@@ -269,6 +269,7 @@ var _ = Describe("tmux save hook (CS-TMUX-030..040)", func() {
 
 	Describe("CS-TMUX-033: registry match", func() {
 		run := func(m tmuxpane.Mark) tmuxpane.Mark {
+			fake = &execx.Fake{} // each run lists only this mark
 			listPanes(paneRow("main", 1, 0, "%1", "claude-sandbox", &m))
 			dockerPS(saveID + "\t" + m.Container + "\trunning")
 			res, err := tmuxpane.Save(state, opts())
@@ -286,6 +287,32 @@ var _ = Describe("tmux save hook (CS-TMUX-030..040)", func() {
 			Expect(got.Conversation).To(Equal(convID))
 			Expect(got.Name).To(Equal("primary"))
 			Expect(got.NameSource).To(Equal("user"))
+		})
+
+		It("CS-TMUX-033: with the primary's record absent, a later join's record in the same container is a miss", func() {
+			record(263, conv2, proj, since+10*60*1000, "join", "user") // a join ten minutes in
+			m := mark(func(m *tmuxpane.Mark) { m.Conversation, m.Name, m.NameSource = convID, "primary", "user" })
+			got := run(m)
+			Expect(got.Conversation).To(Equal(convID), "the mark keeps its own id")
+			Expect(got.Name).To(Equal("primary"))
+			Expect(run(mark(nil)).Conversation).To(BeEmpty(), "and a mark with no id yet stays empty")
+		})
+
+		It("CS-TMUX-033: a primary's record must start within PrimaryWindow of since, a join's within JoinWindow", func() {
+			record(7, convID, proj, since+tmuxpane.PrimaryWindow.Milliseconds()+1, "", "")
+			Expect(run(mark(nil)).Conversation).To(BeEmpty())
+			record(7, convID, proj, since+tmuxpane.PrimaryWindow.Milliseconds(), "", "")
+			Expect(run(mark(nil)).Conversation).To(Equal(convID))
+			record(7, conv2, proj, since+tmuxpane.JoinWindow.Milliseconds()+1, "", "")
+			Expect(run(mark(func(m *tmuxpane.Mark) { m.Mode = tmuxpane.ModeJoin })).Conversation).To(BeEmpty())
+		})
+
+		It("CS-TMUX-033: a candidate naming the mark's current conversation wins over an earlier one", func() {
+			record(7, conv2, proj, since, "", "")
+			record(263, convID, proj, since+3000, "", "")
+			m := mark(func(m *tmuxpane.Mark) { m.Conversation = convID })
+			Expect(run(m).Conversation).To(Equal(convID))
+			Expect(run(mark(nil)).Conversation).To(Equal(conv2), "without a current id the earliest wins")
 		})
 
 		It("CS-TMUX-033: a record older than since - 5 s never counts", func() {
@@ -362,6 +389,10 @@ var _ = Describe("tmux save hook (CS-TMUX-030..040)", func() {
 		It("CS-TMUX-034: names: control characters stripped, over 200 characters or a leading '-' absent; name sources from the 2.1.284 set", func() {
 			Expect(tmuxpane.CleanName("  fix\x07 the\nbug ")).To(Equal("fix the bug"))
 			Expect(tmuxpane.CleanName("--dangerous")).To(BeEmpty())
+			// Format (Cf: bidi overrides, zero-width), private-use (Co) and
+			// surrogate (Cs, as invalid UTF-8 decodes to U+FFFD, kept) characters.
+			Expect(tmuxpane.CleanName("safe\u202egnp.exe\u200b\ue000")).To(Equal("safegnp.exe"))
+			Expect(tmuxpane.CleanName("\u2066-x\u2069")).To(BeEmpty(), "a hidden character cannot hide a leading '-'")
 			Expect(tmuxpane.CleanName(strings.Repeat("é", 201))).To(BeEmpty())
 			Expect(tmuxpane.CleanName(strings.Repeat("é", 200))).To(HaveLen(400))
 			for _, s := range []string{"user", "peer", "derived", "collision", "auto", "hook"} {
@@ -381,6 +412,7 @@ var _ = Describe("tmux save hook (CS-TMUX-030..040)", func() {
 			record(7, convID, proj, since, "my task", "user")
 			m := mark(nil)
 			listPanes(paneRow("main", 1, 0, "%1", "claude-sandbox", &m))
+			fake.On("tmux show-options", m.JSON()+"\n", nil)
 			dockerPS(saveID + "\t" + m.Container + "\trunning")
 			res, err := tmuxpane.Save(state, opts())
 			Expect(err).NotTo(HaveOccurred())
@@ -400,6 +432,30 @@ var _ = Describe("tmux save hook (CS-TMUX-030..040)", func() {
 			res, err = tmuxpane.Save(state, opts())
 			Expect(err).NotTo(HaveOccurred())
 			Expect(res.WriteBacks).To(Equal(0))
+			Expect(writeBacks()).To(BeEmpty())
+		})
+
+		It("CS-TMUX-041: a mark that changed between the list and the write is not overwritten", func() {
+			record(7, convID, proj, since, "my task", "user")
+			m := mark(nil)
+			listPanes(paneRow("main", 1, 0, "%1", "claude-sandbox", &m))
+			relaunched := mark(func(m *tmuxpane.Mark) { m.Since = since + 60000; m.Container = "c-new" })
+			fake.On("tmux show-options", relaunched.JSON()+"\n", nil)
+			dockerPS(saveID + "\t" + m.Container + "\trunning")
+			res, err := tmuxpane.Save(state, opts())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.WriteBacks).To(Equal(0))
+			Expect(res.Superseded).To(Equal(1))
+			Expect(writeBacks()).To(BeEmpty())
+			Expect(fake.CommandLines()).To(ContainElement("tmux show-options -p -q -v -t %1 @claude-sandbox"))
+
+			fake = &execx.Fake{}
+			listPanes(paneRow("main", 1, 0, "%1", "claude-sandbox", &m))
+			fake.On("tmux show-options", "", nil) // unmarked since: the session ended
+			dockerPS(saveID + "\t" + m.Container + "\trunning")
+			res, err = tmuxpane.Save(state, opts())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.Superseded).To(Equal(1))
 			Expect(writeBacks()).To(BeEmpty())
 		})
 
@@ -575,7 +631,7 @@ var _ = Describe("tmux save hook (CS-TMUX-030..040)", func() {
 			m9 := mark(func(m *tmuxpane.Mark) { m.Class = "9" })
 			listPanes(paneRow("main", 1, 0, "%1", "claude-sandbox", &m7), paneRow("main", 2, 0, "%2", "claude-sandbox", &m8),
 				paneRow("main", 3, 0, "%3", "claude-sandbox", &m9))
-			r := &stallRunner{Fake: fake, hang: []string{"docker ps", "tmux set-option"}}
+			r := &stallRunner{Fake: fake, hang: []string{"docker ps", "tmux show-options", "tmux set-option"}}
 			o := opts()
 			o.Runner = r
 			t0 := time.Now()

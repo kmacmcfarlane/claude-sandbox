@@ -99,12 +99,18 @@ func printableMark(m Mark) bool {
 	return true
 }
 
-// Printable drops control characters and collapses whitespace, for text read
-// from a mark and shown to the operator (the notify-webhook precedent).
+// Printable turns control characters into spaces, drops format characters
+// (Cf: bidi overrides, zero-width joiners), private-use (Co) and surrogate
+// (Cs) code points, and collapses whitespace, for text read from a mark or a
+// sandbox-writable registry record and shown to the operator (the
+// notify-webhook precedent; CS-TMUX-034).
 func Printable(s string) string {
 	s = strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) {
+		switch {
+		case unicode.IsControl(r):
 			return ' '
+		case unicode.In(r, unicode.Cf, unicode.Co, unicode.Cs):
+			return -1
 		}
 		return r
 	}, s)

@@ -5,8 +5,10 @@ package tmuxpane
 // synchronously inside save.sh with the path of the state file it just wrote.
 // It records which conversation each sandbox pane of that save holds, in a
 // sidecar beside the state file, and carries the id forward in the pane mark.
-// It is bounded, never prints, and never waits on tmux or docker: the caller
-// logs the returned problems and exits 0.
+// It never prints, and every tmux or docker call it waits on is bounded (1 s
+// each, 3 s for the whole run), so a hung tmux server or docker daemon costs
+// a save a few seconds at most: the caller logs the returned problems and
+// exits 0.
 
 import (
 	"bytes"
@@ -80,11 +82,13 @@ type SaveResult struct {
 	Rows       []Row
 	WriteBacks int
 	Skipped    int // write-backs left for the next save at the deadline
+	Superseded int // write-backs dropped: the pane's mark changed since the list
 }
 
 // livePane is a pane the hook keeps.
 type livePane struct {
 	id   string
+	orig Mark // the mark as list-panes returned it
 	mark Mark
 	row  Row
 }
@@ -142,7 +146,7 @@ func Save(stateFile string, o SaveOptions) (SaveResult, error) {
 		if m.State == StateActive && f[4] != LauncherCommand {
 			continue
 		}
-		kept = append(kept, &livePane{id: f[3], mark: m,
+		kept = append(kept, &livePane{id: f[3], orig: m, mark: m,
 			row: Row{Session: f[0], Window: w, Pane: p}})
 	}
 
@@ -182,6 +186,23 @@ func Save(stateFile string, o SaveOptions) (SaveResult, error) {
 	for i, lp := range writeBacks {
 		t := left()
 		if t <= 0 {
+			res.Skipped = len(writeBacks) - i
+			o.logf("deadline: %d mark write-back(s) left for the next save", res.Skipped)
+			break
+		}
+		// CS-TMUX-041: the pane may have been relaunched, unmarked or
+		// restored since the list; write back only over the same mark.
+		cur, ok := bounded(o.Runner, t, "tmux", "show-options", "-p", "-q", "-v", "-t", lp.id, Option)
+		if !ok {
+			o.logf("tmux show-options for %s failed; mark not written back", lp.id)
+			continue
+		}
+		if now, ok := ParseMark(strings.TrimRight(cur, "\r\n")); !ok || now.JSON() != lp.orig.JSON() {
+			res.Superseded++
+			o.logf("the mark in %s changed since the list; not written back", lp.id)
+			continue
+		}
+		if t = left(); t <= 0 {
 			res.Skipped = len(writeBacks) - i
 			o.logf("deadline: %d mark write-back(s) left for the next save", res.Skipped)
 			break

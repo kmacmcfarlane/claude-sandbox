@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 	"unicode/utf8"
 )
 
@@ -139,36 +140,51 @@ func under(p, dir string) bool {
 // (the mark's since is taken on the host, startedAt in the container).
 const sinceSlack = 5000 // ms
 
+// PrimaryWindow and JoinWindow cap how long after the mark's "since" its
+// claude may have started (CS-TMUX-033). A primary starts once the entrypoint
+// has run (its first start can be slow); a join's claude right after its
+// exec. A record that starts later belongs to a later join in the same
+// container (same class, class + 256·n): when the pane's own record is
+// missing or rejected, taking it would give the pane another session's
+// conversation, so it is a miss instead.
+const (
+	PrimaryWindow = 120 * time.Second
+	JoinWindow    = 30 * time.Second
+)
+
 // Match picks the record holding the conversation of an active mark
 // (CS-TMUX-033): pid % 256 == the mark's class, a cwd under the project or
-// cwdRoot, startedAt >= since - 5 s for a primary (>= since for a join), and
-// the earliest startedAt. ok is false for a ralph mark and when nothing
-// matches.
+// cwdRoot, and a start inside the mark's window — since - 5 s to
+// since + PrimaryWindow for a primary, since to since + JoinWindow for a
+// join. A candidate naming the mark's current conversation wins; else the
+// earliest start. ok is false for a ralph mark and when nothing matches.
 func Match(m Mark, recs []RegistryRecord) (RegistryRecord, bool) {
 	class, err := strconv.Atoi(m.Class)
 	if err != nil || class < 0 || class > 255 {
 		return RegistryRecord{}, false
 	}
-	var min int64
+	var min, max int64
 	switch m.Mode {
 	case ModeClaude:
-		min = m.Since - sinceSlack
+		min, max = m.Since-sinceSlack, m.Since+PrimaryWindow.Milliseconds()
 	case ModeJoin:
-		min = m.Since
+		min, max = m.Since, m.Since+JoinWindow.Milliseconds()
 	default:
 		return RegistryRecord{}, false
 	}
 	var best RegistryRecord
-	found := false
+	found, current := false, false
 	for _, r := range recs {
-		if r.PID%256 != class || r.StartedAt < min {
+		if r.PID%256 != class || r.StartedAt < min || r.StartedAt > max {
 			continue
 		}
 		if !under(r.Cwd, m.Project) && !under(r.Cwd, m.CwdRoot) {
 			continue
 		}
-		if !found || r.StartedAt < best.StartedAt {
-			best, found = r, true
+		isCurrent := m.Conversation != "" && strings.EqualFold(r.SessionID, m.Conversation)
+		switch {
+		case !found, isCurrent && !current, isCurrent == current && r.StartedAt < best.StartedAt:
+			best, found, current = r, true, isCurrent
 		}
 	}
 	return best, found
