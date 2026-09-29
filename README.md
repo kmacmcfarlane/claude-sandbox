@@ -254,7 +254,8 @@ Error: conversation 0b5e9c3a-… is already open in 'otter' (claude-sandbox-…-
   open (a record in `~/.claude/sessions` in the host's pid namespace whose process is still the
   one that wrote it). An exited kept container holds nothing. A sandbox's record that names the
   conversation is confirmed first: one `docker top` of that container (bounded at 5 s), and the
-  record counts only when one of its processes has the record's start time — so a join that
+  record is ruled out only when its processes can be seen and none has the record's start time
+  (a nested launcher, which cannot see host pids, never rules one out) — so a join that
   was OOM-killed with the conversation open no longer blocks it. A failed `docker top` refuses.
   A record written in the host's own pid namespace is always judged as the host's, even when it
   sits in the container's registry directory.

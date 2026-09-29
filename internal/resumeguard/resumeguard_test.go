@@ -304,6 +304,40 @@ var _ = Describe("resume guard", func() {
 			Expect(g.tops()).To(BeZero())
 		})
 
+		It("CS-SESS-089: no listed pid visible, or nothing listed, cannot rule the record out", func() {
+			f.write(reg, 7, record(7, convID, after, "d", "4242"))
+			// A nested launcher: docker top lists host pids its /proc lacks.
+			g := newFixture()
+			g.fake = &execx.Fake{}
+			g.fake.On("docker top", "PID\n7777\n7778\n", nil)
+			v := g.check(sandbox("cs-a", "running", "7", reg, "")).Run()
+			Expect(v.Holder).NotTo(BeNil(), "no listed pid visible")
+
+			h := newFixture()
+			h.fake = &execx.Fake{}
+			h.fake.On("docker top", "PID\n", nil)
+			Expect(h.check(sandbox("cs-a", "running", "7", reg, "")).Run().Holder).NotTo(BeNil(), "nothing listed")
+
+			// One visible pid with another start time does rule it out.
+			Expect(f.check(sandbox("cs-a", "running", "7", reg, "")).Run().Open).To(BeFalse())
+		})
+
+		It("CS-SESS-089: a hung docker top is given up after the bound plus at most about 500 ms", func() {
+			saved := resumeguard.TopTimeout
+			resumeguard.TopTimeout = 50 * time.Millisecond
+			DeferCleanup(func() { resumeguard.TopTimeout = saved })
+			f.write(reg, 7, record(7, convID, after, "d", "1"))
+			hung := &hangingRunner{Fake: f.fake, release: make(chan struct{})}
+			DeferCleanup(func() { close(hung.release) })
+			c := f.check(sandbox("cs-a", "running", "7", reg, ""))
+			c.Runner = hung
+			start := time.Now()
+			v := c.Run()
+			Expect(time.Since(start)).To(BeNumerically("<", 900*time.Millisecond))
+			Expect(v.Reason).To(ContainSubstring("docker top cs-a"))
+			Expect(hung.killedGroup).To(BeTrue(), "the whole process group is killed")
+		})
+
 		It("CS-SESS-089: a failed docker top fails closed, naming it", func() {
 			g := newFixture()
 			g.fake = &execx.Fake{}
@@ -418,3 +452,22 @@ var _ = Describe("resume guard", func() {
 		})
 	})
 })
+
+// hangingRunner starts processes that never exit, even when killed, and
+// records whether their group was killed.
+type hangingRunner struct {
+	*execx.Fake
+	release     chan struct{}
+	killedGroup bool
+}
+
+func (h *hangingRunner) Start(execx.Cmd) (execx.Process, error) {
+	return &hangingProcess{r: h}, nil
+}
+
+type hangingProcess struct{ r *hangingRunner }
+
+func (p *hangingProcess) Signal(os.Signal) error { return nil }
+func (p *hangingProcess) Wait() error            { <-p.r.release; return nil }
+func (p *hangingProcess) Pid() int               { return 1 }
+func (p *hangingProcess) KillGroup() error       { p.r.killedGroup = true; return nil }

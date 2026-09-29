@@ -907,12 +907,18 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
       (CS-SESS-065 rule a or b)
     When the guard finds that match, and only then
     Then it runs ONE "docker top <container> -o pid" for that container, bounded
-      at 5 s and killed after it, never one per sandbox
+      at 5 s, never one per sandbox: at 5 s its whole process group is killed
+      and the guard waits at most 500 ms more, so the lock is never held much
+      past 5 s for it
     And the record's process is alive when one of the listed host pids has
       /proc/<pid>/stat field 22 (starttime) equal to the record's procStart
       (starttime counts clock ticks since boot, the same in every pid namespace)
     And a listed pid whose stat cannot be read or parsed cannot be ruled out:
       the record counts as alive
+    And the record is ruled out only by pids whose stat WAS read: when docker
+      top lists nothing parseable, or none of the listed pids' stat can be seen
+      (every nested launch, whose /proc does not show host pids), the record
+      counts as alive
     And a record without a procStart cannot be ruled out either: it counts as
       alive, and no docker top is run for it
     When none of the listed pids is that process

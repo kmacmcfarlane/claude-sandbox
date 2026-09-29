@@ -43,6 +43,10 @@ const RetryDelay = 330 * time.Millisecond
 // process is alive (CS-SESS-089); it is killed after it.
 var TopTimeout = 5 * time.Second
 
+// killGrace is how long the guard waits for a killed "docker top" to be
+// reaped before it moves on (CS-SESS-089).
+var killGrace = 500 * time.Millisecond
+
 // Check is one guard run.
 type Check struct {
 	// ID is the conversation the launch resumes (a canonical UUID).
@@ -217,7 +221,10 @@ func (c Check) alive(s sessions.Session, matches []Record) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("docker top %s: %v", s.Name, err)
 	}
-	unknown := false
+	// Only a pid whose stat was read can rule the record out. Nothing listed,
+	// or no listed pid visible here (a nested launcher's /proc does not show
+	// host pids), cannot rule it out: alive, failing closed.
+	unknown, read := false, 0
 	for _, pid := range pids {
 		data, err := os.ReadFile(filepath.Join(c.procRoot(), pid, "stat"))
 		if err != nil {
@@ -231,13 +238,14 @@ func (c Check) alive(s sessions.Session, matches []Record) (bool, error) {
 			unknown = true
 			continue
 		}
+		read++
 		for _, m := range matches {
 			if start == m.ProcStart {
 				return true, nil
 			}
 		}
 	}
-	return unknown, nil
+	return unknown || read == 0, nil
 }
 
 // top runs "docker top <name> -o pid" through Runner.Start, killed with the
@@ -265,10 +273,17 @@ func (c Check) top(name string) ([]string, error) {
 			return nil, werr
 		}
 	case <-time.After(TopTimeout):
-		proc.Signal(os.Kill)
+		// The whole group (Start gave it its own): a grandchild holding the
+		// stdout pipe would otherwise keep Wait waiting. Then at most
+		// killGrace more, so the lock is held about TopTimeout, not twice it.
+		if g, ok := proc.(execx.GroupKiller); ok {
+			g.KillGroup()
+		} else {
+			proc.Signal(os.Kill)
+		}
 		select {
 		case <-done:
-		case <-time.After(TopTimeout):
+		case <-time.After(killGrace):
 		}
 		return nil, fmt.Errorf("no answer in %s", TopTimeout)
 	}
