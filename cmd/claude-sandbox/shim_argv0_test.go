@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -68,7 +69,8 @@ var _ = Describe("shim argv0 (spec/tmux.feature)", func() {
 		out = filepath.Join(scratch, "argv.json")
 	})
 
-	runShim := func(args ...string) shimArgv0Record {
+	// shimRaw runs the shim and returns its combined output and error.
+	shimRaw := func(args ...string) (string, error) {
 		cmd := exec.Command("bash", append([]string{filepath.Join(repo, "bin", "claude-sandbox")}, args...)...)
 		env := []string{shimArgv0Env + "=" + out}
 		for _, kv := range os.Environ() {
@@ -78,7 +80,11 @@ var _ = Describe("shim argv0 (spec/tmux.feature)", func() {
 		}
 		cmd.Env = env
 		combined, err := cmd.CombinedOutput()
-		Expect(err).NotTo(HaveOccurred(), string(combined))
+		return string(combined), err
+	}
+	runShim := func(args ...string) shimArgv0Record {
+		combined, err := shimRaw(args...)
+		Expect(err).NotTo(HaveOccurred(), combined)
 		b, err := os.ReadFile(out)
 		Expect(err).NotTo(HaveOccurred())
 		var rec shimArgv0Record
@@ -90,6 +96,38 @@ var _ = Describe("shim argv0 (spec/tmux.feature)", func() {
 		rec := runShim("--new", "--", "--resume", "a b", "")
 		Expect(rec.Args).To(Equal([]string{"claude-sandbox", "--new", "--", "--resume", "a b", ""}))
 		Expect(rec.RepoRoot).To(Equal(repo))
+	})
+
+	It("CS-TMUX-003: tmux save execs an up-to-date binary with argv[0] \"claude-sandbox\" and prints nothing", func() {
+		combined, err := shimRaw("tmux", "save", "/r/tmux_resurrect_x.txt")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(combined).To(BeEmpty())
+		b, err := os.ReadFile(out)
+		Expect(err).NotTo(HaveOccurred())
+		var rec shimArgv0Record
+		Expect(json.Unmarshal(b, &rec)).To(Succeed())
+		Expect(rec.Args).To(Equal([]string{"claude-sandbox", "tmux", "save", "/r/tmux_resurrect_x.txt"}))
+		Expect(rec.RepoRoot).To(Equal(repo))
+	})
+
+	It("CS-TMUX-003: tmux save never builds: a stale or missing binary is exit 0, silent, and not run", func() {
+		// A source newer than the binary: every other path would build.
+		src := filepath.Join(repo, "cmd", "claude-sandbox", "main.go")
+		Expect(os.MkdirAll(filepath.Dir(src), 0o755)).To(Succeed())
+		Expect(os.WriteFile(src, []byte("package main\n"), 0o644)).To(Succeed())
+		future := time.Now().Add(time.Hour)
+		Expect(os.Chtimes(src, future, future)).To(Succeed())
+		combined, err := shimRaw("tmux", "save", "/r/tmux_resurrect_x.txt")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(combined).To(BeEmpty(), "no \"Building…\" line")
+		Expect(out).NotTo(BeAnExistingFile(), "a stale binary is not run")
+		Expect(filepath.Join(repo, "bin", "dist", "gocache")).NotTo(BeADirectory())
+
+		Expect(os.Remove(filepath.Join(repo, "bin", "dist", "claude-sandbox"))).To(Succeed())
+		combined, err = shimRaw("tmux", "save", "/r/tmux_resurrect_x.txt")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(combined).To(BeEmpty())
+		Expect(out).NotTo(BeAnExistingFile())
 	})
 
 	It("CS-TMUX-002: the completion fast path execs with the same argv[0]", func() {

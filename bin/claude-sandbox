@@ -16,6 +16,24 @@ BIN_DIR="$REPO_ROOT/bin/dist"
 BIN="$BIN_DIR/claude-sandbox"
 GO_IMAGE="golang:1.25-bookworm"
 
+# Sources whose changes require a rebuild of the binary.
+SOURCES=(cmd internal assets.go go.mod go.sum scaffold scaffold-ralph
+         container-context.md notification-hooks.json mcp-servers.json PROMPT_RALPH.md)
+
+# stale: the binary is missing, or a source is newer than it.
+stale() {
+    [ -x "$BIN" ] || return 0
+    local src p
+    for src in "${SOURCES[@]}"; do
+        p="$REPO_ROOT/$src"
+        [ -e "$p" ] || continue
+        if [ -n "$(find "$p" -newer "$BIN" -print -quit 2>/dev/null)" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 # Shell completion (spec/completion.feature CS-COMP-022/023): the generated
 # scripts call these hidden commands on every TAB. A keystroke must never block
 # on a compile or a docker image pull, so serve them from whatever binary is
@@ -27,24 +45,24 @@ case "${1-}" in
         export CLAUDE_SANDBOX_REPO_ROOT="$REPO_ROOT"
         exec -a claude-sandbox "$BIN" "$@"
         ;;
+    tmux)
+        # The tmux-resurrect save hook (spec/tmux.feature CS-TMUX-003) runs
+        # inside every save, continuum's minute autosave included: it must
+        # never build (unbounded, and it prints) and never print. A stale
+        # binary is skipped too, not run: one from before the hook existed
+        # would read "tmux save <file>" as a prompt and launch a session. The
+        # next ordinary launch rebuilds, and saves pick up again.
+        if [ "${2-}" = save ]; then
+            stale && exit 0
+            export CLAUDE_SANDBOX_REPO_ROOT="$REPO_ROOT"
+            exec -a claude-sandbox "$BIN" "$@" >/dev/null 2>&1
+        fi
+        ;;
 esac
 
-# Sources whose changes require a rebuild of the binary.
-SOURCES=(cmd internal assets.go go.mod go.sum scaffold scaffold-ralph
-         container-context.md notification-hooks.json mcp-servers.json PROMPT_RALPH.md)
-
 needs_build=false
-if [ ! -x "$BIN" ]; then
+if stale; then
     needs_build=true
-else
-    for src in "${SOURCES[@]}"; do
-        p="$REPO_ROOT/$src"
-        [ -e "$p" ] || continue
-        if [ -n "$(find "$p" -newer "$BIN" -print -quit 2>/dev/null)" ]; then
-            needs_build=true
-            break
-        fi
-    done
 fi
 
 if [ "$needs_build" = true ]; then
