@@ -17,9 +17,12 @@ const NameSourceUser = "user"
 //	cd <project> && [CLAUDE_CONFIG_DIR=<v> ]claude-sandbox --new
 //	  --worktree=<w>|--no-worktree [--model <m>] -- [<replay>…] --resume <id> [--name <n>]
 //
-// Every word is shell-quoted. "" when the mark names no conversation.
+// Every word is shell-quoted. "" when the mark names no conversation, or a
+// worktree whose generated name is not recorded yet.
 func ResumeCommand(m Mark) string {
-	if m.Conversation == "" {
+	if m.Conversation == "" || (m.WorktreeGenerated && m.Worktree == "") {
+		// No id, or a worktree whose name is not known yet: any worktree
+		// flag would resume in the wrong place (CS-TMUX-012).
 		return ""
 	}
 	var w []string
@@ -60,12 +63,40 @@ func PendingNote(prior string, resuming string) string {
 	if !ok || m.State != StatePending || !uuidRE.MatchString(m.Conversation) || strings.EqualFold(m.Conversation, resuming) {
 		return ""
 	}
-	name := Printable(m.Name)
+	if !printableMark(m) {
+		// Shell quoting does not stop an escape sequence from reaching the
+		// terminal: print no value from the mark but the validated id.
+		return "Note: this pane was waiting to restore a conversation (" + m.Conversation +
+			"), but its mark holds unprintable values; no resume command is shown"
+	}
+	name := m.Name
 	if name == "" {
-		name = Printable(m.Instance)
+		name = m.Instance
+	}
+	if m.WorktreeGenerated && m.Worktree == "" {
+		// "--no-worktree" would resume in the shared checkout, where the
+		// transcript is not (CS-TMUX-012).
+		return "Note: this pane was waiting to restore '" + name + "' (" + m.Conversation +
+			") in a worktree whose name is not recorded yet; no resume command is shown"
 	}
 	return "Note: this pane was waiting to restore '" + name + "' (" + m.Conversation +
 		"); resume it with: " + ResumeCommand(m)
+}
+
+// printableMark reports whether every mark value the note prints is free of
+// control characters (CS-TMUX-017).
+func printableMark(m Mark) bool {
+	vals := []string{m.Project, m.Worktree, m.Model, m.Name, m.Instance}
+	if m.ConfigDirEnv != nil {
+		vals = append(vals, *m.ConfigDirEnv)
+	}
+	vals = append(vals, m.Replay...)
+	for _, v := range vals {
+		if strings.IndexFunc(v, unicode.IsControl) >= 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // Printable drops control characters and collapses whitespace, for text read

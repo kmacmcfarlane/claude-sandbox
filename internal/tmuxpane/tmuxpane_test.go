@@ -7,7 +7,10 @@ package tmuxpane_test
 
 import (
 	"encoding/json"
+	"errors"
+	"os"
 	"strings"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -105,6 +108,14 @@ var _ = Describe("tmuxpane", func() {
 			model, unreplayed := tmuxpane.FromLabel(r.LabelValue())
 			Expect(model).To(BeTrue())
 			Expect(unreplayed).To(Equal([]string{"--add-dir", "--effort", "--docker-socket", "--permission-mode"}))
+			// claude's own --model after "--": the model label is not the
+			// session's model, so an attach names --model instead.
+			r = tmuxpane.Record(nil, "sonnet", []string{"--model", "opus"}, nil)
+			Expect(r.Model).To(Equal("opus"))
+			Expect(r.LabelValue()).To(Equal("--model:claude"))
+			model, unreplayed = tmuxpane.FromLabel(r.LabelValue())
+			Expect(model).To(BeFalse())
+			Expect(unreplayed).To(Equal([]string{"--model"}))
 			model, unreplayed = tmuxpane.FromLabel("--bare,rm -rf /,,CLAUDE_SANDBOX_DANGEROUS")
 			Expect(model).To(BeFalse())
 			Expect(unreplayed).To(Equal([]string{"--bare", "CLAUDE_SANDBOX_DANGEROUS"}))
@@ -166,6 +177,21 @@ var _ = Describe("tmuxpane", func() {
 			}))
 		})
 
+		It("CS-TMUX-016: every tmux call is killed after CallTimeout", func() {
+			saved := tmuxpane.CallTimeout
+			tmuxpane.CallTimeout = 50 * time.Millisecond
+			DeferCleanup(func() { tmuxpane.CallTimeout = saved })
+			r := &hangRunner{}
+			p := tmuxpane.Pane{Runner: r, ID: "%3"}
+			start := time.Now()
+			Expect(p.Read()).To(BeEmpty())
+			p.Set(`{"v":1}`)
+			p.Unset()
+			Expect(time.Since(start)).To(BeNumerically("<", 2*time.Second))
+			Expect(r.killed).To(Equal(3))
+			Expect(r.dieWithParent).To(Equal(3), "own process group, killed with the launcher")
+		})
+
 		It("CS-TMUX-014: no pane outside tmux or inside a sandbox", func() {
 			get := func(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
 			_, ok := tmuxpane.FromEnv(get(map[string]string{"TMUX_PANE": "%1"}))
@@ -187,14 +213,40 @@ var _ = Describe("tmuxpane", func() {
 		pending := tmuxpane.Mark{V: 1, State: tmuxpane.StatePending, Mode: "claude", Container: "c",
 			Instance: "otter", Project: "/home/u/proj", ConfigDirEnv: &cde, Worktree: "",
 			Model: "opus", Replay: []string{"--add-dir", "/x y"},
-			Conversation: convID, Name: "fix\x1b[31m it", NameSource: "user"}
+			Conversation: convID, Name: "fix it", NameSource: "user"}
 
 		It("CS-TMUX-017: names the conversation and the exact, quoted resume command", func() {
 			note := tmuxpane.PendingNote(pending.JSON(), "")
-			Expect(note).To(Equal("Note: this pane was waiting to restore 'fix [31m it' (" + convID + "); resume it with: " +
+			Expect(note).To(Equal("Note: this pane was waiting to restore 'fix it' (" + convID + "); resume it with: " +
 				"cd /home/u/proj && CLAUDE_CONFIG_DIR='/home/u/work claude' claude-sandbox --new --no-worktree --model opus -- " +
-				"--add-dir '/x y' --resume " + convID + " --name 'fix [31m it'"))
-			Expect(note).NotTo(ContainSubstring("\x1b"))
+				"--add-dir '/x y' --resume " + convID + " --name 'fix it'"))
+		})
+
+		It("CS-TMUX-017: a control character in any printed value prints no command", func() {
+			esc := pending
+			esc.Replay = []string{"--append-system-prompt", "hi\x1b]0;pwned\x07"}
+			want := "Note: this pane was waiting to restore a conversation (" + convID +
+				"), but its mark holds unprintable values; no resume command is shown"
+			Expect(tmuxpane.PendingNote(esc.JSON(), "")).To(Equal(want))
+			for _, mut := range []func(m *tmuxpane.Mark){
+				func(m *tmuxpane.Mark) { m.Project = "/p\x1b[2J" },
+				func(m *tmuxpane.Mark) { v := "/c\n"; m.ConfigDirEnv = &v },
+				func(m *tmuxpane.Mark) { m.Model = "opus\u009b" }, // C1 CSI
+				func(m *tmuxpane.Mark) { m.Worktree = "w\x1b" },
+				func(m *tmuxpane.Mark) { m.Name = "fix\x1b[31m" },
+			} {
+				m := pending
+				mut(&m)
+				Expect(tmuxpane.PendingNote(m.JSON(), "")).To(Equal(want))
+			}
+		})
+
+		It("CS-TMUX-017: a worktree whose generated name is not recorded gets no command", func() {
+			gen := pending
+			gen.WorktreeGenerated = true
+			Expect(tmuxpane.PendingNote(gen.JSON(), "")).To(Equal("Note: this pane was waiting to restore 'fix it' (" + convID +
+				") in a worktree whose name is not recorded yet; no resume command is shown"))
+			Expect(tmuxpane.ResumeCommand(gen)).To(BeEmpty())
 		})
 
 		It("CS-TMUX-017: --worktree when recorded, --name only for a user name, no CLAUDE_CONFIG_DIR when unset", func() {
@@ -216,3 +268,26 @@ var _ = Describe("tmuxpane", func() {
 		})
 	})
 })
+
+// hangRunner starts tmux processes that never exit until killed: a hung tmux
+// server (CS-TMUX-016).
+type hangRunner struct {
+	execx.Fake
+	killed, dieWithParent int
+}
+
+type hungProc struct {
+	r    *hangRunner
+	done chan struct{}
+}
+
+func (p *hungProc) Signal(os.Signal) error { p.r.killed++; close(p.done); return nil }
+func (p *hungProc) Wait() error            { <-p.done; return errors.New("killed") }
+func (p *hungProc) Pid() int               { return 1 }
+
+func (r *hangRunner) Start(c execx.Cmd) (execx.Process, error) {
+	if c.DieWithParent {
+		r.dieWithParent++
+	}
+	return &hungProc{r: r, done: make(chan struct{})}, nil
+}

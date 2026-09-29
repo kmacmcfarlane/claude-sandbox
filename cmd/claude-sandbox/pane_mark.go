@@ -203,9 +203,17 @@ func attachMark(s sessions.Session, home, gitRoot string) *paneMark {
 }
 
 // joinMark is a join's mark: mode join, since the exec, and the join's own
-// command line (CS-TMUX-012).
-func joinMark(s sessions.Session, home, gitRoot, worktree string, rec tmuxpane.LaunchRecord, since time.Time, resuming string) *paneMark {
-	m := existingMark(s, tmuxpane.ModeJoin, home, gitRoot, worktree, since)
+// command line (CS-TMUX-012). Its worktree is recorded only when the mode
+// resolved on: a --worktree=NAME that stood down runs in the shared checkout,
+// and a bare --worktree lets claude generate a name the launcher never sees
+// — unknown, never "" (the shared checkout).
+func joinMark(s sessions.Session, home string, wt worktreeChoice, rec tmuxpane.LaunchRecord, since time.Time, resuming string) *paneMark {
+	worktree := ""
+	if wt.Enabled {
+		worktree = wt.Name
+	}
+	m := existingMark(s, tmuxpane.ModeJoin, home, wt.Root, worktree, since)
+	m.WorktreeGenerated = wt.Enabled && wt.Name == ""
 	m.FlagsUnknown = false
 	m.Model, m.Replay, m.Unreplayed = rec.Model, rec.Replay, rec.Unreplayed
 	return &paneMark{next: m, resuming: resuming}

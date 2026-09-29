@@ -85,12 +85,22 @@ Feature: tmux integration (CS-TMUX)
       "instance", "worktree" come from its labels
     And "configDirEnv" and "registryDir" come from the claude-sandbox.configdir and
       claude-sandbox.registry labels, "configDir" is that raw value or else $HOME/.claude
-    And "model" is the container's model label only when claude-sandbox.launchflags names --model
+    And "model" is the container's model label only when claude-sandbox.launchflags names --model,
+      which it does only when the launcher's own --model was given and claude's --model (after "--")
+      was not; when claude's --model was given the label says "--model:claude", the attach mark has
+      no "model" and "unreplayed" lists "--model"
     And "replay" is empty and "unreplayed" is every other name in claude-sandbox.launchflags: an
       attach never saw the values
     When a launch inside tmux joins it
     Then the mark's mode is "join", "since" is taken before the exec, and "replay", "unreplayed"
       and "model" come from the join's own command line
+    And "worktree" is recorded only when worktree mode resolved on (wt.Enabled): a --worktree=NAME
+      that stood down (not a git repository) records "" (the join runs in the shared checkout)
+    And a join in worktree mode without a name (claude generates one) records "worktree": "" with
+      "worktreeGenerated": true: the name is unknown, never the shared checkout. The save hook (F3)
+      fills it from the registry record's cwd under <git root>/.claude/worktrees/, and no resume
+      command is printed for such a mark until then (a "--no-worktree" resume would miss the
+      transcript)
     When the container predates these labels (no claude-sandbox.registry)
     Then "configDirEnv" and "registryDir" are omitted (unknown) and "flagsUnknown" is true
 
@@ -124,11 +134,20 @@ Feature: tmux integration (CS-TMUX)
       a signal arrives during the die wait
     Then "tmux set-option -p -u -t <pane> @claude-sandbox" runs once, after the child returned
     And a join or an attach unmarks the same way
+    # Removal covers these ordinary return paths only. A launcher killed outright (SIGKILL, a
+    # crash) or interrupted between setting the mark and the session child's signal handlers
+    # (a Ctrl-C in that instant) leaves a stale "active" mark behind; the save hook (F3) must
+    # therefore check liveness (the pane runs claude-sandbox, the container exists) rather than
+    # trust an active mark.
 
   Scenario: CS-TMUX-016 tmux failures never change the launch
     Given every tmux command fails
     Then the launch, its session child and its exit status are unchanged and nothing is printed
     And a mark read back that does not parse is treated as no mark
+    And every tmux command is bounded: it runs through Runner.Start in its own process group and
+      is killed after 1 s (tmuxpane.CallTimeout, the "claude --version" probe precedent), so a hung
+      tmux server delays the launch by at most about 1 s per call (read and set before the session,
+      the unset after it) and never blocks it
 
   Scenario: CS-TMUX-017 a launch over a pending mark says what the pane was waiting for
     Given the pane's mark is "state": "pending" naming conversation <id> (written by a restore)
@@ -139,6 +158,12 @@ Feature: tmux integration (CS-TMUX)
       --worktree=<w>|--no-worktree [--model <m>] -- [<replay>…] --resume <id> [--name <n>]",
       shell-quoted, --name only for name source "user", CLAUDE_CONFIG_DIR only when recorded non-empty
     And nothing prompts, and the new mark replaces the pending one
+    And when any value the command would print (project, CLAUDE_CONFIG_DIR, worktree, model,
+      replay values, name, instance) holds a control character, no command is printed: the line is
+      "Note: this pane was waiting to restore a conversation (<id>), but its mark holds unprintable
+      values; no resume command is shown", so no escape sequence from a mark reaches the terminal
+    And for a mark whose worktree name is unknown ("worktreeGenerated") the line ends
+      "(<id>) in a worktree whose name is not recorded yet; no resume command is shown"
     And no note is printed for an active mark, a pending mark without an id, or a launch whose
       passthrough resumes that same id
 

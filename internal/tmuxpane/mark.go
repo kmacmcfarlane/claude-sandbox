@@ -10,10 +10,14 @@
 package tmuxpane
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
+	"os"
 	"regexp"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/hostdirs"
@@ -70,6 +74,11 @@ type Mark struct {
 	// Worktree is always present: "" means the shared checkout, and a restore
 	// replays that explicitly as --no-worktree (plan 09 finding 1).
 	Worktree string `json:"worktree"`
+	// WorktreeGenerated is true when the session runs in a worktree whose
+	// name claude generated (a join's bare --worktree): Worktree is then ""
+	// but means unknown, never the shared checkout. The save hook (F3) fills
+	// it from the registry record's cwd (CS-TMUX-012).
+	WorktreeGenerated bool `json:"worktreeGenerated,omitempty"`
 	// Model is the launcher's --model, only when given on the command line.
 	Model string `json:"model,omitempty"`
 
@@ -132,15 +141,60 @@ func FromEnv(getenv func(string) string) (string, bool) {
 	return id, true
 }
 
+// CallTimeout bounds every tmux call (CS-TMUX-016): a hung tmux server must
+// not hang the launch before docker start, nor the launcher after the session
+// when no signal can interrupt it any more. The "claude --version" probe
+// precedent (globalcfg.VersionTimeout).
+var CallTimeout = time.Second
+
+// syncBuffer is a bytes.Buffer safe to read while the process may still be
+// writing it (a killed tmux).
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
+// run runs one tmux command through Runner.Start, in its own process group
+// and killed with the launcher (DieWithParent), and kills it after
+// CallTimeout. It returns stdout and whether tmux finished successfully.
+func (p Pane) run(args ...string) (string, bool) {
+	var out syncBuffer
+	proc, err := p.Runner.Start(execx.Cmd{Name: "tmux", Args: args, Stdout: &out, Stderr: io.Discard, DieWithParent: true})
+	if err != nil {
+		return "", false
+	}
+	done := make(chan error, 1)
+	go func() { done <- proc.Wait() }()
+	select {
+	case werr := <-done:
+		return out.String(), werr == nil
+	case <-time.After(CallTimeout):
+		proc.Signal(os.Kill)
+		select {
+		case <-done:
+		case <-time.After(CallTimeout):
+		}
+		return "", false
+	}
+}
+
 // Read returns the pane's current mark, raw; "" when there is none or tmux
 // failed.
 func (p Pane) Read() string {
-	out, err := p.Runner.Output(execx.Cmd{
-		Name:   "tmux",
-		Args:   []string{"show-options", "-p", "-q", "-v", "-t", p.ID, Option},
-		Stderr: io.Discard,
-	})
-	if err != nil {
+	out, ok := p.run("show-options", "-p", "-q", "-v", "-t", p.ID, Option)
+	if !ok {
 		return ""
 	}
 	return strings.TrimRight(out, "\r\n")
@@ -151,18 +205,10 @@ func (p Pane) Set(raw string) {
 	if raw == "" {
 		return
 	}
-	p.Runner.Run(execx.Cmd{
-		Name:   "tmux",
-		Args:   []string{"set-option", "-p", "-t", p.ID, Option, raw},
-		Stdout: io.Discard, Stderr: io.Discard,
-	})
+	p.run("set-option", "-p", "-t", p.ID, Option, raw)
 }
 
 // Unset removes the pane's mark. Failures are silent (CS-TMUX-016).
 func (p Pane) Unset() {
-	p.Runner.Run(execx.Cmd{
-		Name:   "tmux",
-		Args:   []string{"set-option", "-p", "-u", "-t", p.ID, Option},
-		Stdout: io.Discard, Stderr: io.Discard,
-	})
+	p.run("set-option", "-p", "-u", "-t", p.ID, Option)
 }

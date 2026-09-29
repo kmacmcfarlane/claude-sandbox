@@ -223,6 +223,49 @@ var _ = Describe("tmux pane mark (CS-TMUX-010..019)", func() {
 			Expect(m.CwdRoot).To(Equal(filepath.Join(f.proj, ".claude", "worktrees", "otter")))
 		})
 
+		It("CS-TMUX-012: an attach to a launch with claude's own --model names --model and takes no model", func() {
+			running(psRowMark("cs-otter", f.proj, "claude", "otter", "sonnet", "37", "", created, markID,
+				"", f.home+"/.claude/sessions", tmuxpane.LabelClaudeModel+",--bare"))
+			Expect(f.run("--attach=otter")).To(Equal(0), f.errw.String())
+			m := theMark()
+			Expect(m.Model).To(BeEmpty(), "the model label holds the launcher's model, not the session's")
+			Expect(m.Unreplayed).To(Equal([]string{"--model", "--bare"}))
+		})
+
+		It("CS-LNCH-109: launchflags says --model:claude when claude's own --model was given", func() {
+			Expect(f.run("--model", "sonnet", "--", "--model", "opus")).To(Equal(0), f.errw.String())
+			Expect(label(launch.LabelLaunchFlags)).To(Equal(tmuxpane.LabelClaudeModel + ",CLAUDE_SANDBOX_BASE_ONLY"))
+			Expect(theMark().Model).To(Equal("opus"))
+		})
+
+		It("CS-TMUX-012: a join in worktree mode without a name marks the worktree as generated, never the shared checkout", func() {
+			running(psRowMark("cs-otter", f.proj, "claude", "otter", "", "37", "", created, markID,
+				"", f.home+"/.claude/sessions", ""))
+			f.fake.On("rev-parse --show-toplevel", f.proj+"\n", nil)
+			Expect(f.run("--join=otter", "--worktree")).To(Equal(0), f.errw.String())
+			Expect(f.sessionLine()).To(ContainSubstring(" --worktree"))
+			m := theMark()
+			Expect(m.Worktree).To(Equal(""))
+			Expect(m.WorktreeGenerated).To(BeTrue())
+
+			f.fake.Calls = nil
+			Expect(f.run("--join=otter", "--worktree=named")).To(Equal(0), f.errw.String())
+			m = theMark()
+			Expect(m.Worktree).To(Equal("named"))
+			Expect(m.WorktreeGenerated).To(BeFalse())
+			Expect(m.CwdRoot).To(Equal(filepath.Join(f.proj, ".claude", "worktrees", "named")))
+		})
+
+		It("CS-TMUX-012: a join whose --worktree=NAME stood down (not a git repo) records no worktree", func() {
+			running(psRowMark("cs-otter", f.proj, "claude", "otter", "", "37", "", created, markID,
+				"", f.home+"/.claude/sessions", ""))
+			Expect(f.run("--join=otter", "--worktree=named")).To(Equal(0), f.errw.String())
+			m := theMark()
+			Expect(m.Worktree).To(Equal(""))
+			Expect(m.WorktreeGenerated).To(BeFalse())
+			Expect(m.CwdRoot).To(Equal(f.proj))
+		})
+
 		It("CS-TMUX-012: a container that predates the labels leaves them unknown", func() {
 			running(psRow("cs-otter", "Up 1 hour", f.proj, "otter"))
 			Expect(f.run("--attach=otter")).To(Equal(0), f.errw.String())

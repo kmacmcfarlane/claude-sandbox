@@ -593,7 +593,7 @@ func joinInto(env *Env, s sessions.Session, projectDir, hostUser, model, configu
 	checkGlobalConfig(env, nil)
 	// CS-TMUX-012: a join's pane mark, "since" taken before the exec.
 	_, _, _, home := hostIdentity(env.Getenv)
-	mark := joinMark(s, home, wt.Root, wt.Name, launchRecord(env, f), env.now(), tmuxpane.ResumeID(f.Passthrough))
+	mark := joinMark(s, home, wt, launchRecord(env, f), env.now(), tmuxpane.ResumeID(f.Passthrough))
 	// CS-SESS-060: judged by the exec's own status, since the container
 	// normally outlives it.
 	end, err := runSession(env, execx.Cmd{Name: "docker", Args: args}, s.Name, sessionOpts{kind: joinedSession, mark: mark})

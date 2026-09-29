@@ -787,7 +787,7 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       | label                         | value                                                    |
       | claude-sandbox.configdir      | the launcher's RAW CLAUDE_CONFIG_DIR, empty when unset   |
       | claude-sandbox.registry       | the host peer registry dir: <home>/.cache/claude-sandbox/peers/sessions when the shared registry applied (CS-LNCH-050), else <config dir>/sessions |
-      | claude-sandbox.launchflags    | names only, comma-separated: --model when given on the command line, then the replay and unreplayed names of CS-TMUX-013 |
+      | claude-sandbox.launchflags    | names only, comma-separated: "--model" when the launcher's --model was given and claude's own --model was not ("--model:claude" when claude's was), then the replay and unreplayed names of CS-TMUX-013 |
     And the launch plan records the same registry dir (Plan.RegistryDir)
     And no label carries a flag's value or an environment value other than the raw config dir
     And adding, changing or removing any of them changes neither confighash nor inputs

@@ -117,8 +117,14 @@ var EnvNamed = []string{
 
 // LaunchRecord is what a launch records for a later restore.
 type LaunchRecord struct {
-	// Model is the --model given on the command line ("" when none).
+	// Model is the --model given on the command line ("" when none): claude's
+	// own --model after "--" when given (it comes later and wins in claude),
+	// else the launcher's.
 	Model string
+	// ClaudeModel is true when claude's own --model was given. The container's
+	// model label then does not name the session's model, so an attach must
+	// not take it from there (CS-TMUX-012).
+	ClaudeModel bool
 	// Replay is the allowlisted claude flags with their values, as given.
 	Replay []string
 	// Unreplayed names every other flag given at launch that a restore will
@@ -149,7 +155,7 @@ func Record(launcherGiven []string, model string, passthrough []string, getenv f
 		// claude's own --model after the launcher's: the later one wins in
 		// claude, and it is as much the session's model (identity, never
 		// widening).
-		r.Model = ptModel
+		r.Model, r.ClaudeModel = ptModel, true
 	}
 	for _, n := range named {
 		r.Unreplayed = appendName(r.Unreplayed, n)
@@ -158,12 +164,16 @@ func Record(launcherGiven []string, model string, passthrough []string, getenv f
 }
 
 // LabelNames is the claude-sandbox.launchflags label's content (CS-LNCH-109):
-// names only — --model when given on the command line, the replayed flags'
-// names, then the unreplayed names. An attach, which never saw the values,
-// reads it back with FromLabel.
+// names only — "--model" when only the launcher's --model was given (the
+// model label then names the session's model), "--model:claude" when claude's
+// own was (it does not), the replayed flags' names, then the unreplayed
+// names. An attach, which never saw the values, reads it back with FromLabel.
 func (r LaunchRecord) LabelNames() []string {
 	var out []string
-	if r.Model != "" {
+	switch {
+	case r.ClaudeModel:
+		out = append(out, LabelClaudeModel)
+	case r.Model != "":
 		out = append(out, "--model")
 	}
 	for _, t := range r.Replay {
@@ -187,11 +197,20 @@ func (r LaunchRecord) LabelValue() string { return strings.Join(r.LabelNames(), 
 // is dropped when read back.
 var labelName = regexp.MustCompile(`^(--?[A-Za-z0-9][A-Za-z0-9-]*|[A-Z][A-Z0-9_]*)$`)
 
+// LabelClaudeModel is the launchflags entry for a claude --model given after
+// "--": the model label holds the launcher's model, not the session's.
+const LabelClaudeModel = "--model:claude"
+
 // FromLabel reads a launchflags label (CS-TMUX-012): whether --model was
 // given, and every other name, which for an attach is all unreplayed.
 func FromLabel(v string) (modelGiven bool, unreplayed []string) {
 	for _, n := range strings.Split(v, ",") {
 		n = strings.TrimSpace(n)
+		if n == LabelClaudeModel {
+			// Unknown value: named, and the model label is not the model.
+			unreplayed = appendName(unreplayed, "--model")
+			continue
+		}
 		if n == "" || !labelName.MatchString(n) {
 			continue
 		}
