@@ -127,8 +127,8 @@ var _ = Describe("registry", func() {
 		Expect(registry.CleanName("--dangerous")).To(BeEmpty())
 		// Format (Cf: bidi overrides, zero-width), private-use (Co) and
 		// surrogate (Cs, as invalid UTF-8 decodes to U+FFFD, kept) characters.
-		Expect(registry.CleanName("safe‮gnp.exe​")).To(Equal("safegnp.exe"))
-		Expect(registry.CleanName("⁦-x⁩")).To(BeEmpty(), "a hidden character cannot hide a leading '-'")
+		Expect(registry.CleanName("safe\u202egnp.exe\u200b\ue000")).To(Equal("safegnp.exe"))
+		Expect(registry.CleanName("\u2066-x\u2069")).To(BeEmpty(), "a hidden character cannot hide a leading '-'")
 		Expect(registry.CleanName(strings.Repeat("é", 201))).To(BeEmpty())
 		Expect(registry.CleanName(strings.Repeat("é", 200))).To(HaveLen(400))
 		for _, s := range []string{"user", "peer", "derived", "collision", "auto", "hook"} {
