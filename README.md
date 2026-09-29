@@ -413,7 +413,7 @@ Run inside tmux, every launch, `--attach` and `--join` records which sandbox its
 the pane user option `@claude-sandbox`, and removes it again when the session child returns
 (detach, exit, a signal). It is the first part of restoring sandbox panes after a tmux server
 restart or a reboot with tmux-resurrect (see [docs/tmux-session-restore.md](docs/tmux-session-restore.md));
-the save hook and `claude-sandbox tmux restore` that read it are still to come. Nothing
+the save hook below reads it, and `claude-sandbox tmux restore` is still to come. Nothing
 changes outside tmux (`TMUX`/`TMUX_PANE` unset), in a launcher run inside a sandbox, for
 `headless` or for `--detach`, and a failing tmux never changes the launch: each tmux call is
 killed after 1 s, so a hung tmux server costs at most a few seconds, never the launch. The mark
@@ -457,6 +457,44 @@ else in it, the launcher prints one `Note: this pane was waiting to restore '<na
 resume it with: <command>` line first (no command when a mark value holds a control character,
 or when its worktree name is not recorded yet); a start that fails puts that mark back. Spec:
 `spec/tmux.feature` CS-TMUX-010..019, `spec/launch.feature` CS-LNCH-109.
+
+### tmux save hook
+
+`claude-sandbox tmux save <state-file>` is a tmux-resurrect **post-save-layout hook**. Wire it
+with one line in `~/.tmux.conf`, **before** the `run-shell …/resurrect.tmux` line:
+
+```tmux
+set -g @resurrect-hook-post-save-layout 'claude-sandbox tmux save'
+```
+
+resurrect runs it after every save (continuum's autosave included, every minute), from the
+tmux **server's** environment: check `tmux run-shell 'command -v claude-sandbox'` prints a path,
+and use the shim's absolute path in the line if it prints nothing. For each pane of that save
+whose mark says it runs a sandbox, the hook takes the conversation id and name from the host
+peer registry (`<registry dir>/<pid>.json`, matched by the mark's pid class, start time and
+directory; only the id — checked to be a UUID — and the name, control characters stripped, are
+taken from a record, since sandboxes write them), writes them back into the pane's mark (so the
+last good id survives a moment when no record can be read), and writes a sidecar beside the save:
+`tmux_resurrect_<time>.claude-sandbox.json` (mode 0600; rows of `session`, `window`, `pane` and
+the `mark`), in whichever directory resurrect saved to (it passes the path; by default
+`~/.local/share/tmux/resurrect`, or `~/.tmux/resurrect` if that exists, or `@resurrect-dir`).
+When the save is identical to the previous one — resurrect then deletes the new file — the
+sidecar goes to the file `last` points at. Sidecars whose save resurrect pruned are removed.
+
+A stale mark is not recorded: an `active` mark counts only while the pane actually runs
+`claude-sandbox` and one `docker ps` (at most 1 s) shows its container; if docker does not
+answer, the marks are kept as they are. A `pending` mark (a restore waiting to act) is copied
+as is. A join whose worktree name claude generated gets it from the record's directory. The
+hook never prints and always exits 0, finishes within about 3 s, and logs problems to
+`~/.cache/claude-sandbox/tmux-save.log` (emptied past 64 KiB):
+
+```bash
+ls ~/.local/share/tmux/resurrect/*.claude-sandbox.json   # after prefix + C-s
+```
+
+Nothing reads the sidecars yet: `claude-sandbox tmux restore` is the next step, so keep
+claude-sandbox out of `@resurrect-processes` (see the tmux doc). Spec: `spec/tmux.feature`
+CS-TMUX-030..040.
 
 ## Headless mode (Paseo and other SDK clients)
 
@@ -1767,7 +1805,8 @@ internal/
   launch/          Mount assembly, shadow injections, docker create/start argv, launch lock
   globalcfg/       ~/.claude.json layout (linked/legacy), the in-container link, global-config migrate/revert/accept, the launch health check
   ralphloop/       Ralph loop: iterations, lock, quota handling, pipeline
-  tmuxpane/        tmux pane mark: mark JSON, tmux argv, the restore replay allowlist + names-only flag scan
+  tmuxpane/        tmux pane mark: mark JSON, tmux argv, the restore replay allowlist + names-only flag scan;
+                   the tmux save hook (registry reader, state-file parser, sidecar)
   execx/, prompt/  Command-runner and prompt seams (injected in tests)
 spec/              Gherkin behavioral spec — scenario IDs referenced by the Ginkgo tests
 scripts/check-spec-coverage.sh  CI check: every scenario ID appears in a test
