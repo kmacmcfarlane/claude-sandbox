@@ -776,6 +776,22 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     # Discovery filters on these labels rather than parsing container names,
     # which are lossy (normalized and hashed). See CS-SESS-001.
 
+  @new
+  Scenario: CS-LNCH-109 Create-time labels for the tmux pane mark (config dir, registry, launch flags)
+    # An attach or join never sees the original launch, yet its pane mark
+    # (CS-TMUX-012) needs where the session's config and peer registry live and
+    # which flags the launch was given. The plan (sandbox-reboot-restore 05/06/09)
+    # puts them on the container. Labels sit outside the drift fingerprint, like
+    # every label: none of this changes the container.
+    Then every docker create also receives labels:
+      | label                         | value                                                    |
+      | claude-sandbox.configdir      | the launcher's RAW CLAUDE_CONFIG_DIR, empty when unset   |
+      | claude-sandbox.registry       | the host peer registry dir: <home>/.cache/claude-sandbox/peers/sessions when the shared registry applied (CS-LNCH-050), else <config dir>/sessions |
+      | claude-sandbox.launchflags    | names only, comma-separated: --model when given on the command line, then the replay and unreplayed names of CS-TMUX-013 |
+    And the launch plan records the same registry dir (Plan.RegistryDir)
+    And no label carries a flag's value or an environment value other than the raw config dir
+    And adding, changing or removing any of them changes neither confighash nor inputs
+
   Scenario: CS-LNCH-029 Container runtime environment
     Then docker create receives: -it --rm --init,
       -e HOST_UID/HOST_GID/HOST_USER/HOST_HOME of the calling user,

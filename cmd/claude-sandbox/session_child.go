@@ -45,6 +45,9 @@ type sessionOpts struct {
 	// exits with the child's status (CS-GCFG-001, CS-LNCH-097). Not run
 	// after a forwarded or late signal, or a start that never ran.
 	after func()
+	// mark is the tmux pane mark set while the child runs (CS-TMUX-010);
+	// nil for none. Ignored when headless or outside tmux (CS-TMUX-014).
+	mark *paneMark
 }
 
 // sessionEnd is how a session child ended.
@@ -70,18 +73,31 @@ func (e *Env) isTerminal(w io.Writer) bool {
 // runSession runs c for container and reports an OOM kill when the session
 // ends (CS-LNCH-087..092). The child's signal handlers stay installed until
 // the report is written (CS-LNCH-097).
-func runSession(env *Env, c execx.Cmd, container string, o sessionOpts) (sessionEnd, error) {
+func runSession(env *Env, c execx.Cmd, container string, o sessionOpts) (end sessionEnd, err error) {
 	// Subscribed before the child starts, from a moment before it, so no
 	// event of this session can be missed (CS-LNCH-087).
 	w := oomreport.Start(env.Runner, container, env.now())
 	defer w.Stop()
 
+	// CS-TMUX-010: the pane mark is set before the child starts and removed
+	// once it returned — on every path (CS-TMUX-015), unless the session
+	// never really started, when the prior mark goes back (CS-TMUX-018/019).
+	pane := beginMark(env, o)
+	putBack := false
+
+	started := env.now()
 	res, err := env.Runner.RunSession(c)
 	defer res.Done()
+	// Deferred after res.Done, so it runs first: while the session's signal
+	// handlers are still installed, and a signal cannot cut it short.
+	defer func() { pane.end(putBack || err != nil || end.neverStarted) }()
 	if err != nil {
 		return sessionEnd{code: res.Code}, err
 	}
-	end := sessionEnd{code: res.Code}
+	end = sessionEnd{code: res.Code}
+	if pane != nil && vanished(env, o, res.Code, started) {
+		putBack = true
+	}
 	if res.Forwarded != nil {
 		// CS-LNCH-091: whoever sent the signal ended the session on
 		// purpose, and an SDK client expects a prompt exit: no die wait, no

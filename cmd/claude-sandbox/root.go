@@ -27,6 +27,7 @@ import (
 	"github.com/kmacmcfarlane/claude-sandbox/internal/pidslot"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/prompt"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/ralphloop"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/tmuxpane"
 )
 
 // Env is the top-level dependency bundle, overridable in tests.
@@ -1128,6 +1129,8 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 	// Launch plan (CS-LNCH). Everything but the per-session picks is settled
 	// here, outside the lock.
 	uid, gid, uname, home := hostIdentity(env.Getenv)
+	// CS-TMUX-013: what a restore would replay, and what it would only name.
+	rec := launchRecord(env, f)
 	in := launch.Inputs{
 		ProjectDir: projectDir, Home: home,
 		HostUID: uid, HostGID: gid, HostUser: uname,
@@ -1149,12 +1152,16 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 		OOMScoreAdjSource: oomSource,
 		Headless:          headless, LookupEnv: env.lookupEnv,
 		Detached: f.Detach,
-		Out:      env.Out, Err: env.Err,
+		// CS-LNCH-109: names only, for an attach's pane mark (CS-TMUX-012).
+		LaunchFlags: rec.LabelValue(),
+		Out:         env.Out, Err: env.Err,
 	}
 	// CS-GCFG-001: the global-config health check, after the image work and
 	// before the lock and the create, so it never widens the window between
 	// the create and the start (CS-SESS-052).
 	pre := checkGlobalConfig(env, nil)
+	// CS-TMUX-011: the pane mark's "since" is taken before the create.
+	since := env.now()
 	// Reserve under the host lock: re-validate the noun, pick the pid class,
 	// docker create (CS-SESS-048). The lock is released before the start.
 	plan, err := reserveContainer(env, in, wt, f.Ralph, shadowRoot)
@@ -1162,9 +1169,14 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 		return err
 	}
 	if f.Detach {
+		// CS-TMUX-014: never marked; its launcher exits at once.
 		return startDetached(env, plan, projectDir, home)
 	}
-	return startReserved(env, plan, headless, pre)
+	var mark *paneMark
+	if !headless {
+		mark = newContainerMark(plan, wt.Root, rec, since, tmuxpane.ResumeID(passthrough))
+	}
+	return startReserved(env, plan, headless, pre, mark)
 }
 
 // cacheBudgetCheckCmd is the hidden subcommand the detached checker runs as

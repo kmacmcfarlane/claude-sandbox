@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -102,6 +103,11 @@ type Inputs struct {
 	// hash (CS-LNCH-118).
 	Detached bool
 
+	// LaunchFlags is the claude-sandbox.launchflags label's value (CS-LNCH-109,
+	// tmuxpane.LaunchRecord.LabelValue): the NAMES of the flags given at
+	// launch that a restore needs to know about, never their values.
+	LaunchFlags string
+
 	// LookupEnv tells set-but-empty from unset for the headless env allowlist
 	// (CS-LNCH-063). Nil falls back to Getenv, where "" reads as unset.
 	LookupEnv func(string) (string, bool)
@@ -151,6 +157,21 @@ const LabelKeep = "claude-sandbox.keep"
 // unchanged. Its mode label stays "claude": a detached session is an ordinary
 // attach and join candidate.
 const LabelDetached = "claude-sandbox.detached"
+
+// Labels the tmux pane mark of an attach or a join reads back (CS-LNCH-109,
+// CS-TMUX-012): an attach never saw the original launch. Outside the config
+// hash, like every label.
+const (
+	// LabelConfigDir is the launcher's RAW CLAUDE_CONFIG_DIR, "" when unset:
+	// a restore replays exactly that (set only if it was set).
+	LabelConfigDir = "claude-sandbox.configdir"
+	// LabelRegistry is the host directory of the container's peer registry
+	// records (Plan.RegistryDir). Always non-empty, so its absence marks a
+	// container that predates these labels.
+	LabelRegistry = "claude-sandbox.registry"
+	// LabelLaunchFlags names the flags given at launch, names only.
+	LabelLaunchFlags = "claude-sandbox.launchflags"
+)
 
 // HeadlessEnv is the exact list of variables a headless launch forwards from
 // its own environment (CS-LNCH-063): what the Claude Agent SDK and Paseo set
@@ -259,6 +280,24 @@ type Plan struct {
 	// ShadowDir is the directory holding this launch's shadow files, also
 	// recorded as the claude-sandbox.shadowdir label (CS-LNCH-080).
 	ShadowDir string
+
+	// Identity the tmux pane mark records (CS-TMUX-011, CS-LNCH-109).
+	// ProjectDir is the physical project; Mode the mode label; PIDClass and
+	// Worktree the per-session picks; ConfigDir the host config dir the
+	// container mounts and ConfigDirEnv the launcher's raw CLAUDE_CONFIG_DIR
+	// ("" when unset); RegistryDir the host directory the container's
+	// registry records land in — the shared peers/sessions when the bridge
+	// applied (CS-LNCH-050), else <config dir>/sessions.
+	ProjectDir   string
+	Mode         string
+	PIDClass     string
+	Worktree     string
+	ConfigDir    string
+	ConfigDirEnv string
+	RegistryDir  string
+	// ContainerID is the full id "docker create" printed (Reserve), "" when
+	// it printed none that looks like one.
+	ContainerID string
 
 	// ConfigHash identifies the effective configuration this container was
 	// launched with; ConfigInputs records the contributing files so drift can
@@ -630,6 +669,22 @@ func Build(in Inputs) (*Plan, error) {
 		p.Labels = append(p.Labels, LabelShadowDir+"="+in.TempDir)
 	}
 
+	// CS-LNCH-109: what an attach or join needs for its tmux pane mark
+	// (CS-TMUX-012), and the same values on the plan for a new container's
+	// own mark (CS-TMUX-011). After the fingerprint, and labels are never
+	// hashed: none of this is a property of the container's configuration.
+	p.ProjectDir, p.Mode, p.PIDClass, p.Worktree = in.ProjectDir, mode, in.PIDClass, in.Worktree
+	p.ConfigDir, p.ConfigDirEnv = configDir, in.getenv("CLAUDE_CONFIG_DIR")
+	p.RegistryDir = filepath.Join(configDir, peerSessionsDir)
+	if bridged {
+		p.RegistryDir = filepath.Join(in.Home, PeerRegistryRoot, peerSessionsDir)
+	}
+	p.Labels = append(p.Labels,
+		LabelConfigDir+"="+p.ConfigDirEnv,
+		LabelRegistry+"="+p.RegistryDir,
+		LabelLaunchFlags+"="+in.LaunchFlags,
+	)
+
 	return p, nil
 }
 
@@ -711,9 +766,13 @@ func (e *CreateError) Unwrap() error {
 // atomically: docker refuses a second create with the same name. Anything
 // docker prints on success (kernel capability warnings) is forwarded to warn.
 func (p *Plan) Reserve(r execx.Runner, workdir string, warn io.Writer) error {
-	var stderr strings.Builder
-	err := r.Run(execx.Cmd{Name: "docker", Args: p.CreateArgs(workdir), Stderr: &stderr})
+	var stdout, stderr strings.Builder
+	err := r.Run(execx.Cmd{Name: "docker", Args: p.CreateArgs(workdir), Stdout: &stdout, Stderr: &stderr})
 	if err == nil {
+		// docker create prints the new container's full id (CS-TMUX-011).
+		if id := strings.TrimSpace(stdout.String()); containerIDRE.MatchString(id) {
+			p.ContainerID = id
+		}
 		if warn != nil && stderr.Len() > 0 {
 			io.WriteString(warn, stderr.String())
 		}
@@ -724,6 +783,10 @@ func (p *Plan) Reserve(r execx.Runner, workdir string, warn io.Writer) error {
 		conflict: isNameConflict(stderr.String()),
 	}
 }
+
+// containerIDRE is a full docker container id (plan 07 § 1: a short or odd id
+// is never recorded).
+var containerIDRE = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 // isNameConflict recognises docker's refusal of a taken name:
 //
