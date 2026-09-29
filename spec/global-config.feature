@@ -22,7 +22,8 @@ Feature: Global config (~/.claude.json) — the linked layout (CS-GCFG)
   and in-container half of the linked layout; they work with a layout made
   by hand. CS-GCFG-041..055 are the host commands that switch the layout
   with checks (claude-sandbox global-config migrate|revert) and record a
-  baseline (accept).
+  baseline (accept). CS-GCFG-056..059 drop the dead <parent>/.claude.json
+  mount of trees that set CLAUDE_CONFIG_DIR.
   Background: the claude-json-concurrent-writes investigation (00..03).
   Go home: internal/globalcfg, internal/launch, internal/pidslot,
   cmd/claude-sandbox.
@@ -52,6 +53,10 @@ Feature: Global config (~/.claude.json) — the linked layout (CS-GCFG)
       started (CS-LNCH-096), the launch was --detach (nothing watches the
       session) or headless (an SDK client ends it with a SIGTERM right after
       the result; the next launch's check catches the damage)
+    And a signal that arrives during the check after the session does not
+      cut it short: it lands on the session's late channel (CS-LNCH-097),
+      the check runs to its end and prints its warning, and the launcher
+      then exits with the child's status
     And it changes nothing about the container: no mount, env, label or
       fingerprint input
     And every message goes to stderr, so a headless launch's stdout stays
@@ -109,6 +114,9 @@ Feature: Global config (~/.claude.json) — the linked layout (CS-GCFG)
       read again once it is held: of many launches at once (a restore burst)
       one writes and the others skip the snapshot — never the check — so the
       store never fills with same-second copies that push out older hours
+    And the lock file is opened with O_NOFOLLOW: a symlink at its name is
+      never followed (nothing is created or opened at its target), and the
+      snapshot is skipped as under contention
     And a snapshot another launch removed first is not an error, and a
       .tmp-* file older than 1 h (a writer killed mid-write) is removed
 
@@ -161,6 +169,10 @@ Feature: Global config (~/.claude.json) — the linked layout (CS-GCFG)
       while the live file sits in ~/.claude/ — the warning says the link is
       gone, and the command is "ln -s .claude/.claude.json ~/.claude.json"
       (the home path absolute, shell-quoted)
+    But when $HOME/.claude is itself a symlink, no command is given: the new
+      link would be refused (CS-GCFG-023) and a cp would make the split
+      brain; the warning says to make $HOME/.claude a real directory first,
+      then restore the link
     Given $HOME/.claude.json is missing and $HOME/.claude/.claude.json is not
     Then the command is the cp above, and the warning says to exit every
       Claude session first because a running legacy sandbox still holds the
@@ -178,7 +190,8 @@ Feature: Global config (~/.claude.json) — the linked layout (CS-GCFG)
       a link that does not name $HOME/.claude/.claude.json, or one that does
       while its target exists but is not a regular file (a directory, where
       mv -f would move the file into it; a symlink, which it would replace),
-      or a symlinked config dir
+      or a symlinked config dir (a dangling link included: its target is
+      not restored through the symlinked dir)
     Then no command is given: the warning names the problem itself (an attach
       or a join prints no layout warning of its own) and says to fix the
       layout first and then restore from the snapshot
@@ -314,22 +327,18 @@ Feature: Global config (~/.claude.json) — the linked layout (CS-GCFG)
     And the file is still mounted as legacy
     And a launch inside a sandbox does not repeat it
 
+  @changed
   Scenario: CS-GCFG-027 CLAUDE_CONFIG_DIR set: the feature does nothing
     Given CLAUDE_CONFIG_DIR is set to an absolute path in the launcher's environment
     Then no linked decision is made, CLAUDE_SANDBOX_GLOBAL_CONFIG is not set
       by the launcher (an env-file value is overridden empty, CS-GCFG-032),
       and no split-brain or link warning is printed
-    And the <parent>/.claude.json sibling is mounted only when Lstat reports a
-      regular file (CS-LNCH-012), under the same nested rule as CS-GCFG-025
-    Given that sibling is a symlink
-    Then it is not mounted, with one "Note:" line
+    And no <parent>/.claude.json is mounted, whatever it is (CS-GCFG-056)
     # Claude Code then reads $CLAUDE_CONFIG_DIR/.claude.json, inside the
     # config-dir mount: renames there are already atomic and the lock is
-    # shared. That includes CLAUDE_CONFIG_DIR == $HOME/.claude — which, after
-    # a migration, finds the new ~/.claude.json LINK as its sibling: following
-    # it would single-file-mount ~/.claude/.claude.json and bring back the
-    # in-place writes, and a sandbox able to write the parent dir could plant
-    # ".claude.json -> ~/.ssh/<key>" and have it mounted read-write.
+    # shared. That includes CLAUDE_CONFIG_DIR == $HOME/.claude.
+    # Was: the <parent>/.claude.json sibling mounted when Lstat reported a
+    # regular file, and a symlinked one skipped with one "Note:" line.
 
   Scenario: CS-GCFG-028 A relative or ~ CLAUDE_CONFIG_DIR gets one warning
     Given CLAUDE_CONFIG_DIR is relative, or a path element starts with "~"
@@ -543,6 +552,13 @@ Feature: Global config (~/.claude.json) — the linked layout (CS-GCFG)
       same file by another spelling (stat of the source and lstat of the
       file give one device and inode: a HOME reached through a symlinked
       ancestor)
+    And that device-and-inode test stats only a source whose last element
+      is .claude.json — the spelling it exists for keeps the file's name —
+      so any other source (a project dir, a network mount whose server
+      hangs) is compared lexically only and never stat'ed; the CS-GCFG-046
+      environment values follow the same rule
+    # Not "only sources under $HOME": the launcher that made the container
+    # may have had the other spelling of $HOME, which lies outside this one.
     And when any matches it refuses, naming each container and "exit them
       (/exit, or docker stop / docker rm), or --force"
     And when the listing itself fails it refuses the same way (it cannot
@@ -619,6 +635,9 @@ Feature: Global config (~/.claude.json) — the linked layout (CS-GCFG)
       rename aborts the swap cleanly (as CS-GCFG-051) and one after it lets
       the command finish; only SIGKILL leaves the lock, which the next taker
       reclaims as stale after 10 s
+    And a signal the process inherited as ignored (a nohup'ed run's SIGHUP)
+      stays ignored: it is not caught, so it neither aborts the swap nor
+      reaches the command (the session child's precedent, CS-LNCH-097)
     # Host claude's locked savers then wait (they retry ELOCKED for 10-20 s)
     # rather than write mid-swap. Residual, by design: its unlocked writers
     # (synchronous exit-time saves, the Configuration-error Reset) take no
@@ -633,6 +652,11 @@ Feature: Global config (~/.claude.json) — the linked layout (CS-GCFG)
       one) and this run's pre-migration copy (identical to the source it
       leaves in place) are removed, and the link, the source and the target
       are as they were
+    But an existing identical target that was set to mode 0600
+      (CS-GCFG-043) keeps 0600: the file holds the OAuth account, Claude
+      Code writes it 0600 itself, and restoring a group- or world-readable
+      mode would re-open what the command just closed — its bytes are
+      untouched
     When the steps under the lock take longer than 5 s
     Then it aborts the same way before the rename
     # 5 s keeps the lock well inside Claude Code's ELOCKED retry budget, so a
@@ -663,6 +687,10 @@ Feature: Global config (~/.claude.json) — the linked layout (CS-GCFG)
       it parked the target)
     Then revert finishes it: after the container checks and under the lock
       it parks $HOME/.claude/.claude.json as above and exits 0
+    And it says what it found and did — two identical files, kept
+      $HOME/.claude.json, parked the copy at <path> — not that it finished
+      an interrupted revert: the files look the same after a killed migrate
+      or a copy made by hand
     Given any other layout (split brain with different bytes, a refused
       link, missing, .config.json present)
     Then revert refuses naming the problem and changes nothing
@@ -705,3 +733,55 @@ Feature: Global config (~/.claude.json) — the linked layout (CS-GCFG)
       host whose launcher predates the commands
     And no launch prints a per-launch "unmigrated" reminder (operator
       decision 57: later)
+
+  # ==== CLAUDE_CONFIG_DIR trees: no parent-sibling mount (F4) ====
+  # With CLAUDE_CONFIG_DIR set, Claude Code 2.1.283 reads
+  # $CLAUDE_CONFIG_DIR/.claude.json (or <config dir>/.config.json), never the
+  # .claude.json beside the config dir. The launcher used to mount that
+  # sibling "to mirror the standard layout"; it was dead, and after a
+  # migration a tree with CLAUDE_CONFIG_DIR=$HOME/.claude found the new
+  # ~/.claude.json LINK there and printed a note on every launch.
+
+  Scenario: CS-GCFG-056 With CLAUDE_CONFIG_DIR set, <parent>/.claude.json is never mounted
+    Given CLAUDE_CONFIG_DIR is set (absolute, relative or with a "~")
+    When <parent of the config dir>/.claude.json is a regular file, a symlink
+      (to ~/.claude/.claude.json or to any other file), or absent
+    Then no volume names it or a symlink's target
+    And nothing is printed about it: no "Note:" line, no warning
+    # A session able to write the parent dir could otherwise plant
+    # ".claude.json -> ~/.ssh/<key>"; with no mount at all there is nothing
+    # to plant.
+
+  Scenario: CS-GCFG-057 A migrated host with CLAUDE_CONFIG_DIR=$HOME/.claude launches silently
+    Given the host is in the linked layout ($HOME/.claude.json is a link to
+      $HOME/.claude/.claude.json, CS-GCFG-016)
+    And CLAUDE_CONFIG_DIR is $HOME/.claude
+    Then no launch prints anything about $HOME/.claude.json
+    And the file Claude Code reads, $HOME/.claude/.claude.json, reaches the
+      container through the config-dir mount (CS-LNCH-008) with no mount of
+      its own
+    And the .mcp.json beside the config dir is still shadowed (CS-LNCH-013)
+
+  Scenario: CS-GCFG-058 The dropped mount is drift once, and the sibling no longer moves the hash
+    Given a container launched with CLAUDE_CONFIG_DIR set and a regular
+      <parent>/.claude.json before this change
+    Then its mount set differed, so attach reports config drift once
+      (CS-LNCH-012 @changed); a relaunch clears it
+    And with CLAUDE_CONFIG_DIR set, launches with and without a
+      <parent>/.claude.json produce the same config hash
+
+  Scenario: CS-GCFG-059 A config-dir .claude.json linking outside the config dir warns
+    # Before CS-GCFG-056 an operator could make $CLAUDE_CONFIG_DIR/.claude.json
+    # a link to the parent's file (../.claude.json): it resolved in the
+    # container only because the sibling was mounted. Now it dangles there,
+    # and Claude Code would write a defaults file over it.
+    Given CLAUDE_CONFIG_DIR is set to an absolute path
+    And $CLAUDE_CONFIG_DIR/.claude.json is a symlink (Lstat) whose target,
+      resolved, lies outside the config dir (dangling targets resolved
+      lexically)
+    Then one WARNING names the link and its target and says the container
+      cannot see the target, so the session will not read that global config
+    And nothing is mounted for it
+    Given the link's target lies inside the config dir, or the file is a
+      regular file or absent
+    Then nothing is printed

@@ -227,6 +227,21 @@ var _ = Describe("global-config health check (CS-GCFG-001..015)", func() {
 			Expect(f.check().Snapshot).NotTo(BeEmpty())
 		})
 
+		It("CS-GCFG-006: a symlink at the lock's name is not followed; the snapshot is skipped, the check is not", func() {
+			write(f.link, healthy)
+			store, err := globalcfg.OpenStore(f.state, f.link, nil)
+			Expect(err).NotTo(HaveOccurred())
+			planted := filepath.Join(filepath.Dir(f.home), "planted")
+			Expect(os.Symlink(planted, filepath.Join(store.Dir, globalcfg.SnapshotLockName))).To(Succeed())
+			_, ok := store.TryLock()
+			Expect(ok).To(BeFalse())
+			h := f.check()
+			Expect(h.File).To(Equal(f.link))
+			Expect(h.Snapshot).To(BeEmpty())
+			Expect(f.snapshots(f.link)).To(BeEmpty())
+			Expect(planted).NotTo(BeAnExistingFile(), "nothing created at the link's target")
+		})
+
 		It("CS-GCFG-006: a burst of healthy checks past the hour writes one snapshot", func() {
 			baseline()
 			f.now = f.now.Add(2 * time.Hour)
@@ -386,6 +401,36 @@ var _ = Describe("global-config health check (CS-GCFG-001..015)", func() {
 			Expect(w).To(ContainSubstring("it is missing"))
 			Expect(w).To(ContainSubstring("the link is gone: " + f.target + " is the live file"))
 			Expect(w).To(ContainSubstring("    ln -s .claude/.claude.json " + f.link + "\n"))
+			Expect(w).NotTo(ContainSubstring("    cp "))
+		})
+
+		It("CS-GCFG-010: a deleted link while ~/.claude is itself a symlink gets no command", func() {
+			write(f.target, healthy)
+			Expect(os.Symlink(".claude/.claude.json", f.link)).To(Succeed())
+			f.check()
+			Expect(os.Remove(f.link)).To(Succeed())
+			realDir := filepath.Join(f.home, "real-claude")
+			Expect(os.Rename(filepath.Join(f.home, ".claude"), realDir)).To(Succeed())
+			Expect(os.Symlink("real-claude", filepath.Join(f.home, ".claude"))).To(Succeed())
+			f.check()
+			w := f.errw.String()
+			Expect(w).To(ContainSubstring("it is missing"))
+			Expect(w).To(ContainSubstring("is itself a symlink"))
+			Expect(w).NotTo(ContainSubstring("    ln -s"))
+			Expect(w).NotTo(ContainSubstring("    cp "))
+		})
+
+		It("CS-GCFG-011: a dangling link into a symlinked ~/.claude gets no command", func() {
+			baseline()
+			Expect(os.Remove(f.link)).To(Succeed())
+			realDir := filepath.Join(f.home, "real-claude")
+			Expect(os.Rename(filepath.Join(f.home, ".claude"), realDir)).To(Succeed())
+			Expect(os.Symlink("real-claude", filepath.Join(f.home, ".claude"))).To(Succeed())
+			Expect(os.Symlink(".claude/.claude.json", f.link)).To(Succeed())
+			f.check()
+			w := f.errw.String()
+			Expect(w).To(ContainSubstring("first fix the layout of " + f.link + " (the config dir"))
+			Expect(w).NotTo(ContainSubstring("mv -f"))
 			Expect(w).NotTo(ContainSubstring("    cp "))
 		})
 

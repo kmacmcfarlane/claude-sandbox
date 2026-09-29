@@ -5,6 +5,8 @@ package main
 // launches.
 
 import (
+	"testing"
+
 	"github.com/kmacmcfarlane/claude-sandbox/internal/globalcfg"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/hostdirs"
 )
@@ -15,7 +17,9 @@ import (
 // (CS-GCFG-014). Warn-only: every message goes to env.Err, which is stderr
 // for a headless launch too.
 func checkGlobalConfig(env *Env, prev *globalcfg.Health) *globalcfg.Health {
-	if env.SkipGlobalConfigCheck || hostdirs.InSandbox(env.Getenv) {
+	// SkipGlobalConfigCheck is honoured under go test only: a stray setting
+	// in a real build can never turn the check off.
+	if (env.SkipGlobalConfigCheck && testing.Testing()) || hostdirs.InSandbox(env.Getenv) {
 		return nil
 	}
 	_, _, _, home := hostIdentity(env.Getenv)

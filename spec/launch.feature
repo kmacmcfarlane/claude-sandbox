@@ -325,12 +325,13 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     Given $HOME/.claude.json is a symlink
     Then it is never single-file-mounted: a link to ~/.claude/.claude.json is
       the linked layout (CS-GCFG-016), any other link is refused (CS-GCFG-019..023)
-    Given CLAUDE_CONFIG_DIR is set and $CONFIG_PARENT/.claude.json is a regular file (Lstat)
-    Then it is mounted at the same path without :ro, as before (CS-GCFG-027)
-    Given CLAUDE_CONFIG_DIR is set and $CONFIG_PARENT/.claude.json is a symlink
-    Then it is not mounted (one note, CS-GCFG-027)
+    Given CLAUDE_CONFIG_DIR is set
+    Then $CONFIG_PARENT/.claude.json is never mounted, whatever it is, and
+      nothing is printed about it (CS-GCFG-056): Claude Code reads
+      $CLAUDE_CONFIG_DIR/.claude.json, inside the config-dir mount
     # Was: any existing $CONFIG_PARENT/.claude.json, followed through a
-    # symlink by docker. See spec/global-config.feature.
+    # symlink by docker; then (F2) a regular one only, a symlink skipped
+    # with one note. See spec/global-config.feature.
 
   @changed
   Scenario: CS-LNCH-013 .mcp.json shadow merges sandbox MCP servers natively
