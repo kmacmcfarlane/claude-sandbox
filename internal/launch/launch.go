@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -951,8 +952,19 @@ func (in *Inputs) shadowSiblings(p *Plan, configDir string) error {
 	target := filepath.Join(parent, ".mcp.json")
 	content := assets.MCPServers
 	// CS-LNCH-167: an empty or whitespace-only host file is a missing one.
-	if raw, err := os.ReadFile(hostMCP); err == nil && len(bytes.TrimSpace(raw)) > 0 {
-		merged, merr := mergeMCP(raw, assets.MCPServers)
+	// A leading UTF-8 BOM is ignored, and a bare JSON null counts as empty.
+	raw, err := os.ReadFile(hostMCP)
+	switch {
+	case err != nil && errors.Is(err, fs.ErrNotExist):
+	case err != nil:
+		// CS-LNCH-168: an unreadable host file warns and falls back too.
+		fmt.Fprintf(in.Err, "WARNING: %s cannot be read (%v); the sandbox uses only its own MCP servers\n", hostMCP, err)
+	default:
+		body := bytes.TrimSpace(bytes.TrimPrefix(raw, []byte("\xEF\xBB\xBF")))
+		if len(body) == 0 || string(body) == "null" {
+			break
+		}
+		merged, merr := mergeMCP(body, assets.MCPServers)
 		if merr != nil {
 			// CS-LNCH-168: warn once and fall back to the fragment alone.
 			fmt.Fprintf(in.Err, "WARNING: %s is not valid MCP config (%v); the sandbox uses only its own MCP servers (the host file is unchanged)\n", hostMCP, merr)

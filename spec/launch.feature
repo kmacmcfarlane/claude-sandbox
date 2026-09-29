@@ -344,16 +344,20 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
 
   @new
   Scenario: CS-LNCH-167 an empty host .mcp.json is treated as a missing one
-    Given the host .mcp.json is empty or holds only whitespace
+    # A BOM before valid JSON is stripped too, so the host servers still merge.
+    Given the host .mcp.json is empty, holds only whitespace, or holds only a
+      JSON null (a leading UTF-8 BOM is ignored in every case)
     Then the fragment alone is mounted read-only over $CONFIG_PARENT/.mcp.json
     And nothing is printed and the launch continues
     And the host file is not modified
     # Was: the launch failed with "merging .mcp.json: unexpected end of JSON input".
 
   @new
-  Scenario: CS-LNCH-168 an unparseable host .mcp.json warns once and uses the fragment
+  Scenario: CS-LNCH-168 an unreadable or unparseable host .mcp.json warns once and uses the fragment
     Given the host .mcp.json is not a JSON object, or its mcpServers is not an object
     Then one WARNING on stderr names the file and the parse error
+    Given the host .mcp.json exists but cannot be read (a directory, no permission)
+    Then one WARNING on stderr names the file and the read error
     And the fragment alone is mounted read-only over $CONFIG_PARENT/.mcp.json
     And the launch continues and the host file is not modified
     # Was: invalid JSON failed the launch; a non-object mcpServers was

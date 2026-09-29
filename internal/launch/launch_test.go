@@ -433,7 +433,40 @@ var _ = Describe("launch.Build", func() {
 		},
 		Entry("empty", ""),
 		Entry("whitespace only", " \n\t\r\n"),
+		Entry("JSON null", "null\n"),
+		Entry("BOM and whitespace", "\xEF\xBB\xBF \n"),
+		Entry("BOM and null", "\xEF\xBB\xBFnull"),
 	)
+
+	It("CS-LNCH-167: a leading UTF-8 BOM before valid JSON still merges the host servers", func() {
+		hostMCP := filepath.Join(home, ".mcp.json")
+		content := "\xEF\xBB\xBF" + `{"mcpServers":{"mine":{"type":"stdio"}}}`
+		touch(hostMCP, content)
+		build()
+		raw, err := os.ReadFile(filepath.Join(in.TempDir, ".mcp.json"))
+		Expect(err).NotTo(HaveOccurred())
+		var merged map[string]any
+		Expect(json.Unmarshal(raw, &merged)).To(Succeed())
+		Expect(merged["mcpServers"]).To(HaveKey("mine"))
+		Expect(merged["mcpServers"]).To(HaveKey("discord"))
+		Expect(errw.String()).To(BeEmpty())
+		after, _ := os.ReadFile(hostMCP)
+		Expect(string(after)).To(Equal(content))
+	})
+
+	It("CS-LNCH-168: an unreadable host .mcp.json (a directory) warns once and uses the fragment", func() {
+		hostMCP := filepath.Join(home, ".mcp.json")
+		mkdir(hostMCP)
+		p := build()
+		tmp := filepath.Join(in.TempDir, ".mcp.json")
+		raw, err := os.ReadFile(tmp)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(raw).To(Equal(assets.MCPServers))
+		Expect(p.Volumes).To(ContainElement(tmp + ":" + hostMCP + ":ro"))
+		Expect(strings.Count(errw.String(), "WARNING")).To(Equal(1))
+		Expect(errw.String()).To(ContainSubstring("WARNING: " + hostMCP + " cannot be read"))
+		Expect(errw.String()).To(ContainSubstring("is a directory"))
+	})
 
 	DescribeTable("CS-LNCH-168: an unparseable host .mcp.json warns once naming the file and uses the fragment",
 		func(content, errFrag string) {
