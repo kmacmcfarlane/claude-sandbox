@@ -5,10 +5,12 @@
 package launch
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -977,23 +979,33 @@ func (in *Inputs) shadowSiblings(p *Plan, configDir string) error {
 	parent := filepath.Dir(configDir)
 	hostMCP := filepath.Join(parent, ".mcp.json")
 	target := filepath.Join(parent, ".mcp.json")
-	if raw, err := os.ReadFile(hostMCP); err == nil {
-		merged, merr := mergeMCP(raw, assets.MCPServers)
+	content := assets.MCPServers
+	// CS-LNCH-167: an empty or whitespace-only host file is a missing one.
+	// A leading UTF-8 BOM is ignored, and a bare JSON null counts as empty.
+	raw, err := os.ReadFile(hostMCP)
+	switch {
+	case err != nil && errors.Is(err, fs.ErrNotExist):
+	case err != nil:
+		// CS-LNCH-168: an unreadable host file warns and falls back too.
+		fmt.Fprintf(in.Err, "WARNING: %s cannot be read (%v); the sandbox uses only its own MCP servers\n", hostMCP, err)
+	default:
+		body := bytes.TrimSpace(bytes.TrimPrefix(raw, []byte("\xEF\xBB\xBF")))
+		if len(body) == 0 || string(body) == "null" {
+			break
+		}
+		merged, merr := mergeMCP(body, assets.MCPServers)
 		if merr != nil {
-			return fmt.Errorf("merging .mcp.json: %w", merr)
+			// CS-LNCH-168: warn once and fall back to the fragment alone.
+			fmt.Fprintf(in.Err, "WARNING: %s is not valid MCP config (%v); the sandbox uses only its own MCP servers (the host file is unchanged)\n", hostMCP, merr)
+		} else {
+			content = merged
 		}
-		tmp, terr := in.tempFile(".mcp.json", merged)
-		if terr != nil {
-			return terr
-		}
-		p.Volumes = append(p.Volumes, fmt.Sprintf("%s:%s:ro", tmp, target))
-	} else {
-		tmp, terr := in.tempFile(".mcp.json", assets.MCPServers)
-		if terr != nil {
-			return terr
-		}
-		p.Volumes = append(p.Volumes, fmt.Sprintf("%s:%s:ro", tmp, target))
 	}
+	tmp, terr := in.tempFile(".mcp.json", content)
+	if terr != nil {
+		return terr
+	}
+	p.Volumes = append(p.Volumes, fmt.Sprintf("%s:%s:ro", tmp, target))
 	return nil
 }
 
@@ -1507,7 +1519,9 @@ func mergeMCP(host, fragment []byte) ([]byte, error) {
 	}
 	var hServers, fServers map[string]json.RawMessage
 	if raw, ok := hm["mcpServers"]; ok {
-		json.Unmarshal(raw, &hServers)
+		if err := json.Unmarshal(raw, &hServers); err != nil {
+			return nil, fmt.Errorf("mcpServers: %w", err)
+		}
 	}
 	if hServers == nil {
 		hServers = map[string]json.RawMessage{}

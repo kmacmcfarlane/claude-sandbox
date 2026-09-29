@@ -302,7 +302,7 @@ var _ = Describe("launch.Build: the global config (CS-GCFG)", func() {
 		}
 	})
 
-	It("CS-GCFG-058:with CLAUDE_CONFIG_DIR set, the parent sibling no longer moves the config hash", func() {
+	It("CS-GCFG-058: with CLAUDE_CONFIG_DIR set, the parent sibling no longer moves the config hash", func() {
 		alt := filepath.Join(home, "alt", ".claude")
 		mkdir(alt)
 		env["CLAUDE_CONFIG_DIR"] = alt

@@ -909,7 +909,7 @@ Env file changes take effect on the next container start.
 
 Every run image includes a Discord notification MCP server at `/opt/claude-sandbox/mcp/discord-notify/dist/index.mjs` (bundled in the `claude-sandbox-tools` image and copied in by the cap; see [Image layering](#image-layering)). It provides the `send_discord_notification` tool, which Claude (and ralph prompts) use to post status updates to Discord.
 
-**Setup:** Set `DISCORD_WEBHOOK_URL` in your `.claude-sandbox/env`. The launcher automatically merges the Discord MCP server entry into the container's `.mcp.json` — no manual configuration needed. If you already have a `~/.mcp.json`, the sandbox entries are added alongside your existing servers (the host file is never modified).
+**Setup:** Set `DISCORD_WEBHOOK_URL` in your `.claude-sandbox/env`. The launcher automatically merges the Discord MCP server entry into the container's `.mcp.json` — no manual configuration needed. If you already have a `~/.mcp.json`, the sandbox entries are added alongside your existing servers (the host file is never modified). An empty `~/.mcp.json` is treated as missing; one that cannot be read or is not valid JSON prints a warning naming the file and the sandbox uses only its own servers — the launch continues.
 
 ### Notification hooks
 
