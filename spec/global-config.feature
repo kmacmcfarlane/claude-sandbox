@@ -53,6 +53,10 @@ Feature: Global config (~/.claude.json) — the linked layout (CS-GCFG)
       started (CS-LNCH-096), the launch was --detach (nothing watches the
       session) or headless (an SDK client ends it with a SIGTERM right after
       the result; the next launch's check catches the damage)
+    And a signal that arrives during the check after the session does not
+      cut it short: it lands on the session's late channel (CS-LNCH-097),
+      the check runs to its end and prints its warning, and the launcher
+      then exits with the child's status
     And it changes nothing about the container: no mount, env, label or
       fingerprint input
     And every message goes to stderr, so a headless launch's stdout stays
@@ -110,6 +114,9 @@ Feature: Global config (~/.claude.json) — the linked layout (CS-GCFG)
       read again once it is held: of many launches at once (a restore burst)
       one writes and the others skip the snapshot — never the check — so the
       store never fills with same-second copies that push out older hours
+    And the lock file is opened with O_NOFOLLOW: a symlink at its name is
+      never followed (nothing is created or opened at its target), and the
+      snapshot is skipped as under contention
     And a snapshot another launch removed first is not an error, and a
       .tmp-* file older than 1 h (a writer killed mid-write) is removed
 
@@ -162,6 +169,10 @@ Feature: Global config (~/.claude.json) — the linked layout (CS-GCFG)
       while the live file sits in ~/.claude/ — the warning says the link is
       gone, and the command is "ln -s .claude/.claude.json ~/.claude.json"
       (the home path absolute, shell-quoted)
+    But when $HOME/.claude is itself a symlink, no command is given: the new
+      link would be refused (CS-GCFG-023) and a cp would make the split
+      brain; the warning says to make $HOME/.claude a real directory first,
+      then restore the link
     Given $HOME/.claude.json is missing and $HOME/.claude/.claude.json is not
     Then the command is the cp above, and the warning says to exit every
       Claude session first because a running legacy sandbox still holds the
@@ -179,7 +190,8 @@ Feature: Global config (~/.claude.json) — the linked layout (CS-GCFG)
       a link that does not name $HOME/.claude/.claude.json, or one that does
       while its target exists but is not a regular file (a directory, where
       mv -f would move the file into it; a symlink, which it would replace),
-      or a symlinked config dir
+      or a symlinked config dir (a dangling link included: its target is
+      not restored through the symlinked dir)
     Then no command is given: the warning names the problem itself (an attach
       or a join prints no layout warning of its own) and says to fix the
       layout first and then restore from the snapshot
@@ -540,6 +552,13 @@ Feature: Global config (~/.claude.json) — the linked layout (CS-GCFG)
       same file by another spelling (stat of the source and lstat of the
       file give one device and inode: a HOME reached through a symlinked
       ancestor)
+    And that device-and-inode test stats only a source whose last element
+      is .claude.json — the spelling it exists for keeps the file's name —
+      so any other source (a project dir, a network mount whose server
+      hangs) is compared lexically only and never stat'ed; the CS-GCFG-046
+      environment values follow the same rule
+    # Not "only sources under $HOME": the launcher that made the container
+    # may have had the other spelling of $HOME, which lies outside this one.
     And when any matches it refuses, naming each container and "exit them
       (/exit, or docker stop / docker rm), or --force"
     And when the listing itself fails it refuses the same way (it cannot
@@ -616,6 +635,9 @@ Feature: Global config (~/.claude.json) — the linked layout (CS-GCFG)
       rename aborts the swap cleanly (as CS-GCFG-051) and one after it lets
       the command finish; only SIGKILL leaves the lock, which the next taker
       reclaims as stale after 10 s
+    And a signal the process inherited as ignored (a nohup'ed run's SIGHUP)
+      stays ignored: it is not caught, so it neither aborts the swap nor
+      reaches the command (the session child's precedent, CS-LNCH-097)
     # Host claude's locked savers then wait (they retry ELOCKED for 10-20 s)
     # rather than write mid-swap. Residual, by design: its unlocked writers
     # (synchronous exit-time saves, the Configuration-error Reset) take no
@@ -630,6 +652,11 @@ Feature: Global config (~/.claude.json) — the linked layout (CS-GCFG)
       one) and this run's pre-migration copy (identical to the source it
       leaves in place) are removed, and the link, the source and the target
       are as they were
+    But an existing identical target that was set to mode 0600
+      (CS-GCFG-043) keeps 0600: the file holds the OAuth account, Claude
+      Code writes it 0600 itself, and restoring a group- or world-readable
+      mode would re-open what the command just closed — its bytes are
+      untouched
     When the steps under the lock take longer than 5 s
     Then it aborts the same way before the rename
     # 5 s keeps the lock well inside Claude Code's ELOCKED retry budget, so a
@@ -660,6 +687,10 @@ Feature: Global config (~/.claude.json) — the linked layout (CS-GCFG)
       it parked the target)
     Then revert finishes it: after the container checks and under the lock
       it parks $HOME/.claude/.claude.json as above and exits 0
+    And it says what it found and did — two identical files, kept
+      $HOME/.claude.json, parked the copy at <path> — not that it finished
+      an interrupted revert: the files look the same after a killed migrate
+      or a copy made by hand
     Given any other layout (split brain with different bytes, a refused
       link, missing, .config.json present)
     Then revert refuses naming the problem and changes nothing

@@ -86,8 +86,13 @@ type SwapOptions struct {
 	// hook for CS-GCFG-051).
 	BeforeSwap func()
 	// Signals are caught while the lock is held (CS-GCFG-050); nil means
-	// SIGINT, SIGTERM and SIGHUP. Tests use a signal the runner ignores.
+	// SIGINT, SIGTERM and SIGHUP. One the process inherited as ignored
+	// (nohup) stays ignored. Tests use a signal the runner ignores.
 	Signals []os.Signal
+	// Notify registers the lock's signal channel; nil means signal.Notify.
+	// A test seam: it hands the test the channel, so the test can wait for
+	// a signal's delivery instead of sleeping.
+	Notify func(c chan<- os.Signal, sig ...os.Signal)
 	// DirOps are the store directories' seams.
 	DirOps *hostdirs.Ops
 }
@@ -119,6 +124,9 @@ func (o *SwapOptions) fill() {
 	}
 	if o.Signals == nil {
 		o.Signals = []os.Signal{syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP}
+	}
+	if o.Notify == nil {
+		o.Notify = signal.Notify
 	}
 }
 
@@ -241,6 +249,10 @@ func Migrate(o SwapOptions) error {
 		if err := sameBytes(l.Target, data); err != nil {
 			return refuse("%s appeared or changed during the migration and differs from %s; nothing was changed.", l.Target, l.Link)
 		}
+		// Not undone by an abort (CS-GCFG-051): the file holds the OAuth
+		// account and Claude Code writes it 0600 itself, so owner-only is
+		// never wrong, while restoring a group- or world-readable mode
+		// would re-open what this just closed.
 		if err := os.Chmod(l.Target, 0o600); err != nil {
 			return refuse("restricting %s to 0600: %v; nothing was changed.", l.Target, unwrapPath(err))
 		}
@@ -382,9 +394,11 @@ func Revert(o SwapOptions) error {
 	return nil
 }
 
-// finishRevert completes a revert that was killed after its rename and
-// before it parked the target: both files are regular and byte-identical
-// (CS-GCFG-052). Same container checks and lock as a revert.
+// finishRevert handles both files regular and byte-identical (CS-GCFG-052):
+// a revert killed after its rename and before it parked the target — or a
+// killed migrate, or a copy made by hand; the files cannot tell which. It
+// keeps ~/.claude.json and parks the identical copy, after the same
+// container checks and under the same lock as a revert.
 func (o *SwapOptions) finishRevert(l Layout) error {
 	if err := o.checkContainers(l, true); err != nil {
 		return err
@@ -403,9 +417,9 @@ func (o *SwapOptions) finishRevert(l Layout) error {
 	}
 	parked, err := parkTarget(store, l.Target, o.Now())
 	if err != nil {
-		return fmt.Errorf("finishing the interrupted revert: %s could not be moved away (%v); it is still there", l.Target, err)
+		return fmt.Errorf("%s and %s are identical, but the copy %s could not be moved away (%v); it is still there", l.Link, l.Target, l.Target, err)
 	}
-	fmt.Fprintf(o.Out, "Finished an interrupted revert: %s is a regular file (the legacy layout), and the identical %s is kept at %s\n", l.Link, l.Target, parked)
+	fmt.Fprintf(o.Out, "Found two identical files: kept %s (the legacy layout) and parked the copy %s at %s\n", l.Link, l.Target, parked)
 	return nil
 }
 
@@ -576,7 +590,18 @@ func (o *SwapOptions) acquireLock(link string) (*heldLock, error) {
 		o.Sleep(50 * time.Millisecond)
 	}
 	h := &heldLock{path: path, stop: make(chan struct{}), done: make(chan struct{}), sig: make(chan os.Signal, 1)}
-	signal.Notify(h.sig, o.Signals...)
+	// A signal inherited as ignored stays ignored (a nohup'ed run keeps
+	// ignoring SIGHUP; the execx precedent). Notify with no signals would
+	// relay every signal, so an empty list registers nothing.
+	var caught []os.Signal
+	for _, s := range o.Signals {
+		if !signal.Ignored(s) {
+			caught = append(caught, s)
+		}
+	}
+	if len(caught) > 0 {
+		o.Notify(h.sig, caught...)
+	}
 	go func() {
 		defer close(h.done)
 		t := time.NewTicker(o.LockRefresh)
@@ -646,6 +671,14 @@ func (o *SwapOptions) checkContainers(l Layout, revert bool) error {
 // environment (one docker inspect over all of them) sets EnvVar to exactly
 // envTarget: a linked container of this home (another home's, or the empty
 // override of a non-linked launch, does not use this file).
+//
+// The same-file test by device and inode stats a path, so it is applied only
+// to a path whose last element is the file's own name (.claude.json): the
+// spelling it exists for — a HOME reached through a symlinked ancestor —
+// keeps that name, while a mount source with any other name (a project, an
+// NFS or sshfs path whose server hangs) is never stat'ed (CS-GCFG-045). A
+// filter on "under $HOME" would not do: the launcher's $HOME may be the other
+// spelling, which lies outside this one.
 func containersUsing(r execx.Runner, paths []string, envTarget string) ([]string, error) {
 	out, err := r.Output(execx.Cmd{
 		Name:   "docker",
@@ -666,6 +699,9 @@ func containersUsing(r execx.Runner, paths []string, envTarget string) ([]string
 	// sameAsWanted: the same file by another spelling (a HOME reached
 	// through a symlinked ancestor), by device and inode.
 	sameAsWanted := func(p string, among []os.FileInfo) bool {
+		if len(among) == 0 || !filepath.IsAbs(p) || filepath.Base(filepath.Clean(p)) != FileName {
+			return false
+		}
 		fi, err := os.Stat(p)
 		if err != nil {
 			return false
