@@ -78,12 +78,14 @@ Left off pending operator decision 47.
 - `prefix + Ctrl-s` — save now. Do this manually before a planned reboot.
 - `prefix + Ctrl-r` — restore the last save.
 
-Saves live under `~/.local/share/tmux/resurrect/` (`@resurrect-dir`).
+Saves live under `${XDG_DATA_HOME:-~/.local/share}/tmux/resurrect/`
+(`@resurrect-dir`; on the operator's machine `~/.local/share/tmux/resurrect/`).
 tmux-resurrect uses the XDG data dir only when `~/.tmux/resurrect` does not
 exist; if that directory exists, it takes precedence and saves go there
-instead. Continuum deletes
-saves older than 30 days but always keeps at least 5, so you can restore an
-earlier save if the latest one is bad.
+instead. An explicit `@resurrect-dir` overrides both. tmux-resurrect itself
+deletes saves older than 30 days on every save (`remove_old_backups`) but
+always keeps at least 5, so you can restore an earlier save if the latest one
+is bad.
 
 What comes back is whatever existed at the last save:
 
@@ -96,18 +98,33 @@ What comes back is whatever existed at the last save:
 
 Do this before a planned reboot, in order:
 
-1. Stop autosaves: `tmux set -g @continuum-save-interval 0`
-2. Save now with `prefix + Ctrl-s`.
-3. Check that the `last` symlink in `~/.local/share/tmux/resurrect/` points
-   at the new save: `ls -l ~/.local/share/tmux/resurrect/last`
+1. Stop autosaves: `tmux set -g @continuum-save-interval 0`. Then wait a few
+   seconds: an autosave already running in the background still finishes.
+2. Save now with `prefix + Ctrl-s`, and wait for "Tmux environment saved!"
+   to appear before going on.
+3. Check that the `last` symlink in `~/.local/share/tmux/resurrect/` (or
+   `~/.tmux/resurrect/last` if that directory exists) points at a complete
+   save: `ls -l ~/.local/share/tmux/resurrect/last`. That is the new save,
+   or an older one if nothing changed — resurrect drops a save identical to
+   `last` and leaves `last` as it was.
 4. Stop the server: `tmux kill-server`
 
 Why: killing tmux during an autosave can leave `last` pointing at a partial
 save, and `last` is what auto-restore and `prefix + Ctrl-r` use. Stopping
 autosaves first and confirming `last` avoids that.
 
-Killing tmux does NOT stop running sandboxes. Their containers keep running
-detached; reattach with `claude-sandbox --attach`.
+If you don't reboot after all, turn autosave back on with
+`tmux set -g @continuum-save-interval 1` (or `tmux source-file ~/.tmux.conf`).
+
+Killing tmux does not stop running sandboxes; it leaves them running only
+until the reboot. A reboot stops the containers and `--rm` removes them. So
+before rebooting, let each session finish its turn and note which
+conversations to resume afterwards with `claude-sandbox --new -- --resume <id>`.
+
+`claude-sandbox --attach` helps only when you kill tmux without rebooting:
+the containers keep running detached, and you reattach by running it from the
+project directory (attach filters by cwd). Joined sessions (`--join`) cannot
+be reattached.
 
 ## Do not add claude-sandbox to `@resurrect-processes` yet
 
