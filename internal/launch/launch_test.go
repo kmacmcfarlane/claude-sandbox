@@ -415,6 +415,48 @@ var _ = Describe("launch.Build", func() {
 		Expect(p.Volumes).To(ContainElement(tmp + ":" + filepath.Join(home, ".mcp.json") + ":ro"))
 	})
 
+	DescribeTable("CS-LNCH-167: an empty or whitespace-only host .mcp.json mounts the fragment silently",
+		func(content string) {
+			hostMCP := filepath.Join(home, ".mcp.json")
+			touch(hostMCP, content)
+			p := build()
+			tmp := filepath.Join(in.TempDir, ".mcp.json")
+			raw, err := os.ReadFile(tmp)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(raw).To(Equal(assets.MCPServers))
+			Expect(p.Volumes).To(ContainElement(tmp + ":" + hostMCP + ":ro"))
+			Expect(errw.String()).NotTo(ContainSubstring(".mcp.json"))
+			Expect(out.String()).NotTo(ContainSubstring(".mcp.json"))
+			after, err := os.ReadFile(hostMCP)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(string(after)).To(Equal(content))
+		},
+		Entry("empty", ""),
+		Entry("whitespace only", " \n\t\r\n"),
+	)
+
+	DescribeTable("CS-LNCH-168: an unparseable host .mcp.json warns once naming the file and uses the fragment",
+		func(content, errFrag string) {
+			hostMCP := filepath.Join(home, ".mcp.json")
+			touch(hostMCP, content)
+			p := build()
+			tmp := filepath.Join(in.TempDir, ".mcp.json")
+			raw, err := os.ReadFile(tmp)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(raw).To(Equal(assets.MCPServers))
+			Expect(p.Volumes).To(ContainElement(tmp + ":" + hostMCP + ":ro"))
+			Expect(strings.Count(errw.String(), "WARNING")).To(Equal(1))
+			Expect(errw.String()).To(ContainSubstring("WARNING: " + hostMCP))
+			Expect(errw.String()).To(ContainSubstring(errFrag))
+			after, err := os.ReadFile(hostMCP)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(string(after)).To(Equal(content))
+		},
+		Entry("truncated JSON", `{"mcpServers":{`, "unexpected end of JSON input"),
+		Entry("not an object", `[1,2]`, "cannot unmarshal array"),
+		Entry("mcpServers not an object", `{"mcpServers":[1]}`, "mcpServers"),
+	)
+
 	// ---- host access precedence ----
 
 	Describe("CS-LNCH-014: host access precedence CLI > env var > YAML", func() {
