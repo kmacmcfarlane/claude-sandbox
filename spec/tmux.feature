@@ -5,18 +5,22 @@ Feature: tmux integration (CS-TMUX)
   only what resurrect cannot do (pane mark, save hook, `tmux restore`).
   Plan: .claude-sandbox/investigations/sandbox-reboot-restore/ (05..09).
 
-  # ---- F0: the process name tmux sees ----
+  # ---- F0: the process name tmux-resurrect sees ----
   #
-  # tmux reports a pane's #{pane_current_command} as the basename of the
-  # foreground process group leader's argv[0], and tmux-resurrect saves the
-  # "full command" from `ps args`. resurrect's @resurrect-processes entries
-  # match that command's first word (`^name ` / `^name$`), so a plain
-  # `claude-sandbox->…` entry only matches when the launcher's argv[0] is
-  # `claude-sandbox`. Before F0 the shim ran `exec "$BIN" "$@"`, so argv[0] was
-  # the absolute path of bin/dist/claude-sandbox. The binary reads argv[0] only
-  # for the `ralph` switch and finds its repo root through
-  # CLAUDE_SANDBOX_REPO_ROOT / os.Executable, never argv[0], so renaming it
-  # changes nothing else.
+  # tmux itself was never the problem: #{pane_current_command} is the basename
+  # of the pane's foreground process group leader's argv[0] (tmux 3.5a reads
+  # /proc/<pgrp>/cmdline, then takes the basename), so it already read
+  # `claude-sandbox`. tmux-resurrect is different: every save strategy (ps
+  # args, pgrep -lf, linux_procfs) records the FULL command line, and an
+  # @resurrect-processes entry without `~` matches only its first word
+  # (`^name ` / `^name$`). Before F0 the shim ran `exec "$BIN" "$@"`, so that
+  # first word was the absolute path of bin/dist/claude-sandbox and a plain
+  # `claude-sandbox->…` entry matched under none of the strategies; with
+  # argv[0] `claude-sandbox` it matches under all three. A fixed argv[0] also
+  # covers a checkout whose path contains a space, which would otherwise split
+  # the saved command's first word. The binary reads argv[0] only for the
+  # `ralph` switch and finds its repo root through CLAUDE_SANDBOX_REPO_ROOT /
+  # os.Executable, never argv[0], so renaming it changes nothing else.
 
   Scenario: CS-TMUX-001 the shim execs the launcher with argv[0] "claude-sandbox"
     Given bin/claude-sandbox and an up-to-date bin/dist/claude-sandbox

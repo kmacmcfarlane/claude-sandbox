@@ -1,8 +1,9 @@
 package main
 
 // Spec: spec/tmux.feature (CS-TMUX-001..002) — the bin/claude-sandbox shim
-// execs the launcher with argv[0] "claude-sandbox", the name tmux reports as
-// #{pane_current_command} and tmux-resurrect's process match sees.
+// execs the launcher with argv[0] "claude-sandbox", so the first word of the
+// full command line tmux-resurrect saves matches a plain `claude-sandbox`
+// @resurrect-processes entry (the bin/dist path, possibly with a space, never did).
 //
 // The shim is run for real (bash) from a scratch copy of the repo layout. Its
 // bin/dist/claude-sandbox is a symlink to THIS test binary: a script would not
