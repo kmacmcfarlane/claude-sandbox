@@ -4,6 +4,8 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+
+	"github.com/kmacmcfarlane/claude-sandbox/internal/registry"
 )
 
 // What a restore replays, and what it only names (CS-TMUX-013, operator
@@ -303,9 +305,6 @@ func flagName(t string) (string, bool) {
 	return t, false
 }
 
-// uuidRE is a canonical conversation id.
-var uuidRE = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
-
 // ResumeID returns the conversation a passthrough resumes explicitly —
 // "--resume <id>", "--resume=<id>", "-r <id>", "-r<id>" with a canonical
 // UUID — scanning with ScanPassthrough's stop rules (plan 07 § 6, 08 § 4).
@@ -343,7 +342,7 @@ func ResumeID(args []string) string {
 		}
 		i = next
 	}
-	if uuidRE.MatchString(last) {
+	if registry.IsUUID(last) {
 		return strings.ToLower(last)
 	}
 	return ""

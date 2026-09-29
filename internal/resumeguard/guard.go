@@ -27,13 +27,14 @@ import (
 
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/launch"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/registry"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/sessions"
 )
 
 // Retries is how often a malformed record at a watched class is read again
 // before it counts as unreadable (07 § 7): Claude Code writes by rename, but a
 // partial write is possible on some paths. Only the failures a partial write
-// can cause (ErrPartial) are retried.
+// can cause (registry.ErrPartial) are retried.
 const Retries = 3
 
 // RetryDelay spaces the retries, about 1 s in all.
@@ -155,7 +156,7 @@ type holding struct {
 	labelled bool
 	// matches are its current records naming the id, still to be confirmed
 	// alive (CS-SESS-089); others counts its current records naming other ids.
-	matches []Record
+	matches []registry.Record
 	others  int
 }
 
@@ -205,13 +206,13 @@ func (c Check) holds(s sessions.Session, domain string) (holding, error) {
 }
 
 // alive reports whether one of the records naming the id is still its
-// process (CS-SESS-089). Record pids are the container's own, so the check
+// process (CS-SESS-089). registry.Record pids are the container's own, so the check
 // goes by start time: /proc/<pid>/stat field 22 counts clock ticks since boot,
 // the same in every pid namespace. A record without a procStart cannot be
 // ruled out and needs no docker call. Otherwise ONE bounded "docker top"
 // lists the container's host pids; a pid whose stat cannot be read or parsed
 // cannot be ruled out either. A failed docker top is an error: fail closed.
-func (c Check) alive(s sessions.Session, matches []Record) (bool, error) {
+func (c Check) alive(s sessions.Session, matches []registry.Record) (bool, error) {
 	for _, m := range matches {
 		if m.ProcStart == "" {
 			return true, nil
@@ -337,18 +338,18 @@ func (c Check) registryDirs(s sessions.Session) []string {
 // recordsAt reads every record at a pid class across dirs. A directory that
 // exists but cannot be read, or a record there that stays malformed after
 // the retries, is an error.
-func (c Check) recordsAt(dirs []string, class int) ([]Record, error) {
-	var out []Record
+func (c Check) recordsAt(dirs []string, class int) ([]registry.Record, error) {
+	var out []registry.Record
 	for _, dir := range dirs {
-		d, err := openDir(dir)
+		d, err := registry.OpenDir(dir)
+		if errors.Is(err, os.ErrNotExist) {
+			continue // a missing directory holds no records
+		}
 		if err != nil {
 			return nil, err
 		}
-		if d == nil {
-			continue
-		}
 		recs, err := c.readClass(d, class)
-		d.close()
+		d.Close()
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", dir, err)
 		}
@@ -357,20 +358,20 @@ func (c Check) recordsAt(dirs []string, class int) ([]Record, error) {
 	return out, nil
 }
 
-func (c Check) readClass(d *registryDir, class int) ([]Record, error) {
-	es, err := d.entries()
+func (c Check) readClass(d *registry.Dir, class int) ([]registry.Record, error) {
+	es, err := d.Entries()
 	if err != nil {
 		return nil, err
 	}
-	var out []Record
+	var out []registry.Record
 	for _, e := range es {
-		if e.pid%256 != class {
+		if e.PID%256 != class {
 			continue
 		}
-		var r Record
+		var r registry.Record
 		for attempt := 0; ; attempt++ {
-			r, err = d.read(e)
-			if err == nil || !errors.Is(err, ErrPartial) || attempt >= Retries {
+			r, err = d.Read(e)
+			if err == nil || !errors.Is(err, registry.ErrPartial) || attempt >= Retries {
 				break
 			}
 			c.sleep(RetryDelay)
@@ -425,31 +426,31 @@ func (c Check) hostCheck(domain string, domainErr error) Verdict {
 	}
 	add(c.ConfigDir)
 	for _, dir := range dirs {
-		d, err := openDir(dir)
+		d, err := registry.OpenDir(dir)
+		if errors.Is(err, os.ErrNotExist) {
+			continue // a missing directory holds no records
+		}
 		if err != nil {
 			return Verdict{Open: true, Reason: err.Error()}
 		}
-		if d == nil {
-			continue
-		}
-		es, err := d.entries()
+		es, err := d.Entries()
 		if err != nil {
-			d.close()
+			d.Close()
 			return Verdict{Open: true, Reason: err.Error()}
 		}
 		for _, e := range es {
 			// A malformed record is skipped: its namespace cannot be known,
 			// and the host check has no class to narrow what it watches.
-			r, err := d.read(e)
+			r, err := d.Read(e)
 			if err != nil || r.PIDDomain != domain || !strings.EqualFold(r.SessionID, c.ID) {
 				continue
 			}
 			if c.procLive(r.PID, r.ProcStart) {
-				d.close()
+				d.Close()
 				return Verdict{Open: true, HostPID: r.PID}
 			}
 		}
-		d.close()
+		d.Close()
 	}
 	return Verdict{}
 }

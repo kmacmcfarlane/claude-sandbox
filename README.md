@@ -1863,8 +1863,9 @@ internal/
   globalcfg/       ~/.claude.json layout (linked/legacy), the in-container link, global-config migrate/revert/accept, the launch health check
   ralphloop/       Ralph loop: iterations, lock, quota handling, pipeline
   tmuxpane/        tmux pane mark: mark JSON, tmux argv, the restore replay allowlist + names-only flag scan;
-                   the tmux save hook (registry reader, state-file parser, sidecar)
+                   the tmux save hook (registry match, state-file parser, sidecar)
   resumeguard/     Resume guard: is a conversation already open (sandbox labels, hardened registry reads, host claude)
+  registry/        The one hardened reader of Claude Code's peer registry, shared by the save hook and the resume guard
   execx/, prompt/  Command-runner and prompt seams (injected in tests)
 spec/              Gherkin behavioral spec — scenario IDs referenced by the Ginkgo tests
 scripts/check-spec-coverage.sh  CI check: every scenario ID appears in a test

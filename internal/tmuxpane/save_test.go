@@ -19,6 +19,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/registry"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/tmuxpane"
 )
 
@@ -374,7 +375,7 @@ var _ = Describe("tmux save hook (CS-TMUX-030..040)", func() {
 			w("1287.json", fmt.Sprintf(`{"pid":1287,"sessionId":%q,"cwd":%q,"startedAt":%d,"name":"a\u001b[31mb\tc","nameSource":"user","secret":"x"}`, convID, proj, since))
 			recs, err = tmuxpane.ReadRegistry(reg)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(recs).To(Equal([]tmuxpane.RegistryRecord{{PID: 1287, SessionID: convID, Cwd: proj, StartedAt: since, Name: "a [31mb c", NameSource: "user"}}))
+			Expect(recs).To(Equal([]registry.Record{{PID: 1287, SessionID: convID, Cwd: proj, StartedAt: since, Name: "a [31mb c", NameSource: "user"}}))
 		})
 
 		It("CS-TMUX-034: a symlinked registry dir is not read", func() {
@@ -391,18 +392,17 @@ var _ = Describe("tmux save hook (CS-TMUX-030..040)", func() {
 			Eventually(done, 2*time.Second).Should(BeClosed())
 		})
 
-		It("CS-TMUX-034: names: control characters stripped, over 200 characters or a leading '-' absent; name sources from the 2.1.284 set", func() {
-			Expect(tmuxpane.CleanName("  fix\x07 the\nbug ")).To(Equal("fix the bug"))
-			Expect(tmuxpane.CleanName("--dangerous")).To(BeEmpty())
-			// Format (Cf: bidi overrides, zero-width), private-use (Co) and
-			// surrogate (Cs, as invalid UTF-8 decodes to U+FFFD, kept) characters.
-			Expect(tmuxpane.CleanName("safe\u202egnp.exe\u200b\ue000")).To(Equal("safegnp.exe"))
-			Expect(tmuxpane.CleanName("\u2066-x\u2069")).To(BeEmpty(), "a hidden character cannot hide a leading '-'")
-			Expect(tmuxpane.CleanName(strings.Repeat("é", 201))).To(BeEmpty())
-			Expect(tmuxpane.CleanName(strings.Repeat("é", 200))).To(HaveLen(400))
-			for _, s := range []string{"user", "peer", "derived", "collision", "auto", "hook"} {
-				Expect(tmuxpane.NameSources[s]).To(BeTrue(), s)
+		It("CS-TMUX-034: a registry dir holding more than registry.MaxEntries entries is not read", func() {
+			record(7, convID, proj, since, "", "")
+			for i := 0; i < registry.MaxEntries; i++ {
+				Expect(os.WriteFile(filepath.Join(reg, fmt.Sprintf("x%d", i)), nil, 0o600)).To(Succeed())
 			}
+			recs, err := tmuxpane.ReadRegistry(reg)
+			Expect(err).To(MatchError(ContainSubstring("more than")))
+			Expect(recs).To(BeEmpty())
+		})
+
+		It("CS-TMUX-034: names are cleaned and name sources whitelisted by the shared reader (internal/registry)", func() {
 			record(7, convID, proj, since, "n", "made-up")
 			recs, _ := tmuxpane.ReadRegistry(reg)
 			Expect(recs[0].NameSource).To(BeEmpty())

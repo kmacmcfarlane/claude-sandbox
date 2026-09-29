@@ -264,7 +264,9 @@ Feature: tmux integration (CS-TMUX)
   Scenario: CS-TMUX-034 registry records are read defensively and give only an id and a name
     Given the registry dir is written by code inside sandboxes
     Then the dir is opened once with O_DIRECTORY|O_NOFOLLOW (a symlinked dir is not read) and each
-      "<digits>.json" relative to that fd with O_NOFOLLOW|O_NONBLOCK
+      "<digits>.json" relative to that fd with O_NOFOLLOW|O_NONBLOCK|O_NOCTTY
+    And a dir holding more than 10000 entries is not read (every mark resolved from it misses)
+    And the reader is the one the resume guard uses (internal/registry, CS-SESS-066)
     And a record counts only when it is a regular file of at most 64 KiB that parses, its "pid"
       equals the file name's, and its "sessionId" is a canonical UUID
     And its "name" has control characters turned into spaces, format characters (Unicode Cf: bidi
