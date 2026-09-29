@@ -25,7 +25,10 @@ and pick the conversation from the picker.
 ## Install
 
 The operator's `~/.tmux.conf` has no plugin manager (no tpm), so install by
-cloning the two plugins directly:
+cloning the two plugins directly. These clone lines are one-time shell
+commands, run in a terminal. Never put them in `~/.tmux.conf` as `run-shell`
+lines: tmux would re-run them on every config load and print "returned 128"
+each time once the directories exist.
 
 ```
 git clone https://github.com/tmux-plugins/tmux-resurrect ~/.tmux/plugins/tmux-resurrect
@@ -75,7 +78,10 @@ Left off pending operator decision 47.
 - `prefix + Ctrl-s` — save now. Do this manually before a planned reboot.
 - `prefix + Ctrl-r` — restore the last save.
 
-Saves live under `~/.tmux/resurrect/` (`@resurrect-dir`). Continuum deletes
+Saves live under `~/.local/share/tmux/resurrect/` (`@resurrect-dir`).
+tmux-resurrect uses the XDG data dir only when `~/.tmux/resurrect` does not
+exist; if that directory exists, it takes precedence and saves go there
+instead. Continuum deletes
 saves older than 30 days but always keeps at least 5, so you can restore an
 earlier save if the latest one is bad.
 
@@ -85,6 +91,23 @@ What comes back is whatever existed at the last save:
   drop one from the saved layout.
 - A window created in the last minute or so before a crash may be missing,
   since it wasn't captured by the last autosave.
+
+## Safe shutdown before a reboot
+
+Do this before a planned reboot, in order:
+
+1. Stop autosaves: `tmux set -g @continuum-save-interval 0`
+2. Save now with `prefix + Ctrl-s`.
+3. Check that the `last` symlink in `~/.local/share/tmux/resurrect/` points
+   at the new save: `ls -l ~/.local/share/tmux/resurrect/last`
+4. Stop the server: `tmux kill-server`
+
+Why: killing tmux during an autosave can leave `last` pointing at a partial
+save, and `last` is what auto-restore and `prefix + Ctrl-r` use. Stopping
+autosaves first and confirming `last` avoids that.
+
+Killing tmux does NOT stop running sandboxes. Their containers keep running
+detached; reattach with `claude-sandbox --attach`.
 
 ## Do not add claude-sandbox to `@resurrect-processes` yet
 
@@ -130,4 +153,5 @@ Remove the lines added above from `~/.tmux.conf`, then:
 rm -rf ~/.tmux/plugins/tmux-resurrect ~/.tmux/plugins/tmux-continuum
 ```
 
-Saved state under `~/.tmux/resurrect/` can be kept or removed independently.
+Saved state under `~/.local/share/tmux/resurrect/` (or `~/.tmux/resurrect/`
+if that directory exists) can be kept or removed independently.
