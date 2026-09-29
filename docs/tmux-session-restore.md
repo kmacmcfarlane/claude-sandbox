@@ -113,13 +113,17 @@ Why: killing tmux during an autosave can leave `last` pointing at a partial
 save, and `last` is what auto-restore and `prefix + Ctrl-r` use. Stopping
 autosaves first and confirming `last` avoids that.
 
-If you don't reboot after all, turn autosave back on with
+If you change your mind before step 4, turn autosave back on with
 `tmux set -g @continuum-save-interval 1` (or `tmux source-file ~/.tmux.conf`).
+After step 4 there is nothing to re-enable: a new tmux server reads
+`~/.tmux.conf` and starts with autosave on.
 
 Killing tmux does not stop running sandboxes; it leaves them running only
 until the reboot. A reboot stops the containers and `--rm` removes them. So
-before rebooting, let each session finish its turn and note which
-conversations to resume afterwards with `claude-sandbox --new -- --resume <id>`.
+before rebooting, let each session finish its turn and note each
+conversation's session id (shown by `/status`) or its name, so you can resume
+it afterwards with `claude-sandbox --new -- --resume <id-or-name>` (or pick it
+from the `--resume` picker).
 
 `claude-sandbox --attach` helps only when you kill tmux without rebooting:
 the containers keep running detached, and you reattach by running it from the
