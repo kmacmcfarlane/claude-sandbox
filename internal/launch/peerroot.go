@@ -104,7 +104,9 @@ func pinsLegacyRoot(home string, sources []string, sameFile bool) bool {
 			legacyFI, _ = statPeerSource(legacy)
 		}
 		if legacyFI == nil {
-			return false
+			// No legacy root to compare with: no stat can match, but a later
+			// source in this row may still match by path.
+			continue
 		}
 		if fi, err := statPeerSource(cand); err == nil && os.SameFile(fi, legacyFI) {
 			return true

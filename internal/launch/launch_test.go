@@ -2075,6 +2075,18 @@ var _ = Describe("launch.Build", func() {
 				Expect(statted).To(Equal([]string{legacy, other}))
 			})
 
+			It("CS-DIR-011: a stat candidate that cannot match does not hide a later source that matches by path", func() {
+				// The legacy root cannot be stat'ed here, so the candidate
+				// listed first can never match; the row must still pin.
+				DeferCleanup(launch.SetStatPeerSource(func(string) (os.FileInfo, error) {
+					return nil, os.ErrNotExist
+				}))
+				row := []string{"/elsewhere/h/.cache/claude-sandbox/peers", legacy + "/sessions"}
+				c := launch.ChoosePeerRoot(home, [][]string{row}, nil, false, true)
+				Expect(c.Root).To(Equal(legacy))
+				Expect(c.Pinned).To(Equal(1))
+			})
+
 			It("CS-DIR-010: a test whose home is the real home panics before creating the peers root", func() {
 				real, err := os.UserHomeDir()
 				Expect(err).NotTo(HaveOccurred())
