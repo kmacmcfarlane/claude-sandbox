@@ -41,6 +41,9 @@ const (
 	CLIImageName  = "claude-sandbox-cli"
 	CLIDockerfile = "Dockerfile.cli"
 
+	// BaseDockerfile is the base image's Dockerfile in the repo root.
+	BaseDockerfile = "Dockerfile"
+
 	// CLIVersionLabel records the version the CLI image was pinned to; the
 	// update check reads it with an inspect instead of spawning a container.
 	CLIVersionLabel = "claude-sandbox.claude-version"
@@ -111,6 +114,12 @@ type Options struct {
 	// Self is the launcher binary the background build runs as
 	// "<Self> cli-prefetch <version>".
 	Self string
+
+	// Pulls records the external-parent pulls of one launch across the base,
+	// tools and CLI builds, deduping them and keeping each outcome
+	// (CS-IMG-055/056); nil pulls each image's parents on its own and records
+	// nothing.
+	Pulls *Pulls
 }
 
 // BakedSources are the paths (relative to RepoRoot) Dockerfile.tools COPYs
@@ -223,12 +232,12 @@ func Version(r execx.Runner, repoRoot string) string {
 // Returns whether a build happened.
 func EnsureBase(o Options) (rebuilt bool, err error) {
 	fp := baseInputs(o.RepoRoot)
-	need := false
+	need, fromScratch := false, false
 	switch {
 	case o.ForceRebuild:
-		need = true
+		need, fromScratch = true, true
 	case !imageExists(o.Runner, BaseImageName):
-		need = true
+		need, fromScratch = true, true
 	default:
 		if labeled, stale := labelVerdict(o.Runner, BaseImageName, fp); labeled {
 			if stale {
@@ -245,6 +254,11 @@ func EnsureBase(o Options) (rebuilt bool, err error) {
 	}
 	if !need {
 		return false, nil
+	}
+	if fromScratch {
+		// Only a from-scratch build pulls: an input-change build keeps its
+		// cached chain and works offline (CS-IMG-055).
+		pullParents(o, BaseDockerfile)
 	}
 	fmt.Fprintf(o.Out, "Building %s base image...\n", BaseImageName)
 	args := append([]string{"build", "-t", BaseImageName}, labelArgs(fp)...)
@@ -272,12 +286,12 @@ func EnsureTools(o Options) (rebuilt bool, err error) {
 	if have == "<no value>" {
 		have = ""
 	}
-	need := false
+	need, fromScratch := false, false
 	switch {
 	case o.ForceRebuild:
-		need = true
+		need, fromScratch = true, true
 	case !exists:
-		need = true
+		need, fromScratch = true, true
 	default:
 		if labeled, stale := fp != "" && have != "", have != fp; labeled {
 			if stale {
@@ -299,6 +313,9 @@ func EnsureTools(o Options) (rebuilt bool, err error) {
 	}
 	if !need {
 		return false, nil
+	}
+	if fromScratch {
+		pullParents(o, ToolsDockerfile) // CS-IMG-055
 	}
 	fmt.Fprintf(o.Out, "Building %s image (%s)...\n", ToolsImageName, o.Version)
 	args := append([]string{"build", "-t", ToolsImageName}, labelArgs(fp)...)
@@ -358,12 +375,12 @@ func buildCLITagged(o Options, tag, version string, noCache bool) error {
 // EnsureCLI builds the Claude Code CLI image when missing or stale
 // (CS-IMG-021, CS-IMG-022, CS-IMG-002). Returns whether a build happened.
 func EnsureCLI(o Options) (rebuilt bool, err error) {
-	need := false
+	need, fromScratch := false, false
 	switch {
 	case o.ForceRebuild:
-		need = true
+		need, fromScratch = true, true
 	case !imageExists(o.Runner, CLIImageName):
-		need = true
+		need, fromScratch = true, true
 	default:
 		if labeled, stale := labelVerdict(o.Runner, CLIImageName, cliInputs(o.RepoRoot)); labeled {
 			need = stale
@@ -376,6 +393,11 @@ func EnsureCLI(o Options) (rebuilt bool, err error) {
 	}
 	if !need {
 		return false, nil
+	}
+	if fromScratch {
+		// Not for an --update build or the background prefetch: those
+		// only change the pin (CS-IMG-055).
+		pullParents(o, CLIDockerfile)
 	}
 	return true, buildCLI(o, resolveClaudeVersion(o), o.ForceRebuild)
 }

@@ -1994,6 +1994,222 @@ var _ = Describe("image build lifecycle", func() {
 		})
 	})
 
+	// ---- external parents (CS-IMG-055/056) ----
+
+	Describe("external parent pulls", func() {
+		// pulls returns the docker pull calls in order.
+		pulls := func() []string {
+			var out []string
+			for _, l := range fake.CommandLines() {
+				if strings.HasPrefix(l, "docker pull ") {
+					out = append(out, l)
+				}
+			}
+			return out
+		}
+		// indexOf is the position of the first command line with prefix.
+		indexOf := func(prefix string) int {
+			for i, l := range fake.CommandLines() {
+				if strings.HasPrefix(l, prefix) {
+					return i
+				}
+			}
+			return -1
+		}
+		noPullFlag := func() {
+			for _, l := range fake.CommandLines() {
+				if strings.HasPrefix(l, "docker build ") {
+					for _, field := range strings.Fields(l) {
+						Expect(strings.HasPrefix(field, "--pull")).To(BeFalse(), l)
+					}
+				}
+			}
+		}
+
+		BeforeEach(func() {
+			fake.On("npm view @anthropic-ai/claude-code version", "1.2.3\n", nil)
+		})
+
+		It("CS-IMG-055: a missing base pulls its parent before the build", func() {
+			rebuilt, err := imagebuild.EnsureBase(o)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rebuilt).To(BeTrue())
+			Expect(pulls()).To(Equal([]string{"docker pull -q debian:bookworm-slim"}))
+			Expect(indexOf("docker pull ")).To(BeNumerically("<", indexOf("docker build ")))
+			noPullFlag()
+		})
+
+		It("CS-IMG-055: --rebuild pulls every external parent once across base, tools and CLI", func() {
+			for _, n := range []string{"claude-sandbox", "claude-sandbox-tools", "claude-sandbox-cli"} {
+				images[n] = &imgState{created: imgT}
+			}
+			o.ForceRebuild = true
+			o.Pulls = imagebuild.NewPulls()
+			_, err := imagebuild.EnsureBase(o)
+			Expect(err).NotTo(HaveOccurred())
+			_, err = imagebuild.EnsureTools(o)
+			Expect(err).NotTo(HaveOccurred())
+			_, err = imagebuild.EnsureCLI(o)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(pulls()).To(Equal([]string{
+				"docker pull -q debian:bookworm-slim",
+				"docker pull -q golang:1.25-bookworm",
+				"docker pull -q node:22-bookworm-slim",
+			}))
+			Expect(buildLines(fake)).To(HaveLen(3))
+			noPullFlag()
+		})
+
+		It("CS-IMG-055: a missing tools or CLI image pulls its own parents", func() {
+			_, err := imagebuild.EnsureTools(o)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(pulls()).To(Equal([]string{
+				"docker pull -q golang:1.25-bookworm",
+				"docker pull -q node:22-bookworm-slim",
+				"docker pull -q debian:bookworm-slim",
+			}))
+			Expect(indexOf("docker pull ")).To(BeNumerically("<", indexOf("docker build ")))
+
+			fake.Calls = nil
+			_, err = imagebuild.EnsureCLI(o)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(pulls()).To(Equal([]string{"docker pull -q debian:bookworm-slim"}))
+			noPullFlag()
+		})
+
+		It("CS-IMG-055: an input-change base build pulls nothing, and neither does a fresh image", func() {
+			images["claude-sandbox"] = &imgState{created: imgT, inputs: strings.Repeat("0", 64)}
+			rebuilt, err := imagebuild.EnsureBase(o)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rebuilt).To(BeTrue(), "the test must exercise an input-change build")
+			Expect(pulls()).To(BeEmpty())
+
+			// Unlabeled image, Dockerfile newer: the mtime rule is an input change too.
+			fake.Calls = nil
+			images["claude-sandbox"] = &imgState{created: imgT}
+			touchAt(filepath.Join(repo, "Dockerfile"), time.Now())
+			rebuilt, err = imagebuild.EnsureBase(o)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rebuilt).To(BeTrue())
+			Expect(pulls()).To(BeEmpty())
+
+			// Existing, current images: no build, no pull.
+			fake.Calls = nil
+			images["claude-sandbox-tools"] = &imgState{created: imgT}
+			images["claude-sandbox-cli"] = &imgState{created: imgT}
+			touchAt(filepath.Join(repo, "Dockerfile"), old)
+			_, err = imagebuild.EnsureTools(o)
+			Expect(err).NotTo(HaveOccurred())
+			_, err = imagebuild.EnsureCLI(o)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(pulls()).To(BeEmpty())
+			Expect(buildLines(fake)).To(BeEmpty())
+		})
+
+		It("CS-IMG-055: the build-inputs fingerprints are the same whether or not the build pulled", func() {
+			_, err := imagebuild.EnsureBase(o) // missing: pulls
+			Expect(err).NotTo(HaveOccurred())
+			pulled := stampOf(fake, "claude-sandbox")
+			Expect(pulled).NotTo(BeEmpty())
+
+			fake.Calls = nil
+			images["claude-sandbox"] = &imgState{created: imgT, inputs: strings.Repeat("0", 64)}
+			_, err = imagebuild.EnsureBase(o) // input change: no pull
+			Expect(err).NotTo(HaveOccurred())
+			Expect(pulls()).To(BeEmpty())
+			Expect(stampOf(fake, "claude-sandbox")).To(Equal(pulled))
+		})
+
+		It("CS-IMG-055: an --update CLI build and the background prefetch pull nothing", func() {
+			images["claude-sandbox-cli"] = &imgState{created: imgT, claudeVersion: "1.2.2"}
+			o.AutoUpdate = true
+			Expect(imagebuild.UpdateCheck(o, false)).To(BeTrue())
+			Expect(buildLines(fake)).To(HaveLen(1))
+
+			o.CacheDir = filepath.Join(GinkgoT().TempDir(), "cache")
+			Expect(imagebuild.Prefetch(o, "1.2.4")).To(Succeed())
+			Expect(buildLines(fake)).To(HaveLen(2))
+			Expect(pulls()).To(BeEmpty())
+			noPullFlag()
+		})
+
+		It("CS-IMG-055: child and cap builds never pull", func() {
+			proj := GinkgoT().TempDir()
+			df := filepath.Join(proj, ".claude-sandbox", "Dockerfile")
+			touchAt(df, old)
+			spec := imagebuild.ChildSpec{Use: true, Dockerfile: df, Context: proj, ImageName: "claude-sandbox-proj"}
+			images["claude-sandbox"] = &imgState{created: imgT, id: "sha256:base"}
+			images["claude-sandbox-tools"] = &imgState{created: imgT, id: "sha256:tools"}
+			images["claude-sandbox-cli"] = &imgState{created: imgT, id: "sha256:cli"}
+			o.ForceRebuild = true
+			_, built, err := imagebuild.EnsureChild(o, spec, true, false)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(built).To(BeTrue())
+			images["claude-sandbox-proj"] = &imgState{created: imgT, id: "sha256:proj"}
+			_, built, err = imagebuild.EnsureCap(o, "claude-sandbox-proj")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(built).To(BeTrue())
+			Expect(buildLines(fake)).To(HaveLen(2))
+			Expect(pulls()).To(BeEmpty())
+			noPullFlag()
+		})
+
+		It("CS-IMG-055: each parent's outcome is recorded by image: pulled, failed or skipped", func() {
+			fake.On("docker pull -q node:22-bookworm-slim", "", execx.Fail(1))
+			o.Pulls = imagebuild.NewPulls()
+			Expect(o.Pulls.Outcome("debian:bookworm-slim")).To(Equal(imagebuild.PullSkipped))
+			Expect(o.Pulls.Pulled(imagebuild.BaseDockerfile)).To(BeFalse())
+
+			_, err := imagebuild.EnsureBase(o)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(o.Pulls.Outcome("debian:bookworm-slim")).To(Equal(imagebuild.PullPulled))
+			Expect(o.Pulls.Outcome("golang:1.25-bookworm")).To(Equal(imagebuild.PullSkipped))
+			Expect(o.Pulls.Pulled(imagebuild.BaseDockerfile)).To(BeTrue())
+
+			_, err = imagebuild.EnsureTools(o)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(o.Pulls.Outcome("golang:1.25-bookworm")).To(Equal(imagebuild.PullPulled))
+			Expect(o.Pulls.Outcome("node:22-bookworm-slim")).To(Equal(imagebuild.PullFailed))
+			Expect(o.Pulls.Pulled(imagebuild.ToolsDockerfile)).To(BeFalse())
+			Expect(o.Pulls.Pulled(imagebuild.CLIDockerfile)).To(BeTrue(), "debian was pulled for the base")
+
+			var none *imagebuild.Pulls
+			Expect(none.Outcome("debian:bookworm-slim")).To(Equal(imagebuild.PullSkipped))
+		})
+
+		It("CS-IMG-056: a failed pull warns once naming the image and docker's error, then builds on the local copy", func() {
+			fake.OnFunc("docker pull -q debian:bookworm-slim", func(c execx.Cmd) (string, error) {
+				io.WriteString(c.Stderr, "Error response from daemon: Get \"https://registry-1.docker.io/v2/\": dial tcp: lookup registry-1.docker.io: no such host\n")
+				return "", execx.Fail(1)
+			})
+			o.Pulls = imagebuild.NewPulls()
+			rebuilt, err := imagebuild.EnsureBase(o)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rebuilt).To(BeTrue())
+			Expect(buildLines(fake)).To(ConsistOf("docker build -t claude-sandbox " + repo))
+			Expect(errw.String()).To(Equal("WARNING: could not pull debian:bookworm-slim (Error response from daemon: " +
+				"Get \"https://registry-1.docker.io/v2/\": dial tcp: lookup registry-1.docker.io: no such host); building on the local copy.\n"))
+
+			// Not pulled (or warned about) again for the CLI image this launch;
+			// no retry of the pull or the build.
+			_, err = imagebuild.EnsureCLI(o)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(pulls()).To(HaveLen(1))
+			Expect(strings.Count(errw.String(), "WARNING: could not pull")).To(Equal(1))
+			Expect(buildLines(fake)).To(HaveLen(2))
+		})
+
+		It("CS-IMG-056: with no stderr the warning names the process error; a build failure still fails", func() {
+			fake.On("docker pull", "", execx.Fail(1))
+			fake.On("docker build", "", execx.Fail(1))
+			_, err := imagebuild.EnsureBase(o)
+			Expect(err).To(HaveOccurred())
+			Expect(errw.String()).To(ContainSubstring("WARNING: could not pull debian:bookworm-slim (exit 1); building on the local copy."))
+			Expect(buildLines(fake)).To(HaveLen(1))
+			Expect(pulls()).To(HaveLen(1))
+		})
+	})
+
 	// ---- --version report ----
 
 	Describe("PrintVersion", func() {

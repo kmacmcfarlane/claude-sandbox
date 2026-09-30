@@ -97,7 +97,7 @@ These flags are consumed by the launcher and control the container environment. 
 | `--host-access-package-caches-enabled` | `--package-caches` | Keep go/npm/pip downloads made inside sessions in `~/.cache/claude-sandbox/` on the host |
 | `--model MODEL` | | Model to use (alias like `opus` or full ID like `claude-opus-4-8`) |
 | `--dangerous` | | Pass `--dangerously-skip-permissions` to claude/ralph and `--join` sessions (durable alternatives: `dangerous: true` in config.yaml, or `CLAUDE_SANDBOX_DANGEROUS=1`) |
-| `--rebuild` | | Force rebuild of every image — base, tools, Claude Code, child, run (uses `--no-cache`) |
+| `--rebuild` | | Force rebuild of every image — base, tools, Claude Code, child, run (uses `--no-cache`; `docker pull`s the base, tools and CLI registry parents first) |
 | `--update` | | Check npm for a Claude Code update now and build it in the foreground before launching (only the CLI image; without it an update builds in the background for the next launch) |
 | `--no-update-check` | | Skip Claude Code version check at launch |
 | `--ralph` | | Launch the ralph loop runner instead of interactive claude |
@@ -1861,6 +1861,8 @@ If a background build fails, launches keep using the current CLI image and print
 ```bash
 claude-sandbox --rebuild
 ```
+
+**Upstream parent images:** the base, tools and CLI Dockerfiles build `FROM` registry images (`debian:bookworm-slim` for all three, plus `golang:1.25-bookworm` and `node:22-bookworm-slim` for the tools image). A build uses whatever copy of those is in the local image store, so before a from-scratch build — the image is missing, or `--rebuild` — the launcher runs `docker pull` on that image's parents first (each parent once per launch, the outcome of each kept for the rest of the launch). It never uses BuildKit's `--pull`, which on the classic image store refreshes only that one build and leaves the local tag behind, so the next build would go back to the old parent. An ordinary rebuild because the Dockerfile changed does not pull, so it stays cached and works offline; neither does `--update`, the background CLI build, a child build or a cap build (their `FROM`s name local-only images). A headless launch pulls by the same rules, with the pull output on stderr like the rest of its launcher output (the pull only ever precedes a from-scratch build, which already takes minutes). When a pull fails (offline, registry down), the launcher prints `WARNING: could not pull <image> (<error>); building on the local copy.` and builds anyway. A child Dockerfile's own registry `FROM`s are its own business: the launcher never pulls them.
 
 ## Makefile integration
 
