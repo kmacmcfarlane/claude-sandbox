@@ -821,6 +821,10 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
     And a container without that label (from before it) is looked up in
       <CLAUDE_CONFIG_DIR or ~/.claude>/sessions and in
       ~/.cache/claude-sandbox/peers/sessions
+    # The legacy peers root on purpose: a container without the label predates
+    # the peers move too (CS-DIR-011). Every later container names its registry
+    # dir, whichever root its launch took, so sessions on the legacy and the new
+    # root are both read from where they really are.
     And each directory is opened once with O_DIRECTORY|O_NOFOLLOW, and each
       record "<pid>.json" through that directory fd with
       O_NOFOLLOW|O_NONBLOCK|O_NOCTTY

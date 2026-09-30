@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/hostdirs"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/registry"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/sessions"
 )
@@ -308,7 +309,10 @@ func registryDirs(m Mark, o SaveOptions) []string {
 		dirs = append(dirs, filepath.Join(cfg, "sessions"))
 	}
 	if filepath.IsAbs(o.Home) {
-		dirs = append(dirs, filepath.Join(o.Home, ".cache", "claude-sandbox", "peers", "sessions"))
+		// The LEGACY peers root on purpose: a mark without registryDir comes
+		// from a container that predates the peers move (CS-DIR-011). Every
+		// later mark names the dir its launch applied, legacy or new root.
+		dirs = append(dirs, filepath.Join(hostdirs.LegacyPeersRoot(o.Home), "sessions"))
 	}
 	return dirs
 }

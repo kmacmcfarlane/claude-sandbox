@@ -60,7 +60,11 @@ var _ = Describe("state and cache roots", func() {
 		// No XDG_CACHE_HOME input exists to honour: the signature takes none.
 		Expect(launch.SandboxHomeRoot).To(Equal(hostdirs.CacheRootRel))
 		Expect(launch.PackageCacheRoot).To(Equal(".cache/claude-sandbox"))
-		Expect(launch.PeerRegistryRoot).To(Equal(".cache/claude-sandbox/peers"))
+		// The peer registry is state and has left the cache root
+		// (CS-DIR-010); only its legacy location, kept for the drain
+		// (CS-DIR-011), still derives from it.
+		Expect(launch.LegacyPeerRegistryRoot).To(Equal(".cache/claude-sandbox/peers"))
+		Expect(launch.PeerRegistryRoot).To(Equal(".local/state/claude-sandbox-peers"))
 		Expect(launch.LaunchLockPath("/h")).To(Equal("/h/.cache/claude-sandbox/launch.lock"))
 	})
 })

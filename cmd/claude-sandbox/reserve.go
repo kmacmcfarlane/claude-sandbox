@@ -135,7 +135,7 @@ func reserveContainer(env *Env, in launch.Inputs, wt worktreeChoice, ralph bool,
 	var lost []string // nouns a create conflict proved taken
 	reclaimed := false
 	for attempt := 1; ; attempt++ {
-		found, derr := discoverForReservation(env)
+		found, removing, derr := discoverForReservation(env)
 		if in.Resume != "" {
 			// CS-SESS-065..069: under the lock, before the create, on every
 			// attempt, so a launch racing this one is seen by its label.
@@ -168,6 +168,10 @@ func reserveContainer(env *Env, in launch.Inputs, wt worktreeChoice, ralph bool,
 		}
 		in.Worktree = wt.nameFor(instance, ralph)
 		in.PIDClass = pidClassFrom(found)
+		// CS-DIR-010..016: the peers root, from the same discovery and under
+		// the same lock, so every launcher on the host agrees on it.
+		pr := peerRootFrom(in.Home, found, removing, derr, false)
+		in.PeerRoot = &pr
 
 		if attempt > 1 {
 			// Build's warnings and banners were printed on the first attempt.
@@ -216,18 +220,21 @@ func reserveContainer(env *Env, in launch.Inputs, wt worktreeChoice, ralph bool,
 // discoverForReservation lists every sandbox container on the host, created
 // reservations included (CS-SESS-050), and removes the stale reservations
 // among them (CS-SESS-052). Discovery failing must not block a launch: the
-// picks then fall back to random, as they always have.
-func discoverForReservation(env *Env) ([]sessions.Session, error) {
+// picks then fall back to random, as they always have. removing are the
+// exited --rm rows docker is still removing, listed for the peers-root pin
+// only (CS-DIR-011).
+func discoverForReservation(env *Env) (found, removing []sessions.Session, err error) {
 	// Uncounted: session counts are not needed to pick, and counting would run
 	// one docker top per running sandbox inside the critical section.
-	found, err := sessions.DiscoverAllUncounted(env.Runner)
+	found, removing, err = sessions.DiscoverForLaunch(env.Runner)
 	if err != nil {
-		// The error matters only to the resume guard, which fails closed.
-		return nil, err
+		// The error matters to the resume guard and the peers root, which
+		// both fail closed (CS-SESS-069, CS-DIR-014).
+		return nil, nil, err
 	}
 	stale := sessions.Stale(found, env.now(), staleReservationAge)
 	if len(stale) == 0 {
-		return found, nil
+		return found, removing, nil
 	}
 	removed := map[string]bool{}
 	for _, s := range stale {
@@ -236,7 +243,18 @@ func discoverForReservation(env *Env) ([]sessions.Session, error) {
 			removed[s.Name] = true
 		}
 	}
-	return slices.DeleteFunc(found, func(s sessions.Session) bool { return removed[s.Name] }), nil
+	return slices.DeleteFunc(found, func(s sessions.Session) bool { return removed[s.Name] }), removing, nil
+}
+
+// peerRootFrom chooses the shared peer registry's root (CS-DIR-010..016) from
+// the bind sources of every row discovery returned. keep marks a kept launch
+// (CS-DIR-016); no launch is marked kept yet.
+func peerRootFrom(home string, found, removing []sessions.Session, derr error, keep bool) launch.PeerRootChoice {
+	var mounts [][]string
+	for _, s := range append(slices.Clip(found), removing...) {
+		mounts = append(mounts, s.Mounts)
+	}
+	return launch.ChoosePeerRoot(home, mounts, derr, keep)
 }
 
 // guardResume refuses a launch that would resume a conversation already open

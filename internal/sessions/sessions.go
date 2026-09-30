@@ -53,6 +53,9 @@ const (
 	// LabelResume is the conversation a container was created to resume, read
 	// by the resume guard (CS-LNCH-110, CS-SESS-065).
 	LabelResume = launch.LabelResume
+	// LabelPeerRoot is the peers root the container's bridge applied, or
+	// "none" (CS-DIR-012), read by the drift check (CS-DIR-017).
+	LabelPeerRoot = launch.LabelPeerRoot
 )
 
 // ModeRalph marks a ralph loop container.
@@ -117,6 +120,13 @@ type Session struct {
 	// Resume is the claude-sandbox.resume label (CS-LNCH-110), "" when unset
 	// or on an older row.
 	Resume string `json:"-"`
+	// PeerRoot is the claude-sandbox.peerroot label (CS-DIR-012): the peers
+	// root the bridge applied, "none", or "" on a container that predates it.
+	PeerRoot string `json:"-"`
+	// Mounts are the container's bind sources ({{.Mounts}} under --no-trunc,
+	// split on ","), read for the peers-root pin (CS-DIR-011). nil on an
+	// older row.
+	Mounts []string `json:"-"`
 }
 
 // StateCreated is docker's state for a container that exists but has never
@@ -194,7 +204,11 @@ var psFormat = strings.Join([]string{
 	`{{.Label "` + LabelConfigDir + `"}}`,
 	`{{.Label "` + LabelRegistry + `"}}`,
 	`{{.Label "` + LabelLaunchFlags + `"}}`,
-	`{{.Label "` + LabelResume + `"}}`, // CS-SESS-065
+	`{{.Label "` + LabelResume + `"}}`,   // CS-SESS-065
+	`{{.Label "` + LabelPeerRoot + `"}}`, // CS-DIR-012
+	// CS-DIR-011: every bind source, comma-joined; last, so nothing after
+	// it depends on how a source is spelled.
+	"{{.Mounts}}",
 }, fieldSep)
 
 // psFieldCount is the minimum a row must carry; State and CreatedAt follow.
@@ -239,7 +253,17 @@ func DiscoverAll(r execx.Runner) ([]Session, error) {
 // docker call per running sandbox on the host to the critical section
 // (CS-SESS-048).
 func DiscoverAllUncounted(r execx.Runner) ([]Session, error) {
-	return list(r, LabelProject, false)
+	found, _, err := listAll(r, LabelProject, false)
+	return found, err
+}
+
+// DiscoverForLaunch is DiscoverAllUncounted plus the rows it leaves out:
+// exited containers without the keep label, which docker is still removing
+// (CS-SESS-070). Their bind sources still count for the peers-root pin
+// (CS-DIR-011) — a --rm container being removed may hold the legacy root a
+// moment longer. Same single docker ps.
+func DiscoverForLaunch(r execx.Runner) (found, removing []Session, err error) {
+	return listAll(r, LabelProject, false)
 }
 
 // list runs one docker ps and reads names, status and every label from the same
@@ -261,6 +285,13 @@ func DiscoverAllUncounted(r execx.Runner) ([]Session, error) {
 // (CS-SESS-072), while a --rm container is only ever exited while docker
 // removes it and stays out, as before.
 func list(r execx.Runner, filter string, count bool) ([]Session, error) {
+	found, _, err := listAll(r, filter, count)
+	return found, err
+}
+
+// listAll is list, also returning the exited rows without the keep label it
+// leaves out of the listing (DiscoverForLaunch).
+func listAll(r execx.Runner, filter string, count bool) ([]Session, []Session, error) {
 	out, err := r.Output(execx.Cmd{
 		Name: "docker",
 		Args: []string{"ps", "-a",
@@ -274,9 +305,9 @@ func list(r execx.Runner, filter string, count bool) ([]Session, error) {
 		Stderr: io.Discard,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("listing sandbox containers: %w", err)
+		return nil, nil, fmt.Errorf("listing sandbox containers: %w", err)
 	}
-	var out2 []Session
+	var out2, removing []Session
 	for _, line := range strings.Split(out, "\n") {
 		line = strings.TrimRight(line, "\r")
 		if strings.TrimSpace(line) == "" {
@@ -310,9 +341,14 @@ func list(r execx.Runner, filter string, count bool) ([]Session, error) {
 		if len(f) > 20 {
 			s.Resume = strings.TrimSpace(f[20])
 		}
+		if len(f) > 22 {
+			s.PeerRoot = strings.TrimSpace(f[21])
+			s.Mounts = launch.SplitMounts(f[22])
+		}
 		// An exited or restarting container is listed only when kept: a --rm
 		// one is being removed (CS-SESS-070).
 		if s.Down() && s.Keep == "" {
+			removing = append(removing, s)
 			continue
 		}
 		// A reservation or a stopped kept container has no processes to
@@ -323,7 +359,7 @@ func list(r execx.Runner, filter string, count bool) ([]Session, error) {
 		}
 		out2 = append(out2, s)
 	}
-	return out2, nil
+	return out2, removing, nil
 }
 
 // countSessions counts live claude processes in a container (CS-SESS-003).

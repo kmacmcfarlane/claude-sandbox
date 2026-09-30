@@ -249,6 +249,9 @@ Feature: tmux integration (CS-TMUX)
     Then the hook reads "<registryDir>/<pid>.json" records; a mark without registryDir (a container
       from before CS-LNCH-109) tries "<CLAUDE_CONFIG_DIR, else ~/.claude>/sessions" and then
       "~/.cache/claude-sandbox/peers/sessions"
+    # The legacy peers root on purpose: a mark without registryDir predates the
+    # peers move (CS-DIR-011); every later mark records the registry dir its
+    # container's launch applied, legacy or new root alike.
     And a candidate record has pid % 256 == the mark's class and a cwd equal to or under the mark's
       project or cwdRoot
     And for mode "claude" it started between since - 5 s and since + 120 s (tmuxpane.PrimaryWindow)

@@ -416,10 +416,12 @@ sharedPeerRegistry: true
 ```
 
 With the key on, every opted-in container uses one shared folder,
-`~/.cache/claude-sandbox/peers`, mounted at the **same path** in every container with
+`~/.local/state/claude-sandbox-peers` (the old `~/.cache/claude-sandbox/peers` while a container
+still mounts it — see [Moving the registry out of the cache](#moving-the-registry-out-of-the-cache)),
+mounted at the **same path** in every container with
 `XDG_RUNTIME_DIR` pointed at it (Claude Code puts its socket under `XDG_RUNTIME_DIR` in
 preference to `CLAUDE_CODE_TMPDIR`), so every session's advertised socket address,
-`~/.cache/claude-sandbox/peers/cc-socks/<pid>.sock`, is valid in every bridged container. Its
+`<peers root>/cc-socks/<pid>.sock`, is valid in every bridged container. Its
 `sessions/` is mounted over the container's `<config dir>/sessions`, so they share one registry
 too. Scratchpads stay under `CLAUDE_CODE_TMPDIR` and do not move, but `XDG_RUNTIME_DIR` applies
 to the whole container, so other tools that use it also leave their runtime files in the shared
@@ -497,8 +499,9 @@ belong in `config.yaml`, which a restore re-reads like any launch.
 An attach or join never saw the original launch, so every container also carries three
 labels (outside the config-drift hash): `claude-sandbox.configdir` (the raw
 `CLAUDE_CONFIG_DIR`, empty when unset), `claude-sandbox.registry` (the host dir its registry
-records land in — the shared `peers/sessions` when [the bridge](#messaging-between-sessions)
-applied) and `claude-sandbox.launchflags` (the flag names, comma-separated, names only). An
+records land in — the shared `<peers root>/sessions` when [the bridge](#messaging-between-sessions)
+applied, on whichever root that launch took, so a restore reads each session's records where they
+really are) and `claude-sandbox.launchflags` (the flag names, comma-separated, names only). An
 attach's mark takes them from there; its `unreplayed` holds every name, since an attach never
 saw the values, and it records the container's model only when the launcher's `--model` was the
 one given (a claude `--model` after `--` is labelled `--model:claude` and listed as unreplayed). A container from before these labels gets `"flagsUnknown": true`.
@@ -1119,9 +1122,10 @@ disjoint registries and advertise socket addresses no other container can reach:
 sharedPeerRegistry: true
 ```
 
-One shared folder, `~/.cache/claude-sandbox/peers`, is mounted **read-write** at the same path
+One shared folder, the peers root `~/.local/state/claude-sandbox-peers`, is mounted
+**read-write** at the same path
 in every bridged container, and `XDG_RUNTIME_DIR` is set to it, so every session binds and
-advertises its inbox socket at `~/.cache/claude-sandbox/peers/cc-socks/<pid>.sock` — an
+advertises its inbox socket at `<peers root>/cc-socks/<pid>.sock` — an
 address that works from every other bridged container, whatever its config dir. Its `sessions/`
 is mounted read-write over the container's `<config dir>/sessions`, so all of them share one
 registry. Claude Code's scratchpads stay under `CLAUDE_CODE_TMPDIR` and do not move. But
@@ -1139,7 +1143,7 @@ see bridged records either. The host binds its socket under its own runtime dir 
 `/run/user/<uid>/cc-socks`), which no bridged container mounts. No `sharedPeerRegistry` setting
 bridges the host itself.
 
-The launcher creates `peers/`, `peers/sessions/` and `peers/cc-socks/` on the host as you,
+The launcher creates the peers root, its `sessions/` and its `cc-socks/` on the host as you,
 before `docker create`, and forces them to `0700` even if they already exist with a wider mode: Docker would otherwise create a missing bind source as root, and
 Claude Code refuses a socket directory that is group- or world-writable or owned by someone
 else — it then silently falls back to a private `/tmp` inside the container that no other
@@ -1156,7 +1160,7 @@ docker reads it, so a bare `XDG_RUNTIME_DIR` line counts when your environment s
 since docker passes it through), or when your home
 directory is so long that the socket path would exceed Claude Code's 103-byte limit, or when
 the launcher cannot create one of those directories or restrict it to `0700` — for example a
-`peers/` Docker once created as root, or one replaced by a symlink (the launcher never re-modes
+peers root Docker once created as root, or one replaced by a symlink (the launcher never re-modes
 through a link). That warning names the directory and the fix: make it yours (`chown` it, or
 remove it and relaunch), or set `CLAUDE_SANDBOX_SHARED_PEER_REGISTRY=0` to keep the tree off
 the bridge. It is all
@@ -1178,6 +1182,53 @@ every session that is to be visible must be opted in and relaunched — see
 It is part of the config-drift fingerprint (unlike the model and the worktree, it is a property
 of the environment, not a per-session choice). See
 [Messaging between sessions](#messaging-between-sessions) for what the boundary crossing means.
+
+##### Moving the registry out of the cache
+
+The registry used to live at `~/.cache/claude-sandbox/peers`. It is **state**, not cache: a
+cache cleaner (`rm -rf ~/.cache`, BleachBit, a tmpfiles rule) deleting it would take every
+bridged session dark until each was relaunched. Its root is now
+`~/.local/state/claude-sandbox-peers`, a sibling of the launcher's state root (it never follows
+`XDG_STATE_HOME`: the same path must hold on the host and in every container).
+
+Running sessions cannot be moved — their mounts hold the old directory and their records
+advertise the old socket paths — so the launcher **drains, then switches**. Under the launch
+lock it reads every container's bind sources (the same `docker ps -a --no-trunc` it already
+runs, with `{{.Mounts}}`):
+
+- **Any container** (any state, another user's excluded) mounting `~/.cache/claude-sandbox/peers`
+  or something under it pins the old location: the launch bridges there too, so it still sees
+  and is seen by the old sessions. Its banner says so:
+  `Peer registry: shared (~/.cache/claude-sandbox/peers) - … This is the old location: N
+  container(s) use it. It moves to ~/.local/state/claude-sandbox-peers at the first launch when
+  none do (usually after a reboot).`
+- **No container** mounting it: the launch takes the new root, and prints the plain banner.
+- **`docker ps` failed**: the launch keeps the old location if that directory exists, with
+  `Warning: could not list containers; keeping the peer registry at … for this launch`, and
+  takes the new root otherwise.
+
+Every bridged launch during the drain mounts the old location again, so with overlapping
+sessions the switch happens in practice at the **first launch after a reboot**, or after you end
+(or stop) every bridged session and then launch. Nothing is copied. Each container records the
+root it took in the `claude-sandbox.peerroot` label (`none` without the bridge) and in
+`claude-sandbox.registry`, so attach/join drift checks, the resume guard, the tmux pane marks
+and a restore read each session from its own root, old or new; a container from before these
+labels is read at the old location.
+
+A nested launcher (inside a sandbox) makes the same choice from the same host daemon, and
+bridges only when its own sandbox mounts the chosen root (`XDG_RUNTIME_DIR` is that root) or the
+root is otherwise visibly bound in; otherwise the bridge stands down for that session with one
+warning. A nested launch under an **unbridged** sandbox therefore no longer bridges.
+
+**Afterwards:** the launcher never deletes `~/.cache/claude-sandbox/peers`. Once no container
+uses it (`docker ps -a --no-trunc --format '{{.Names}} {{.Mounts}}' | grep
+claude-sandbox/peers` prints nothing, and a new bridged launch's banner shows the new root),
+remove it by hand: `rm -rf ~/.cache/claude-sandbox/peers`. Its crash-surviving records are the
+only copy of sessions' names and ids from before the switch; keep it until a restore no longer
+needs them. Scripts of your own that read `~/.cache/claude-sandbox/peers/sessions` should read
+each container's `claude-sandbox.registry` label instead (or both roots). A long home directory
+loses 6 bytes of socket-path headroom with the new root: a home of up to 47 bytes still bridges
+(was 53).
 
 #### Host access
 

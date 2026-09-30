@@ -405,7 +405,7 @@ func joinExistingSession(env *Env, projectDir string, f *launchFlags, cfg *casca
 
 	noteEarlierOOM(env, d.Target)
 
-	wantHash, wantInputs := wouldBeFingerprint(env, projectDir, f, cfg, envFiles, linked)
+	wantHash, wantInputs := wouldBeFingerprint(env, projectDir, f, cfg, envFiles, linked, &d.Target)
 	proceed, newContainer, err := confirmDrift(env, d.Target, wantHash, wantInputs, f)
 	if err != nil {
 		return false, err
@@ -432,8 +432,10 @@ func joinExistingSession(env *Env, projectDir string, f *launchFlags, cfg *casca
 // already exists; when it does not, the empty ID is itself a difference, which
 // is correct — the launch would have built a new image. A linked worktree
 // resolves its child Dockerfile and git dir mount as the launch does
-// (CS-LNCH-074).
-func wouldBeFingerprint(env *Env, projectDir string, f *launchFlags, cfg *cascade.Config, envFiles []string, linked *launch.LinkedWorktree) (string, []launch.InputDigest) {
+// (CS-LNCH-074). target is the container being attached to or joined: its
+// own peers root is reused (CS-DIR-017), so a session on the legacy root shows
+// no drift once launches have switched; nil uses the new root.
+func wouldBeFingerprint(env *Env, projectDir string, f *launchFlags, cfg *cascade.Config, envFiles []string, linked *launch.LinkedWorktree, target *sessions.Session) (string, []launch.InputDigest) {
 	mainCheckout := ""
 	if linked != nil {
 		mainCheckout = linked.Main
@@ -471,6 +473,10 @@ func wouldBeFingerprint(env *Env, projectDir string, f *launchFlags, cfg *cascad
 	defer os.RemoveAll(shadow)
 
 	uid, gid, uname, home := hostIdentity(env.Getenv)
+	var peerRoot *launch.PeerRootChoice
+	if target != nil {
+		peerRoot = &launch.PeerRootChoice{Root: launch.DriftPeerRoot(home, target.PeerRoot, target.Mounts)}
+	}
 	plan, err := launch.Build(launch.Inputs{
 		ProjectDir: projectDir, Home: home, TempDir: shadow,
 		HostUID: uid, HostGID: gid, HostUser: uname,
@@ -489,7 +495,9 @@ func wouldBeFingerprint(env *Env, projectDir string, f *launchFlags, cfg *cascad
 		// The launch passes it too: a nested check that decided differently
 		// would change the mount set, and with it the hash (CS-LNCH-163..165).
 		MountInfo: env.MountInfo,
-		Out:       io.Discard, Err: io.Discard,
+		// CS-DIR-017/019: the target's own root, and nothing created for it.
+		PeerRoot: peerRoot, NoCreatePeerDirs: true,
+		Out: io.Discard, Err: io.Discard,
 	})
 	if err != nil {
 		// Without a comparable hash, drift cannot be judged; confirmDrift treats

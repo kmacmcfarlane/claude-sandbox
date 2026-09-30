@@ -27,6 +27,7 @@ import (
 	assets "github.com/kmacmcfarlane/claude-sandbox"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/cascade"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/hostdirs"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/imagebuild"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/launch"
 )
@@ -1357,7 +1358,7 @@ var _ = Describe("launch.Build", func() {
 			home = filepath.Join(short, "h")
 			mkdir(home)
 			in.Home = home
-			root = filepath.Join(home, ".cache", "claude-sandbox", "peers")
+			root = hostdirs.PeersRoot(home) // CS-DIR-010: the default root
 			cfgDir = filepath.Join(home, ".claude")
 			mkdir(cfgDir)
 		})
@@ -1380,7 +1381,7 @@ var _ = Describe("launch.Build", func() {
 			var got []string
 			args := p.CreateArgs(proj)
 			for _, v := range argPairs(args, "-v") {
-				if strings.Contains(v, filepath.Join("claude-sandbox", "peers")) {
+				if strings.Contains(v, "claude-sandbox-peers") {
 					got = append(got, "-v "+v)
 				}
 			}
@@ -1400,6 +1401,7 @@ var _ = Describe("launch.Build", func() {
 			Expect(build().CreateArgs(proj)).To(Equal(before))
 			for _, v := range before {
 				Expect(v).NotTo(ContainSubstring("claude-sandbox/peers"))
+				Expect(v).NotTo(ContainSubstring("claude-sandbox-peers"))
 				Expect(v).NotTo(ContainSubstring("XDG_RUNTIME_DIR"))
 			}
 			// The pre-commit cache (CS-LNCH-133) is always created; the peers
@@ -1470,7 +1472,7 @@ var _ = Describe("launch.Build", func() {
 			var rest []string
 			for i := 0; i < len(on); i++ {
 				if i+1 < len(on) && (on[i] == "-v" || on[i] == "-e") &&
-					(strings.Contains(on[i+1], filepath.Join("claude-sandbox", "peers")) ||
+					(strings.Contains(on[i+1], "claude-sandbox-peers") ||
 						strings.HasPrefix(on[i+1], "XDG_RUNTIME_DIR=")) {
 					i++
 					continue
@@ -1489,6 +1491,9 @@ var _ = Describe("launch.Build", func() {
 					if strings.HasPrefix(a, launch.LabelRegistry+"=") {
 						a = launch.LabelRegistry + "=<masked>"
 					}
+					if strings.HasPrefix(a, launch.LabelPeerRoot+"=") {
+						a = launch.LabelPeerRoot + "=<masked>" // CS-DIR-012
+					}
 					out[i] = a
 				}
 				return out
@@ -1506,7 +1511,7 @@ var _ = Describe("launch.Build", func() {
 			// Every session bind()s its socket and writes its record: neither
 			// mount may be :ro (bind() under a read-only bind is EROFS).
 			for _, v := range p.Volumes {
-				if strings.Contains(v, filepath.Join("claude-sandbox", "peers")) {
+				if strings.Contains(v, "claude-sandbox-peers") {
 					Expect(v).NotTo(HaveSuffix(":ro"))
 				}
 			}
@@ -1578,9 +1583,9 @@ var _ = Describe("launch.Build", func() {
 				Expect(fi.IsDir()).To(BeTrue(), d)
 				Expect(fi.Mode().Perm()).To(Equal(os.FileMode(0o700)), d)
 			}
-			Expect(launch.PeerRegistryRoot).To(Equal(".cache/claude-sandbox/peers"))
-			// One root for every fixed host-side mount, so they cannot drift.
-			Expect(launch.PeerRegistryRoot).To(HavePrefix(launch.PackageCacheRoot + "/"))
+			// The root is state, outside the cache root (CS-DIR-010).
+			Expect(launch.PeerRegistryRoot).To(Equal(".local/state/claude-sandbox-peers"))
+			Expect(launch.PeerRegistryRoot).NotTo(HavePrefix(launch.PackageCacheRoot + "/"))
 		})
 
 		It("CS-LNCH-051: creates the registry DESTINATION 0700, so docker never makes it as root", func() {
@@ -1756,7 +1761,7 @@ var _ = Describe("launch.Build", func() {
 			mkdir(longHome)
 			mkdir(filepath.Join(longHome, ".claude"))
 			in.Home = longHome
-			longRoot := filepath.Join(longHome, ".cache", "claude-sandbox", "peers")
+			longRoot := hostdirs.PeersRoot(longHome)
 			n := len(longRoot) + len("/cc-socks/1234567.sock")
 			Expect(n).To(BeNumerically(">", 103))
 			off := build()
@@ -1808,7 +1813,7 @@ var _ = Describe("launch.Build", func() {
 			if os.Getuid() == 0 {
 				Skip("root ignores directory permissions")
 			}
-			parent := filepath.Join(home, ".cache", "claude-sandbox")
+			parent := filepath.Dir(root)
 			mkdir(parent)
 			Expect(os.Chmod(parent, 0o500)).To(Succeed())
 			DeferCleanup(func() { _ = os.Chmod(parent, 0o755) })
@@ -1885,13 +1890,13 @@ var _ = Describe("launch.Build", func() {
 		})
 
 		It("CS-LNCH-055: a path of exactly 103 bytes is still bridged", func() {
-			// root = home + /.cache/claude-sandbox/peers (28); suffix 22.
-			pad := 103 - 22 - 28 - len(home) - 1
+			// root = home + /.local/state/claude-sandbox-peers (34); suffix 22.
+			pad := 103 - 22 - 34 - len(home) - 1
 			Expect(pad).To(BeNumerically(">", 0))
 			edge := filepath.Join(home, strings.Repeat("e", pad))
 			mkdir(edge)
 			in.Home = edge
-			edgeRoot := filepath.Join(edge, ".cache", "claude-sandbox", "peers")
+			edgeRoot := hostdirs.PeersRoot(edge)
 			Expect(len(edgeRoot) + len("/cc-socks/1234567.sock")).To(Equal(103))
 			enable()
 			Expect(envValues(build(), "XDG_RUNTIME_DIR")).To(Equal([]string{edgeRoot}))
@@ -1958,6 +1963,134 @@ var _ = Describe("launch.Build", func() {
 				}, "it is on a tmpfs mounted at /tmp inside the container"),
 				Entry("mountinfo unreadable", "", func() (string, error) { return "", errors.New("boom") }, "/proc/self/mountinfo is unreadable: boom"),
 			)
+		})
+
+		Describe("the peers root move (CS-DIR)", func() {
+			var legacy string
+			BeforeEach(func() { legacy = hostdirs.LegacyPeersRoot(home) })
+			peerLabel := func(p *launch.Plan) string {
+				for _, l := range argPairs(p.CreateArgs(proj), "--label") {
+					if v, ok := strings.CutPrefix(l, launch.LabelPeerRoot+"="); ok {
+						return v
+					}
+				}
+				return "<absent>"
+			}
+
+			It("CS-DIR-010: ChoosePeerRoot takes the new root when no bind source is under the legacy one", func() {
+				c := launch.ChoosePeerRoot(home, [][]string{{"/x"}, nil, {legacy + "x"}}, nil, false)
+				Expect(c.Root).To(Equal(root))
+				Expect(c.Pinned).To(Equal(0))
+				Expect(c.OnLegacy()).To(BeFalse())
+			})
+
+			It("CS-DIR-011: ChoosePeerRoot keeps the legacy root while any bind source is at or under it", func() {
+				c := launch.ChoosePeerRoot(home, [][]string{{"/x", legacy + "/sessions"}, {legacy + "/"}, {"/y"}}, nil, false)
+				Expect(c.Root).To(Equal(legacy))
+				Expect(c.Pinned).To(Equal(2))
+				Expect(launch.PinsLegacyRoot(home, launch.SplitMounts("/a, "+legacy+"/cc-socks,/b"))).To(BeTrue())
+			})
+
+			It("CS-DIR-011: a build on the legacy root mounts it and says so in its one banner line", func() {
+				enable()
+				in.PeerRoot = &launch.PeerRootChoice{Root: legacy, Legacy: legacy, New: root, Pinned: 2}
+				p := build()
+				Expect(p.Volumes).To(ContainElement(legacy + ":" + legacy))
+				Expect(envValues(p, "XDG_RUNTIME_DIR")).To(Equal([]string{legacy}))
+				Expect(peerLabel(p)).To(Equal(legacy))
+				Expect(p.RegistryDir).To(Equal(filepath.Join(legacy, "sessions")))
+				Expect(strings.Count(out.String(), "\n")).To(Equal(1), out.String())
+				Expect(out.String()).To(ContainSubstring("This is the old location: 2 container(s) use it. It moves to " + root))
+				Expect(root).NotTo(BeADirectory())
+			})
+
+			It("CS-DIR-012: the label is the applied root, or none when off or stood down", func() {
+				Expect(peerLabel(build())).To(Equal("none"))
+				enable()
+				Expect(peerLabel(build())).To(Equal(root))
+				ef := filepath.Join(proj, "env")
+				touch(ef, "XDG_RUNTIME_DIR=/run/x\n")
+				in.EnvFiles = []string{ef}
+				Expect(peerLabel(build())).To(Equal("none"))
+			})
+
+			It("CS-DIR-013: another user's legacy root does not pin", func() {
+				c := launch.ChoosePeerRoot(home, [][]string{{"/home/other/.cache/claude-sandbox/peers"}}, nil, false)
+				Expect(c.Root).To(Equal(root))
+			})
+
+			It("CS-DIR-014: a failed discovery keeps a real legacy directory", func() {
+				mkdir(legacy)
+				c := launch.ChoosePeerRoot(home, nil, errors.New("docker down"), false)
+				Expect(c.Root).To(Equal(legacy))
+				Expect(c.DiscoveryFailed).To(BeTrue())
+			})
+
+			It("CS-DIR-015: a failed discovery with no legacy directory takes the new root", func() {
+				c := launch.ChoosePeerRoot(home, nil, errors.New("docker down"), false)
+				Expect(c.Root).To(Equal(root))
+				Expect(c.DiscoveryFailed).To(BeTrue())
+			})
+
+			It("CS-DIR-016: a launch marked kept ignores the pin, and its banner says what it cannot see", func() {
+				c := launch.ChoosePeerRoot(home, [][]string{{legacy}}, nil, true)
+				Expect(c.Root).To(Equal(root))
+				Expect(c.Keep).To(BeTrue())
+				Expect(c.Pinned).To(Equal(1))
+				enable()
+				in.PeerRoot = &c
+				p := build()
+				Expect(envValues(p, "XDG_RUNTIME_DIR")).To(Equal([]string{root}))
+				Expect(out.String()).To(ContainSubstring("This kept session cannot see the sessions of the 1 container(s) still on the old location " + legacy))
+			})
+
+			It("CS-DIR-017: DriftPeerRoot reuses the container's root", func() {
+				Expect(launch.DriftPeerRoot(home, legacy, nil)).To(Equal(legacy))
+				Expect(launch.DriftPeerRoot(home, "", []string{legacy + "/sessions"})).To(Equal(legacy))
+				Expect(launch.DriftPeerRoot(home, "", []string{"/x"})).To(Equal(root))
+				Expect(launch.DriftPeerRoot(home, "none", []string{legacy})).To(Equal(root))
+			})
+
+			It("CS-DIR-019: NoCreatePeerDirs builds the bridge without creating anything", func() {
+				enable()
+				in.NoCreatePeerDirs = true
+				p := build()
+				Expect(p.Volumes).To(ContainElement(rootMount()))
+				Expect(root).NotTo(BeADirectory())
+				Expect(filepath.Join(cfgDir, "sessions")).NotTo(BeADirectory())
+			})
+
+			Describe("inside a sandbox (CS-DIR-027/028)", func() {
+				BeforeEach(func() {
+					env["CLAUDE_SANDBOX_PROJECT_DIR"] = "/outer/proj"
+					touch(filepath.Join(cfgDir, "CLAUDE.md"), "")
+					in.MountInfo = func() (string, error) { return "1 0 0:1 / / rw - overlay overlay rw\n", nil }
+				})
+
+				It("CS-DIR-027: a parent bridged to another root, or not at all, stands the bridge down naming the chosen root", func() {
+					for _, parent := range []string{"", legacy} {
+						if parent != "" {
+							env["XDG_RUNTIME_DIR"] = parent
+						}
+						out.Reset()
+						enable()
+						p := build()
+						Expect(envValues(p, "XDG_RUNTIME_DIR")).To(BeEmpty(), parent)
+						Expect(peerLabel(p)).To(Equal("none"))
+						Expect(out.String()).To(ContainSubstring("inside a sandbox that does not mount " + root))
+						Expect(root).NotTo(BeADirectory())
+					}
+				})
+
+				It("CS-DIR-028: a parent bridged to the chosen root bridges this one on it", func() {
+					env["XDG_RUNTIME_DIR"] = legacy
+					enable()
+					in.PeerRoot = &launch.PeerRootChoice{Root: legacy}
+					p := build()
+					Expect(envValues(p, "XDG_RUNTIME_DIR")).To(Equal([]string{legacy}))
+					Expect(peerLabel(p)).To(Equal(legacy))
+				})
+			})
 		})
 	})
 

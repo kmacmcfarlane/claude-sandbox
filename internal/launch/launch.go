@@ -70,6 +70,18 @@ type Inputs struct {
 	// (cascade.KeySource), named when its value is invalid (CS-LNCH-112).
 	OOMScoreAdjSource string
 
+	// PeerRoot is the shared peer registry's root chosen under the launch
+	// lock (ChoosePeerRoot, CS-DIR-010..016), or the drift check's root for
+	// the target container (DriftPeerRoot, CS-DIR-017). Nil means the new
+	// root, hostdirs.PeersRoot, with no drain note.
+	PeerRoot *PeerRootChoice
+
+	// NoCreatePeerDirs makes the bridge create and re-mode nothing: the
+	// drift check hashes a would-be plan and must not plant a peers root on
+	// the host (CS-DIR-019). The refusals of an existing directory still
+	// stand the bridge down, as they would the launch.
+	NoCreatePeerDirs bool
+
 	// Chmod restricts a launcher-owned peer-registry directory (CS-LNCH-051).
 	// Nil means fchmod on the descriptor hostdirs.EnsureOwnedDir checked;
 	// when set it is called with that descriptor's path instead. Tests inject
@@ -316,6 +328,9 @@ type Plan struct {
 	ConfigDir    string
 	ConfigDirEnv string
 	RegistryDir  string
+	// PeerRoot is the claude-sandbox.peerroot label's value: the peers root
+	// the bridge applied, or PeerRootNone (CS-DIR-012).
+	PeerRoot string
 	// ContainerID is the full id "docker create" printed (Reserve), "" when
 	// it printed none that looks like one.
 	ContainerID string
@@ -341,6 +356,25 @@ func (in *Inputs) getenv(k string) string {
 		return in.Getenv(k)
 	}
 	return os.Getenv(k)
+}
+
+// peerRoot is the bridge's root: the one chosen for this launch, else the
+// new root with no drain note (CS-DIR-010).
+func (in *Inputs) peerRoot() PeerRootChoice {
+	if in.PeerRoot != nil && in.PeerRoot.Root != "" {
+		c := *in.PeerRoot
+		if c.Legacy == "" {
+			c.Legacy = hostdirs.LegacyPeersRoot(in.Home)
+		}
+		if c.New == "" {
+			c.New = hostdirs.PeersRoot(in.Home)
+		}
+		return c
+	}
+	return PeerRootChoice{
+		Root: hostdirs.PeersRoot(in.Home), New: hostdirs.PeersRoot(in.Home),
+		Legacy: hostdirs.LegacyPeersRoot(in.Home),
+	}
 }
 
 // ConfigDir resolves the Claude config directory (CLAUDE_CONFIG_DIR or
@@ -613,8 +647,9 @@ func Build(in Inputs) (*Plan, error) {
 	// bridged is what was APPLIED: a session that stands down (CS-LNCH-054/055/107)
 	// launches exactly as with the key off, so it hashes like one.
 	bridged := false
+	peerRoot := in.peerRoot()
 	if sharedPeers {
-		bridged = in.assembleSharedPeerRegistry(p, configDir)
+		bridged = in.assembleSharedPeerRegistry(p, configDir, peerRoot)
 	}
 
 	// CS-LNCH-169..171: a missing shadow destination under a read-write
@@ -705,14 +740,20 @@ func Build(in Inputs) (*Plan, error) {
 	// hashed: none of this is a property of the container's configuration.
 	p.ProjectDir, p.Mode, p.PIDClass, p.Worktree = in.ProjectDir, mode, in.PIDClass, in.Worktree
 	p.ConfigDir, p.ConfigDirEnv = configDir, in.getenv("CLAUDE_CONFIG_DIR")
+	// The registry dir is the root the bridge APPLIED (CS-DIR-010/011), so a
+	// tmux mark or the resume guard reads records where they really are,
+	// legacy root or new.
 	p.RegistryDir = filepath.Join(configDir, peerSessionsDir)
+	p.PeerRoot = PeerRootNone
 	if bridged {
-		p.RegistryDir = filepath.Join(in.Home, PeerRegistryRoot, peerSessionsDir)
+		p.PeerRoot = peerRoot.Root
+		p.RegistryDir = filepath.Join(peerRoot.Root, peerSessionsDir)
 	}
 	p.Labels = append(p.Labels,
 		LabelConfigDir+"="+p.ConfigDirEnv,
 		LabelRegistry+"="+p.RegistryDir,
 		LabelLaunchFlags+"="+in.LaunchFlags,
+		LabelPeerRoot+"="+p.PeerRoot, // CS-DIR-012
 	)
 	// CS-LNCH-110: the resume guard's reservation marker, visible to the next
 	// launch's discovery as soon as docker create returns.
@@ -1376,10 +1417,15 @@ func samePath(a, b string) bool {
 // cc-socks/. Fixed, like PackageCacheRoot: a free-form path could name one
 // tree's own <config dir>/sessions as the shared root, putting other trees'
 // sandboxes into a registry the host's own claude also writes. A dedicated
-// root cannot.
-const PeerRegistryRoot = SandboxHomeRoot + "/peers"
+// root cannot. It is STATE, so it lives outside the cache root (CS-DIR-010);
+// LegacyPeerRegistryRoot is where it was, still used while a container
+// mounts it (CS-DIR-011).
+const PeerRegistryRoot = hostdirs.PeersRootRel
 
-// peerRegistryDirs are the two subdirectories of PeerRegistryRoot: the peer
+// LegacyPeerRegistryRoot is the pre-move peers root relative to $HOME.
+const LegacyPeerRegistryRoot = hostdirs.LegacyPeersRootRel
+
+// peerRegistryDirs are the two subdirectories of a peers root: the peer
 // registry itself, and the socket directory Claude Code creates beneath
 // XDG_RUNTIME_DIR.
 const (
@@ -1416,7 +1462,7 @@ const worstSocketSuffix = "/" + peerSocketsDir + "/1234567.sock"
 // container. Claude Code binds at XDG_RUNTIME_DIR || CLAUDE_CODE_TMPDIR ||
 // os.tmpdir(), then /cc-socks/<pid>.sock. So the peers root is mounted at the
 // SAME path in every bridged container and XDG_RUNTIME_DIR points at it: every
-// session advertises <home>/.cache/claude-sandbox/peers/cc-socks/<pid>.sock,
+// session advertises <peers root>/cc-socks/<pid>.sock,
 // valid everywhere. XDG_RUNTIME_DIR outranks CLAUDE_CODE_TMPDIR for the socket
 // path only, so scratchpads stay where CS-LNCH-034 put them. It names the ROOT,
 // not cc-socks: Claude Code appends /cc-socks itself, and a bundled
@@ -1450,8 +1496,11 @@ const worstSocketSuffix = "/" + peerSocketsDir + "/1234567.sock"
 // It reports whether the bridge was applied; false means it stood down for
 // this session (CS-LNCH-054/055/107) and the plan is exactly the key-off plan.
 // It never fails the launch: every obstacle is a stand-down with one warning.
-func (in *Inputs) assembleSharedPeerRegistry(p *Plan, configDir string) bool {
-	root := filepath.Join(in.Home, PeerRegistryRoot)
+//
+// choice is the root chosen for this launch (CS-DIR-010..016): the legacy
+// root during the drain, else the new one.
+func (in *Inputs) assembleSharedPeerRegistry(p *Plan, configDir string, choice PeerRootChoice) bool {
+	root := choice.Root
 
 	// CS-LNCH-054/055: when the socket cannot be bridged, the WHOLE bridge
 	// stands down for this session. A registry-only bridge is strictly worse
@@ -1500,9 +1549,18 @@ func (in *Inputs) assembleSharedPeerRegistry(p *Plan, configDir string) bool {
 	// failing the launch — an error here would fail every launch in every tree
 	// inheriting the key. Nothing has been mounted yet, so the plan is still
 	// the key-off plan. The warning names the fix, since it will recur.
+	//
+	// CS-DIR-019: the drift check only checks — it must not plant a peers
+	// root on the host while it hashes a would-be plan.
 	sessions := filepath.Join(root, peerSessionsDir)
 	for _, d := range []string{root, sessions, filepath.Join(root, peerSocketsDir)} {
-		if err := in.mkOwnedPeerDir(d); err != nil {
+		var err error
+		if in.NoCreatePeerDirs {
+			err = hostdirs.CheckOwnedDir(d, in.Getuid)
+		} else {
+			err = in.mkOwnedPeerDir(d)
+		}
+		if err != nil {
 			in.peerDirStandDown(d, err)
 			return false
 		}
@@ -1511,9 +1569,11 @@ func (in *Inputs) assembleSharedPeerRegistry(p *Plan, configDir string) bool {
 	// be under a mount by definition — its own. Not chmod'ed: it lives under
 	// the user's config dir and is not the launcher's to tighten.
 	dstSessions := filepath.Join(configDir, peerSessionsDir)
-	if err := in.mkPeerDest(p, dstSessions); err != nil {
-		in.peerDirStandDown(dstSessions, err)
-		return false
+	if !in.NoCreatePeerDirs {
+		if err := in.mkPeerDest(p, dstSessions); err != nil {
+			in.peerDirStandDown(dstSessions, err)
+			return false
+		}
 	}
 	p.Volumes = append(p.Volumes,
 		fmt.Sprintf("%s:%s", sessions, dstSessions),
@@ -1525,8 +1585,27 @@ func (in *Inputs) assembleSharedPeerRegistry(p *Plan, configDir string) bool {
 	// and a workspace-level config key can switch it on for a session that
 	// never asked. Like the Worktree banner, it prints only when the mode is
 	// actually in use.
-	fmt.Fprintf(in.Out, "Peer registry: shared (%s) - /peers and SendMessage reach every other opted-in sandbox on this host, and only those.\n", root)
+	if choice.DiscoveryFailed && choice.OnLegacy() {
+		// CS-DIR-014: failed closed.
+		fmt.Fprintf(in.Out, "Warning: could not list containers; keeping the peer registry at %s for this launch (it moves to %s at the first launch that finds no container using it).\n", root, choice.New)
+	}
+	fmt.Fprintf(in.Out, "Peer registry: shared (%s) - /peers and SendMessage reach every other opted-in sandbox on this host, and only those.%s\n", root, peerRootNote(choice))
 	return true
+}
+
+// peerRootNote is what the one banner line adds during the drain
+// (CS-DIR-011/014/016); "" on the new root with nothing pinning it.
+func peerRootNote(c PeerRootChoice) string {
+	switch {
+	case c.OnLegacy() && c.DiscoveryFailed:
+		// The warning line said why (CS-DIR-014).
+		return ""
+	case c.OnLegacy():
+		return fmt.Sprintf(" This is the old location: %d container(s) use it. It moves to %s at the first launch when none do (usually after a reboot).", c.Pinned, c.New)
+	case c.Keep && c.Pinned > 0:
+		return fmt.Sprintf(" This kept session cannot see the sessions of the %d container(s) still on the old location %s until those end.", c.Pinned, c.Legacy)
+	}
+	return ""
 }
 
 // peerDirStandDown prints the one CS-LNCH-107 warning: the directory, the

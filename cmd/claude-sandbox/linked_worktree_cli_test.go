@@ -171,9 +171,9 @@ var _ = Describe("linked git worktree (CS-LNCH-070..075, CS-CASC-031..033)", fun
 		envFiles, _ := paths.CollectChain(chain, paths.Env)
 		cfg, err := cascade.Load(configFiles)
 		Expect(err).NotTo(HaveOccurred())
-		hash, _ := wouldBeFingerprint(l.env, l.proj, fl, cfg, envFiles, linked)
+		hash, _ := wouldBeFingerprint(l.env, l.proj, fl, cfg, envFiles, linked, nil)
 		Expect(hash).To(Equal(launched))
-		without, _ := wouldBeFingerprint(l.env, l.proj, fl, cfg, envFiles, nil)
+		without, _ := wouldBeFingerprint(l.env, l.proj, fl, cfg, envFiles, nil, nil)
 		Expect(without).NotTo(Equal(launched), "the git dir mount is part of the fingerprint")
 	})
 
