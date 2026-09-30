@@ -2194,6 +2194,50 @@ var _ = Describe("image build lifecycle", func() {
 			Expect(strings.Join(buildLines(fake), "\n")).NotTo(ContainSubstring(df), "the file is never handed to docker")
 		})
 
+		It("CS-IMG-074: an override name with a slash found in a parent keeps the directory holding it as context", func() {
+			ws := filepath.Dir(proj)
+			found := filepath.Join(ws, "sub", "Dockerfile")
+			writeFileAt(found, "FROM claude-sandbox\n")
+			spec, err := resolve(imagebuild.ChildInputs{Dockerfile: "sub/Dockerfile"})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(spec.Dockerfile).To(Equal(found))
+			Expect(spec.Context).To(Equal(filepath.Join(ws, "sub")))
+		})
+
+		DescribeTable("CS-IMG-073: a non-regular Dockerfile.dockerignore is absent, as BuildKit treats it: stdin build, no hang",
+			func(plant func(p string)) {
+				df := filepath.Join(proj, ".claude-sandbox", "Dockerfile")
+				writeFileAt(df, "FROM claude-sandbox\n")
+				plant(df + ".dockerignore")
+				spec, err := resolve(imagebuild.ChildInputs{})
+				Expect(err).NotTo(HaveOccurred())
+				spec.ImageName = "claude-sandbox-proj"
+				done := make(chan error, 1)
+				go func() { _, _, err := imagebuild.EnsureChild(o, spec, false, false); done <- err }()
+				Eventually(done, 5*time.Second).Should(Receive(BeNil()))
+				Expect(buildLines(fake)).To(ContainElement("docker build -t claude-sandbox-proj -f - " + proj))
+				Expect(stdinOf(childBuild())).To(Equal("FROM claude-sandbox\n"))
+			},
+			Entry("a FIFO", func(p string) { Expect(syscall.Mkfifo(p, 0o644)).To(Succeed()) }),
+			Entry("a directory", func(p string) { Expect(os.MkdirAll(p, 0o755)).To(Succeed()) }),
+		)
+
+		It("CS-IMG-073: an unreadable regular Dockerfile.dockerignore fails the build naming it", func() {
+			if os.Geteuid() == 0 {
+				Skip("root reads unreadable files")
+			}
+			df := filepath.Join(proj, ".claude-sandbox", "Dockerfile")
+			writeFileAt(df, "FROM claude-sandbox\n")
+			writeFileAt(df+".dockerignore", "secrets/\n")
+			Expect(os.Chmod(df+".dockerignore", 0o000)).To(Succeed())
+			spec, err := resolve(imagebuild.ChildInputs{})
+			Expect(err).NotTo(HaveOccurred())
+			spec.ImageName = "claude-sandbox-proj"
+			_, _, err = imagebuild.EnsureChild(o, spec, false, false)
+			Expect(err).To(MatchError(ContainSubstring(df + ".dockerignore")))
+			Expect(buildLines(fake)).To(BeEmpty())
+		})
+
 		Describe("the private-temp-dir fallback", func() {
 			var df string
 			var seen struct{ file, dockerfile, ignore string }

@@ -665,8 +665,12 @@ func ResolveChild(in ChildInputs, out io.Writer) (ChildSpec, error) {
 				return spec, err
 			}
 			if ok {
-				fmt.Fprintf(out, "Found %s in %s: %s\n", name, foundIn(dir, lvl), lvl)
-				return used(found, lvl, content), nil
+				// filepath.Dir(found), not lvl: they differ when name holds a
+				// slash, and the context (so the tag and the fingerprint) must
+				// stay what it was before the snapshot (CS-IMG-074).
+				ctx := filepath.Dir(found)
+				fmt.Fprintf(out, "Found %s in %s: %s\n", name, foundIn(dir, ctx), ctx)
+				return used(found, ctx, content), nil
 			}
 		}
 		spec.Dockerfile = df
@@ -767,9 +771,11 @@ func EnsureChild(o Options, spec ChildSpec, baseRebuilt bool, baseOnly bool) (im
 // beside a copy of it instead, and that directory is removed after the build.
 func buildChild(o Options, spec ChildSpec, fp string) error {
 	args := append([]string{"build", "-t", spec.ImageName}, labelArgs(fp)...)
-	ignore, err := os.ReadFile(spec.Dockerfile + ".dockerignore")
+	ignore, found, err := readDockerignore(spec.Dockerfile + ".dockerignore")
 	switch {
-	case err == nil:
+	case err != nil:
+		return fmt.Errorf("building %s: %w", spec.ImageName, err)
+	case found:
 		dir, err := os.MkdirTemp(privateTempRoot(o.TempRoot), "claude-sandbox-child-")
 		if err != nil {
 			return fmt.Errorf("building %s: private Dockerfile directory: %w", spec.ImageName, err)
@@ -789,7 +795,7 @@ func buildChild(o Options, spec ChildSpec, fp string) error {
 			Env:    buildEnv,
 			Stdout: o.Out, Stderr: o.Err,
 		})
-	case errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR):
+	default:
 		return o.Runner.Run(execx.Cmd{
 			Name:   "docker",
 			Args:   append(args, "-f", "-", spec.Context),
@@ -797,9 +803,39 @@ func buildChild(o Options, spec ChildSpec, fp string) error {
 			Stdin:  bytes.NewReader(spec.Content),
 			Stdout: o.Out, Stderr: o.Err,
 		})
-	default:
-		return fmt.Errorf("building %s: reading %s.dockerignore: %w", spec.ImageName, spec.Dockerfile, err)
 	}
+}
+
+// readDockerignore reads a Dockerfile-specific ignore file for CS-IMG-073's
+// fallback. Like readChild it opens non-blocking and reads only a regular
+// file, so a FIFO planted at the path cannot hang the launch. Anything that
+// is not a regular file (missing, a directory, a FIFO) is absent, as BuildKit
+// treats it: the build then uses stdin and the context's own .dockerignore.
+// Only a regular file that cannot be read is an error.
+func readDockerignore(path string) (content []byte, found bool, err error) {
+	fh, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
+			return nil, false, nil
+		}
+		if fi, serr := os.Stat(path); serr == nil && !fi.Mode().IsRegular() {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("reading %s: %w", path, err)
+	}
+	defer fh.Close()
+	fi, err := fh.Stat()
+	if err != nil {
+		return nil, false, fmt.Errorf("reading %s: %w", path, err)
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, false, nil
+	}
+	raw, err := io.ReadAll(fh)
+	if err != nil {
+		return nil, false, fmt.Errorf("reading %s: %w", path, err)
+	}
+	return raw, true, nil
 }
 
 // privateTempRoot resolves Options.TempRoot ("" = os.TempDir()). Under go

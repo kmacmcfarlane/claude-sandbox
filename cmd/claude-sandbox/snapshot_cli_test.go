@@ -36,6 +36,20 @@ var _ = Describe("the launch-config snapshot (CS-CASC-046, CS-IMG-073/074)", fun
 		Expect(f.out.String()).To(ContainSubstring(filepath.Join(f.proj, ".claude-sandbox") + "/  →  config.yaml"))
 	})
 
+	It("CS-CASC-046: the oomScoreAdj source is named from the bytes the launch merged, not a later read", func() {
+		cfg := filepath.Join(f.proj, ".claude-sandbox", "config.yaml")
+		writeFile(cfg, "oomScoreAdj: -5000\n")
+		// Session discovery runs between the merge and the key lookup; a
+		// session rewrites the file while it does.
+		f.fake.OnFunc("docker ps", func(execx.Cmd) (string, error) {
+			Expect(os.WriteFile(cfg, []byte("model: planted\n"), 0o644)).To(Succeed())
+			return "", nil
+		})
+		Expect(f.run()).To(Equal(2))
+		Expect(f.errw.String()).To(ContainSubstring("oomScoreAdj: -5000 in " + cfg))
+		Expect(createdAny(f)).To(BeFalse())
+	})
+
 	It("CS-IMG-073: the child image is built from the bytes the launch read, on stdin, even if the file changed after", func() {
 		df := filepath.Join(f.proj, ".claude-sandbox", "Dockerfile")
 		writeFile(df, "FROM claude-sandbox\nRUN echo checked\n")

@@ -454,8 +454,11 @@ func wouldBeFingerprint(env *Env, projectDir string, f *launchFlags, cfg *cascad
 		BaseOnly: baseOnly, DockerfileDir: dfDir, Dockerfile: dfName,
 	}, io.Discard)
 	if err != nil {
-		// An unreadable Dockerfile would fail a launch (CS-IMG-074); here it
-		// only means no comparable hash — "no opinion", as below.
+		// An unreadable Dockerfile would fail a launch (CS-IMG-074). Here the
+		// hash cannot be computed, so confirmDrift reports drift (a prompt,
+		// or exit 3 without a terminal); name the cause, or its listing of
+		// every input as "removed" would be the only clue.
+		fmt.Fprintf(env.Err, "WARNING: cannot compute the current configuration for the drift check: %v\n", err)
 		return "", nil
 	}
 

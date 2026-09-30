@@ -335,6 +335,10 @@ Feature: Image build lifecycle (CS-IMG)
       "no Dockerfile"
     And an empty file is a real, empty Dockerfile: the build runs and fails as
       docker says, never a silent base-only launch
+    And the build context is what it was before this rule (an override name
+      found in a parent builds with the directory holding it as context)
+    And an attach or join whose drift check cannot read the Dockerfile warns
+      naming it, then reports drift as for any uncomputable hash
     And the child fingerprint hashes those bytes: for the same content it is
       the same value as before this rule, so no child rebuilds
     But COPY and ADD sources in the build context are NOT snapshotted: docker
@@ -352,6 +356,10 @@ Feature: Image build lifecycle (CS-IMG)
       directory, beside a copy of that ignore file, builds with
       "-f <private dir>/<name>", and removes the directory after the build,
       whether the build succeeded or not
+    And the ignore file is opened like the Dockerfile (non-blocking, regular
+      files only): a directory, FIFO or other non-regular file there is absent,
+      as BuildKit treats it, and the build uses stdin; only a regular ignore
+      file that cannot be read fails the build naming it
     # Never the shadow directory (made after the launch lock; builds run
     # before it) and never the project file.
 

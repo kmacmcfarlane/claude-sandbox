@@ -366,6 +366,21 @@ var _ = Describe("sessions (CS-SESS)", func() {
 			Expect(f.errw.String()).NotTo(ContainSubstring("different configuration"))
 		})
 
+		It("CS-IMG-074: a drift check that cannot read the child Dockerfile names it before reporting drift", func() {
+			if os.Geteuid() == 0 {
+				Skip("root reads unreadable files")
+			}
+			df := filepath.Join(f.proj, ".claude-sandbox", "Dockerfile")
+			writeFile(df, "FROM claude-sandbox\n")
+			Expect(os.Chmod(df, 0o000)).To(Succeed())
+			delete(f.envmap, "CLAUDE_SANDBOX_BASE_ONLY")
+			running(psRowFull("cs-a", "Up 1 hour", f.proj, "otter", "", "stalehash1234", "[]"))
+			f.env.Prompter = &prompt.Scripted{IsTTY: false}
+			Expect(f.run("--attach=otter")).To(Equal(3))
+			Expect(f.errw.String()).To(ContainSubstring("cannot compute the current configuration for the drift check"))
+			Expect(f.errw.String()).To(ContainSubstring(df))
+		})
+
 		It("CS-SESS-038: the would-be fingerprint resolves the cap image's ID, not its parent's", func() {
 			running(psRowFull("cs-a", "Up 1 hour", f.proj, "otter", "", "stalehash1234", "[]"))
 			f.env.Prompter = &prompt.Scripted{IsTTY: true, Answers: []string{"c"}}
