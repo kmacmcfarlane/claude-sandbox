@@ -761,6 +761,6 @@ var _ = Describe("launcher CLI (end-to-end argv)", func() {
 		f.fake.On("image inspect "+tag, "", execx.Fail(1)) // force the child build
 		Expect(f.run()).To(Equal(0))
 		Expect(f.fake.CommandLines()).To(ContainElement(
-			"docker build -t " + tag + " -f " + filepath.Join(dirB, "Dockerfile") + " " + dirB))
+			"docker build -t " + tag + " -f - " + dirB)) // CS-IMG-073: the bytes ride stdin
 	})
 })

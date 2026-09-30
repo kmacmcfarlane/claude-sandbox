@@ -14,6 +14,7 @@ package imagebuild
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -21,12 +22,15 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"io/fs"
 	"math"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
+	"testing"
 	"time"
 
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
@@ -120,6 +124,12 @@ type Options struct {
 	// (CS-IMG-055/056); nil pulls each image's parents on its own and records
 	// nothing.
 	Pulls *Pulls
+
+	// TempRoot is where CS-IMG-073's fallback makes its private directory
+	// ("" = os.TempDir(); under go test "" panics, so a test never writes
+	// to the real temp root). The docker CLIENT reads "-f <file>", so a
+	// container-local directory is fine for a nested launcher.
+	TempRoot string
 }
 
 // BakedSources are the paths (relative to RepoRoot) Dockerfile.tools COPYs
@@ -530,6 +540,11 @@ type ChildSpec struct {
 	Dockerfile string
 	Context    string
 	ImageName  string
+	// Content is the Dockerfile's bytes, read once by ResolveChild
+	// (CS-IMG-074). The fingerprint hashes them and the build is fed them
+	// (CS-IMG-073): the file under Dockerfile is session-writable, so it is
+	// never read again. COPY/ADD sources in Context are not snapshotted.
+	Content []byte
 }
 
 // ChildInputs are the resolution inputs (env vars already read by the caller).
@@ -566,22 +581,57 @@ func foundIn(project, dir string) string {
 // used builds a ChildSpec for a resolved Dockerfile. The image name is derived
 // here rather than up front because it depends on what was resolved — see
 // ImageSlug (CS-IMG-015).
-func used(dockerfile, context string) ChildSpec {
+func used(dockerfile, context string, content []byte) ChildSpec {
 	return ChildSpec{
 		Use:        true,
 		Dockerfile: dockerfile,
 		Context:    context,
 		ImageName:  BaseImageName + "-" + ImageSlug(dockerfile, context),
+		Content:    content,
 	}
 }
 
+// readChild reads one candidate Dockerfile, once (CS-IMG-074). found is false
+// only when the file does not exist (ENOENT, or ENOTDIR for a non-directory on
+// the way): that level has no child. Every other failure is an error naming
+// the file — an unreadable Dockerfile is not "no Dockerfile". The open is
+// non-blocking so a FIFO planted at the path cannot hang the launch; only a
+// regular file is read. An empty file is returned as found, with no bytes.
+func readChild(path string) (content []byte, found bool, err error) {
+	fh, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("reading child Dockerfile %s: %w", path, err)
+	}
+	defer fh.Close()
+	fi, err := fh.Stat()
+	if err != nil {
+		return nil, false, fmt.Errorf("reading child Dockerfile %s: %w", path, err)
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, false, fmt.Errorf("reading child Dockerfile %s: not a regular file (%s)", path, fi.Mode().Type())
+	}
+	raw, err := io.ReadAll(fh)
+	if err != nil {
+		return nil, false, fmt.Errorf("reading child Dockerfile %s: %w", path, err)
+	}
+	if raw == nil {
+		raw = []byte{}
+	}
+	return raw, true, nil
+}
+
 // ResolveChild determines which child Dockerfile (if any) to use, and its
-// build context (CS-IMG-010..014). When no child is in use the returned
-// ImageName is empty: EnsureChild uses BaseImageName on that path.
-func ResolveChild(in ChildInputs, out io.Writer) ChildSpec {
+// build context (CS-IMG-010..014), reading it once into the spec
+// (CS-IMG-074). When no child is in use the returned ImageName is empty:
+// EnsureChild uses BaseImageName on that path. The error names a candidate
+// that exists but could not be read.
+func ResolveChild(in ChildInputs, out io.Writer) (ChildSpec, error) {
 	var spec ChildSpec
 	if in.BaseOnly {
-		return spec
+		return spec, nil
 	}
 	override := in.DockerfileDir != "" || in.Dockerfile != ""
 	if override {
@@ -594,9 +644,13 @@ func ResolveChild(in ChildInputs, out io.Writer) ChildSpec {
 			name = "Dockerfile"
 		}
 		df := filepath.Join(dir, name)
-		if fileExists(df) {
+		content, ok, err := readChild(df)
+		if err != nil {
+			return spec, err
+		}
+		if ok {
 			// Honored verbatim: context stays the override directory.
-			return used(df, dir)
+			return used(df, dir, content), nil
 		}
 		// Walk parents for the exact override filename — along the linked
 		// chain when the directory is the (linked worktree) project itself.
@@ -604,32 +658,51 @@ func ResolveChild(in ChildInputs, out io.Writer) ChildSpec {
 		if in.DockerfileDir == "" {
 			chain = paths.Chain(dir, in.MainCheckout)
 		}
-		if found := paths.FindChainFile(above(chain), name); found != "" {
-			fmt.Fprintf(out, "Found %s in %s: %s\n", name, foundIn(dir, filepath.Dir(found)), filepath.Dir(found))
-			return used(found, filepath.Dir(found))
+		for _, lvl := range above(chain) {
+			found := filepath.Join(lvl, name)
+			content, ok, err := readChild(found)
+			if err != nil {
+				return spec, err
+			}
+			if ok {
+				fmt.Fprintf(out, "Found %s in %s: %s\n", name, foundIn(dir, lvl), lvl)
+				return used(found, lvl, content), nil
+			}
 		}
 		spec.Dockerfile = df
-		return spec
+		return spec, nil
 	}
 	// Default: .claude-sandbox/Dockerfile with the PROJECT ROOT as context so
 	// COPY instructions reference the project.
 	df, _ := paths.Resolve(in.ProjectDir, paths.Dockerfile)
-	if fileExists(df) {
-		return used(df, in.ProjectDir)
+	content, ok, err := readChild(df)
+	if err != nil {
+		return spec, err
+	}
+	if ok {
+		return used(df, in.ProjectDir, content), nil
 	}
 	// Nearest wins along the search chain minus the project itself (checked
 	// above): the physical parents, or a linked worktree's chain through its
 	// main checkout (CS-CASC-033).
-	if found, _ := paths.FindChain(above(paths.Chain(in.ProjectDir, in.MainCheckout)), paths.Dockerfile); found != "" {
-		ctx := filepath.Dir(filepath.Dir(found)) // parent of the .claude-sandbox/ dir
+	for _, lvl := range above(paths.Chain(in.ProjectDir, in.MainCheckout)) {
+		found, _ := paths.Resolve(lvl, paths.Dockerfile)
+		content, ok, err := readChild(found)
+		if err != nil {
+			return spec, err
+		}
+		if !ok {
+			continue
+		}
+		ctx := lvl // the parent of the .claude-sandbox/ dir
 		fmt.Fprintf(out, "Found %s in %s: %s\n", filepath.Base(found), foundIn(in.ProjectDir, ctx), ctx)
 		// Every project resolving to this same shared Dockerfile gets the same
 		// context and therefore the same image tag — one build, not one per
 		// project (CS-IMG-018).
-		return used(found, ctx)
+		return used(found, ctx, content), nil
 	}
 	spec.Dockerfile = df
-	return spec
+	return spec, nil
 }
 
 // EnsureChild builds the child image when in use and stale (CS-IMG-015..017).
@@ -681,16 +754,65 @@ func EnsureChild(o Options, spec ChildSpec, baseRebuilt bool, baseOnly bool) (im
 		return spec.ImageName, false, nil
 	}
 	fmt.Fprintf(o.Out, "Building %s child image from %s (context: %s)...\n", spec.ImageName, spec.Dockerfile, spec.Context)
-	err = o.Runner.Run(execx.Cmd{
-		Name:   "docker",
-		Args:   append(append([]string{"build", "-t", spec.ImageName}, labelArgs(fp)...), "-f", spec.Dockerfile, spec.Context),
-		Env:    buildEnv,
-		Stdout: o.Out, Stderr: o.Err,
-	})
-	if err != nil {
+	if err := buildChild(o, spec, fp); err != nil {
 		return "", true, err
 	}
 	return spec.ImageName, true, nil
+}
+
+// buildChild runs the child build from spec.Content, never from the file
+// (CS-IMG-073): "-f -" with the bytes on stdin. stdin carries no file name,
+// so a Dockerfile-specific ignore file ("<Dockerfile>.dockerignore") could
+// not be found; when one exists the bytes go into a private temp directory
+// beside a copy of it instead, and that directory is removed after the build.
+func buildChild(o Options, spec ChildSpec, fp string) error {
+	args := append([]string{"build", "-t", spec.ImageName}, labelArgs(fp)...)
+	ignore, err := os.ReadFile(spec.Dockerfile + ".dockerignore")
+	switch {
+	case err == nil:
+		dir, err := os.MkdirTemp(privateTempRoot(o.TempRoot), "claude-sandbox-child-")
+		if err != nil {
+			return fmt.Errorf("building %s: private Dockerfile directory: %w", spec.ImageName, err)
+		}
+		defer os.RemoveAll(dir)
+		name := filepath.Base(spec.Dockerfile)
+		df := filepath.Join(dir, name)
+		if err := os.WriteFile(df, spec.Content, 0o600); err != nil {
+			return fmt.Errorf("building %s: writing %s: %w", spec.ImageName, df, err)
+		}
+		if err := os.WriteFile(df+".dockerignore", ignore, 0o600); err != nil {
+			return fmt.Errorf("building %s: writing %s.dockerignore: %w", spec.ImageName, df, err)
+		}
+		return o.Runner.Run(execx.Cmd{
+			Name:   "docker",
+			Args:   append(args, "-f", df, spec.Context),
+			Env:    buildEnv,
+			Stdout: o.Out, Stderr: o.Err,
+		})
+	case errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR):
+		return o.Runner.Run(execx.Cmd{
+			Name:   "docker",
+			Args:   append(args, "-f", "-", spec.Context),
+			Env:    buildEnv,
+			Stdin:  bytes.NewReader(spec.Content),
+			Stdout: o.Out, Stderr: o.Err,
+		})
+	default:
+		return fmt.Errorf("building %s: reading %s.dockerignore: %w", spec.ImageName, spec.Dockerfile, err)
+	}
+}
+
+// privateTempRoot resolves Options.TempRoot ("" = os.TempDir()). Under go
+// test "" panics: a test must point it at a scratch directory, never the
+// real temp root.
+func privateTempRoot(root string) string {
+	if root != "" {
+		return root
+	}
+	if testing.Testing() {
+		panic("imagebuild: a test made a private directory in the real temp root; set Options.TempRoot to a scratch directory such as GinkgoT().TempDir()")
+	}
+	return os.TempDir()
 }
 
 // PrintVersion implements --version (CS-LNCH-030).
@@ -1193,9 +1315,11 @@ func childInputs(spec ChildSpec, baseID string) string {
 	}
 	f, sum := newFingerprint("child")
 	f.add(spec.Context)
-	if !f.addFile(spec.Dockerfile, spec.Dockerfile) {
-		return ""
-	}
+	// The snapshot, not the file (CS-IMG-074): the same name and content
+	// that addFile added before, so the value is unchanged for unchanged
+	// content and no child rebuilds.
+	f.add(spec.Dockerfile)
+	f.add(string(spec.Content))
 	f.add(baseID)
 	return sum()
 }

@@ -8,6 +8,7 @@ package imagebuild_test
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -69,6 +70,20 @@ func touchAt(p string, mtime time.Time) {
 	Expect(os.MkdirAll(filepath.Dir(p), 0o755)).To(Succeed())
 	Expect(os.WriteFile(p, []byte("x\n"), 0o644)).To(Succeed())
 	Expect(os.Chtimes(p, mtime, mtime)).To(Succeed())
+}
+
+// writeFileAt writes content to p, creating its directories.
+func writeFileAt(p, content string) {
+	Expect(os.MkdirAll(filepath.Dir(p), 0o755)).To(Succeed())
+	Expect(os.WriteFile(p, []byte(content), 0o644)).To(Succeed())
+}
+
+// specOf is the spec ResolveChild would return for df with context ctx: it
+// carries the Dockerfile's bytes (CS-IMG-074), which EnsureChild builds from.
+func specOf(df, ctx, image string) imagebuild.ChildSpec {
+	raw, err := os.ReadFile(df)
+	Expect(err).NotTo(HaveOccurred())
+	return imagebuild.ChildSpec{Use: true, Dockerfile: df, Context: ctx, ImageName: image, Content: raw}
 }
 
 // labelRe matches the build-inputs stamp every build carries (CS-IMG-032).
@@ -655,7 +670,7 @@ var _ = Describe("image build lifecycle", func() {
 			ctx := GinkgoT().TempDir()
 			df := filepath.Join(ctx, ".claude-sandbox", "Dockerfile")
 			touchAt(df, old)
-			spec = imagebuild.ChildSpec{Use: true, Dockerfile: df, Context: ctx, ImageName: "claude-sandbox-proj"}
+			spec = specOf(df, ctx, "claude-sandbox-proj")
 		})
 
 		// stampAfter runs build with the named image missing and returns the
@@ -1091,6 +1106,7 @@ var _ = Describe("image build lifecycle", func() {
 			images["claude-sandbox-proj"] = &imgState{created: imgT, inputs: fp}
 			Expect(os.WriteFile(spec.Dockerfile, []byte("FROM claude-sandbox\nRUN true\n"), 0o644)).To(Succeed())
 			Expect(os.Chtimes(spec.Dockerfile, old, old)).To(Succeed())
+			spec = specOf(spec.Dockerfile, spec.Context, spec.ImageName) // the next launch's read
 			fake.Calls = nil
 			_, built, err := imagebuild.EnsureChild(o, spec, false, false)
 			Expect(err).NotTo(HaveOccurred())
@@ -1708,7 +1724,9 @@ var _ = Describe("image build lifecycle", func() {
 			if in.ProjectDir == "" {
 				in.ProjectDir = proj
 			}
-			return imagebuild.ResolveChild(in, out)
+			spec, err := imagebuild.ResolveChild(in, out)
+			Expect(err).NotTo(HaveOccurred())
+			return spec
 		}
 
 		It("CS-IMG-010: uses .claude-sandbox/Dockerfile with the PROJECT ROOT as build context", func() {
@@ -1947,7 +1965,7 @@ var _ = Describe("image build lifecycle", func() {
 			proj = GinkgoT().TempDir()
 			df = filepath.Join(proj, ".claude-sandbox", "Dockerfile")
 			touchAt(df, old)
-			spec = imagebuild.ChildSpec{Use: true, Dockerfile: df, Context: proj, ImageName: "claude-sandbox-proj"}
+			spec = specOf(df, proj, "claude-sandbox-proj")
 			images["claude-sandbox"] = &imgState{created: imgT}
 		})
 
@@ -1959,7 +1977,7 @@ var _ = Describe("image build lifecycle", func() {
 				Expect(built).To(BeTrue())
 				Expect(img).To(Equal("claude-sandbox-proj"))
 				Expect(buildLines(fake)).To(ContainElement(
-					"docker build -t claude-sandbox-proj -f " + df + " " + proj))
+					"docker build -t claude-sandbox-proj -f - " + proj))
 			},
 			Entry("the child image does not exist", func() {}, false),
 			Entry("the base was rebuilt this launch", func() {
@@ -1991,6 +2009,247 @@ var _ = Describe("image build lifecycle", func() {
 			Expect(built).To(BeFalse())
 			Expect(img).To(Equal("claude-sandbox-proj"))
 			Expect(buildLines(fake)).To(BeEmpty())
+		})
+	})
+
+	// ---- the child Dockerfile snapshot (CS-IMG-073/074) ----
+
+	Describe("child Dockerfile snapshot", func() {
+		var proj, scratch string
+
+		BeforeEach(func() {
+			base, err := filepath.EvalSymlinks(GinkgoT().TempDir())
+			Expect(err).NotTo(HaveOccurred())
+			proj = filepath.Join(base, "ws", "proj")
+			Expect(os.MkdirAll(proj, 0o755)).To(Succeed())
+			scratch = filepath.Join(base, "scratch")
+			Expect(os.MkdirAll(scratch, 0o755)).To(Succeed())
+			o.TempRoot = scratch
+			images["claude-sandbox"] = &imgState{created: imgT, id: "sha256:base1"}
+		})
+
+		resolve := func(in imagebuild.ChildInputs) (imagebuild.ChildSpec, error) {
+			if in.ProjectDir == "" {
+				in.ProjectDir = proj
+			}
+			return imagebuild.ResolveChild(in, out)
+		}
+		// childBuild is the recorded child "docker build" call.
+		childBuild := func() execx.Cmd {
+			for _, c := range fake.Calls {
+				if c.Name == "docker" && len(c.Args) > 2 && c.Args[0] == "build" && c.Args[2] == "claude-sandbox-proj" {
+					return c
+				}
+			}
+			Fail("no child build ran")
+			return execx.Cmd{}
+		}
+		stdinOf := func(c execx.Cmd) string {
+			Expect(c.Stdin).NotTo(BeNil())
+			raw, err := io.ReadAll(c.Stdin)
+			Expect(err).NotTo(HaveOccurred())
+			return string(raw)
+		}
+
+		It("CS-IMG-074: the resolved spec carries the Dockerfile's bytes, read once", func() {
+			df := filepath.Join(proj, ".claude-sandbox", "Dockerfile")
+			writeFileAt(df, "FROM claude-sandbox\nRUN echo checked\n")
+			spec, err := resolve(imagebuild.ChildInputs{})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(spec.Use).To(BeTrue())
+			Expect(string(spec.Content)).To(Equal("FROM claude-sandbox\nRUN echo checked\n"))
+		})
+
+		It("CS-IMG-074: a missing Dockerfile (ENOENT) is no child: base only, no error", func() {
+			spec, err := resolve(imagebuild.ChildInputs{})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(spec.Use).To(BeFalse())
+			img, _, err := imagebuild.EnsureChild(o, spec, false, false)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(img).To(Equal("claude-sandbox"))
+		})
+
+		It("CS-IMG-074: a non-directory on the way (ENOTDIR) is no child at that level; the walk goes on", func() {
+			writeFileAt(filepath.Join(proj, ".claude-sandbox"), "a file, not the layout dir\n")
+			ws := filepath.Dir(proj)
+			shared := filepath.Join(ws, ".claude-sandbox", "Dockerfile")
+			writeFileAt(shared, "FROM claude-sandbox\n")
+			spec, err := resolve(imagebuild.ChildInputs{})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(spec.Dockerfile).To(Equal(shared))
+			Expect(spec.Context).To(Equal(ws))
+		})
+
+		It("CS-IMG-074: an unreadable Dockerfile (EACCES) fails, naming the file", func() {
+			if os.Geteuid() == 0 {
+				Skip("root reads unreadable files")
+			}
+			df := filepath.Join(proj, ".claude-sandbox", "Dockerfile")
+			writeFileAt(df, "FROM claude-sandbox\n")
+			Expect(os.Chmod(df, 0o000)).To(Succeed())
+			_, err := resolve(imagebuild.ChildInputs{})
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring(df))
+			Expect(errors.Is(err, os.ErrPermission)).To(BeTrue())
+		})
+
+		It("CS-IMG-074: an unreadable Dockerfile in a PARENT level fails too — it is not skipped for one further up", func() {
+			if os.Geteuid() == 0 {
+				Skip("root reads unreadable files")
+			}
+			ws := filepath.Dir(proj)
+			df := filepath.Join(ws, ".claude-sandbox", "Dockerfile")
+			writeFileAt(df, "FROM claude-sandbox\n")
+			writeFileAt(filepath.Join(filepath.Dir(ws), ".claude-sandbox", "Dockerfile"), "FROM claude-sandbox\n")
+			Expect(os.Chmod(df, 0o000)).To(Succeed())
+			_, err := resolve(imagebuild.ChildInputs{})
+			Expect(err).To(MatchError(ContainSubstring(df)))
+		})
+
+		It("CS-IMG-074: an unreadable override Dockerfile fails, naming the file", func() {
+			if os.Geteuid() == 0 {
+				Skip("root reads unreadable files")
+			}
+			dir := filepath.Join(proj, "docker")
+			df := filepath.Join(dir, "Dockerfile.sandbox")
+			writeFileAt(df, "FROM claude-sandbox\n")
+			Expect(os.Chmod(df, 0o000)).To(Succeed())
+			_, err := resolve(imagebuild.ChildInputs{DockerfileDir: dir, Dockerfile: "Dockerfile.sandbox"})
+			Expect(err).To(MatchError(ContainSubstring(df)))
+		})
+
+		It("CS-IMG-074: a directory or a FIFO at the path fails naming it, and a FIFO never hangs the launch", func() {
+			df := filepath.Join(proj, ".claude-sandbox", "Dockerfile")
+			Expect(os.MkdirAll(df, 0o755)).To(Succeed())
+			_, err := resolve(imagebuild.ChildInputs{})
+			Expect(err).To(MatchError(ContainSubstring(df)))
+
+			Expect(os.Remove(df)).To(Succeed())
+			Expect(syscall.Mkfifo(df, 0o644)).To(Succeed())
+			done := make(chan error, 1)
+			go func() { _, err := resolve(imagebuild.ChildInputs{}); done <- err }()
+			Eventually(done, 5*time.Second).Should(Receive(MatchError(ContainSubstring("not a regular file"))))
+		})
+
+		It("CS-IMG-074: an empty Dockerfile is a real, empty Dockerfile — built, never a silent base-only launch", func() {
+			df := filepath.Join(proj, ".claude-sandbox", "Dockerfile")
+			writeFileAt(df, "")
+			spec, err := resolve(imagebuild.ChildInputs{})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(spec.Use).To(BeTrue())
+			Expect(spec.Content).To(BeEmpty())
+			spec.ImageName = "claude-sandbox-proj"
+			_, built, err := imagebuild.EnsureChild(o, spec, false, false)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(built).To(BeTrue())
+			Expect(stdinOf(childBuild())).To(BeEmpty())
+		})
+
+		It("CS-IMG-074: the child fingerprint value is unchanged for the same content, so nothing rebuilds", func() {
+			df := filepath.Join(proj, ".claude-sandbox", "Dockerfile")
+			writeFileAt(df, "FROM claude-sandbox\nRUN apt-get install -y gopls\n")
+			spec, err := resolve(imagebuild.ChildInputs{})
+			Expect(err).NotTo(HaveOccurred())
+			want := imagebuild.PreSnapshotChildInputs(spec, "sha256:base1")
+			Expect(want).NotTo(BeEmpty())
+			spec.ImageName = "claude-sandbox-proj"
+			_, built, err := imagebuild.EnsureChild(o, spec, false, false)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(built).To(BeTrue())
+			Expect(stampOf(fake, "claude-sandbox-proj")).To(Equal(want))
+
+			// An image labelled by the pre-snapshot launcher is fresh.
+			images["claude-sandbox-proj"] = &imgState{created: imgT, id: "sha256:child1", inputs: want}
+			fake.Calls = nil
+			_, built, err = imagebuild.EnsureChild(o, spec, false, false)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(built).To(BeFalse())
+		})
+
+		It("CS-IMG-074: the fingerprint hashes the snapshot, not the file on disk at build time", func() {
+			df := filepath.Join(proj, ".claude-sandbox", "Dockerfile")
+			writeFileAt(df, "FROM claude-sandbox\n")
+			spec, err := resolve(imagebuild.ChildInputs{})
+			Expect(err).NotTo(HaveOccurred())
+			spec.ImageName = "claude-sandbox-proj"
+			want := imagebuild.PreSnapshotChildInputs(spec, "sha256:base1")
+			writeFileAt(df, "FROM claude-sandbox\nRUN planted\n")
+			_, _, err = imagebuild.EnsureChild(o, spec, false, false)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(stampOf(fake, "claude-sandbox-proj")).To(Equal(want))
+		})
+
+		It("CS-IMG-073: the child builds from the checked bytes on stdin, even when the file changed after the read", func() {
+			df := filepath.Join(proj, ".claude-sandbox", "Dockerfile")
+			writeFileAt(df, "FROM claude-sandbox\nRUN echo checked\n")
+			spec, err := resolve(imagebuild.ChildInputs{})
+			Expect(err).NotTo(HaveOccurred())
+			spec.ImageName = "claude-sandbox-proj"
+			writeFileAt(df, "FROM claude-sandbox\nENV LD_PRELOAD=/planted.so\n")
+			_, built, err := imagebuild.EnsureChild(o, spec, false, false)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(built).To(BeTrue())
+			Expect(buildLines(fake)).To(ContainElement("docker build -t claude-sandbox-proj -f - " + proj))
+			Expect(stdinOf(childBuild())).To(Equal("FROM claude-sandbox\nRUN echo checked\n"))
+			Expect(strings.Join(buildLines(fake), "\n")).NotTo(ContainSubstring(df), "the file is never handed to docker")
+		})
+
+		Describe("the private-temp-dir fallback", func() {
+			var df string
+			var seen struct{ file, dockerfile, ignore string }
+
+			BeforeEach(func() {
+				df = filepath.Join(proj, ".claude-sandbox", "Dockerfile")
+				writeFileAt(df, "FROM claude-sandbox\nCOPY . /src\n")
+				writeFileAt(df+".dockerignore", "secrets/\n")
+				seen = struct{ file, dockerfile, ignore string }{}
+			})
+
+			build := func(fail bool) error {
+				fake.OnFunc("docker build -t claude-sandbox-proj", func(c execx.Cmd) (string, error) {
+					for i, a := range c.Args {
+						if a == "-f" && i+1 < len(c.Args) {
+							seen.file = c.Args[i+1]
+						}
+					}
+					raw, _ := os.ReadFile(seen.file)
+					seen.dockerfile = string(raw)
+					raw, _ = os.ReadFile(seen.file + ".dockerignore")
+					seen.ignore = string(raw)
+					if fail {
+						return "", execx.Fail(1)
+					}
+					return "", nil
+				})
+				spec, err := resolve(imagebuild.ChildInputs{})
+				Expect(err).NotTo(HaveOccurred())
+				spec.ImageName = "claude-sandbox-proj"
+				writeFileAt(df, "FROM claude-sandbox\nRUN planted\n")
+				_, _, err = imagebuild.EnsureChild(o, spec, false, false)
+				return err
+			}
+
+			It("CS-IMG-073: a Dockerfile-specific ignore file sends the checked bytes through a private temp dir, removed after the build", func() {
+				Expect(build(false)).To(Succeed())
+				Expect(seen.file).To(HavePrefix(scratch + string(filepath.Separator)))
+				Expect(filepath.Base(seen.file)).To(Equal("Dockerfile"))
+				Expect(seen.dockerfile).To(Equal("FROM claude-sandbox\nCOPY . /src\n"), "the checked bytes, not the rewritten file")
+				Expect(seen.ignore).To(Equal("secrets/\n"))
+				c := childBuild()
+				Expect(c.Stdin).To(BeNil())
+				Expect(c.Args[len(c.Args)-1]).To(Equal(proj), "the context stays the project")
+				entries, err := os.ReadDir(scratch)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(entries).To(BeEmpty(), "the private directory is removed")
+			})
+
+			It("CS-IMG-073: the private temp dir is removed after a failed build too", func() {
+				Expect(build(true)).NotTo(Succeed())
+				Expect(seen.dockerfile).To(Equal("FROM claude-sandbox\nCOPY . /src\n"))
+				entries, err := os.ReadDir(scratch)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(entries).To(BeEmpty())
+			})
 		})
 	})
 
@@ -2137,7 +2396,7 @@ var _ = Describe("image build lifecycle", func() {
 			proj := GinkgoT().TempDir()
 			df := filepath.Join(proj, ".claude-sandbox", "Dockerfile")
 			touchAt(df, old)
-			spec := imagebuild.ChildSpec{Use: true, Dockerfile: df, Context: proj, ImageName: "claude-sandbox-proj"}
+			spec := specOf(df, proj, "claude-sandbox-proj")
 			images["claude-sandbox"] = &imgState{created: imgT, id: "sha256:base"}
 			images["claude-sandbox-tools"] = &imgState{created: imgT, id: "sha256:tools"}
 			images["claude-sandbox-cli"] = &imgState{created: imgT, id: "sha256:cli"}

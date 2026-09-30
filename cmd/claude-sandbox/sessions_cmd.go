@@ -449,10 +449,15 @@ func wouldBeFingerprint(env *Env, projectDir string, f *launchFlags, cfg *cascad
 	if dfName == "" {
 		dfName = cfg.Dockerfile
 	}
-	spec := imagebuild.ResolveChild(imagebuild.ChildInputs{
+	spec, err := imagebuild.ResolveChild(imagebuild.ChildInputs{
 		ProjectDir: projectDir, MainCheckout: mainCheckout,
 		BaseOnly: baseOnly, DockerfileDir: dfDir, Dockerfile: dfName,
 	}, io.Discard)
+	if err != nil {
+		// An unreadable Dockerfile would fail a launch (CS-IMG-074); here it
+		// only means no comparable hash — "no opinion", as below.
+		return "", nil
+	}
 
 	parent := spec.ImageName
 	if !spec.Use {

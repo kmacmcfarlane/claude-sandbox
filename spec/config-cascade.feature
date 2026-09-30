@@ -483,3 +483,22 @@ Feature: Config cascade and env stacking (CS-CASC)
       | /ws/p/.claude-sandbox/env | 3  | LD_PRELOAD |
     And a finding names the key and never the value (env files hold secrets; CS-CASC-025)
     And an unreadable file yields no finding (the launch fails on it elsewhere)
+
+  # ---- one snapshot of the config files (CS-CASC-046) ----
+  # config.yaml files are session-writable (the project tree is mounted rw).
+  # Each consumer used to open them again: the merge, the key-source lookups
+  # (oomScoreAdj, memoryLimit), the cascade report. A file rewritten between
+  # two reads made one launch act on two configs — the checked one and the
+  # used one. The env files already follow this rule (CS-LNCH-132).
+
+  Scenario: CS-CASC-046 Each config.yaml is read once per launch and every consumer uses that snapshot
+    Given the cascade /ws/.claude-sandbox/config.yaml and /ws/p/.claude-sandbox/config.yaml
+    When a launch starts
+    Then each file's bytes are read exactly once (cascade.ReadConfigFiles)
+    And the merge, the trackInHost resolution, the key sources (oomScoreAdj,
+      memoryLimit), the cascade report's config.yaml entries and the drift
+      fingerprint (which hashes the merged result) all use those bytes
+    And a file rewritten after the read changes nothing in this launch
+    And a file that cannot be read fails the launch naming it, as before
+    # The path-taking helpers (Load, TrackInHost*, KeySource) remain for callers
+    # outside the launch path (init), each a read followed by the snapshot form.

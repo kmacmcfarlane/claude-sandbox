@@ -302,11 +302,11 @@ Feature: Image build lifecycle (CS-IMG)
 
   Scenario: CS-IMG-010 Default child location with project-root build context
     Given .claude-sandbox/Dockerfile exists in the project
-    Then the child builds with -f that Dockerfile and build context = the PROJECT ROOT
+    Then the child builds from that Dockerfile's bytes (CS-IMG-073) with build context = the PROJECT ROOT
 
   Scenario: CS-IMG-011 Parent-walk finds a shared child Dockerfile
     Given no project child Dockerfile, and /ws/.claude-sandbox/Dockerfile exists above
-    Then the child builds with -f /ws/.claude-sandbox/Dockerfile and context /ws
+    Then the child builds from /ws/.claude-sandbox/Dockerfile (CS-IMG-073) with context /ws
     And stdout reports where it was found
 
   Scenario: CS-IMG-012 Explicit override is honored verbatim
@@ -323,6 +323,37 @@ Feature: Image build lifecycle (CS-IMG)
   Scenario: CS-IMG-014 Missing child warns but proceeds on the base image
     Given no child Dockerfile anywhere and baseOnly unset
     Then a warning explains how to add one or set baseOnly, and the base image is used
+
+  Scenario: CS-IMG-074 The child Dockerfile is read once; only a missing file means "no child"
+    Given the resolution of CS-IMG-010..012 reaches a candidate Dockerfile
+    Then the file is opened once (non-blocking, so a FIFO cannot hang the launch)
+      and read into the resolved spec's content
+    And a candidate that does not exist (ENOENT, or ENOTDIR for a non-directory
+      on the way) is no child at that level: the walk goes on, then base only
+    And any other failure (EACCES, a directory, a FIFO or another non-regular
+      file) fails the launch naming the file: an unreadable Dockerfile is not
+      "no Dockerfile"
+    And an empty file is a real, empty Dockerfile: the build runs and fails as
+      docker says, never a silent base-only launch
+    And the child fingerprint hashes those bytes: for the same content it is
+      the same value as before this rule, so no child rebuilds
+    But COPY and ADD sources in the build context are NOT snapshotted: docker
+      reads the context at build time, so they are neither checked nor
+      fingerprinted (only the Dockerfile, the context path and the base ID are)
+
+  Scenario: CS-IMG-073 The child image is built from exactly the checked bytes
+    Given a child Dockerfile is in use and the child needs a build
+    Then the build is "docker build -t <tag> <labels> -f - <context>" with the
+      snapshot bytes of CS-IMG-074 on stdin
+    And a Dockerfile rewritten on disk after the read does not reach the build
+    When a Dockerfile-specific ignore file "<Dockerfile>.dockerignore" exists
+      beside it (stdin carries no file name, so docker could not find it)
+    Then the launcher writes the snapshot bytes 0600 into a private temp
+      directory, beside a copy of that ignore file, builds with
+      "-f <private dir>/<name>", and removes the directory after the build,
+      whether the build succeeded or not
+    # Never the shadow directory (made after the launch lock; builds run
+    # before it) and never the project file.
 
   # ---- child image staleness ----
 
