@@ -861,7 +861,7 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     Then every docker create also receives labels:
       | label                         | value                                                    |
       | claude-sandbox.configdir      | the launcher's RAW CLAUDE_CONFIG_DIR, empty when unset   |
-      | claude-sandbox.registry       | the host peer registry dir: <home>/.cache/claude-sandbox/peers/sessions when the shared registry applied (CS-LNCH-050), else <config dir>/sessions |
+      | claude-sandbox.registry       | the host peer registry dir: <peers root>/sessions when the shared registry applied (CS-LNCH-050; the root the launch chose, CS-DIR-010/011), else <config dir>/sessions |
       | claude-sandbox.launchflags    | names only, comma-separated: "--model" when the launcher's --model was given and claude's own --model was not ("--model:claude" when claude's was), then the replay and unreplayed names of CS-TMUX-013 |
     And the launch plan records the same registry dir (Plan.RegistryDir)
     And no label carries a flag's value or an environment value other than the raw config dir
@@ -1123,12 +1123,14 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
   # socket paths that exist only inside their own containers: their sessions
   # can neither enumerate nor message each other.
   #
-  # The bridge fixes both halves with one fixed host folder,
-  # ~/.cache/claude-sandbox/peers. Its sessions/ is mounted over each
+  # The bridge fixes both halves with one fixed host folder, the peers root
+  # ~/.local/state/claude-sandbox-peers (state, not cache: CS-DIR-010; the
+  # legacy root ~/.cache/claude-sandbox/peers while a container still mounts
+  # it, CS-DIR-011). Its sessions/ is mounted over each
   # container's <config dir>/sessions, so every opted-in container shares one
   # registry. The folder itself is mounted at the SAME path in every opted-in
   # container and XDG_RUNTIME_DIR points at it, so every session binds and
-  # advertises ~/.cache/claude-sandbox/peers/cc-socks/<pid>.sock — an address
+  # advertises <peers root>/cc-socks/<pid>.sock — an address
   # valid in every bridged container whatever its config dir. XDG_RUNTIME_DIR
   # outranks CLAUDE_CODE_TMPDIR for the socket path ONLY: scratchpads stay
   # under CLAUDE_CODE_TMPDIR and do not move. The variable itself applies to
@@ -1158,14 +1160,18 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     Given no config sets sharedPeerRegistry and CLAUDE_SANDBOX_SHARED_PEER_REGISTRY is unset
     Then the assembled docker create argv is identical to what it would be without the feature
     And no XDG_RUNTIME_DIR is passed
-    And nothing under ~/.cache/claude-sandbox/peers is mounted or created
+    And nothing under ~/.local/state/claude-sandbox-peers or
+      ~/.cache/claude-sandbox/peers is mounted or created
 
   Scenario: CS-LNCH-050 The shared peer registry bridges the registry and the socket address
     Given the merged config sets "sharedPeerRegistry: true"
-    Then "-v ~/.cache/claude-sandbox/peers/sessions:<config dir>/sessions" is added
-    And "-v ~/.cache/claude-sandbox/peers:~/.cache/claude-sandbox/peers" is added —
+    # <peers root> is ~/.local/state/claude-sandbox-peers, or the legacy
+    # ~/.cache/claude-sandbox/peers while a container still mounts it
+    # (CS-DIR-010/011).
+    Then "-v <peers root>/sessions:<config dir>/sessions" is added
+    And "-v <peers root>:<peers root>" is added —
       the peers root at the SAME path inside the container
-    And "-e XDG_RUNTIME_DIR=~/.cache/claude-sandbox/peers" is added
+    And "-e XDG_RUNTIME_DIR=<peers root>" is added
     # The ROOT, not cc-socks: Claude Code appends /cc-socks itself, and a
     # bundled language-server library drops vscode-ipc-*.sock files directly
     # under XDG_RUNTIME_DIR.
@@ -1183,7 +1189,7 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       scratchpads do not move
 
   Scenario: CS-LNCH-051 The shared directories are created on the host before docker create
-    Given the shared peer registry is enabled and ~/.cache/claude-sandbox/peers does not exist
+    Given the shared peer registry is enabled and the chosen peers root does not exist
     Then the launcher creates peers/, peers/sessions/ and peers/cc-socks/ (as the
       invoking user) before assembling the mounts
     # Docker creates a missing bind source as root and the entrypoint deliberately
@@ -1220,7 +1226,9 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       is left to docker: the launch still succeeds, and nothing is created there on the host
     # Creating it would plant the config dir itself on the host, flipping its
     # existence check for the NEXT launch.
-    And the host root is fixed at ~/.cache/claude-sandbox/peers and is not configurable
+    And the host root is fixed at ~/.local/state/claude-sandbox-peers (the legacy
+      ~/.cache/claude-sandbox/peers only during the drain, CS-DIR-011) and is not
+      configurable
     # A free-form path would let one tree's <config dir>/sessions be named as
     # the shared root by accident, which would have another tree's sandboxes
     # writing into a registry that its own host claude also owns. A fixed
@@ -1285,8 +1293,10 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     # Claude Code binds only when Buffer.byteLength(path) <= 103 (the sun_path
     # limit); past it, it silently falls back to /tmp/cc-socks-<uid> —
     # container-private, unreachable from any other container. For a home of
-    # /home/rt the root is 36 bytes and the worst-case socket path 58, so this
-    # guards only unusual home directories.
+    # /home/rt the root ~/.local/state/claude-sandbox-peers is 42 bytes and the
+    # worst-case socket path 64 (the legacy root: 36 and 58), so a home of up to
+    # 47 bytes bridges; this guards only unusual home directories. The length is
+    # that of the root the launch chose (CS-DIR-010/011).
     Given the shared peer registry is enabled
     And the worst-case socket path — the peers root + "/cc-socks/" + a 7-digit
       pid + ".sock" — would exceed 103 bytes
@@ -1297,7 +1307,8 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     And the docker create argv and the drift fingerprint are those of a key-off launch
 
   Scenario: CS-LNCH-107 A peer directory the launcher cannot own stands the bridge down with a remedy
-    # CS-LNCH-051 creates and tightens peers/, peers/sessions/ and peers/cc-socks/.
+    # CS-LNCH-051 creates and tightens the peers root (here "peers/"), its
+    # sessions/ and its cc-socks/.
     # When that fails — a directory docker once created as root, a read-only
     # one, a regular file in the way — erroring out would fail EVERY launch in
     # every tree that inherits the key, for a feature whose absence costs only
@@ -1321,7 +1332,8 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     # chmod follows symlinks: tightening through one would re-mode whatever the
     # link names, which the launcher does not own. The check is an lstat before
     # the chmod; swapping the directory between the two needs write access to
-    # the user's own ~/.cache/claude-sandbox, i.e. the user.
+    # the user's own ~/.local/state (or, during the drain, ~/.cache/claude-sandbox),
+    # i.e. the user.
 
   Scenario Outline: CS-LNCH-108 "An env file defines the key" means what docker will pass
     # The two checks that yield to an env file — the CLAUDE_CODE_TMPDIR stand-down
@@ -1556,7 +1568,7 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     And the drift fingerprint follows the normalized mount set, as always
 
   Scenario: CS-LNCH-165 A launcher inside a sandbox bridges the peer registry only where the outer sandbox did
-    # The peers root under ~/.cache/claude-sandbox is container-local unless
+    # The chosen peers root (CS-DIR-010/011) is container-local unless
     # the outer sandbox mounted it. The nested launcher would create it in its
     # own container, and docker would create the host path as root.
     Given the shared peer registry is enabled and the launcher runs inside a

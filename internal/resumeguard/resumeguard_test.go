@@ -174,6 +174,20 @@ var _ = Describe("resume guard", func() {
 			Expect(f.check(sandbox("cs-old", "running", "9", "", "")).Run().Holder).NotTo(BeNil(), "peers/sessions")
 		})
 
+		It("CS-SESS-066, CS-DIR-011: containers on the legacy and on the new peers root are each read from their label", func() {
+			newReg := filepath.Join(f.home, ".local", "state", "claude-sandbox-peers", "sessions")
+			f.write(newReg, 9, record(9, convID, after, "linux::pid:[1]", "1"))
+			f.write(reg, 10, record(10, otherID, after, "linux::pid:[1]", "1"))
+			Expect(f.check(sandbox("cs-new", "running", "9", newReg, "")).Run().Holder).NotTo(BeNil(), "new root")
+			Expect(f.check(sandbox("cs-legacy", "running", "10", reg, "")).Run().Open).To(BeFalse())
+			f.write(reg, 10, record(10, convID, after, "linux::pid:[1]", "1"))
+			Expect(f.check(sandbox("cs-legacy", "running", "10", reg, "")).Run().Holder).NotTo(BeNil(), "legacy root")
+			// A container without the label predates the move: the new root
+			// is not a fallback.
+			Expect(os.RemoveAll(reg)).To(Succeed())
+			Expect(f.check(sandbox("cs-old", "running", "9", "", "")).Run().Open).To(BeFalse())
+		})
+
 		It("CS-SESS-066: a missing registry dir holds no records; a container without a class is judged by its label only", func() {
 			Expect(f.check(sandbox("cs-a", "running", "7", filepath.Join(f.home, "nope"), "")).Run().Open).To(BeFalse())
 			f.write(reg, 7, record(7, convID, after, "linux::pid:[1]", "1"))

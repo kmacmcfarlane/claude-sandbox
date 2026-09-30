@@ -28,12 +28,17 @@ const CacheRootRel = ".cache/claude-sandbox"
 // XDG_STATE_HOME does not name an absolute directory (CS-DIR-001/002).
 const StateRootDefaultRel = ".local/state/claude-sandbox"
 
-// PeersRootRel is the shared peer registry's planned root relative to $HOME.
-// A SIBLING of the state root, never inside it, so no container bind is ever
-// at or under StateRoot; pinned to $HOME with no env lookup because the same
-// path must be computed on the host and in every container. Nothing uses it
-// yet: the registry still lives under CacheRoot until the peers move lands.
+// PeersRootRel is the shared peer registry's root relative to $HOME
+// (CS-DIR-010). A SIBLING of the state root, never inside it, so no container
+// bind is ever at or under StateRoot; pinned to $HOME with no env lookup
+// because the same path must be computed on the host and in every container.
 const PeersRootRel = ".local/state/claude-sandbox-peers"
+
+// LegacyPeersRootRel is where the shared peer registry lived before it moved
+// out of the cache root. A launch still uses it while any container mounts it
+// (drain-then-switch, CS-DIR-011), and readers of a container that predates
+// the claude-sandbox.registry label look there. The launcher never deletes it.
+const LegacyPeersRootRel = CacheRootRel + "/peers"
 
 // OwnedDirMode is the mode for StateRoot and every directory under it.
 const OwnedDirMode os.FileMode = 0o700
@@ -57,10 +62,45 @@ func StateRoot(home string, getenv func(string) string) string {
 	return filepath.Join(home, StateRootDefaultRel)
 }
 
-// PeersRoot is the planned shared-peer-registry root for a home directory
-// (see PeersRootRel).
+// PeersRoot is the shared-peer-registry root for a home directory (see
+// PeersRootRel).
 func PeersRoot(home string) string {
 	return filepath.Join(home, PeersRootRel)
+}
+
+// LegacyPeersRoot is the pre-move peer registry root for a home directory
+// (see LegacyPeersRootRel).
+func LegacyPeersRoot(home string) string {
+	return filepath.Join(home, LegacyPeersRootRel)
+}
+
+// CheckOwnedDir is EnsureOwnedDir's refusals without its side effects: it
+// creates and re-modes nothing (CS-DIR-019). An absent dir is fine — a launch
+// would create it; a symlink, a non-directory or another uid's directory is
+// refused with EnsureOwnedDir's texts. getuid nil means os.Getuid.
+func CheckOwnedDir(dir string, getuid func() int) error {
+	fi, err := os.Lstat(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return errSymlink
+	}
+	if !fi.IsDir() {
+		return errors.New("it is not a directory")
+	}
+	if getuid == nil {
+		getuid = os.Getuid
+	}
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+		if uid := getuid(); int(st.Uid) != uid {
+			return fmt.Errorf("it is owned by uid %d, not by the invoking user (uid %d)", st.Uid, uid)
+		}
+	}
+	return nil
 }
 
 // InSandbox reports whether the launcher runs inside a claude-sandbox

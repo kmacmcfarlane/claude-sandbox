@@ -319,8 +319,10 @@ func (s *syncBuffer) String() string {
 	return s.b.String()
 }
 
-// registryDirs is where a sandbox's records land: its registry label, else
-// (a container from before the label) both places they could be.
+// registryDirs is where a sandbox's records land: its registry label — the
+// dir its launch applied, the legacy or the new peers root alike — else (a
+// container from before the label, and so from before the peers move,
+// CS-DIR-011) both places they could be: its config dir and the LEGACY root.
 func (c Check) registryDirs(s sessions.Session) []string {
 	if s.RegistryDir != "" {
 		return []string{s.RegistryDir}
@@ -330,7 +332,7 @@ func (c Check) registryDirs(s sessions.Session) []string {
 		dirs = append(dirs, filepath.Join(c.ConfigDir, "sessions"))
 	}
 	if c.Home != "" {
-		dirs = append(dirs, filepath.Join(c.Home, launch.PeerRegistryRoot, "sessions"))
+		dirs = append(dirs, filepath.Join(c.Home, launch.LegacyPeerRegistryRoot, "sessions"))
 	}
 	return dirs
 }

@@ -120,7 +120,8 @@
 # each record advertises a socket path under CLAUDE_CODE_TMPDIR — both tied to
 # CLAUDE_CONFIG_DIR, so trees that export different config dirs (a work
 # checkout with its own .envrc, say) cannot see or message each other. Turning
-# this on uses one shared folder, ~/.cache/claude-sandbox/peers, mounted at the
+# this on uses one shared folder, ~/.local/state/claude-sandbox-peers (the old
+# ~/.cache/claude-sandbox/peers while a container still mounts it), mounted at the
 # same path in every opted-in container with XDG_RUNTIME_DIR pointed at it, so
 # every session's advertised socket address is valid everywhere; its sessions/
 # becomes the registry. Scratchpads do not move, but XDG_RUNTIME_DIR applies to

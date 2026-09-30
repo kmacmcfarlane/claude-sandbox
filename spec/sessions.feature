@@ -506,6 +506,9 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
     And the warning says container names stay unique (docker refuses a
       duplicate, CS-SESS-053) but pid classes are NOT protected: a launch at the
       same moment may get the same class
+    And it says the shared peer registry's root is not protected either: a
+      launch at the same moment may choose the other one during the drain
+      (CS-DIR-011)
 
   Scenario: CS-SESS-049 The launch lock is never held across image builds
     When a launch has to build or check images
@@ -821,6 +824,10 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
     And a container without that label (from before it) is looked up in
       <CLAUDE_CONFIG_DIR or ~/.claude>/sessions and in
       ~/.cache/claude-sandbox/peers/sessions
+    # The legacy peers root on purpose: a container without the label predates
+    # the peers move too (CS-DIR-011). Every later container names its registry
+    # dir, whichever root its launch took, so sessions on the legacy and the new
+    # root are both read from where they really are.
     And each directory is opened once with O_DIRECTORY|O_NOFOLLOW, and each
       record "<pid>.json" through that directory fd with
       O_NOFOLLOW|O_NONBLOCK|O_NOCTTY

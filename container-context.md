@@ -68,10 +68,14 @@ restart Claude Code afterwards). Use `setup-lsp-plugins --check` to verify statu
   the registry and the socket root both live under `CLAUDE_CONFIG_DIR`, so a
   tree exporting its own does not appear. The `sharedPeerRegistry: true`
   config key (off by default) bridges that: every opted-in container mounts
-  one shared folder, `~/.cache/claude-sandbox/peers`, at the same path, uses
-  its `sessions/` as the registry and has `XDG_RUNTIME_DIR` pointed at it, so
-  every session's advertised socket address (`…/peers/cc-socks/<pid>.sock`)
-  is valid in every bridged container. Scratchpads stay under
+  one shared folder, `~/.local/state/claude-sandbox-peers` (the old
+  `~/.cache/claude-sandbox/peers` while any container still mounts it — the
+  launcher drains, then switches; usually at the first launch after a
+  reboot), at the same path, uses its `sessions/` as the registry and has
+  `XDG_RUNTIME_DIR` pointed at it, so every session's advertised socket
+  address (`$XDG_RUNTIME_DIR/cc-socks/<pid>.sock`) is valid in every bridged
+  container. `XDG_RUNTIME_DIR` names the root this session actually uses, and
+  `$XDG_RUNTIME_DIR/sessions` is its registry. Scratchpads stay under
   `CLAUDE_CODE_TMPDIR` and do not move. `XDG_RUNTIME_DIR` is set for the
   whole container, though: other tools that use it (dbus, gpg, podman,
   pulse) also write their runtime files into that shared folder, which
@@ -157,8 +161,10 @@ restart Claude Code afterwards). Use `setup-lsp-plugins --check` to verify statu
   scratchpad when it is under the Claude config dir, and retry. A
   `settings.json` symlink target, a linked worktree's git dir and the shared
   peer registry are mounted from here only when this container's mountinfo
-  shows the outer sandbox bound them in; otherwise one warning says which was
-  skipped.
+  shows the outer sandbox bound them in (for the registry, also when this
+  session's `XDG_RUNTIME_DIR` is the root the launch chose); otherwise one
+  warning says which was skipped — so a launch from an unbridged sandbox
+  normally does not bridge.
 - **Discord MCP server** — baked in at `/opt/claude-sandbox/mcp/discord-notify/dist/index.mjs`. Provides the `send_discord_notification` tool when `DISCORD_WEBHOOK_URL` is set in the env file (`.claude-sandbox/env`). Configured via `~/.mcp.json` — no per-project setup needed.
 - **Notification hooks are managed settings.** A `Notification` hook is baked
   into the image at `/etc/claude-code/managed-settings.d/10-claude-sandbox.json`.
