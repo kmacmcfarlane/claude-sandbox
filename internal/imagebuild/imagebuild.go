@@ -115,13 +115,10 @@ type Options struct {
 	// "<Self> cli-prefetch <version>".
 	Self string
 
-	// Headless is a "claude-sandbox headless" launch: it never pulls an
-	// external parent (CS-IMG-055), since every second counts against an SDK
-	// client's probe timeout.
-	Headless bool
-	// Pulls dedupes the external-parent pulls of one launch across the base,
-	// tools and CLI builds (CS-IMG-055/056); nil pulls each image's parents
-	// on its own.
+	// Pulls records the external-parent pulls of one launch across the base,
+	// tools and CLI builds, deduping them and keeping each outcome
+	// (CS-IMG-055/056); nil pulls each image's parents on its own and records
+	// nothing.
 	Pulls *Pulls
 }
 

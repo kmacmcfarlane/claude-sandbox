@@ -2019,7 +2019,9 @@ var _ = Describe("image build lifecycle", func() {
 		noPullFlag := func() {
 			for _, l := range fake.CommandLines() {
 				if strings.HasPrefix(l, "docker build ") {
-					Expect(strings.Fields(l)).NotTo(ContainElement("--pull"), l)
+					for _, field := range strings.Fields(l) {
+						Expect(strings.HasPrefix(field, "--pull")).To(BeFalse(), l)
+					}
 				}
 			}
 		}
@@ -2152,23 +2154,27 @@ var _ = Describe("image build lifecycle", func() {
 			noPullFlag()
 		})
 
-		It("CS-IMG-055: a headless launch never pulls and says so once", func() {
-			o.Headless = true
+		It("CS-IMG-055: each parent's outcome is recorded by image: pulled, failed or skipped", func() {
+			fake.On("docker pull -q node:22-bookworm-slim", "", execx.Fail(1))
 			o.Pulls = imagebuild.NewPulls()
+			Expect(o.Pulls.Outcome("debian:bookworm-slim")).To(Equal(imagebuild.PullSkipped))
+			Expect(o.Pulls.Pulled(imagebuild.BaseDockerfile)).To(BeFalse())
+
 			_, err := imagebuild.EnsureBase(o)
 			Expect(err).NotTo(HaveOccurred())
+			Expect(o.Pulls.Outcome("debian:bookworm-slim")).To(Equal(imagebuild.PullPulled))
+			Expect(o.Pulls.Outcome("golang:1.25-bookworm")).To(Equal(imagebuild.PullSkipped))
+			Expect(o.Pulls.Pulled(imagebuild.BaseDockerfile)).To(BeTrue())
+
 			_, err = imagebuild.EnsureTools(o)
 			Expect(err).NotTo(HaveOccurred())
-			_, err = imagebuild.EnsureCLI(o)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(pulls()).To(BeEmpty())
-			Expect(buildLines(fake)).To(HaveLen(3))
-			Expect(strings.Count(errw.String(), "debian:bookworm-slim")).To(Equal(1))
-			Expect(errw.String()).To(ContainSubstring(
-				"Note: headless launch — not pulling debian:bookworm-slim; building on the local copy.\n"))
-			Expect(errw.String()).To(ContainSubstring(
-				"Note: headless launch — not pulling golang:1.25-bookworm, node:22-bookworm-slim; building on the local copy.\n"))
-			Expect(out.String()).NotTo(ContainSubstring("Pulling"))
+			Expect(o.Pulls.Outcome("golang:1.25-bookworm")).To(Equal(imagebuild.PullPulled))
+			Expect(o.Pulls.Outcome("node:22-bookworm-slim")).To(Equal(imagebuild.PullFailed))
+			Expect(o.Pulls.Pulled(imagebuild.ToolsDockerfile)).To(BeFalse())
+			Expect(o.Pulls.Pulled(imagebuild.CLIDockerfile)).To(BeTrue(), "debian was pulled for the base")
+
+			var none *imagebuild.Pulls
+			Expect(none.Outcome("debian:bookworm-slim")).To(Equal(imagebuild.PullSkipped))
 		})
 
 		It("CS-IMG-056: a failed pull warns once naming the image and docker's error, then builds on the local copy", func() {

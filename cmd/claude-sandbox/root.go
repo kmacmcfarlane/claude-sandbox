@@ -1055,9 +1055,9 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 		RepoRoot: rr, Version: version,
 		ForceRebuild: f.Rebuild, NoUpdateCheck: noUpdate, AutoUpdate: f.Update,
 		CacheDir: env.cacheDir(), Now: env.Now, Self: env.executable(),
-		// External parents are pulled at most once per launch, and never
-		// headless (CS-IMG-055/056).
-		Headless: headless, Pulls: imagebuild.NewPulls(),
+		// External parents are pulled at most once per launch, each
+		// outcome kept (CS-IMG-055/056).
+		Pulls: imagebuild.NewPulls(),
 	}
 	if err := imagebuild.EnsureBuildKit(imgOpts); err != nil {
 		return exitErr(2, "%s", err.Error())

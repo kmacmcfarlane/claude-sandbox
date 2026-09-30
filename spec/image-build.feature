@@ -635,11 +635,13 @@ Feature: Image build lifecycle (CS-IMG)
   # ---- external parents (base-image-refresh F1) ----
 
   Scenario: CS-IMG-055 External parents are docker-pulled before a from-scratch base, tools or CLI build
-    # The set is imagebuild.ExternalParents: every FROM of Dockerfile,
-    # Dockerfile.tools and Dockerfile.cli that names neither an earlier stage nor
-    # a local sandbox image — today debian:bookworm-slim (base, tools, CLI),
+    # The set is imagebuild.ExternalParents: every image reference of Dockerfile,
+    # Dockerfile.tools and Dockerfile.cli — a FROM, a COPY --from=<image> or a
+    # RUN --mount=...,from=<image> — that names neither an earlier stage nor a
+    # local sandbox image; today debian:bookworm-slim (base, tools, CLI),
     # golang:1.25-bookworm and node:22-bookworm-slim (tools). A test parses the
-    # three Dockerfiles so the set cannot drift from them.
+    # three Dockerfiles so the set cannot drift from them, and fails on an image
+    # reference holding "$" (a build-arg the launcher could not resolve).
     Given the base image is missing, or "claude-sandbox --rebuild"
     Then "docker pull -q <parent>" runs for each of the base's external parents
       before the base's docker build
@@ -658,9 +660,12 @@ Feature: Image build lifecycle (CS-IMG)
       and COPY --from name local-only images (claude-sandbox, claude-sandbox-tools,
       claude-sandbox-cli), and a registry lookup of those names is a squatting surface
     And a launch that builds none of the base, tools and CLI images pulls nothing
-    And a headless launch never pulls (Paseo's 5 s probes): it prints one
-      "Note: headless launch — not pulling <parents>; building on the local copy." line
-      on stderr and builds on the local copy
+    And a headless launch pulls by the same rules, its pull output on stderr like the
+      rest of its launcher output: the pull only ever precedes a from-scratch build,
+      which already takes minutes, so a probe that reaches it has timed out anyway
+    And the launch records each parent's outcome by image — pulled, failed, or skipped
+      (not attempted this launch) — so a later step can tell whether the build it
+      follows ran on a freshly pulled parent (base-image-refresh F2 reads it)
     # The pulls are what a later refresh stamp (base-image-refresh F2) rests on: F1 adds
     # no stamp and changes no build-inputs fingerprint (CS-IMG-032..036, 048).
 
@@ -674,7 +679,7 @@ Feature: Image build lifecycle (CS-IMG)
     And the pull is not retried and the build is not retried; a build failure of
       any kind fails as it does today
     And that parent is not pulled again for another image in the same launch, so the
-      warning appears once per parent
+      warning appears once per parent, and its outcome is recorded as failed
     # When the refresh stamp lands (F2), such a build does not renew it.
 
   Scenario: CS-IMG-067 The entrypoint's root part trusts nothing from the container environment
