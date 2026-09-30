@@ -2059,6 +2059,22 @@ var _ = Describe("launch.Build", func() {
 				Expect(launch.ChoosePeerRoot(home, [][]string{{alias}}, nil, false, true).Root).To(Equal(root))
 			})
 
+			It("CS-DIR-011: only a source ending in /.cache/claude-sandbox/peers is ever stat'ed", func() {
+				mkdir(legacy)
+				var statted []string
+				DeferCleanup(launch.SetStatPeerSource(func(p string) (os.FileInfo, error) {
+					statted = append(statted, p)
+					return os.Stat(p)
+				}))
+				hung := [][]string{{"/mnt/x/peers", "/mnt/nas/peers/sessions", "/mnt/y/peers/cc-socks", "/srv/claude-sandbox/peers"}}
+				Expect(launch.ChoosePeerRoot(home, hung, nil, false, true).Root).To(Equal(root))
+				Expect(statted).To(BeEmpty(), "no stat of a source that cannot be the legacy root")
+
+				other := "/elsewhere/h/.cache/claude-sandbox/peers"
+				launch.ChoosePeerRoot(home, [][]string{{other + "/sessions"}}, nil, false, true)
+				Expect(statted).To(Equal([]string{legacy, other}))
+			})
+
 			It("CS-DIR-010: a test whose home is the real home panics before creating the peers root", func() {
 				real, err := os.UserHomeDir()
 				Expect(err).NotTo(HaveOccurred())

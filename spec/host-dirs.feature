@@ -140,6 +140,12 @@ Feature: Host directories — cache root, state root, owned directories (CS-DIR)
     And on the host (not in a sandbox) a source that does not match lexically
       still pins when it stats as the same file as the legacy root (os.SameFile,
       the globalcfg precedent) — a $HOME reached through a symlinked ancestor
+    And only a source (or the parent of a sessions/ or cc-socks/ source) that,
+      path-cleaned, ends in /.cache/claude-sandbox/peers is ever stat'ed; any
+      other source — /mnt/nas/peers, say — never is
+    # The choice runs under the launch lock: a stat of a hung hard-mounted
+    # share would block uninterruptibly and push every other launch into the
+    # unserialized fallback (CS-SESS-048), which splits the registry.
     # Bind sources, not labels, are the evidence: they say what a container
     # actually mounts, a pre-move container's included. {{.Mounts}} is split on
     # ",", so a home path holding "," can hide a legacy mount and let a launch

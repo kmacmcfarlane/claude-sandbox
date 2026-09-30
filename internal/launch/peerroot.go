@@ -60,15 +60,24 @@ func PinsLegacyRoot(home string, sources []string) bool {
 	return pinsLegacyRoot(home, sources, false)
 }
 
+// statPeerSource stats a pin candidate; a seam so a test can prove which
+// sources are never stat'ed.
+var statPeerSource = os.Stat
+
 // pinsLegacyRoot is PinsLegacyRoot; with sameFile (on the host only — in a
 // sandbox a stat would read the container's view) a source that does not
 // match lexically still pins when it, or its parent for a sessions/ or
 // cc-socks/ source, stats as the same directory as the legacy root: a $HOME
 // reached through a symlinked ancestor (CS-DIR-011, the globalcfg
-// precedent). Only sources whose last element names a peer-registry
-// directory are stat'ed, so an unrelated (possibly hung) mount is never.
+// precedent). Only a candidate that, path-cleaned, ends in
+// "/.cache/claude-sandbox/peers" is stat'ed — the legacy root under another
+// spelling of a home — so no other source (a cascade mount such as
+// /mnt/nas/peers on a hung hard-mounted share) is ever stat'ed: the choice
+// runs under the launch lock, and a stat blocked in D state would stall
+// every other launch into the unserialized fallback.
 func pinsLegacyRoot(home string, sources []string, sameFile bool) bool {
 	legacy := filepath.Clean(hostdirs.LegacyPeersRoot(home))
+	suffix := "/" + hostdirs.LegacyPeersRootRel
 	var legacyFI os.FileInfo
 	statted := false
 	for _, s := range sources {
@@ -84,24 +93,20 @@ func pinsLegacyRoot(home string, sources []string, sameFile bool) bool {
 			continue
 		}
 		cand := c
-		switch filepath.Base(c) {
-		case filepath.Base(legacy):
-		case peerSessionsDir, peerSocketsDir:
+		if b := filepath.Base(c); b == peerSessionsDir || b == peerSocketsDir {
 			cand = filepath.Dir(c)
-			if filepath.Base(cand) != filepath.Base(legacy) {
-				continue
-			}
-		default:
+		}
+		if !strings.HasSuffix(cand, suffix) {
 			continue
 		}
 		if !statted {
 			statted = true
-			legacyFI, _ = os.Stat(legacy)
+			legacyFI, _ = statPeerSource(legacy)
 		}
 		if legacyFI == nil {
 			return false
 		}
-		if fi, err := os.Stat(cand); err == nil && os.SameFile(fi, legacyFI) {
+		if fi, err := statPeerSource(cand); err == nil && os.SameFile(fi, legacyFI) {
 			return true
 		}
 	}
