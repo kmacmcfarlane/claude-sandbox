@@ -154,6 +154,38 @@ var _ = Describe("headless mode (CS-LNCH-058..067)", func() {
 		Expect(f.out.String()).To(BeEmpty())
 	})
 
+	It("CS-IMG-055: a headless launch that builds never pulls; an interactive one pulls each parent once, and only when it builds from scratch", func() {
+		pullLines := func(g *cliFixture) []string {
+			var out []string
+			for _, l := range g.fake.CommandLines() {
+				if strings.HasPrefix(l, "docker pull ") {
+					out = append(out, l)
+				}
+			}
+			return out
+		}
+		f.fake.On("image inspect", "", execx.Fail(1))
+		Expect(f.run("headless", "--", "--version")).To(Equal(0), f.errw.String())
+		Expect(strings.Join(f.fake.CommandLines(), "\n")).To(ContainSubstring("docker build "), "the test must exercise a build")
+		Expect(pullLines(f)).To(BeEmpty())
+		Expect(f.errw.String()).To(ContainSubstring("Note: headless launch — not pulling"))
+		Expect(f.out.String()).To(BeEmpty())
+
+		g := newCLIFixture()
+		g.fake.On("image inspect", "", execx.Fail(1))
+		Expect(g.run()).To(Equal(0), g.errw.String())
+		Expect(pullLines(g)).To(Equal([]string{
+			"docker pull -q debian:bookworm-slim",
+			"docker pull -q golang:1.25-bookworm",
+			"docker pull -q node:22-bookworm-slim",
+		}))
+
+		// Every image present and current: no build, so no pull.
+		h := newCLIFixture()
+		Expect(h.run()).To(Equal(0), h.errw.String())
+		Expect(pullLines(h)).To(BeEmpty())
+	})
+
 	Describe("CS-LNCH-062: update check", func() {
 		stub := func(g *cliFixture) {
 			g.fake.On("claude-sandbox.claude-version", "1.2.3\n", nil)

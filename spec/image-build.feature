@@ -632,6 +632,51 @@ Feature: Image build lifecycle (CS-IMG)
     # false, so pip refuses ("User site-packages are not visible in this
     # virtualenv").
 
+  # ---- external parents (base-image-refresh F1) ----
+
+  Scenario: CS-IMG-055 External parents are docker-pulled before a from-scratch base, tools or CLI build
+    # The set is imagebuild.ExternalParents: every FROM of Dockerfile,
+    # Dockerfile.tools and Dockerfile.cli that names neither an earlier stage nor
+    # a local sandbox image — today debian:bookworm-slim (base, tools, CLI),
+    # golang:1.25-bookworm and node:22-bookworm-slim (tools). A test parses the
+    # three Dockerfiles so the set cannot drift from them.
+    Given the base image is missing, or "claude-sandbox --rebuild"
+    Then "docker pull -q <parent>" runs for each of the base's external parents
+      before the base's docker build
+    And the tools image's parents are pulled the same way only when the tools image
+      is missing or on --rebuild, and the CLI image's only when it is missing or on
+      --rebuild
+    And a parent shared by several images is pulled at most once per launch
+    And no docker build ever carries --pull
+    # A BuildKit --pull is per build and leaves the local tag alone on the classic
+    # image store (probed 2026-09-24): the next build without it goes back to the
+    # old parent. docker pull moves the tag every later build resolves.
+    And a base build for an input change (a Dockerfile edit, or the unlabeled mtime
+      rule) pulls nothing, so a tail edit stays cached and works offline
+    And an --update CLI build and the background CLI prefetch (CS-IMG-045) pull nothing
+    And a child build and a cap build never pull and never carry --pull: their FROM
+      and COPY --from name local-only images (claude-sandbox, claude-sandbox-tools,
+      claude-sandbox-cli), and a registry lookup of those names is a squatting surface
+    And a launch that builds none of the base, tools and CLI images pulls nothing
+    And a headless launch never pulls (Paseo's 5 s probes): it prints one
+      "Note: headless launch — not pulling <parents>; building on the local copy." line
+      on stderr and builds on the local copy
+    # The pulls are what a later refresh stamp (base-image-refresh F2) rests on: F1 adds
+    # no stamp and changes no build-inputs fingerprint (CS-IMG-032..036, 048).
+
+  Scenario: CS-IMG-056 A failed parent pull warns and builds on the local copy
+    Given a from-scratch build whose "docker pull" of a parent fails (offline,
+      registry down)
+    Then one line is printed on stderr:
+      "WARNING: could not pull <image> (<docker's error>); building on the local copy."
+    And the build runs as it would have without the pull, on the local copy of the
+      parent (a missing local copy then fails the build as it does today)
+    And the pull is not retried and the build is not retried; a build failure of
+      any kind fails as it does today
+    And that parent is not pulled again for another image in the same launch, so the
+      warning appears once per parent
+    # When the refresh stamp lands (F2), such a build does not renew it.
+
   Scenario: CS-IMG-067 The entrypoint's root part trusts nothing from the container environment
     Given entrypoint.sh runs as root on EVERY start of a container — a docker start of
       a stopped kept container re-runs it — and its environment is the container's,
