@@ -54,15 +54,54 @@ func (c PeerRootChoice) OnLegacy() bool { return c.Root == c.Legacy }
 // home's legacy peers root: a source that, path-cleaned, equals the root or
 // lies under it (the peers/sessions source counts). Sources are the split
 // {{.Mounts}} of docker ps --no-trunc. Another user's legacy root never
-// matches (CS-DIR-013).
+// matches (CS-DIR-013). The match is lexical; see pinsLegacyRoot for the
+// host's same-file fallback.
 func PinsLegacyRoot(home string, sources []string) bool {
+	return pinsLegacyRoot(home, sources, false)
+}
+
+// pinsLegacyRoot is PinsLegacyRoot; with sameFile (on the host only — in a
+// sandbox a stat would read the container's view) a source that does not
+// match lexically still pins when it, or its parent for a sessions/ or
+// cc-socks/ source, stats as the same directory as the legacy root: a $HOME
+// reached through a symlinked ancestor (CS-DIR-011, the globalcfg
+// precedent). Only sources whose last element names a peer-registry
+// directory are stat'ed, so an unrelated (possibly hung) mount is never.
+func pinsLegacyRoot(home string, sources []string, sameFile bool) bool {
 	legacy := filepath.Clean(hostdirs.LegacyPeersRoot(home))
+	var legacyFI os.FileInfo
+	statted := false
 	for _, s := range sources {
 		s = strings.TrimSpace(s)
 		if s == "" {
 			continue
 		}
-		if c := filepath.Clean(s); c == legacy || strings.HasPrefix(c, legacy+"/") {
+		c := filepath.Clean(s)
+		if c == legacy || strings.HasPrefix(c, legacy+"/") {
+			return true
+		}
+		if !sameFile {
+			continue
+		}
+		cand := c
+		switch filepath.Base(c) {
+		case filepath.Base(legacy):
+		case peerSessionsDir, peerSocketsDir:
+			cand = filepath.Dir(c)
+			if filepath.Base(cand) != filepath.Base(legacy) {
+				continue
+			}
+		default:
+			continue
+		}
+		if !statted {
+			statted = true
+			legacyFI, _ = os.Stat(legacy)
+		}
+		if legacyFI == nil {
+			return false
+		}
+		if fi, err := os.Stat(cand); err == nil && os.SameFile(fi, legacyFI) {
 			return true
 		}
 	}
@@ -73,16 +112,23 @@ func PinsLegacyRoot(home string, sources []string) bool {
 // mounts holds the bind sources of EVERY row the launch's discovery returned,
 // exited ones docker is still removing included; discoveryErr is that
 // discovery's error. keep marks a kept launch (CS-DIR-016; no caller sets it
-// yet).
+// yet). onHost enables the same-file fallback of the pin (CS-DIR-011); a
+// launcher inside a sandbox passes false.
 //
-// A failed discovery fails closed (CS-DIR-014): the legacy root when it is a
-// real directory — an empty list would read as "nothing pins it" and split
-// the registry under live legacy sessions — else the new root (CS-DIR-015).
-func ChoosePeerRoot(home string, mounts [][]string, discoveryErr error, keep bool) PeerRootChoice {
+// A failed discovery (CS-DIR-014/015): the NEW root when it is a real
+// directory — it exists only once a launch switched, and the legacy
+// directory is never deleted, so its mere existence would send this launch
+// back to it and every later launch would pin to it; else the legacy root
+// when it is a real directory (fail closed before the switch: an empty list
+// would read as "nothing pins it"); else the new root.
+func ChoosePeerRoot(home string, mounts [][]string, discoveryErr error, keep, onHost bool) PeerRootChoice {
 	c := PeerRootChoice{Legacy: hostdirs.LegacyPeersRoot(home), New: hostdirs.PeersRoot(home)}
 	if discoveryErr != nil {
 		c.DiscoveryFailed = true
 		c.Root = c.New
+		if fi, err := os.Lstat(c.New); err == nil && fi.IsDir() {
+			return c
+		}
 		if fi, err := os.Lstat(c.Legacy); err == nil && fi.IsDir() {
 			c.Root = c.Legacy
 		} else if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -93,7 +139,7 @@ func ChoosePeerRoot(home string, mounts [][]string, discoveryErr error, keep boo
 		return c
 	}
 	for _, m := range mounts {
-		if PinsLegacyRoot(home, m) {
+		if pinsLegacyRoot(home, m, onHost) {
 			c.Pinned++
 		}
 	}

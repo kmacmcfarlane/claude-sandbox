@@ -61,7 +61,9 @@ const minReclaimAge = 10 * time.Second
 // pid class, so a concurrent launch can pick the same one.
 const unlockedWarning = "Warning: could not take the launch lock (%s); launching without it. " +
 	"Container names stay unique (docker refuses a duplicate), but a launch running at the same moment " +
-	"may get the same pid class, and one of the two sessions would then be missing from /peers.\n"
+	"may get the same pid class, and one of the two sessions would then be missing from /peers. " +
+	"The shared peer registry's root is not protected either: while the old root drains, " +
+	"a launch at the same moment may choose the other one.\n"
 
 // acquireLaunchLock takes the host launch lock and returns its release. A lock
 // that cannot be taken warns and degrades to an unserialized launch rather
@@ -170,7 +172,7 @@ func reserveContainer(env *Env, in launch.Inputs, wt worktreeChoice, ralph bool,
 		in.PIDClass = pidClassFrom(found)
 		// CS-DIR-010..016: the peers root, from the same discovery and under
 		// the same lock, so every launcher on the host agrees on it.
-		pr := peerRootFrom(in.Home, found, removing, derr, false)
+		pr := peerRootFrom(env.Getenv, in.Home, found, removing, derr, false)
 		in.PeerRoot = &pr
 
 		if attempt > 1 {
@@ -249,12 +251,12 @@ func discoverForReservation(env *Env) (found, removing []sessions.Session, err e
 // peerRootFrom chooses the shared peer registry's root (CS-DIR-010..016) from
 // the bind sources of every row discovery returned. keep marks a kept launch
 // (CS-DIR-016); no launch is marked kept yet.
-func peerRootFrom(home string, found, removing []sessions.Session, derr error, keep bool) launch.PeerRootChoice {
+func peerRootFrom(getenv func(string) string, home string, found, removing []sessions.Session, derr error, keep bool) launch.PeerRootChoice {
 	var mounts [][]string
 	for _, s := range append(slices.Clip(found), removing...) {
 		mounts = append(mounts, s.Mounts)
 	}
-	return launch.ChoosePeerRoot(home, mounts, derr, keep)
+	return launch.ChoosePeerRoot(home, mounts, derr, keep, !hostdirs.InSandbox(getenv))
 }
 
 // guardResume refuses a launch that would resume a conversation already open

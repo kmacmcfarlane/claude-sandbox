@@ -102,7 +102,10 @@ Feature: Host directories — cache root, state root, owned directories (CS-DIR)
   #
   # The choice is made under the launch lock (CS-SESS-048) from the discovery
   # that already runs there, so it is serialized against every other launcher
-  # on the host. Discovery lists bind sources at no extra docker call: the one
+  # on the host — except a launch that could not take the lock (CS-SESS-048's
+  # unserialized fallback) and nested launchers, whose lock files are
+  # container-private: either can choose outside the critical section during
+  # the drain, and its warning says so. Discovery lists bind sources at no extra docker call: the one
   # "docker ps -a --no-trunc" gains a trailing {{.Mounts}} field, the
   # comma-joined list of every mount source.
 
@@ -117,6 +120,9 @@ Feature: Host directories — cache root, state root, owned directories (CS-DIR)
     And the container carries claude-sandbox.peerroot=<that root> and
       claude-sandbox.registry=<that root>/sessions (CS-LNCH-109)
     And the one banner line (CS-LNCH-053) names that root and says nothing more
+    # Under go test a build whose home is the real home panics before any peer
+    # directory is created (the CS-LNCH-138 precedent), whatever else stood
+    # down first.
 
   Scenario: CS-DIR-011 A container mounting the legacy root pins it, and the banner says so
     Given the shared peer registry is enabled
@@ -131,6 +137,9 @@ Feature: Host directories — cache root, state root, owned directories (CS-DIR)
       ~/.local/state/claude-sandbox-peers at the first launch when none do
       (usually after a reboot)
     And the legacy directory is never deleted by the launcher
+    And on the host (not in a sandbox) a source that does not match lexically
+      still pins when it stats as the same file as the legacy root (os.SameFile,
+      the globalcfg precedent) — a $HOME reached through a symlinked ancestor
     # Bind sources, not labels, are the evidence: they say what a container
     # actually mounts, a pre-move container's included. {{.Mounts}} is split on
     # ",", so a home path holding "," can hide a legacy mount and let a launch
@@ -154,9 +163,10 @@ Feature: Host directories — cache root, state root, owned directories (CS-DIR)
     # Discovery lists every sandbox on the host daemon, other users' included;
     # only this user's legacy root can split this user's registry.
 
-  Scenario: CS-DIR-014 A failed discovery keeps an existing legacy root, with a warning
+  Scenario: CS-DIR-014 A failed discovery before the switch keeps the legacy root, with a warning
     Given the shared peer registry is enabled
     And the launch's discovery failed
+    And ~/.local/state/claude-sandbox-peers is not a real directory (lstat)
     And ~/.cache/claude-sandbox/peers is a real directory (lstat, not a symlink)
     Then the bridge uses the legacy root
     And one warning says containers could not be listed and the peer registry
@@ -165,11 +175,16 @@ Feature: Host directories — cache root, state root, owned directories (CS-DIR)
     # and taking the new root under live legacy sessions would split the
     # registry. The noun and pid-class picks keep their random fallback.
 
-  Scenario: CS-DIR-015 A failed discovery with no legacy directory takes the new root
+  Scenario: CS-DIR-015 A failed discovery after the switch, or with no legacy directory, takes the new root
     Given the launch's discovery failed
-    And ~/.cache/claude-sandbox/peers does not exist (or is not a real directory)
+    And ~/.local/state/claude-sandbox-peers is a real directory, or
+      ~/.cache/claude-sandbox/peers does not exist (or is not a real directory)
     Then the bridge uses the new root, with no discovery warning
-    # No legacy directory, no legacy session to split from.
+    # The new root exists only once some launch switched, i.e. once nothing
+    # mounted the legacy root. The legacy directory is never deleted, so its
+    # existence alone would send a launch back to it after the switch — and
+    # every later launch would then pin to it, splitting the fleet until a
+    # reboot. No legacy directory, no legacy session to split from.
 
   Scenario: CS-DIR-016 A launch marked kept ignores the pin
     # Seam only: no launch is marked kept today (no --keep flag). A kept

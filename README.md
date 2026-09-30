@@ -1203,13 +1203,23 @@ runs, with `{{.Mounts}}`):
   container(s) use it. It moves to ~/.local/state/claude-sandbox-peers at the first launch when
   none do (usually after a reboot).`
 - **No container** mounting it: the launch takes the new root, and prints the plain banner.
-- **`docker ps` failed**: the launch keeps the old location if that directory exists, with
-  `Warning: could not list containers; keeping the peer registry at … for this launch`, and
-  takes the new root otherwise.
+- **`docker ps` failed**: the launch takes the new root if that directory exists (it exists
+  only once a launch has switched, so a failed listing after the switch never sends a launch
+  back); before the switch it keeps the old location if that directory exists, with
+  `Warning: could not list containers; keeping the peer registry at … for this launch`; with
+  neither, the new root.
+
+The choice is serialized by the launch lock. Two kinds of launch choose outside it: one that
+could not take the lock within 30 s (its warning says the pid class and the peer registry root
+are unprotected), and a launcher run inside a sandbox, whose lock file is container-private.
+During the drain either can land on the other root than a launch at the same moment.
 
 Every bridged launch during the drain mounts the old location again, so with overlapping
 sessions the switch happens in practice at the **first launch after a reboot**, or after you end
-(or stop) every bridged session and then launch. Nothing is copied. Each container records the
+(or stop) every bridged session and then launch. Before a mass relaunch (a restore), check
+which root it will take: if `docker ps -a --no-trunc --format '{{.Names}} {{.Mounts}}' | grep
+claude-sandbox/peers` prints nothing, the first launch switches to the new root and every later
+one follows it; otherwise all of them stay on the old one. Nothing is copied. Each container records the
 root it took in the `claude-sandbox.peerroot` label (`none` without the bridge) and in
 `claude-sandbox.registry`, so attach/join drift checks, the resume guard, the tmux pane marks
 and a restore read each session from its own root, old or new; a container from before these

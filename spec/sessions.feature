@@ -506,6 +506,9 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
     And the warning says container names stay unique (docker refuses a
       duplicate, CS-SESS-053) but pid classes are NOT protected: a launch at the
       same moment may get the same class
+    And it says the shared peer registry's root is not protected either: a
+      launch at the same moment may choose the other one during the drain
+      (CS-DIR-011)
 
   Scenario: CS-SESS-049 The launch lock is never held across image builds
     When a launch has to build or check images

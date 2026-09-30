@@ -200,8 +200,12 @@ With `sharedPeerRegistry` on, bridged sessions on different peers roots cannot s
 the root moved from `~/.cache/claude-sandbox/peers` to `~/.local/state/claude-sandbox-peers`, and
 a launch stays on the old one while any container still mounts it (usually until a reboot). Compare
 `docker inspect -f '{{index .Config.Labels "claude-sandbox.peerroot"}}' <name>` across the
-sessions; a split only arises when an older launcher (another checkout, a nested launcher in an
-old container) started a session after the switch — relaunch that one.
+sessions, then relaunch the odd one out. A split can arise three ways: an older launcher (another
+checkout, a nested launcher in an old container) started a session after the switch; a launch
+ran unserialized (the lock took over 30 s — its warning says the root is unprotected) or from
+inside a sandbox (container-private lock file) while the drain was ending; or, with launchers
+before the fix, a failed `docker ps` after the switch sent a launch back to the old root — now
+closed: a failed listing stays on the new root once it exists.
 
 ### Container won't start
 1. Check Docker daemon is running: `docker info`

@@ -74,8 +74,8 @@ restart Claude Code afterwards). Use `setup-lsp-plugins --check` to verify statu
   reboot), at the same path, uses its `sessions/` as the registry and has
   `XDG_RUNTIME_DIR` pointed at it, so every session's advertised socket
   address (`$XDG_RUNTIME_DIR/cc-socks/<pid>.sock`) is valid in every bridged
-  container. `XDG_RUNTIME_DIR` names the root this session actually uses; the
-  container's `claude-sandbox.registry` label names its registry dir. Scratchpads stay under
+  container. `XDG_RUNTIME_DIR` names the root this session actually uses, and
+  `$XDG_RUNTIME_DIR/sessions` is its registry. Scratchpads stay under
   `CLAUDE_CODE_TMPDIR` and do not move. `XDG_RUNTIME_DIR` is set for the
   whole container, though: other tools that use it (dbus, gpg, podman,
   pulse) also write their runtime files into that shared folder, which

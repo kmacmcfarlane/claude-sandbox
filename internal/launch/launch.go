@@ -1553,6 +1553,11 @@ func (in *Inputs) assembleSharedPeerRegistry(p *Plan, configDir string, choice P
 	// CS-DIR-019: the drift check only checks — it must not plant a peers
 	// root on the host while it hashes a would-be plan.
 	sessions := filepath.Join(root, peerSessionsDir)
+	if !in.NoCreatePeerDirs && testing.Testing() && isRealHome(in.Home) {
+		// A fixture that reaches this point with the real home would create
+		// and re-mode the operator's real peers root (CS-DIR-010).
+		panic(fmt.Sprintf("launch: a test would create the real peer registry %s; set Inputs.Home to a scratch directory", root))
+	}
 	for _, d := range []string{root, sessions, filepath.Join(root, peerSocketsDir)} {
 		var err error
 		if in.NoCreatePeerDirs {

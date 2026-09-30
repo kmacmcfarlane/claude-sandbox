@@ -6,6 +6,7 @@ package main
 // bind sources discovery lists, and reused by the attach/join drift check.
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -179,6 +180,22 @@ var _ = Describe("peers root move: drain-then-switch (CS-DIR-010..019)", func() 
 		Expect(os.MkdirAll(filepath.Dir(legacy), 0o700)).To(Succeed())
 		Expect(os.Symlink(target, legacy)).To(Succeed())
 		expectRoot(launch(), newer)
+	})
+
+	It("CS-DIR-015: a failed discovery after the switch stays on the new root, though the legacy dir remains", func() {
+		Expect(os.MkdirAll(legacy, 0o700)).To(Succeed())
+		expectRoot(launch(), newer) // the switch: nothing mounts the legacy root
+		discoveryFails = true
+		expectRoot(launch(), newer)
+		Expect(f.out.String()).NotTo(ContainSubstring("could not list containers"))
+		Expect(legacy).To(BeADirectory())
+	})
+
+	It("CS-SESS-048, CS-DIR-011: the unserialized-launch warning says the peers root is unprotected too", func() {
+		f.lock.err = errors.New("timed out after 30s")
+		launch()
+		Expect(f.errw.String()).To(ContainSubstring("pid class"))
+		Expect(f.errw.String()).To(ContainSubstring("The shared peer registry's root is not protected either"))
 	})
 
 	Describe("the drift check (CS-DIR-017..019)", func() {
