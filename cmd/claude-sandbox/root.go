@@ -923,10 +923,17 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 	if err != nil {
 		return err
 	}
-	cascade.PrintReportChain(env.Out, chain)
+	// CS-CASC-046: each config.yaml is read ONCE; the report, the merge and
+	// the key sources below all use these bytes, never the session-writable
+	// file again.
+	configSnap, err := cascade.ReadConfigFiles(configFiles)
+	if err != nil {
+		return err
+	}
+	cascade.PrintReportSnapshot(env.Out, chain, configSnap)
 	// Name env keys a more-local file shadows — names only (CS-CASC-021..029).
 	cascade.PrintEnvOverrides(env.Out, envFiles, env.lookupEnv)
-	cfg, err := cascade.Load(configFiles)
+	cfg, err := cascade.LoadSnapshot(configSnap)
 	if err != nil {
 		return err
 	}
@@ -997,7 +1004,7 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 	// CS-LNCH-112: settled before any image work, so a bad value never costs
 	// a build; Build checks it again as a backstop. After the session
 	// decision: an attach or join creates nothing, so the value is moot there.
-	oomSource := cascade.KeySource(configFiles, "oomScoreAdj")
+	oomSource := cascade.KeySourceOf(configSnap, "oomScoreAdj")
 	adj, err := launch.ResolveOOMScoreAdj(env.Getenv, cfg, oomSource)
 	if err != nil {
 		return exitErr(2, "Error: %v", err)
@@ -1058,6 +1065,8 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 		// External parents are pulled at most once per launch, each
 		// outcome kept (CS-IMG-055/056).
 		Pulls: imagebuild.NewPulls(),
+		// CS-IMG-073's fallback makes a private directory here.
+		TempRoot: env.TempRoot,
 	}
 	if err := imagebuild.EnsureBuildKit(imgOpts); err != nil {
 		return exitErr(2, "%s", err.Error())
@@ -1108,10 +1117,15 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 	if dfName == "" {
 		dfName = cfg.Dockerfile
 	}
-	spec := imagebuild.ResolveChild(imagebuild.ChildInputs{
+	// CS-IMG-074: the Dockerfile is read once here; CS-IMG-073: the build
+	// gets exactly these bytes.
+	spec, err := imagebuild.ResolveChild(imagebuild.ChildInputs{
 		ProjectDir: projectDir, MainCheckout: mainCheckout,
 		BaseOnly: baseOnly, DockerfileDir: dfDir, Dockerfile: dfName,
 	}, env.Out)
+	if err != nil {
+		return exitErr(2, "Error: %v", err)
+	}
 	parent, childBuilt, err := imagebuild.EnsureChild(imgOpts, spec, baseRebuilt, baseOnly)
 	if err != nil {
 		return err
@@ -1157,7 +1171,7 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 		MountInfo: env.MountInfo,
 		Version:   version,
 		// CS-LNCH-093: recorded on the container for the OOM report.
-		MemoryLimitSource: cascade.MemoryLimitSource(configFiles),
+		MemoryLimitSource: cascade.MemoryLimitSourceOf(configSnap),
 		OOMScoreAdjSource: oomSource,
 		Headless:          headless, LookupEnv: env.lookupEnv,
 		Detached: f.Detach,

@@ -731,6 +731,12 @@ Sandbox config cascade (root → project; later overrides earlier):
   /home/rt/work/src/git.example.com/myproject/.claude-sandbox/  →  config.yaml env
 ```
 
+Each `config.yaml` is read once per launch: the cascade report, the merge and every lookup
+that names a key's file (such as `memoryLimit`'s in the OOM report) use those bytes, so a
+file rewritten while the launch builds images changes nothing until the next launch. Env
+files are handled the same way (docker gets verbatim copies of the bytes the launcher
+checked).
+
 Merge rules:
 
 - **Scalars and maps** (`model`, `memoryLimit`, `hostAccess.*`, `trackInHost`, …): the
@@ -1349,6 +1355,8 @@ baseOnly: true
 ### `.claude-sandbox/Dockerfile`
 
 Place a `Dockerfile` under `.claude-sandbox/` to install project-specific tools on top of the base image. It must start with `FROM claude-sandbox`. The build context stays the project root, so `COPY` instructions reference the project.
+
+The launcher reads the Dockerfile once and builds the child from exactly those bytes (`docker build -f - <context>`, the Dockerfile on stdin), so a file rewritten after the launch read it does not reach the build. A Dockerfile-specific ignore file (`Dockerfile.dockerignore` beside it) cannot be found from stdin, so when one exists the launcher writes the bytes and a copy of that ignore file into a private temp directory, builds with `-f` pointing there, and removes the directory afterwards (a directory or FIFO at that name is ignored, as BuildKit ignores it). The files your `COPY`/`ADD` lines copy from the build context are **not** snapshotted: docker reads the context at build time, and they are neither checked nor part of the rebuild fingerprint. A missing Dockerfile means "no child" (the parent walk goes on, then the base image); one that exists but cannot be read (permissions, a directory or FIFO in its place) fails the launch naming it; an empty file is built as an empty Dockerfile and fails as docker says.
 
 ```dockerfile
 FROM claude-sandbox

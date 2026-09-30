@@ -29,6 +29,21 @@ func PrintReport(w io.Writer, project string) {
 // first, paths.Chain) — a linked worktree's includes its main checkout
 // (CS-CASC-032).
 func PrintReportChain(w io.Writer, chain []string) {
+	printReport(w, chain, func(p string) bool { return fileExists(p) })
+}
+
+// PrintReportSnapshot is PrintReportChain whose config.yaml entries come from
+// the launch's snapshot rather than a fresh look at the disk (CS-CASC-046):
+// the report names exactly the config files the launch merged.
+func PrintReportSnapshot(w io.Writer, chain []string, configs []ConfigFile) {
+	have := make(map[string]bool, len(configs))
+	for _, c := range configs {
+		have[c.Path] = true
+	}
+	printReport(w, chain, func(p string) bool { return have[p] })
+}
+
+func printReport(w io.Writer, chain []string, hasConfig func(string) bool) {
 	type line struct {
 		dir   string
 		files []string
@@ -37,7 +52,7 @@ func PrintReportChain(w io.Writer, chain []string) {
 	for _, lvl := range paths.SandboxLevelsChain(chain) {
 		sb := paths.SandboxDir(lvl)
 		var has []string
-		if fileExists(filepath.Join(sb, "config.yaml")) {
+		if hasConfig(filepath.Join(sb, "config.yaml")) {
 			has = append(has, "config.yaml")
 		}
 		if fileExists(filepath.Join(sb, "env")) {
@@ -141,18 +156,60 @@ type Config struct {
 	OOMScoreAdj *int `yaml:"oomScoreAdj" json:"-"`
 }
 
-// Load parses and deep-merges the config files (root-first order, as returned
-// by paths.CollectUp). A nil/empty file list yields a zero Config.
-func Load(files []string) (*Config, error) {
-	merged := map[string]any{}
+// ConfigFile is one config.yaml as read at launch (CS-CASC-046): the launch
+// hands every consumer these bytes — the merge, the trackInHost resolution,
+// the key sources and the cascade report — never the path to re-read. The
+// file under Path is session-writable (the project tree is mounted rw), so a
+// second read could see other bytes than the first; env files follow the
+// same rule (EnvFile, CS-LNCH-132).
+type ConfigFile struct {
+	Path    string // the original path, for messages and sources
+	Content []byte
+}
+
+// ReadConfigFiles snapshots every path, in order, one read each. Any
+// unreadable file is an error naming it: a launch must never proceed past a
+// config file it could not read.
+func ReadConfigFiles(files []string) ([]ConfigFile, error) {
+	out := make([]ConfigFile, 0, len(files))
 	for _, f := range files {
 		raw, err := os.ReadFile(f)
 		if err != nil {
 			return nil, fmt.Errorf("cascade: reading %s: %w", f, err)
 		}
+		out = append(out, ConfigFile{Path: f, Content: raw})
+	}
+	return out, nil
+}
+
+// ConfigPaths returns the snapshot's paths, in order.
+func ConfigPaths(snap []ConfigFile) []string {
+	out := make([]string, len(snap))
+	for i, c := range snap {
+		out[i] = c.Path
+	}
+	return out
+}
+
+// Load parses and deep-merges the config files (root-first order, as returned
+// by paths.CollectUp). A nil/empty file list yields a zero Config. It is
+// ReadConfigFiles followed by LoadSnapshot; the launch path calls the two
+// itself so the rest of the launch shares the snapshot (CS-CASC-046).
+func Load(files []string) (*Config, error) {
+	snap, err := ReadConfigFiles(files)
+	if err != nil {
+		return nil, err
+	}
+	return LoadSnapshot(snap)
+}
+
+// LoadSnapshot parses and deep-merges already-read config files (root-first).
+func LoadSnapshot(snap []ConfigFile) (*Config, error) {
+	merged := map[string]any{}
+	for _, f := range snap {
 		var doc map[string]any
-		if err := yaml.Unmarshal(raw, &doc); err != nil {
-			return nil, fmt.Errorf("cascade: parsing %s: %w", f, err)
+		if err := yaml.Unmarshal(f.Content, &doc); err != nil {
+			return nil, fmt.Errorf("cascade: parsing %s: %w", f.Path, err)
 		}
 		if doc == nil {
 			continue // fully-commented sparse file
@@ -168,7 +225,7 @@ func Load(files []string) (*Config, error) {
 	}
 	cfg := &Config{}
 	if err := yaml.Unmarshal(out, cfg); err != nil {
-		return nil, fmt.Errorf("cascade: invalid merged config (%v): %w", files, err)
+		return nil, fmt.Errorf("cascade: invalid merged config (%v): %w", ConfigPaths(snap), err)
 	}
 	return cfg, nil
 }
@@ -238,33 +295,41 @@ func (c *Config) Validate(files []string) error {
 
 var trackRe = regexp.MustCompile(`(?m)^[ \t]*trackInHost:[ \t]*(true|false)([ \t].*)?$`)
 
+// readable reads the files that can be read, skipping the rest: the
+// path-taking helpers below have always ignored an unreadable file.
+func readable(files []string) []ConfigFile {
+	out := make([]ConfigFile, 0, len(files))
+	for _, f := range files {
+		if raw, err := os.ReadFile(f); err == nil {
+			out = append(out, ConfigFile{Path: f, Content: raw})
+		}
+	}
+	return out
+}
+
 // TrackInHost resolves the cascade-wide trackInHost with a line scan (not a
 // YAML parse) so it works on files in any state: the most-local file with an
 // explicit uncommented setting wins; default false. files are root-first.
 func TrackInHost(files []string) bool {
-	val := false
-	for _, f := range files {
-		raw, err := os.ReadFile(f)
-		if err != nil {
-			continue
-		}
-		ms := trackRe.FindAllStringSubmatch(string(raw), -1)
-		if len(ms) > 0 {
-			val = ms[len(ms)-1][1] == "true"
-		}
-	}
-	return val
+	return TrackInHostOf(readable(files))
+}
+
+// TrackInHostOf is TrackInHost over a snapshot (CS-CASC-046).
+func TrackInHostOf(snap []ConfigFile) bool {
+	v, _ := TrackInHostExplicitOf(snap)
+	return v
 }
 
 // TrackInHostExplicit reports whether any of the files explicitly sets
 // trackInHost, and the resolved value when so.
 func TrackInHostExplicit(files []string) (value, isSet bool) {
-	for _, f := range files {
-		raw, err := os.ReadFile(f)
-		if err != nil {
-			continue
-		}
-		ms := trackRe.FindAllStringSubmatch(string(raw), -1)
+	return TrackInHostExplicitOf(readable(files))
+}
+
+// TrackInHostExplicitOf is TrackInHostExplicit over a snapshot (CS-CASC-046).
+func TrackInHostExplicitOf(snap []ConfigFile) (value, isSet bool) {
+	for _, f := range snap {
+		ms := trackRe.FindAllStringSubmatch(string(f.Content), -1)
 		if len(ms) > 0 {
 			isSet = true
 			value = ms[len(ms)-1][1] == "true"
@@ -276,14 +341,15 @@ func TrackInHostExplicit(files []string) (value, isSet bool) {
 // TrackInHostSource returns the most-local file that explicitly sets
 // trackInHost ("" when none). files are root-first.
 func TrackInHostSource(files []string) string {
+	return TrackInHostSourceOf(readable(files))
+}
+
+// TrackInHostSourceOf is TrackInHostSource over a snapshot (CS-CASC-046).
+func TrackInHostSourceOf(snap []ConfigFile) string {
 	src := ""
-	for _, f := range files {
-		raw, err := os.ReadFile(f)
-		if err != nil {
-			continue
-		}
-		if trackRe.MatchString(string(raw)) {
-			src = f
+	for _, f := range snap {
+		if trackRe.Match(f.Content) {
+			src = f.Path
 		}
 	}
 	return src
@@ -298,23 +364,30 @@ func MemoryLimitSource(files []string) string {
 	return KeySource(files, "memoryLimit")
 }
 
+// MemoryLimitSourceOf is MemoryLimitSource over a snapshot (CS-CASC-046).
+func MemoryLimitSourceOf(snap []ConfigFile) string {
+	return KeySourceOf(snap, "memoryLimit")
+}
+
 // KeySource returns the most-local config file that sets the top-level key
 // ("" when none does). The cascade keeps no per-key provenance, so the few
 // callers that must name a key's file (memoryLimit's OOM report, CS-CASC-036;
-// an invalid oomScoreAdj, CS-LNCH-112) re-read the files for that one key.
+// an invalid oomScoreAdj, CS-LNCH-112) look the key up per file.
 func KeySource(files []string, key string) string {
+	return KeySourceOf(readable(files), key)
+}
+
+// KeySourceOf is KeySource over a snapshot (CS-CASC-046): the launch names a
+// key's file from the same bytes it merged.
+func KeySourceOf(snap []ConfigFile, key string) string {
 	src := ""
-	for _, f := range files {
-		raw, err := os.ReadFile(f)
-		if err != nil {
-			continue
-		}
+	for _, f := range snap {
 		var doc map[string]any
-		if yaml.Unmarshal(raw, &doc) != nil {
+		if yaml.Unmarshal(f.Content, &doc) != nil {
 			continue
 		}
 		if _, ok := doc[key]; ok {
-			src = f
+			src = f.Path
 		}
 	}
 	return src
