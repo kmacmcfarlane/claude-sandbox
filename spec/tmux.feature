@@ -1058,8 +1058,10 @@ Feature: tmux integration (CS-TMUX)
       compared, so coordinates and new-pane membership decide alone; a mismatch is logged and the
       pane left to its typed restore, which then reads last
     And an armed pane gets the row as a PENDING mark with one bounded "tmux set-option -p", right after
-      one bounded "tmux display-message -p -t <pane> '#{pane_current_command}\t#{@claude-sandbox}'"
-      finds it still unmarked and not running claude-sandbox
+      one bounded "tmux display-message -p -t <pane>
+      '#{pane_current_command}\t#{pane_in_mode}\t#{pane_synchronized}\t#{pane_pid}\t#{@claude-sandbox}'"
+      finds it still unmarked and not running claude-sandbox (the other fields feed CS-TMUX-067's
+      typing guard)
     And when every row was handled the pin is renamed to "….consumed.json"; at RearmDeadline (5 s, the
       real clock) the rows not yet handled — the one a deadline cut mid-way included — are logged as
       late, and the pin is left unconsumed for their typed restores
@@ -1072,9 +1074,22 @@ Feature: tmux integration (CS-TMUX)
     Given a pane --rearm armed (CS-TMUX-066)
     When the row was PENDING and the pane's line in the pinned state file has field 11 exactly ":" (it
       sat at a bare shell when saved, so resurrect typed nothing into it)
-    Then one bounded "tmux send-keys -t <pane> 'claude-sandbox tmux restore --resurrected' C-m" types
-      the restore into it (answer 51 a), so a waiting session retries after a restart as an active one
-      does
+    Then the restore is typed into it (answer 51 a), so a waiting session retries after a restart as
+      an active one does — under CS-TMUX-069's typing guard, the same helpers --all uses: its current
+      command is the basename of "tmux show -gv default-shell" (one bounded call per run, made only
+      when a pane is to be typed into), it is in no mode, its window is not synchronized, the pane's
+      own process (pane_pid) leads its terminal's foreground process group (Linux /proc stat tpgid
+      through the /proc seam; darwin one bounded "ps -o tpgid="; unreadable = cannot tell), and no
+      client is looking at it, read again after the mark right before the keys across every line of
+      the pane id
+    And the keys are one bounded "tmux send-keys -t <pane> C-e C-u 'claude-sandbox tmux restore
+      --resurrected' C-m", the line cleared first (CS-TMUX-069's keys and per-editor residual)
+    And a pane the guard holds back, or whose focus re-read tmux does not answer, keeps its pending mark
+      and is logged "marked only: <reason>; type claude-sandbox tmux restore in it"; every call stays
+      within RearmDeadline, and one the deadline cuts makes the rows from there on late (CS-TMUX-066)
+    # At boot no client is usually attached and a pane resurrect just created sits at its shell, so the
+    # guard rarely changes anything here; it is kept uniform with --all (F4d review 2026-10-01: a
+    # default-command or a shell rc that starts a program reads as the shell by name alone).
     And an active row, a pending row whose saved full command was anything else (resurrect typed the
       processes entry, or another program), or a line with no field 11 is marked only, never typed into
     And a ralph or join row that is retyped only prints its line (answer 66 a: a ralph pane prints its

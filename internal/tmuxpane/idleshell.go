@@ -1,9 +1,10 @@
 package tmuxpane
 
 // The guard before keys are typed into a pane that claude-sandbox did not
-// start (CS-TMUX-069; F4d review round 1): one helper, so --rearm can adopt
-// it too. A pane may be typed into only when it is provably idle at its own
-// shell; anything else is marked only.
+// start (CS-TMUX-069; F4d review round 1) — --all's armed panes and
+// --rearm's resurrected ones (CS-TMUX-067) alike. A pane may be typed into
+// only when it is provably idle at its own shell; anything else is marked
+// only.
 
 import (
 	"os"
@@ -138,6 +139,21 @@ func readProcStat(path string) ([]byte, error) {
 		return nil, err
 	}
 	return b[:n], nil
+}
+
+// DefaultShell is the basename of the server's default-shell, from one
+// bounded "tmux show -gv default-shell"; "" when tmux does not answer.
+func DefaultShell(r execx.Runner) string { return DefaultShellWithin(r, CallTimeout) }
+
+// DefaultShellWithin is DefaultShell bounded by timeout (--rearm's calls
+// never run past its whole-run deadline).
+func DefaultShellWithin(r execx.Runner, timeout time.Duration) string {
+	out, ok := bounded(r, timeout, "tmux", "show", "-gv", "default-shell")
+	sh := strings.TrimSpace(out)
+	if !ok || sh == "" {
+		return ""
+	}
+	return filepath.Base(sh)
 }
 
 // TypeKeys are the keys TypeRestore sends, in one send-keys: C-e then C-u

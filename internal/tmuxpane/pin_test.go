@@ -4,7 +4,8 @@ package tmuxpane_test
 // `tmux restore`: --pin (the keyed pin, preexisting, the sparse verdict within
 // its deadline, the notice, the prunes), the pin a --resurrected restore
 // reads, and --rearm (new panes only, matched by coordinates and saved dir,
-// marked pending, retyped only where the saved full command was empty, the
+// marked pending, retyped only where the saved full command was empty and
+// under --all's typing guard (foreground group, focus, C-e C-u), the
 // pin consumed, the deadline). Scratch dirs only; tmux is faked through
 // execx.Fake.
 
@@ -266,7 +267,24 @@ var _ = Describe("tmux restore: the resurrect hooks (CS-TMUX-064..068)", func() 
 			st   string
 			rows []tmuxpane.Row
 			pin  string
+			proc string
 		)
+		// listPat is --rearm's one list-panes; focusPat the focus re-read
+		// right before the keys (distinct patterns: both are list-panes -a).
+		const listPat = "list-panes -a -F #{pane_id}\t#{session_name}"
+		const focusPat = "list-panes -a -F #{pane_id}\t#{pane_active}"
+		// recheck renders the re-check right before the mark: the current
+		// command, not in a mode, not synchronized, the pane's pid, the mark.
+		recheck := func(cmd string, pid int, raw string) string {
+			return fmt.Sprintf("%s\t0\t0\t%d\t%s\n", cmd, pid, raw)
+		}
+		// stat writes /proc/<pid>/stat with tpgid as the terminal's
+		// foreground group (a comm holding ") " checks the last-")" split).
+		stat := func(pid, tpgid int) {
+			Expect(os.MkdirAll(filepath.Join(proc, fmt.Sprint(pid)), 0o755)).To(Succeed())
+			Expect(os.WriteFile(filepath.Join(proc, fmt.Sprint(pid), "stat"),
+				[]byte(fmt.Sprintf("%d (z)sh x) S 1 %d %d 34816 %d 4194560 0 0\n", pid, pid, pid, tpgid)), 0o644)).To(Succeed())
+		}
 		// paneLineCmd renders a list-panes line: id, coordinates, the server,
 		// the current command and path, and the raw mark.
 		paneLineCmd := func(id string, w int, cmd, path, raw string) string {
@@ -277,10 +295,16 @@ var _ = Describe("tmux restore: the resurrect hooks (CS-TMUX-064..068)", func() 
 		// idle, unmarked pane unless a test scripted that pane first (the
 		// first matching stub wins).
 		rearm := func() tmuxpane.RearmResult {
-			fake.On("tmux display-message", "zsh\t\n", nil)
-			return tmuxpane.Rearm(opts())
+			fake.On("tmux display-message", recheck("zsh", 5000, ""), nil)
+			fake.On(focusPat, "%10\t1\t1\t0\n%11\t1\t1\t0\n%12\t1\t1\t0\n", nil)
+			fake.On("tmux show -gv default-shell", "/bin/zsh\n", nil)
+			o := opts()
+			o.Proc = tmuxpane.ProcOptions{Runner: fake, ProcRoot: proc, GOOS: "linux"}
+			return tmuxpane.Rearm(o)
 		}
 		BeforeEach(func() {
+			proc = GinkgoT().TempDir()
+			stat(5000, 5000) // the default re-check's pane: its shell leads the group
 			st = stamp(-1)
 			rows = []tmuxpane.Row{
 				{Session: "main", Window: 0, Pane: 0, Mark: mark(0, tmuxpane.StateActive)},  // typed by resurrect
@@ -298,7 +322,7 @@ var _ = Describe("tmux restore: the resurrect hooks (CS-TMUX-064..068)", func() 
 			b, _ := json.Marshal(p)
 			pin = filepath.Join(dir, tmuxpane.PinName(4242, p.At))
 			Expect(os.WriteFile(pin, b, 0o600)).To(Succeed())
-			fake.On("tmux list-panes", paneLine("%10", 0, proj, "")+paneLine("%11", 1, proj, "")+
+			fake.On(listPat, paneLine("%10", 0, proj, "")+paneLine("%11", 1, proj, "")+
 				paneLine("%12", 2, proj, "")+paneLine("%3", 3, proj, ""), nil)
 		})
 		setOn := func(id string) []tmuxpane.Mark {
@@ -334,7 +358,9 @@ var _ = Describe("tmux restore: the resurrect hooks (CS-TMUX-064..068)", func() 
 				Expect(ms[0].Conversation).To(Equal(rows[i].Mark.Conversation), id)
 			}
 			Expect(setOn("%3")).To(BeEmpty(), "a pre-existing pane is never marked")
-			Expect(typed()).To(Equal([]string{"tmux send-keys -t %11 claude-sandbox tmux restore --resurrected C-m"}))
+			Expect(typed()).To(Equal([]string{"tmux send-keys -t %11 C-e C-u claude-sandbox tmux restore --resurrected C-m"}),
+				"the line is cleared first (C-e C-u), as --all does")
+			Expect(fake.CommandLines()).To(ContainElement("tmux show -gv default-shell"))
 			Expect(res.Consumed).To(BeTrue())
 			Expect(pin).NotTo(BeAnExistingFile())
 			Expect(strings.TrimSuffix(pin, ".json") + ".consumed.json").To(BeAnExistingFile())
@@ -342,9 +368,9 @@ var _ = Describe("tmux restore: the resurrect hooks (CS-TMUX-064..068)", func() 
 
 		It("CS-TMUX-066: a pane already marked (by a list or a re-check) is left to its own restore", func() {
 			fake = &execx.Fake{}
-			fake.On("tmux list-panes", paneLine("%10", 0, proj, mark(0, tmuxpane.StatePending).JSON())+paneLine("%11", 1, proj, "")+
+			fake.On(listPat, paneLine("%10", 0, proj, mark(0, tmuxpane.StatePending).JSON())+paneLine("%11", 1, proj, "")+
 				paneLine("%12", 2, proj, ""), nil)
-			fake.On("display-message -p -t %11", "zsh\t"+mark(1, tmuxpane.StatePending).JSON()+"\n", nil)
+			fake.On("display-message -p -t %11", recheck("zsh", 5000, mark(1, tmuxpane.StatePending).JSON()), nil)
 			res := rearm()
 			Expect(setOn("%10")).To(BeEmpty())
 			Expect(setOn("%11")).To(BeEmpty())
@@ -356,7 +382,7 @@ var _ = Describe("tmux restore: the resurrect hooks (CS-TMUX-064..068)", func() 
 		It("CS-TMUX-066: a pane not in its saved dir, or an active row saved outside its project, is not armed", func() {
 			elsewhere := GinkgoT().TempDir()
 			fake = &execx.Fake{}
-			fake.On("tmux list-panes", paneLine("%10", 0, proj, "")+paneLine("%11", 1, elsewhere, "")+paneLine("%12", 2, proj, ""), nil)
+			fake.On(listPat, paneLine("%10", 0, proj, "")+paneLine("%11", 1, elsewhere, "")+paneLine("%12", 2, proj, ""), nil)
 			rows[0].Mark.Project = elsewhere // saved dir is proj: the active row's layout moved
 			save(st, &srv, rows, "")
 			res := rearm()
@@ -374,14 +400,14 @@ var _ = Describe("tmux restore: the resurrect hooks (CS-TMUX-064..068)", func() 
 			lines := fmt.Sprintf("pane\tmain\t1\t1\t:*\t0\tt\t:%s\t1\tzsh\t:\n", strings.Replace(spaced, " ", `\ `, 1))
 			save(st, &srv, rows[1:2], lines)
 			fake = &execx.Fake{}
-			fake.On("tmux list-panes", paneLine("%11", 1, spaced, ""), nil)
+			fake.On(listPat, paneLine("%11", 1, spaced, ""), nil)
 			res := rearm()
 			Expect(res.Marked).To(Equal(1), "\"My\\ Project\" is where the pane is")
 			Expect(res.Retyped).To(Equal(1))
 
 			Expect(os.Rename(strings.TrimSuffix(pin, ".json")+".consumed.json", pin)).To(Succeed()) // a fresh restore
 			fake = &execx.Fake{}
-			fake.On("tmux list-panes", paneLine("%11", 1, GinkgoT().TempDir(), ""), nil)
+			fake.On(listPat, paneLine("%11", 1, GinkgoT().TempDir(), ""), nil)
 			res = rearm()
 			Expect(res.Marked).To(BeZero(), "a moved pane under My Project")
 			Expect(logged).To(ContainElement(ContainSubstring("main:1.0: the pane is not in its saved directory")))
@@ -393,16 +419,16 @@ var _ = Describe("tmux restore: the resurrect hooks (CS-TMUX-064..068)", func() 
 			lines := fmt.Sprintf("pane\tmain\t1\t1\t:*\t0\tt\t:%s\t1\tzsh\t:\n", strings.Replace(filepath.Join(proj, "a b"), " ", `\ `, 1))
 			save(st, &srv, rows[1:2], lines)
 			fake = &execx.Fake{}
-			fake.On("tmux list-panes", paneLine("%11", 1, lossy, ""), nil)
+			fake.On(listPat, paneLine("%11", 1, lossy, ""), nil)
 			res := rearm()
 			Expect(res.Marked).To(Equal(1))
 		})
 
 		It("CS-TMUX-066: a pane running a launcher, at the list or at the re-check, is left to it", func() {
 			fake = &execx.Fake{}
-			fake.On("tmux list-panes", paneLineCmd("%10", 0, "claude-sandbox", proj, "")+paneLine("%11", 1, proj, "")+
+			fake.On(listPat, paneLineCmd("%10", 0, "claude-sandbox", proj, "")+paneLine("%11", 1, proj, "")+
 				paneLine("%12", 2, proj, ""), nil)
-			fake.On("display-message -p -t %11", "claude-sandbox\t\n", nil)
+			fake.On("display-message -p -t %11", recheck("claude-sandbox", 5000, ""), nil)
 			res := rearm()
 			Expect(setOn("%10")).To(BeEmpty())
 			Expect(setOn("%11")).To(BeEmpty())
@@ -437,7 +463,10 @@ var _ = Describe("tmux restore: the resurrect hooks (CS-TMUX-064..068)", func() 
 
 		It("CS-TMUX-066: a row the deadline cuts mid-way counts as late; the pin stays unconsumed", func() {
 			tmuxpane.RearmDeadline = 30 * time.Millisecond
-			fake.OnFunc("tmux display-message", func(execx.Cmd) (string, error) { time.Sleep(40 * time.Millisecond); return "zsh\t\n", nil })
+			fake.OnFunc("tmux display-message", func(execx.Cmd) (string, error) {
+				time.Sleep(40 * time.Millisecond)
+				return recheck("zsh", 5000, ""), nil
+			})
 			res := rearm()
 			Expect(res.Marked).To(BeZero())
 			Expect(res.Skipped).To(BeZero(), "the cut row is late, not failed")
@@ -452,6 +481,91 @@ var _ = Describe("tmux restore: the resurrect hooks (CS-TMUX-064..068)", func() 
 			res := rearm()
 			Expect(res.Marked).To(BeZero())
 			Expect(res.Consumed).To(BeTrue())
+		})
+		Describe("CS-TMUX-067: the typing guard --all uses (CS-TMUX-069)", func() {
+			// fresh starts a new fake with the four listed panes, so a test's
+			// own stubs come before the defaults rearm adds.
+			fresh := func() {
+				fake = &execx.Fake{}
+				fake.On(listPat, paneLine("%10", 0, proj, "")+paneLine("%11", 1, proj, "")+
+					paneLine("%12", 2, proj, "")+paneLine("%3", 3, proj, ""), nil)
+			}
+			It("CS-TMUX-067: a program in the foreground of the pane's shell (tpgid != pane_pid) is marked only", func() {
+				stat(5001, 777)
+				fresh()
+				fake.On("display-message -p -t %11", recheck("zsh", 5001, ""), nil)
+				res := rearm()
+				Expect(setOn("%11")).To(HaveLen(1), "still marked pending")
+				Expect(typed()).To(BeEmpty())
+				Expect(res.Retyped).To(BeZero())
+				Expect(logged).To(ContainElement(ContainSubstring("main:1.0: marked only: a program runs in the foreground of its shell")))
+			})
+
+			It("CS-TMUX-067: a foreground group that cannot be read (no /proc entry, no pid) is marked only", func() {
+				for _, pid := range []int{5002, 0} {
+					fresh()
+					logged = nil
+					fake.On("display-message -p -t %11", recheck("zsh", pid, ""), nil)
+					Expect(os.Rename(strings.TrimSuffix(pin, ".json")+".consumed.json", pin)).To(Or(Succeed(), MatchError(ContainSubstring("no such file"))))
+					rearm()
+					Expect(setOn("%11")).To(HaveLen(1))
+					Expect(typed()).To(BeEmpty(), fmt.Sprint(pid))
+					Expect(logged).To(ContainElement(ContainSubstring("main:1.0: marked only: cannot tell whether its shell is at its prompt")))
+				}
+			})
+
+			It("CS-TMUX-067: copy mode, synchronize-panes or a command that is not the default shell is marked only", func() {
+				for _, c := range []struct{ recheck, why string }{
+					{"zsh\t1\t0\t5000\t\n", "it is in copy mode"},
+					{"zsh\t0\t1\t5000\t\n", "its window has synchronize-panes on"},
+					{"bash\t0\t0\t5000\t\n", "it runs bash, not the shell"},
+				} {
+					fresh()
+					logged = nil
+					fake.On("display-message -p -t %11", c.recheck, nil)
+					Expect(os.Rename(strings.TrimSuffix(pin, ".json")+".consumed.json", pin)).To(Or(Succeed(), MatchError(ContainSubstring("no such file"))))
+					rearm()
+					Expect(setOn("%11")).To(HaveLen(1), c.why)
+					Expect(typed()).To(BeEmpty(), c.why)
+					Expect(logged).To(ContainElement(ContainSubstring("main:1.0: marked only: " + c.why)))
+				}
+			})
+
+			It("CS-TMUX-067: focus is read after the mark, right before the keys, across every line of the pane id", func() {
+				fresh()
+				// %11 listed twice (a grouped session): one line is looked at.
+				fake.On(focusPat, "%11\t1\t1\t0\n%11\t1\t1\t1\n", nil)
+				rearm()
+				Expect(setOn("%11")).To(HaveLen(1))
+				Expect(typed()).To(BeEmpty())
+				Expect(logged).To(ContainElement(ContainSubstring("main:1.0: marked only: a client is looking at it")))
+				var setAt, focusAt int
+				for i, l := range fake.CommandLines() {
+					switch {
+					case strings.HasPrefix(l, "tmux set-option -p -t %11 "):
+						setAt = i
+					case strings.HasPrefix(l, "tmux "+focusPat):
+						focusAt = i
+					}
+				}
+				Expect(focusAt).To(BeNumerically(">", setAt), "the focus re-read follows the mark")
+			})
+
+			It("CS-TMUX-067: a focus re-read tmux does not answer, or that no longer lists the pane, is marked only", func() {
+				for _, c := range []struct {
+					out string
+					err error
+				}{{"", execx.Fail(1)}, {"%10\t1\t1\t0\n", nil}} {
+					fresh()
+					logged = nil
+					fake.On(focusPat, c.out, c.err)
+					Expect(os.Rename(strings.TrimSuffix(pin, ".json")+".consumed.json", pin)).To(Or(Succeed(), MatchError(ContainSubstring("no such file"))))
+					rearm()
+					Expect(setOn("%11")).To(HaveLen(1))
+					Expect(typed()).To(BeEmpty())
+					Expect(logged).To(ContainElement(ContainSubstring("main:1.0: marked only: cannot tell whether a client is looking at it")))
+				}
+			})
 		})
 	})
 

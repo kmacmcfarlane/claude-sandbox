@@ -184,7 +184,9 @@ If you already set `@resurrect-processes`, add the quoted entry to your list.
 - `tmux save` records which conversation each sandbox pane holds, beside each
   save. `--pin` pins the save a restore reads and the panes that already
   exist. `--rearm` marks the panes the restore created and retypes the
-  restore into pending ones that sat at a shell. All three never print,
+  restore into pending ones that sat at a shell (only where that shell is
+  at its prompt and no client looks at the pane; the line is cleared
+  first). All three never print,
   always exit 0, and finish within a few seconds; problems go to
   `~/.cache/claude-sandbox/tmux-save.log` and `tmux-restore.log`. The shim
   never builds for them: after a `git pull` they do nothing until your next
