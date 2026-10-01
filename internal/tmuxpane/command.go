@@ -101,6 +101,9 @@ func printableMark(m Mark) bool {
 	return true
 }
 
+// ShellQuote quotes s for a POSIX shell when it needs it.
+func ShellQuote(s string) string { return shq(s) }
+
 // shq quotes s for a POSIX shell when it needs it.
 func shq(s string) string {
 	if s != "" && strings.IndexFunc(s, func(r rune) bool {

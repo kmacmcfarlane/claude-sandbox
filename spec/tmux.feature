@@ -259,7 +259,8 @@ Feature: tmux integration (CS-TMUX)
   Scenario: CS-TMUX-031 the hook reads every pane once and keeps only the panes resurrect saved
     Given a valid state file
     Then the hook runs exactly one "tmux list-panes -a -F
-      #{session_name}<TAB>#{window_index}<TAB>#{pane_index}<TAB>#{pane_id}<TAB>#{pane_current_command}<TAB>#{@claude-sandbox}"
+      #{session_name}<TAB>#{window_index}<TAB>#{pane_index}<TAB>#{pane_id}<TAB>#{pane_current_command}<TAB>#{pid}<TAB>#{start_time}<TAB>#{@claude-sandbox}"
+      (#{pid} and #{start_time} are the tmux server's, the same on every line: CS-TMUX-047)
     And it keeps a pane only when its session name, window index and pane index appear on a "pane"
       line of the state file (so resurrect's own skip of grouped sessions is inherited)
     And only when its mark parses as a v1 mark in state "active" or "pending"
@@ -340,13 +341,20 @@ Feature: tmux integration (CS-TMUX)
     When <new> is byte-equal to the file "last" points at (resurrect will delete <new>)
     Then the sidecar is written for "last"'s target: the same layout, fresher data
     And otherwise it is written for <new>
+    And when that target's sidecar records a DIFFERENT tmux server (CS-TMUX-047) — a new server whose
+      first save is identical to the previous server's final one — no sidecar is written and the
+      lifetimes index is not updated, with one log line: that sidecar is the previous lifetime's final
+      state, which "--from previous" and the sparse baseline rely on; the new server gets its own at
+      its first distinct save; only a proven difference counts — a hook whose own server is unknown,
+      or a sidecar that records none, writes as before
     And the sidecar path is the state file's path with ".txt" replaced by ".claude-sandbox.json",
       outside resurrect's prune glob tmux_resurrect_*.txt (tmuxpane.SidecarPath)
 
   Scenario: CS-TMUX-038 the sidecar format and its atomic write
     Then the sidecar is compact JSON {"v": 1, "stateFile": <state file base name>, "savedAt": <unix
-      ms>, "panes": [...]}, one row per recorded pane: "session", "window", "pane" (resurrect's
-      coordinates) and "mark" (the mark as updated)
+      ms>, "server": {"pid", "start"}, "panes": [...]}, one row per recorded pane: "session",
+      "window", "pane" (resurrect's coordinates) and "mark" (the mark as updated); "server" is
+      CS-TMUX-047's and absent when it is unknown
     And it is written to a temp file in the same directory with mode 0600, synced, and renamed over
       the sidecar, so a reader never sees a partial file
     And a save with no sandbox panes writes a sidecar with no rows
@@ -450,3 +458,158 @@ Feature: tmux integration (CS-TMUX)
     # records them active and live; one after the launchers classified records their pending marks
     # verbatim; one inside a launcher's die wait records pending here; and one with docker already down
     # keeps the active marks unchecked (CS-TMUX-032).
+
+  # ---- F4a: tmux restore, the read-only surface ----
+  #
+  # "claude-sandbox tmux restore" brings a sandbox pane back after a tmux server
+  # restart or a reboot. F4a is its read-only half: which saves exist (--list),
+  # which one to read (--from), whether a save looks sparse, and what a restore
+  # WOULD do in each pane (--dry-run [--all]), from the same decision function
+  # the acting restore (F4b) runs. Nothing here writes a file, a tmux option or
+  # a pane mark, takes a lock or starts a container. The save hook (F3) gains
+  # the tmux server's identity in each sidecar and a small lifetimes index, so
+  # "previous" and the sparse rule need not scan weeks of sidecars. Plan
+  # 10 § 2/§ 3/§ 4, 11 § 2/§ 5/§ 9, 12 § 4/§ 7, 13 § 3. The plain restore, the
+  # start lock, --drop and the notice are F4b/F4c, under the IDs that follow 051.
+
+  Scenario: CS-TMUX-045 the resurrect dir is resolved the way resurrect resolves it
+    Given "claude-sandbox tmux restore --list" or "--dry-run" on the host
+    Then the dir is the tmux option @resurrect-dir, read with one bounded "tmux show-option -gqv
+      @resurrect-dir", with every "$HOME", "$HOSTNAME" and "~" in it expanded as resurrect's sed does
+    And else "~/.tmux/resurrect" when that exists
+    And else "${XDG_DATA_HOME:-~/.local/share}/tmux/resurrect"
+    And outside tmux, when no server answers within 1 s, the option step is skipped
+    And a value that is not absolute after expansion is not used (the next step decides)
+    # Copied from tmux-resurrect cff343c (scripts/helpers.sh resurrect_dir, variables.sh).
+    # Under go test the resolution panics unless the test set the seam (Env.ResurrectDir), so no
+    # test ever reads ~/.local/share/tmux (the cache-dir precedent).
+
+  Scenario: CS-TMUX-046 sidecars, the lifetimes index and rows are read defensively
+    Given a sidecar, or the lifetimes index, in the resurrect dir
+    Then it is opened with O_NOFOLLOW and read only when it is a regular file owned by the user, not
+      group- or world-writable, at most 1 MiB, that parses with "v": 1
+    And a sidecar that fails is listed as "unreadable" by --list and gives "cannot read this save"
+      to a dry-run; it never stops the listing
+    And each row is checked before use: "project" absolute; "configDir" and "cwdRoot" absolute when
+      present; "configDirEnv" empty or absolute; "worktree" empty or ^[A-Za-z0-9._-]+$; "model" empty
+      or ^[A-Za-z0-9][A-Za-z0-9._:\[\]-]*$; "containerId" empty or 64 hex; "conversation" empty or a
+      UUID; the mark's "v" 1, "state" active or pending, "mode" claude, join or ralph; and no control
+      character in any value a line prints
+    And a row that fails gets decision row 3 (CS-TMUX-051), naming the field
+
+  Scenario: CS-TMUX-047 the save hook records its tmux server and keeps a lifetimes index
+    Given a save hook run (CS-TMUX-030)
+    Then its one list-panes also reads the server's #{pid} and #{start_time} (no extra tmux call), and
+      the sidecar records them as "server": {"pid", "start"}; a sidecar written before this has none
+    And after the sidecar is written, within the 3 s deadline, it updates
+      "<resurrect dir>/claude-sandbox-lifetimes.json" (0600, written by temp file, fsync and rename):
+      {"v": 1, "lifetimes": [{"server", "first", "last", "rows", "savedAt"}]}, newest first, at most
+      64 entries, where "first" and "last" are save stamps and "rows" the row count of "last"'s save
+    And the update runs under an flock on "<resurrect dir>/.claude-sandbox-lifetimes.lock" (opened
+      O_CREAT|O_NOFOLLOW|O_CLOEXEC, 0600), polled every 20 ms for up to 500 ms or what is left of the
+      deadline; only then is the update skipped, with one log line (the next save catches up)
+    And a server with no entry is added with "first" = "last" = the stamp; an existing entry changes
+      only when the stamp is at or after its "last" (a late save never moves it backwards), and its
+      "first" is never rewritten
+    And entries whose "last" state file is gone are pruned
+    And a hook whose server is unknown (no parsable #{pid} and #{start_time}) writes the sidecar
+      without "server" and leaves the index alone
+    And nothing else reads or writes the index: it is derived data, and every reader falls back to a
+      scan of the sidecars when it is missing or unreadable (CS-TMUX-049/050)
+
+  Scenario: CS-TMUX-048 --list prints the saves as runs, newest first
+    Given "claude-sandbox tmux restore --list [--all]", anywhere on the host
+    Then it reads the saves of the last 7 days (30 with --all), newest first; a save is named by its
+      stamp, the YYYYmmddTHHMMSS of tmux_resurrect_<stamp>.txt, and never by an index
+    And consecutive saves of one tmux server whose rows name the same sandbox sessions (container id,
+      else name, with the conversation and the state) collapse into one line: the newest stamp and
+      its local time, the number of saves and the oldest's time, "N sandbox panes (a active,
+      p pending)", "last" on the run holding last's target, and "sparse (had M)" when CS-TMUX-050
+      flags it
+    And the runs are grouped under one heading per tmux server ("tmux server started <time>"), and
+      saves recorded before CS-TMUX-047 under a heading of their own, and saves with no usable sidecar
+      ("no record", "unreadable") under another, never under a server's heading
+    And a state file without a sidecar prints as "no record" and is never sparse
+    And it ends with how to use a line, with a stamp and the resolved dir filled in: --from in one
+      pane, --dry-run --all --from for every pane, and the two whole-layout procedures:
+      A, in the running server: "tmux set -g @continuum-save-interval 0", "ln -sf
+      tmux_resurrect_<stamp>.txt <dir>/last", prefix + C-r, then the interval as it was — read with
+      one bounded "tmux show -gqv @continuum-save-interval" and printed only when it matches ^[0-9]+$,
+      else (unset, non-numeric, no server) "tmux set -gu @continuum-save-interval"; and
+      B, a fresh server: "systemctl --user stop tmux.service", the same ln -sf, "systemctl --user
+      start tmux.service" (without the unit: interval 0, a few seconds, kill-server, ln -sf, tmux)
+    And it says that a reboot never restores a chosen save (its shutdown save moves last again)
+    And it writes nothing and exits 0
+
+  Scenario: CS-TMUX-049 --from names a save in the resurrect dir and nothing else
+    Given "--from <save>" with --dry-run (the acting forms are F4b's)
+    Then <save> is "last" (the default: the save the "last" link points at), "previous", a stamp, or
+      the base name of a state file or sidecar in the resurrect dir
+    And "previous" is the newest save the PREVIOUS tmux server ended with: the newest lifetimes-index
+      entry whose server differs from the running one (read with one bounded "tmux display-message
+      -p"), else a scan of at most 500 sidecars, newest first, for the newest one recording another
+      server
+    And "previous" outside tmux, or when no save records another server, exits 2 with one line naming
+      --list
+    And a path, a name outside those forms, or a save that does not exist exits 2; the ownership checks
+      of CS-TMUX-046 cover only the resurrect dir
+
+  Scenario: CS-TMUX-050 the sparse-save rule and its line
+    Given a chosen save S with n rows (every mode, active or pending)
+    Then its baseline m is the median of the row counts the last save of each of up to 3 tmux
+      server lifetimes before S's own ended with (with two values the larger), from the lifetimes
+      index (entries of another server whose "last" is before S), else from a scan of at most 500
+      earlier sidecars, else, when no earlier lifetime is known, the up to 5 sidecars right before S
+    And S is sparse when m - n >= max(2, ceil(m / 3)): at least two panes fewer AND at least a third
+      fewer (m 2 warns at n 0; m 3 at n <= 1; m 6 at n <= 4; m 13 at n <= 8)
+    And a baseline that cannot be found is "unknown": no warning
+    And so saves piling up after a bad restore still warn: only earlier servers' final saves count
+    And --list flags such a run "sparse (had m)"; a dry-run prints, before its decisions, the line
+      "claude-sandbox: this save (<stamp>) has <n> sandbox panes; the saves before the last <k> tmux
+      restarts had <m>. If sessions are missing, list earlier saves: claude-sandbox tmux restore
+      --list (ignore this if you closed them on purpose)."
+    And the line never changes a decision
+    # The constants live in one place (tmuxpane.SparseLifetimes 3, SparseMinDrop 2, SparseFraction 1/3,
+    # ListDays 7): the comparison and the thresholds are operator decision 65, still open.
+
+  Scenario: CS-TMUX-051 --dry-run decides every row without acting
+    Given "claude-sandbox tmux restore --dry-run [--from <save>]" typed in a pane, or
+      "--dry-run --all [--from <save>]" anywhere on the host
+    Then a per-pane dry-run reads this pane's coordinates, the server and the pane's mark with one
+      bounded "tmux display-message -p -t $TMUX_PANE"; its row is the pane's own PENDING mark, else
+      last's row at those coordinates; with --from, that save's row only
+    And --all lists the pending marks of the running server first (one bounded list-panes; none when
+      it does not answer), then every row of the save
+    And each row is decided by the first match of this table, read-only:
+      | #  | condition                                                                    | decision |
+      | 1  | inside a sandbox, or a per-pane form without TMUX_PANE                       | exit 2   |
+      | 2  | no row at this pane's coordinates                                            | nothing  |
+      | 3  | the row fails CS-TMUX-046's checks                                           | clear    |
+      | 4  | mode ralph: print the rerun command                                          | clear    |
+      | 5  | mode join: joins are not restored (the manual resume command when known)     | clear    |
+      | 7  | the project is not a directory                                               | pending  |
+      | 8  | docker does not answer one bounded "docker version"                          | pending  |
+      | 9  | a 64-hex containerId running with the row's project and instance labels      | attach, or clear when an active mark for it is on screen in another pane |
+      | 10 | the same, paused                                                             | pending  |
+      | 11 | the same, restarting                                                         | pending  |
+      | 12 | the inspect failed for another reason than "no such container"              | pending  |
+      | 13 | gone (no id, not found, other labels, created/exited/dead/removing) and no conversation | clear |
+      | 14 | gone, a generated worktree whose name was never recorded                     | clear    |
+      | 15 | gone, and the resume guard names a sandbox holding the conversation          | clear    |
+      | 16 | gone, and the guard finds a host claude holding it                           | clear    |
+      | 17 | gone, and the guard cannot tell                                              | pending  |
+      | 18 | gone, the id is known and open nowhere                                       | resume   |
+    And the inspect is one "docker inspect --type container" by the 64-hex id; the on-screen check is
+      the one list-panes; the guard is resumeguard.Check against the row's config dir, over one
+      discovery (uncounted: no docker top); every docker call runs in its own process group, killed
+      after its bound ("docker version" 3 s, the inspect and the discovery 5 s each), and one that
+      does not finish reads as "cannot tell"; and a resume shows the gap the restore would wait
+      after "session up": none on a
+      linked or relocated global-config layout, 10 s otherwise
+    And every decision prints its line, what a restore would do, and, where one exists, the exact
+      manual command (tmuxpane.ResumeCommand)
+    And a dry-run writes no file, sidecar, index or tmux option, takes no lock and starts nothing; it
+      exits 0 whatever it decides
+    And until F4b lands, "tmux restore" without --list or --dry-run exits 2 saying so
+    # Row 6 (the sparse line) is not a decision: CS-TMUX-050's line is printed before the rows and the
+    # decisions go on. The acting restore (F4b) reuses this table and adds the effects.

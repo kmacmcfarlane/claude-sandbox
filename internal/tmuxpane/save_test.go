@@ -28,6 +28,9 @@ const (
 	saveID2 = "9f1c2a9b8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a3928170615e4d3"
 	conv2   = "1b5e9c3a-1f2d-4e5f-8a9b-0c1d2e3f4a5b"
 	conv3   = "2b5e9c3a-1f2d-4e5f-8a9b-0c1d2e3f4a5b"
+	// The tmux server every scripted list-panes line reports (CS-TMUX-047).
+	srvPID   = 4100
+	srvStart = 1790000000
 )
 
 // stallRunner is a Fake whose Start hangs for commands matching hang, until
@@ -83,7 +86,7 @@ var _ = Describe("tmux save hook (CS-TMUX-030..040)", func() {
 		if m != nil {
 			raw = m.JSON()
 		}
-		return fmt.Sprintf("%s\t%d\t%d\t%s\t%s\t%s", session, w, p, id, cmd, raw)
+		return fmt.Sprintf("%s\t%d\t%d\t%s\t%s\t%d\t%d\t%s", session, w, p, id, cmd, srvPID, srvStart, raw)
 	}
 	stateLine := func(session string, w, p int, dir, full string) string {
 		return strings.Join([]string{"pane", session, fmt.Sprint(w), "1", ":*", fmt.Sprint(p), "title", ":" + dir, "1", "claude-sandbox", ":" + full}, "\t")
@@ -194,7 +197,7 @@ var _ = Describe("tmux save hook (CS-TMUX-030..040)", func() {
 			res, err := tmuxpane.Save(state, opts())
 			Expect(err).NotTo(HaveOccurred())
 			Expect(commands("tmux list-panes")).To(Equal(1))
-			Expect(fake.CommandLines()[0]).To(Equal("tmux list-panes -a -F #{session_name}\t#{window_index}\t#{pane_index}\t#{pane_id}\t#{pane_current_command}\t#{@claude-sandbox}"))
+			Expect(fake.CommandLines()[0]).To(Equal("tmux list-panes -a -F #{session_name}\t#{window_index}\t#{pane_index}\t#{pane_id}\t#{pane_current_command}\t#{pid}\t#{start_time}\t#{@claude-sandbox}"))
 			Expect(res.Rows).To(HaveLen(1))
 			Expect(res.Rows[0].Session).To(Equal("main"))
 			Expect(res.Rows[0].Window).To(Equal(1))
@@ -703,6 +706,113 @@ var _ = Describe("tmux save hook (CS-TMUX-030..040)", func() {
 			Expect(res.WriteBacks).To(Equal(0))
 			Expect(res.Skipped).To(BeNumerically(">=", 1))
 			Expect(strings.Join(logs, "\n")).To(ContainSubstring("left for the next save"))
+		})
+	})
+
+	Describe("CS-TMUX-047: the server and the lifetimes index", func() {
+		me := tmuxpane.Server{PID: srvPID, Start: srvStart}
+		lifetimes := func() []tmuxpane.Lifetime {
+			ls, err := tmuxpane.ReadLifetimes(dir)
+			Expect(err).NotTo(HaveOccurred())
+			return ls
+		}
+
+		It("CS-TMUX-047: the server comes from the one list-panes (any line) and the index gets this save", func() {
+			m := mark(func(m *tmuxpane.Mark) { m.State = tmuxpane.StatePending })
+			listPanes(paneRow("other", 3, 0, "%9", "zsh", nil), paneRow("main", 1, 0, "%1", "zsh", &m))
+			res, err := tmuxpane.Save(state, opts())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(commands("tmux list-panes")).To(Equal(1))
+			Expect(res.Server).To(Equal(&me))
+			Expect(readSidecar(res.Sidecar).Server).To(Equal(&me))
+			Expect(lifetimes()).To(Equal([]tmuxpane.Lifetime{{Server: me, First: "20260929T120000", Last: "20260929T120000", Rows: 1, SavedAt: now.UnixMilli()}}))
+			Expect(logs).To(BeEmpty())
+		})
+
+		It("CS-TMUX-047: an unknown server writes the sidecar without one and leaves the index alone", func() {
+			fake.On("tmux list-panes", "main\t1\t0\t%1\tzsh\t\t\t\n", nil)
+			res, err := tmuxpane.Save(state, opts())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.Server).To(BeNil())
+			raw, _ := os.ReadFile(res.Sidecar)
+			Expect(string(raw)).NotTo(ContainSubstring(`"server"`))
+			Expect(filepath.Join(dir, tmuxpane.LifetimesFile)).NotTo(BeAnExistingFile())
+		})
+
+		It("CS-TMUX-037/047: an equal save of a NEW server never rewrites the previous server's final sidecar", func() {
+			prev := writeState("tmux_resurrect_20260929T115900.txt", stateLine("main", 1, 0, proj, "claude-sandbox"))
+			Expect(os.Symlink(filepath.Base(prev), filepath.Join(dir, "last"))).To(Succeed())
+			old := tmuxpane.Server{PID: 77, Start: 1780000000}
+			om := mark(func(m *tmuxpane.Mark) { m.Conversation = convID })
+			Expect(tmuxpane.WriteSidecar(tmuxpane.SidecarPath(prev), tmuxpane.Sidecar{V: 1, StateFile: filepath.Base(prev), Server: &old,
+				Panes: []tmuxpane.Row{{Session: "main", Window: 1, Pane: 0, Mark: om}}})).To(Succeed())
+			before, _ := os.ReadFile(tmuxpane.SidecarPath(prev))
+			listPanes(paneRow("main", 1, 0, "%1", "zsh", nil)) // the new server: a shell, no mark
+			res, err := tmuxpane.Save(state, opts())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.Kept).To(BeTrue())
+			after, _ := os.ReadFile(tmuxpane.SidecarPath(prev))
+			Expect(after).To(Equal(before))
+			Expect(tmuxpane.SidecarPath(state)).NotTo(BeAnExistingFile())
+			Expect(filepath.Join(dir, tmuxpane.LifetimesFile)).NotTo(BeAnExistingFile())
+			Expect(logs).To(ContainElement(ContainSubstring("another tmux server's final save")))
+
+			// The same server's equal save refreshes it as before, and the
+			// index records last's target.
+			logs = nil
+			Expect(tmuxpane.WriteSidecar(tmuxpane.SidecarPath(prev), tmuxpane.Sidecar{V: 1, StateFile: filepath.Base(prev), Server: &me})).To(Succeed())
+			res, err = tmuxpane.Save(state, opts())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.Kept).To(BeFalse())
+			Expect(readSidecar(tmuxpane.SidecarPath(prev)).SavedAt).To(Equal(now.UnixMilli()))
+			Expect(lifetimes()[0].Last).To(Equal("20260929T115900"))
+		})
+
+		It("CS-TMUX-037/047: an equal save by a hook whose own server is UNKNOWN writes as before, without server", func() {
+			prev := writeState("tmux_resurrect_20260929T115900.txt", stateLine("main", 1, 0, proj, "claude-sandbox"))
+			Expect(os.Symlink(filepath.Base(prev), filepath.Join(dir, "last"))).To(Succeed())
+			old := tmuxpane.Server{PID: 77, Start: 1780000000}
+			Expect(tmuxpane.WriteSidecar(tmuxpane.SidecarPath(prev), tmuxpane.Sidecar{V: 1, StateFile: filepath.Base(prev), Server: &old})).To(Succeed())
+			fake.On("tmux list-panes", "main\t1\t0\t%1\tzsh\t\t\t\n", nil)
+			res, err := tmuxpane.Save(state, opts())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.Kept).To(BeFalse())
+			sc := readSidecar(tmuxpane.SidecarPath(prev))
+			Expect(sc.Server).To(BeNil())
+			Expect(sc.SavedAt).To(Equal(now.UnixMilli()))
+			Expect(filepath.Join(dir, tmuxpane.LifetimesFile)).NotTo(BeAnExistingFile())
+		})
+
+		It("CS-TMUX-047: the lock wait is cut to what is left of the 3 s deadline", func() {
+			DeferCleanup(func(w time.Duration) { tmuxpane.IndexLockWait = w }, tmuxpane.IndexLockWait)
+			tmuxpane.IndexLockWait = 3 * time.Second
+			tmuxpane.SaveDeadline = 300 * time.Millisecond
+			f, err := os.OpenFile(filepath.Join(dir, ".claude-sandbox-lifetimes.lock"), os.O_RDWR|os.O_CREATE, 0o600)
+			Expect(err).NotTo(HaveOccurred())
+			defer f.Close()
+			Expect(syscall.Flock(int(f.Fd()), syscall.LOCK_EX)).To(Succeed())
+			listPanes(paneRow("main", 1, 0, "%1", "zsh", nil))
+			start := time.Now()
+			res, err := tmuxpane.Save(state, opts())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(time.Since(start)).To(BeNumerically("<", time.Second), "bounded by the deadline, not IndexLockWait")
+			Expect(res.Sidecar).To(BeAnExistingFile())
+			Expect(logs).To(ContainElement(ContainSubstring("lifetimes index not updated")))
+		})
+
+		It("CS-TMUX-047: a held index lock is waited on, then the update is skipped with one line; the sidecar stands", func() {
+			DeferCleanup(func(w time.Duration) { tmuxpane.IndexLockWait = w }, tmuxpane.IndexLockWait)
+			tmuxpane.IndexLockWait = 60 * time.Millisecond
+			f, err := os.OpenFile(filepath.Join(dir, ".claude-sandbox-lifetimes.lock"), os.O_RDWR|os.O_CREATE, 0o600)
+			Expect(err).NotTo(HaveOccurred())
+			defer f.Close()
+			Expect(syscall.Flock(int(f.Fd()), syscall.LOCK_EX)).To(Succeed())
+			listPanes(paneRow("main", 1, 0, "%1", "zsh", nil))
+			res, err := tmuxpane.Save(state, opts())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.Sidecar).To(BeAnExistingFile())
+			Expect(filepath.Join(dir, tmuxpane.LifetimesFile)).NotTo(BeAnExistingFile())
+			Expect(logs).To(ConsistOf(ContainSubstring("lifetimes index not updated")))
 		})
 	})
 })

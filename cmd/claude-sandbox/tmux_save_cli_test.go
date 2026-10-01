@@ -36,7 +36,7 @@ var _ = Describe("tmux save (CS-TMUX-030)", func() {
 
 	It("CS-TMUX-030: routes to the hook, writes the sidecar, prints nothing and exits 0", func() {
 		m := tmuxpane.Mark{V: 1, State: tmuxpane.StatePending, Mode: tmuxpane.ModeClaude, Container: "c", Project: f.proj, Conversation: markConv}
-		f.fake.On("tmux list-panes", "main\t1\t0\t%1\tzsh\t"+m.JSON()+"\n", nil)
+		f.fake.On("tmux list-panes", "main\t1\t0\t%1\tzsh\t4100\t1790000000\t"+m.JSON()+"\n", nil)
 		Expect(f.run("tmux", "save", state)).To(Equal(0))
 		Expect(f.out.String()).To(BeEmpty())
 		Expect(f.errw.String()).To(BeEmpty())

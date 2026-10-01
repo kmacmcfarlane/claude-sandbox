@@ -40,8 +40,14 @@ const LauncherCommand = "claude-sandbox"
 // maxStateFile caps the state file read.
 const maxStateFile = 16 << 20
 
-// listPanesFormat is the one list-panes format the hook reads (CS-TMUX-031).
-const listPanesFormat = "#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_id}\t#{pane_current_command}\t#{" + Option + "}"
+// listPanesFormat is the one list-panes format the hook reads (CS-TMUX-031):
+// #{pid} and #{start_time} are the server's, the same on every line, and name
+// its lifetime (CS-TMUX-047). The mark stays last: it is JSON, which holds no
+// literal tab, and SplitN keeps it whole.
+const listPanesFormat = "#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_id}\t#{pane_current_command}\t#{pid}\t#{start_time}\t#{" + Option + "}"
+
+// listPanesFields is listPanesFormat's field count.
+const listPanesFields = 8
 
 // dockerPSFormat lists sandbox containers for the liveness check
 // (CS-TMUX-032).
@@ -80,7 +86,13 @@ var ErrNotStateFile = errors.New("not a tmux-resurrect state file")
 
 // SaveResult says what one hook run did, for the tests and the log.
 type SaveResult struct {
-	Sidecar    string
+	Sidecar string
+	// Server is the tmux server that ran the save, nil when unknown
+	// (CS-TMUX-047).
+	Server *Server
+	// Kept is true when the sidecar was not written because its target
+	// belongs to another server's lifetime (CS-TMUX-037/047).
+	Kept       bool
 	Rows       []Row
 	WriteBacks int
 	Skipped    int // write-backs left for the next save at the deadline
@@ -128,9 +140,12 @@ func Save(stateFile string, o SaveOptions) (SaveResult, error) {
 	}
 	var kept []*livePane
 	for _, line := range strings.Split(out, "\n") {
-		f := strings.SplitN(strings.TrimRight(line, "\r"), "\t", 6)
-		if len(f) != 6 {
+		f := strings.SplitN(strings.TrimRight(line, "\r"), "\t", listPanesFields)
+		if len(f) != listPanesFields {
 			continue
+		}
+		if res.Server == nil {
+			res.Server = parseServer(f[5], f[6])
 		}
 		w, err1 := strconv.Atoi(f[1])
 		p, err2 := strconv.Atoi(f[2])
@@ -140,7 +155,7 @@ func Save(stateFile string, o SaveOptions) (SaveResult, error) {
 		if _, ok := saved[coordKey(f[0], w, p)]; !ok {
 			continue // not in this save (a grouped session, or opened since)
 		}
-		m, ok := ParseMark(f[5])
+		m, ok := ParseMark(f[7])
 		if !ok || (m.State != StateActive && m.State != StatePending) {
 			continue
 		}
@@ -174,10 +189,28 @@ func Save(stateFile string, o SaveOptions) (SaveResult, error) {
 	// CS-TMUX-037/038: the sidecar, for the state file resurrect keeps.
 	target := sidecarTarget(stateFile, data)
 	res.Sidecar = SidecarPath(target)
-	if err := WriteSidecar(res.Sidecar, Sidecar{
-		V: SidecarVersion, StateFile: filepath.Base(target), SavedAt: o.now().UnixMilli(), Panes: res.Rows,
-	}); err != nil {
-		return res, fmt.Errorf("write sidecar: %v", err)
+	if target != stateFile && otherServer(res.Sidecar, res.Server) {
+		// CS-TMUX-037/047: a new server whose first save equals the previous
+		// server's final one. That sidecar is the previous lifetime's final
+		// state; the new server gets its own at its first distinct save.
+		res.Kept = true
+		o.logf("kept %s: it records another tmux server's final save", filepath.Base(res.Sidecar))
+	} else {
+		if err := WriteSidecar(res.Sidecar, Sidecar{
+			V: SidecarVersion, StateFile: filepath.Base(target), SavedAt: o.now().UnixMilli(),
+			Server: res.Server, Panes: res.Rows,
+		}); err != nil {
+			return res, fmt.Errorf("write sidecar: %v", err)
+		}
+		// CS-TMUX-047: the lifetimes index, within the deadline.
+		if res.Server != nil {
+			wait := min(IndexLockWait, SaveDeadline-time.Since(start))
+			if wait <= 0 {
+				o.logf("deadline: lifetimes index not updated")
+			} else if err := UpdateLifetimes(filepath.Dir(target), *res.Server, StampOf(filepath.Base(target)), len(res.Rows), o.now(), wait); err != nil {
+				o.logf("lifetimes index not updated: %v", err)
+			}
+		}
 	}
 	// CS-TMUX-039.
 	if err := PruneSidecars(filepath.Dir(stateFile), o.now()); err != nil {
@@ -216,6 +249,33 @@ func Save(stateFile string, o SaveOptions) (SaveResult, error) {
 		res.WriteBacks++
 	}
 	return res, nil
+}
+
+// parseServer reads the #{pid} and #{start_time} fields; nil unless both are
+// positive integers (CS-TMUX-047).
+func parseServer(pid, start string) *Server {
+	p, err1 := strconv.Atoi(pid)
+	st, err2 := strconv.ParseInt(start, 10, 64)
+	if err1 != nil || err2 != nil || p <= 0 || st <= 0 {
+		return nil
+	}
+	return &Server{PID: p, Start: st}
+}
+
+// otherServer reports whether the sidecar at path records a tmux server
+// known to differ from cur (CS-TMUX-037/047). Only a proven difference keeps
+// the sidecar: a current server that is unknown (a tmux without
+// #{start_time}) writes as before, without "server", and so does a sidecar
+// that records none or cannot be read.
+func otherServer(path string, cur *Server) bool {
+	if cur == nil {
+		return false
+	}
+	sc, err := ReadSidecar(path)
+	if err != nil || sc.Server == nil {
+		return false
+	}
+	return *sc.Server != *cur
 }
 
 // liveStates are the container states an active mark may name.

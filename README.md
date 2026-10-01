@@ -471,7 +471,8 @@ the pane user option `@claude-sandbox`, and removes it again when the session ch
 (a detach, an exit, a crash, an OOM kill, your own signal) — unless the session was stopped from
 outside (below). It is the first part of restoring sandbox panes after a tmux server
 restart or a reboot with tmux-resurrect (see [docs/tmux-session-restore.md](docs/tmux-session-restore.md));
-the save hook below reads it, and `claude-sandbox tmux restore` is still to come. Nothing
+the save hook below reads it, and `claude-sandbox tmux restore` (read-only so far) shows what a
+restore would do with it. Nothing
 changes outside tmux (`TMUX`/`TMUX_PANE` unset), in a launcher run inside a sandbox, for
 `headless` or for `--detach`, and a failing tmux never changes the launch: each tmux call is
 killed after 1 s, so a hung tmux server costs at most a few seconds, never the launch. The mark
@@ -558,7 +559,19 @@ meantime, such as a relaunch in that pane), and writes a sidecar beside the save
 the `mark`), in whichever directory resurrect saved to (it passes the path; by default
 `~/.local/share/tmux/resurrect`, or `~/.tmux/resurrect` if that exists, or `@resurrect-dir`).
 When the save is identical to the previous one — resurrect then deletes the new file — the
-sidecar goes to the file `last` points at. Sidecars whose save resurrect pruned are removed.
+sidecar goes to the file `last` points at; but when that sidecar was written by a *different*
+tmux server (a new server whose first save matches the old server's final one), it is left
+alone, since it is the state the previous server ended with. Sidecars whose save resurrect
+pruned are removed.
+
+Each sidecar also records its tmux server (`"server": {"pid", "start"}`, from the same one
+`list-panes`), and the hook keeps a small index of server lifetimes beside the saves,
+`claude-sandbox-lifetimes.json` (0600: per server, its first and last save and the last one's
+row count; at most 64), which `tmux restore` reads for `--from previous` and the sparse-save
+warning instead of scanning weeks of sidecars. Overlapping saves update it under a lock waited on
+for up to 500 ms (an flock on `.claude-sandbox-lifetimes.lock`, an empty 0600 file left in place
+beside it); a late save never moves it backwards. It is derived data: when it is missing,
+the readers scan the sidecars instead.
 
 A stale mark is not recorded: an `active` mark counts only while the pane actually runs
 `claude-sandbox`. One `docker ps` (at most 1 s) then checks its container: while the launcher
@@ -574,9 +587,62 @@ hook never prints and always exits 0, finishes within about 3 s, and logs proble
 ls ~/.local/share/tmux/resurrect/*.claude-sandbox.json   # after prefix + C-s
 ```
 
-Nothing reads the sidecars yet: `claude-sandbox tmux restore` is the next step, so keep
-claude-sandbox out of `@resurrect-processes` (see the tmux doc). Spec: `spec/tmux.feature`
-CS-TMUX-003, CS-TMUX-030..040, CS-TMUX-070, CS-TMUX-072.
+Only `claude-sandbox tmux restore --list`/`--dry-run` read the sidecars so far (below); the
+restore that acts is still to come, so keep claude-sandbox out of `@resurrect-processes` (see the
+tmux doc). Spec: `spec/tmux.feature` CS-TMUX-003, CS-TMUX-030..040, CS-TMUX-047, CS-TMUX-070,
+CS-TMUX-072.
+
+### tmux restore (read-only so far)
+
+`claude-sandbox tmux restore` will bring a sandbox pane back after a tmux server restart or a
+reboot. Its read-only half is here: it lists the saves and shows what a restore would do, and
+it writes nothing, takes no lock and starts nothing. Host only (exit 2 inside a sandbox).
+
+```bash
+claude-sandbox tmux restore --list            # the saves of the last 7 days (--all: 30)
+claude-sandbox tmux restore --dry-run         # in a pane: what a restore would do there
+claude-sandbox tmux restore --dry-run --all   # anywhere: every pane of the save
+claude-sandbox tmux restore --dry-run --all --from previous
+```
+
+It reads the saves where resurrect keeps them: `@resurrect-dir` (with `$HOME`, `$HOSTNAME` and
+`~` expanded), else `~/.tmux/resurrect` if it exists, else
+`${XDG_DATA_HOME:-~/.local/share}/tmux/resurrect`.
+
+- **`--list`** prints the saves newest first, grouped by tmux server (`tmux server started
+  <time>`), collapsing consecutive saves that hold the same sandbox sessions into one line: the
+  stamp, its time, how many saves, `N sandbox panes (a active, p pending)`, `last` on the save
+  the `last` link points at, and `sparse (had M)` (below). A save without a sidecar (the hook
+  was not wired then) says `no record`. It ends with how to use a stamp and the two ways to
+  restore a whole layout from an earlier save, with the stamp and dir filled in — in the running
+  server (autosave off, `ln -sf tmux_resurrect_<stamp>.txt <dir>/last`, `prefix + C-r`, the
+  autosave interval put back as it was), or a fresh server (`systemctl --user stop
+  tmux.service`, the `ln -sf`, `systemctl --user start tmux.service`). A reboot never restores a
+  chosen save: its shutdown save moves `last` again.
+- **`--from SAVE`** chooses the save: `last` (the default), `previous` (the newest save of the
+  previous tmux server, which needs tmux), a stamp such as `20260929T120000`, or the file name of
+  a save in that dir. Never a path; anything else exits 2. Saves are named by stamp, never by
+  position: continuum saves most minutes.
+- **`--dry-run`**, in a pane, takes this pane's own pending mark, else the row `last` (or
+  `--from`) holds at the pane's coordinates; **`--dry-run --all`** lists the running server's
+  pending marks, then every row of the save. Each row gets its decision — nothing recorded;
+  a row that fails the checks (cleared); a ralph run or a join (one line, not restarted); the
+  project or docker missing (kept pending); the container still running (attach, or "already on
+  screen" when another pane shows it); paused or restarting (pending); gone with no
+  conversation id or an unknown generated worktree (cleared); the conversation open elsewhere
+  (the resume guard: cleared with an attach command, or pending when it cannot tell); else a
+  resume in a new container, with the pause it would take (none on a linked or
+  `CLAUDE_CONFIG_DIR` host, 10 s otherwise) and the flags it would not replay — plus the exact
+  manual command. Each docker call it makes is bounded (`docker version` 3 s; the inspect and
+  the resume guard's container listing 5 s each); one that does not answer reads as "cannot
+  tell", so the row stays pending.
+
+**The sparse-save warning.** A save is *sparse* when it has at least 2 sandbox panes fewer, and
+at least a third fewer, than the median of what the last save of each of the previous 3 tmux
+servers held (the saves right before it when no earlier server is known). After a bad restore
+continuum writes a sparse save every minute, so comparing with the previous few saves would go
+quiet exactly when it matters. A dry run prints one line before its decisions; ignore it if you
+closed those sessions on purpose. Spec: `spec/tmux.feature` CS-TMUX-045..051.
 
 ## Headless mode (Paseo and other SDK clients)
 
@@ -1959,7 +2025,8 @@ internal/
   globalcfg/       ~/.claude.json layout (linked/legacy), the in-container link, global-config migrate/revert/accept, the launch health check
   ralphloop/       Ralph loop: iterations, lock, quota handling, pipeline
   tmuxpane/        tmux pane mark: mark JSON, tmux argv, the restore replay allowlist + names-only flag scan;
-                   the tmux save hook (registry match, state-file parser, sidecar)
+                   the tmux save hook (registry match, state-file parser, sidecar, lifetimes index);
+                   tmux restore's read side (saves, --from, the sparse rule, the decision table)
   resumeguard/     Resume guard: is a conversation already open (sandbox labels, hardened registry reads, host claude)
   registry/        The one hardened reader of Claude Code's peer registry, shared by the save hook and the resume guard
   execx/, prompt/  Command-runner and prompt seams (injected in tests)
