@@ -2185,16 +2185,21 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       drift as for any uncomputable hash (a prompt, or exit 3 with no
       terminal; --allow-config-drift attaches or joins)
 
-  Scenario: CS-LNCH-173 A FIFO at a linked worktree's back-link is "not linked", never a hang
+  Scenario: CS-LNCH-173 The launcher's own read of a linked worktree's back-link never blocks
     # <GitDir>/gitdir lives in the common git dir, which CS-LNCH-071 mounts
     # read-write into every session of the worktree, so a session can replace
-    # it. It is read through cascade.ReadRegularFile.
+    # it. The launcher's read of it goes through cascade.ReadRegularFile.
     Given git names a linked worktree whose <GitDir>/gitdir is a FIFO, device
       or socket
-    Then the read returns at once and the project launches plain, as for a
-      missing or unreadable back-link (CS-LNCH-070): no mount, no warning
+    Then the launcher's read returns at once and the project launches plain,
+      as for a missing or unreadable back-link (CS-LNCH-070): no mount, no
+      warning
     # A non-regular back-link is unreadable, not "mismatched": there is no
     # recorded path to name in the repair warning.
+    # Not covered: the "git rev-parse" that runs first reads files in the same
+    # directory (<GitDir>/commondir, the worktree's .git file) with git's own
+    # blocking open, so a FIFO there still blocks the launch inside git;
+    # bounding the launch-path git calls is a separate change.
 
   Scenario: CS-LNCH-174 The shadow sources are read non-blocking, regular files only
     # <config dir>/CLAUDE.md lives under the read-write config-dir bind;

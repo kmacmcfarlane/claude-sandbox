@@ -913,11 +913,14 @@ file rewritten while the launch builds images changes nothing until the next lau
 files are handled the same way (docker gets verbatim copies of the bytes the launcher
 checked). Only regular files are read: a FIFO, device or socket at a `config.yaml` or `env`
 path fails the launch at once with an error naming it (exit 2), never a hang; `init` reads
-the same way. The launch's other reads of files a session can write — the project
-`.gitignore`, a linked worktree's back-link, `CLAUDE.md`/`.mcp.json`/`.gitconfig` for the
-shadow copies, the global config the health check reads, and this repository's own
+the same way. The launcher's own reads of the other files a session can write — the
+project `.gitignore`, a linked worktree's back-link, `CLAUDE.md`/`.mcp.json`/`.gitconfig` for
+the shadow copies, the global config the health check reads, and this repository's own
 Dockerfiles for the rebuild fingerprint — never wait on such a file either: each treats it
-as unreadable (a `.gitignore` one is skipped with a warning).
+as unreadable (a `.gitignore` one is skipped with a warning, and the `git check-ignore`
+checks that would read it are skipped too). The `git` commands a launch runs read files
+of their own (`.git`, `.git/info/exclude`, a worktree's git dir) and are not covered by
+this: a FIFO there can still hold the launch inside git.
 
 Merge rules:
 

@@ -100,6 +100,40 @@ func Setup(project string, trackInHost bool, opts Options) error {
 	}
 
 	hostGI := filepath.Join(project, ".gitignore")
+	sideGI := filepath.Join(sb, ".gitignore")
+
+	// CS-LAY-023: the sidecar .gitignore is written in this mode (CS-LAY-004);
+	// one that exists but is not a readable regular file fails the setup
+	// here, before any git probe could open it (git check-ignore reads it,
+	// blocking, for a probe path under .claude-sandbox/).
+	if !trackInHost {
+		if _, err := cascade.ReadRegularFile(sideGI); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+	}
+	// CS-LAY-023: every git check-ignore probe below opens the host
+	// .gitignore and, for a probe path under .claude-sandbox/, the sidecar
+	// one, with a blocking open. When either exists but is not a readable
+	// regular file, no probe runs and the host .gitignore is not touched: one
+	// warning, and the steps that need a probe's answer are skipped. Other
+	// files git reads (.git/info/exclude, core.excludesFile, the .git file)
+	// are the bounded-git-calls follow-up, not this check.
+	if hostIsGit {
+		if p, err := unreadableIgnoreFile(hostGI, sideGI); p != "" {
+			fmt.Fprintf(opts.errw(), "WARNING: cannot read %s (%v); skipping the .gitignore update and the git ignore checks, which would read it.\n", p, unwrapPathErr(err))
+			if !trackInHost && hostTracked > 0 {
+				warnHostTracked(opts.errw(), hostTracked, false, dirExists(filepath.Join(sb, ".git")))
+			}
+			if !trackInHost {
+				// CS-LAY-004, as on the ordinary path.
+				if err := ensureLines(sideGI, "temp/", "env", "ralph/"); err != nil {
+					return err
+				}
+			}
+			// The sidecar init (CS-LAY-005/006) needs dirIgnored's answer.
+			return nil
+		}
+	}
 
 	if trackInHost {
 		// CS-LAY-009: host-tracked — ignore only ephemeral content. The
@@ -174,6 +208,18 @@ var worktreesCoveringRules = []string{
 	worktreesLine, "/" + worktreesLine, ".claude/worktrees", "/.claude/worktrees",
 	".claude/", "/.claude/", ".claude", "/.claude",
 	".claude/*", "/.claude/*", ".claude/**", "/.claude/**",
+}
+
+// unreadableIgnoreFile returns the first of paths that exists but is not a
+// readable regular file, and why; "" when every one is regular or absent.
+// Read through cascade.ReadRegularFile, so the check itself never blocks.
+func unreadableIgnoreFile(paths ...string) (string, error) {
+	for _, p := range paths {
+		if _, err := cascade.ReadRegularFile(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return p, err
+		}
+	}
+	return "", nil
 }
 
 // withWorktreesLine appends worktreesLine to lines unless the host .gitignore

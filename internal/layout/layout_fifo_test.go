@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -76,32 +77,93 @@ var _ = Describe("CS-LAY-023: layout never blocks on a non-regular file", func()
 		errOut.Reset()
 	})
 
-	It("CS-LAY-023: a FIFO at the host .gitignore skips its update with one warning (trackInHost false)", func() {
+	// probes are the git check-ignore calls made: with real git each one
+	// opens the host (and sidecar) .gitignore blocking, so none may run.
+	probes := func() []string {
+		var out []string
+		for _, l := range fake.CommandLines() {
+			if strings.Contains(l, "check-ignore") {
+				out = append(out, l)
+			}
+		}
+		return out
+	}
+	skipWarning := func(p string) string {
+		return "WARNING: cannot read " + p + " ("
+	}
+
+	It("CS-LAY-023: a FIFO at the host .gitignore skips its update and every git probe (trackInHost false)", func() {
 		plantLayoutFIFO(hostGI)
 		Expect(setup(false)).To(Succeed())
-		Expect(errOut.String()).To(ContainSubstring("WARNING: cannot read " + hostGI + " (not a regular file"))
-		Expect(errOut.String()).To(ContainSubstring("skipping the .gitignore update."))
+		Expect(errOut.String()).To(ContainSubstring(skipWarning(hostGI) + "not a regular file"))
+		Expect(errOut.String()).To(ContainSubstring("skipping the .gitignore update and the git ignore checks, which would read it."))
+		Expect(strings.Count(errOut.String(), "WARNING")).To(Equal(1))
 		Expect(errOut.String()).NotTo(ContainSubstring("These entries are missing"))
+		Expect(probes()).To(BeEmpty(), "git check-ignore would block on the FIFO")
 		Expect(isFIFO(hostGI)).To(BeTrue(), "the FIFO is left alone")
-		// The rest of the setup goes on: the sidecar .gitignore (CS-LAY-004).
+		// The sidecar .gitignore (CS-LAY-004) is still written; the sidecar
+		// init, which needs a probe's answer, is skipped.
 		Expect(read(filepath.Join(sb, ".gitignore"))).To(ContainSubstring("temp/"))
+		for _, l := range fake.CommandLines() {
+			Expect(l).NotTo(ContainSubstring(" init "))
+		}
 	})
 
-	It("CS-LAY-023: a FIFO at the host .gitignore skips its update with one warning (trackInHost true)", func() {
-		fake.On("check-ignore", "", execx.Fail(1))
+	It("CS-LAY-023: a FIFO at the host .gitignore skips its update and every git probe (trackInHost true)", func() {
 		plantLayoutFIFO(hostGI)
 		Expect(setup(true)).To(Succeed())
-		Expect(errOut.String()).To(ContainSubstring("WARNING: cannot read " + hostGI))
+		Expect(errOut.String()).To(ContainSubstring(skipWarning(hostGI) + "not a regular file"))
+		Expect(probes()).To(BeEmpty())
 		Expect(isFIFO(hostGI)).To(BeTrue())
 	})
 
-	It("CS-LAY-023: a FIFO at the sidecar .gitignore fails the setup at once, naming it", func() {
+	It("CS-LAY-023: with host-tracked files the CS-LAY-020 warning still prints, without the probe", func() {
+		fake.On("ls-files -z -- .claude-sandbox", ".claude-sandbox/config.yaml\x00", nil)
+		plantLayoutFIFO(hostGI)
+		Expect(setup(false)).To(Succeed())
+		Expect(errOut.String()).To(ContainSubstring(skipWarning(hostGI)))
+		Expect(errOut.String()).To(ContainSubstring("the host repo already tracks 1 file under .claude-sandbox/"))
+		Expect(probes()).To(BeEmpty())
+		Expect(read(filepath.Join(sb, ".gitignore"))).To(ContainSubstring("temp/"), "CS-LAY-004 as on the ordinary path")
+	})
+
+	It("CS-LAY-023: a FIFO at the sidecar .gitignore with trackInHost true skips the probes, naming it", func() {
+		gi := filepath.Join(sb, ".gitignore")
+		plantLayoutFIFO(gi)
+		Expect(setup(true)).To(Succeed())
+		Expect(errOut.String()).To(ContainSubstring(skipWarning(gi) + "not a regular file"))
+		Expect(probes()).To(BeEmpty())
+	})
+
+	It("CS-LAY-023: a directory at the host .gitignore is skipped the same way", func() {
+		Expect(os.MkdirAll(hostGI, 0o755)).To(Succeed())
+		Expect(setup(false)).To(Succeed())
+		Expect(errOut.String()).To(ContainSubstring(skipWarning(hostGI) + "not a regular file"))
+		Expect(probes()).To(BeEmpty())
+		Expect(errOut.String()).NotTo(ContainSubstring("These entries are missing"))
+	})
+
+	It("CS-LAY-023: an unreadable (no permission) host .gitignore is skipped the same way", func() {
+		if os.Geteuid() == 0 {
+			Skip("root reads a mode-000 file")
+		}
+		write(hostGI, "node_modules/\n")
+		Expect(os.Chmod(hostGI, 0)).To(Succeed())
+		DeferCleanup(func() { _ = os.Chmod(hostGI, 0o644) })
+		Expect(setup(true)).To(Succeed())
+		Expect(errOut.String()).To(ContainSubstring(skipWarning(hostGI) + "permission denied"))
+		Expect(probes()).To(BeEmpty())
+		Expect(errOut.String()).NotTo(ContainSubstring("These entries are missing"))
+	})
+
+	It("CS-LAY-023: a FIFO at the sidecar .gitignore fails the setup at once, naming it, before any probe", func() {
 		gi := filepath.Join(sb, ".gitignore")
 		plantLayoutFIFO(gi)
 		err := setup(false)
 		Expect(err).To(MatchError(ContainSubstring(gi)))
 		Expect(err).To(MatchError(ContainSubstring("not a regular file")))
 		Expect(isFIFO(gi)).To(BeTrue())
+		Expect(probes()).To(BeEmpty())
 	})
 
 	It("CS-LAY-023: the CLAUDE.md seed never writes through a symlink or onto a FIFO", func() {
