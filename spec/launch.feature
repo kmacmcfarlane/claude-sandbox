@@ -1881,7 +1881,8 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       none (docker kill, a stop timeout) is then quiet
     And a joined session in a marked tmux pane (CS-TMUX-071) whose docker exec
       ended non-zero waits up to 2 s for its container's die, whatever the code,
-      ending at once when it arrives (then 150 ms more for an oom not seen yet);
+      ending at once when it arrives (then 150 ms more only for a 137 — the
+      exec's or the die's — whose oom has not arrived yet);
       an unmarked join, or one whose exec exited 0, waits as CS-SESS-060 says
 
   Scenario: CS-LNCH-089 An OOM-killed session is reported on stderr

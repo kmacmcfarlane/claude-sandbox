@@ -513,13 +513,15 @@ prints `stopping`) or an end the launcher cannot read (the docker event stream e
 `die`, or the container cannot be inspected) ends a marked session, the launcher keeps the pane's
 mark with `"state": "pending"` and the last conversation the save hook recorded, so the pane's
 session is restored rather than forgotten — which is what keeps every sandbox row in the save
-tmux-continuum takes at shutdown. A detach unsets only on positive evidence: the docker client
-exited 0, the event stream was still open and the container is running. A crash or an OOM kill
+tmux-continuum takes at shutdown. A detach unsets only on positive evidence: the event stream was
+still open, the container is running, and the client was `docker attach` (which exits 1 on the
+detach keys) or a `docker start -ai` that exited 0. A crash or an OOM kill
 unsets, as before (the narrow default). A marked `--join` that ends non-zero waits up to 2 s for
-its container's `die` and is judged by it (a join whose container runs on unsets). These checks —
-two more `docker events` filters on every session, one bounded `systemctl is-system-running`
-when the end would otherwise unset, one bounded `docker inspect` when no `die` came — run only
-for a marked pane: headless, `--detach` and sessions outside tmux are unchanged.
+its container's `die` and is judged by it (a join whose container runs on unsets). Every session's
+`docker events` subscription now also carries `kill` and `stop` filters (headless included; they
+never change a report). The checks — one bounded `systemctl is-system-running` when the end would
+otherwise unset, one bounded `docker inspect` when no `die` came — run only for a marked pane:
+headless, `--detach` and sessions outside tmux are unchanged.
 
 If a pane still carries a *pending* mark (a restore waiting to act) and you launch something
 else in it, the launcher prints one `Note: this pane was waiting to restore '<name>' (<id>);

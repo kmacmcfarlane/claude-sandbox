@@ -252,12 +252,15 @@ func (w *Watch) AwaitDeath(stop <-chan os.Signal) (Outcome, bool) {
 // OOMGrace for ooms still in flight. forDie is set for a join in a marked tmux
 // pane (CS-LNCH-088, CS-TMUX-071): a non-zero exec then waits up to DieWait
 // for the container's die whatever the code, ending at once when it arrives,
-// then OOMGrace for an oom not seen yet — so the pane's mark is judged by the
-// container, not by the exec, which ends non-zero whenever its container goes.
+// then OOMGrace only for a 137 (the exec's or the die's) whose oom has not
+// arrived yet — so the pane's mark is judged by the container, not by the
+// exec, which ends non-zero whenever its container goes.
 func (w *Watch) AwaitJoined(code int, forDie bool, stop <-chan os.Signal) (Outcome, bool) {
 	if forDie && code != 0 {
 		o, stopped := w.Await(DieWait, Died, stop)
-		if stopped || o.OOMKills > 0 {
+		// As AwaitDeath: the grace only for a 137 (the exec's or the die's)
+		// whose oom has not arrived yet.
+		if stopped || o.OOMKills > 0 || (code != OOMExit && !(o.Died && o.ExitCode == OOMExit)) {
 			return o, stopped
 		}
 		return w.Await(OOMGrace, SawOOM, stop)

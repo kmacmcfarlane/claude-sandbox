@@ -622,7 +622,10 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
   Scenario: CS-SESS-060 A joined session is judged by its own exit status
     # The container normally outlives a joined session, so there is no die to
     # wait for.
-    When the joined "docker exec" returns without a signal from the launcher
+    # A join in a marked tmux pane whose exec ended non-zero waits up to 2 s for
+    # its container's die instead (CS-LNCH-088, CS-TMUX-071); the rest holds.
+    When the joined "docker exec" of an unmarked join (outside tmux), or one that exited 0, returns
+      without a signal from the launcher
     Then with exit 137 the launcher waits up to 2 s for an oom event, and
       with one prints the OOM report (CS-LNCH-089); a die of the container
       ends that wait early, leaving only 150 ms for an oom that trails it

@@ -367,9 +367,9 @@ Feature: tmux integration (CS-TMUX)
       | 4 | the container's die arrived (any exit code: a clean exit, a crash, an OOM kill)    | unset   |
       | 5 | a join whose docker exec exited 0 (the joined claude ended on its own)            | unset   |
       | 6 | no die, and the event stream ended, or the inspect failed, timed out or found the container neither running nor paused | pending |
-      | 7 | a primary session: no die while the stream stayed open, the child exited 0 and the container is running or paused (a detach) | unset |
+      | 7 | a detach: no die while the stream stayed open and the container is running or paused, and either an attach ("docker attach", any exit code) or a new container's "docker start -ai" that exited 0 | unset |
       | 8 | a join: no die while the stream stayed open and the container is running or paused (it runs on) | unset |
-      | 9 | a primary session whose child exited non-zero while its container runs on          | pending |
+      | 9 | a new container whose "docker start -ai" exited non-zero while its container runs on | pending |
     And "pending" re-reads the pane's current mark with one bounded "tmux show-options -p -q -v -t
       <pane> @claude-sandbox" and, only when it is still this session's own (the same containerId, else
       the same container), sets it back with "state": "pending" and nothing else changed — so it keeps
@@ -395,11 +395,15 @@ Feature: tmux integration (CS-TMUX)
     # joined claude ends the exec non-zero while its container runs on, and that join unsets (plan
     # 12 § 6, third bullet) rather than going pending. A pending row is visible: the next hand launch
     # in the pane prints CS-TMUX-017's note with the exact resume command.
+    # The docker client's exit status on a detach is known from the docker/cli source (v24.0.9,
+    # v27.5.1, master), not from a host run: "docker start -ai" returns nil on the detach keys
+    # (start.go), so it exits 0; "docker attach" returns the term.EscapeError from RunAttach ("read
+    # escape sequence"), so it exits 1 — which is why row 7 takes any exit code for an attach.
     # Host checks still owed (plan 11 § 1.4, 12 § 3.4; not verified, not run in CI): the docker events
     # for "docker stop", "docker kill" and "systemctl stop docker" with a throwaway sandbox running —
     # in particular whether a daemon shutdown emits kill for the containers it stops; what
     # "systemctl is-system-running" prints during a real shutdown (a logging user unit across a
-    # reboot); the docker client's exit status on a detach for "start -ai" and "attach"; and claude's
+    # reboot); and claude's
     # exit codes for /exit, Ctrl-D, a double Ctrl-C and SIGTERM (under this narrow default none of
     # them changes a decision: any die without outside evidence unsets).
 

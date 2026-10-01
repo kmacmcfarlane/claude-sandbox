@@ -241,6 +241,21 @@ var _ = Describe("oomreport", func() {
 		Expect(time.Since(start)).To(BeNumerically(">=", oomreport.DieWait), "no die: the whole die wait")
 	})
 
+	It("CS-LNCH-088: a marked join's die other than 137 ends the wait with no grace; a die 137 without an oom waits it", func() {
+		w := oomreport.Start(&scripted{lines: []string{ev("die", "0")}}, "cs-x", time.Now())
+		start := time.Now()
+		o, _ := w.AwaitJoined(130, true, nil)
+		Expect(o.Died).To(BeTrue())
+		Expect(time.Since(start)).To(BeNumerically("<", oomreport.OOMGrace), "no 150 ms for nothing")
+		w.Stop()
+
+		w = oomreport.Start(&scripted{lines: []string{ev("die", "137")}}, "cs-x", time.Now())
+		start = time.Now()
+		w.AwaitJoined(1, true, nil)
+		Expect(time.Since(start)).To(BeNumerically(">=", oomreport.OOMGrace), "a die 137 may have an oom trailing it")
+		w.Stop()
+	})
+
 	It("CS-LNCH-088: an unmarked join, or a marked one that exited 0, keeps the grace-only wait", func() {
 		for _, c := range []struct {
 			code   int

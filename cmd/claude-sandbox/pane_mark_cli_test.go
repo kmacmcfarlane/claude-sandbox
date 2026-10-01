@@ -652,6 +652,42 @@ var _ = Describe("tmux pane mark (CS-TMUX-010..019)", func() {
 			}
 		})
 
+		It("CS-TMUX-071 row 7: a new container's detach (docker start -ai exits 0 on the detach keys) unsets", func() {
+			f.env.Runner = &eventsRunner{Fake: f.fake, open: true}
+			Expect(f.run()).To(Equal(0))
+			Expect(p.get()).To(BeEmpty())
+		})
+
+		Describe("attach", func() {
+			created := "2026-09-18 12:34:56 +0000 UTC"
+			BeforeEach(func() {
+				f.fake.On("docker ps", psRowMark("cs-otter", f.proj, "claude", "otter", "", "37", "", created, markID,
+					"", f.home+"/.claude/sessions", "")+"\n", nil)
+				f.fake.On("docker top", "PID  COMMAND\n1  claude\n", nil)
+				// docker attach exits 1 on the detach keys (docker/cli
+				// RunAttach returns the term.EscapeError).
+				f.fake.OnFunc("docker attach", func(execx.Cmd) (string, error) {
+					p.update(func(m *tmuxpane.Mark) { m.Conversation = markConv })
+					return "", execx.Fail(1)
+				})
+			})
+
+			It("CS-TMUX-071 row 7: an attach detach (exit 1, stream open, container running) unsets", func() {
+				f.env.Runner = &eventsRunner{Fake: f.fake, open: true}
+				Expect(f.run("--attach=otter")).To(Equal(1))
+				Expect(p.get()).To(BeEmpty(), "tmux: %v", tmuxLines())
+				Expect(f.fake.CommandLines()).To(ContainElement("docker inspect --type container -f {{.State.Status}} " + markID))
+			})
+
+			It("CS-TMUX-071 row 6: an attach whose stream ended with no die is pending", func() {
+				f.run("--attach=otter")
+				m, ok := tmuxpane.ParseMark(p.get())
+				Expect(ok).To(BeTrue(), "tmux: %v", tmuxLines())
+				Expect(m.State).To(Equal(tmuxpane.StatePending))
+				Expect(m.Conversation).To(Equal(markConv))
+			})
+		})
+
 		Describe("joins", func() {
 			created := "2026-09-18 12:34:56 +0000 UTC"
 			BeforeEach(func() {

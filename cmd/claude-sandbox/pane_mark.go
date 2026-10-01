@@ -180,10 +180,16 @@ func (m *markedPane) inconclusive(env *Env, o sessionOpts, w *oomreport.Watch, c
 	if !ok || (state != "running" && state != "paused") {
 		return true // row 6
 	}
-	if join {
-		return false // row 8: the container runs on
+	if o.kind != reservedSession {
+		// Row 8: a join whose container runs on. Row 7, attach: "docker
+		// attach" exits 1 on the detach keys (docker/cli RunAttach returns
+		// the term.EscapeError), so for an attach no die + an open stream +
+		// a running container is a detach whatever the exit code.
+		return false
 	}
-	return code != 0 // row 7 (a detach) or row 9
+	// Row 7, a new container: "docker start -ai" returns nil on the detach
+	// keys (docker/cli start.go), so a detach exits 0; row 9 otherwise.
+	return code != 0
 }
 
 // vanished reports a restore attach whose container was gone (CS-TMUX-019):
