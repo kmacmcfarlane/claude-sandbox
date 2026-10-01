@@ -100,7 +100,7 @@ var _ = Describe("tmux restore, read-only (CS-TMUX-045..051)", func() {
 	}
 
 	Describe("CS-TMUX-051 row 1 and CS-TMUX-049: refusals exit 2", func() {
-		It("CS-TMUX-051: inside a sandbox, without a form, with a form F4b owns, or a bad combination", func() {
+		It("CS-TMUX-051: inside a sandbox, outside a pane, with a form F4c owns, or a bad combination (CS-TMUX-052)", func() {
 			f.envmap["CLAUDE_SANDBOX_PROJECT_DIR"] = f.proj
 			Expect(f.run("tmux", "restore", "--list")).To(Equal(2))
 			Expect(f.errw.String()).To(ContainSubstring("host only"))
@@ -117,9 +117,19 @@ var _ = Describe("tmux restore, read-only (CS-TMUX-045..051)", func() {
 				Expect(f.run(args...)).To(Equal(2), strings.Join(args, " "))
 				Expect(f.errw.String()).NotTo(BeEmpty())
 			}
+			// CS-TMUX-052: the acting forms run in a pane.
 			f.errw.Reset()
 			Expect(f.run("tmux", "restore")).To(Equal(2))
-			Expect(f.errw.String()).To(ContainSubstring("restoring is not built yet"))
+			Expect(f.errw.String()).To(ContainSubstring("TMUX_PANE is not set"))
+			for _, args := range [][]string{
+				{"tmux", "restore", "--drop", "--from", "last"},
+				{"tmux", "restore", "--drop", "--dry-run"},
+				{"tmux", "restore", "--all"},
+				{"tmux", "restore", "--list", "--drop"},
+			} {
+				f.errw.Reset()
+				Expect(f.run(args...)).To(Equal(2), strings.Join(args, " "))
+			}
 			Expect(f.fake.Calls).To(BeEmpty())
 		})
 

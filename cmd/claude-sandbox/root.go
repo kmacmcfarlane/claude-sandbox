@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -89,6 +90,15 @@ type Env struct {
 	// (CS-TMUX-045); "" resolves it as resurrect does. Tests point it at a
 	// scratch directory: resurrectDir() panics under go test when unset.
 	ResurrectDir string
+
+	// restore is set only on the Env copy a "tmux restore" resumes with
+	// (CS-TMUX-058, plan 10 § 5.2): the pane's pending row to put back and
+	// the hook that starts the readiness watcher. Never an environment
+	// variable; nil on every other path.
+	restore *restoreHooks
+	// interrupt is the Ctrl-C context a restore waits under (docker, the
+	// start lock); nil means signal.NotifyContext on os.Interrupt.
+	interrupt func() (context.Context, context.CancelFunc)
 }
 
 // shadowRoot resolves where this launch makes its shadow directory
@@ -299,9 +309,12 @@ Commands (bootstrap the project, then exit — launcher flags do not apply):
   tmux restore --list [--all]
                             List the tmux-resurrect saves, newest first, as runs of saves
                             holding the same sandbox sessions (host only)
+  tmux restore [--from SAVE] | --drop
+                            In a tmux pane: restore the sandbox session recorded for it
+                            (attach, or resume in a new container), or forget its pending mark
   tmux restore --dry-run [--all] [--from SAVE]
                             Show what a restore would do in this pane (or every pane of the
-                            save); reads only — restoring itself is still to come
+                            save); reads only
   completion SHELL          Print a shell completion script (bash, zsh, fish, powershell)
                             e.g. source <(claude-sandbox completion zsh)
      --track-in-host / --no-track-in-host              set trackInHost (skip the prompt)
@@ -968,6 +981,14 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 	if err != nil {
 		return err
 	}
+	if decision.Action != actionQuit && !headless && !f.Detach && env.restore == nil && env.isTerminal(env.Err) {
+		// CS-TMUX-050: a hand launch, attach or join in a terminal prints a
+		// pending sparse-restore notice before its session, and claims it
+		// inside tmux. A launch a restore started prints nothing (its pane
+		// already did); nor does a scripted one whose stderr is no terminal
+		// (nobody would read it).
+		claimNotice(env)
+	}
 	switch decision.Action {
 	case actionQuit:
 		return nil
@@ -1211,6 +1232,12 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 	var mark *paneMark
 	if !headless {
 		mark = newContainerMark(plan, wt.Root, rec, since, tmuxpane.ResumeID(passthrough))
+		if env.restore != nil {
+			// CS-TMUX-018/062: a restore hands in the pane's pending row, so
+			// a start that fails puts it back, and no note is printed.
+			prior := env.restore.prior
+			mark.prior = &prior
+		}
 	}
 	return startReserved(env, plan, headless, pre, mark)
 }

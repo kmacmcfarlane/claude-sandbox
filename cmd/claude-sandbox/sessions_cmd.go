@@ -421,7 +421,7 @@ func joinExistingSession(env *Env, projectDir string, f *launchFlags, cfg *casca
 		warnModelMismatch(env, d.Target, model)
 		noteWorktree(env, d.Target, wt)
 		_, _, _, home := hostIdentity(env.Getenv)
-		return true, attachTo(env, d.Target, cfg.DetachKeys, attachMark(d.Target, home, wt.Root))
+		return true, attachTo(env, d.Target, cfg.DetachKeys, attachMark(d.Target, home, wt.Root), nil)
 	}
 	_, _, hostUser, _ := hostIdentity(env.Getenv)
 	return true, joinInto(env, d.Target, projectDir, hostUser, model, cfg.DetachKeys, resolveDangerous(env, f, cfg), f, wt)
@@ -544,8 +544,12 @@ func newInstance(env *Env, projectDir string, f *launchFlags, gitRoot string) st
 // attachTo runs `docker attach` as the session child (CS-SESS-031) and, like a
 // new session, reports an OOM kill that ends it (CS-SESS-059). The limit
 // comes from the container's own labels, carried by its events.
-// mark is the pane mark for the attach (CS-TMUX-012), nil for none.
-func attachTo(env *Env, s sessions.Session, configuredKeys string, mark *paneMark) error {
+// mark is the pane mark for the attach (CS-TMUX-012), nil for none; onChild
+// runs once the pane is marked, right before docker attach (a restore
+// releases its start lock there, CS-TMUX-060). docker attach gets the full
+// 64-hex id when it is known, else the name; the event filter keeps the name,
+// which oomreport matches exactly (CS-TMUX-056, CS-LNCH-095).
+func attachTo(env *Env, s sessions.Session, configuredKeys string, mark *paneMark, onChild func()) error {
 	detachKeys := launch.ResolveDetachKeys(configuredKeys)
 	fmt.Fprintf(env.Out, "Attaching to %s. Press %s to detach without stopping it.\n", sessionLabel(s), detachKeys)
 	// Docker cannot report whether another client is already attached, so this
@@ -553,10 +557,14 @@ func attachTo(env *Env, s sessions.Session, configuredKeys string, mark *paneMar
 	fmt.Fprintln(env.Out, "If someone else is already attached, you will share the terminal.")
 	// CS-GCFG-001: the health check before the session, and again after it.
 	pre := checkGlobalConfig(env, nil)
+	target := s.Name
+	if fullID.MatchString(s.ID) {
+		target = s.ID
+	}
 	end, err := runSession(env, execx.Cmd{
 		Name: "docker",
-		Args: []string{"attach", "--detach-keys=" + detachKeys, s.Name},
-	}, s.Name, sessionOpts{kind: primarySession, after: func() { checkGlobalConfig(env, pre) }, mark: mark})
+		Args: []string{"attach", "--detach-keys=" + detachKeys, target},
+	}, s.Name, sessionOpts{kind: primarySession, after: func() { checkGlobalConfig(env, pre) }, mark: mark, onChild: onChild})
 	if err != nil {
 		return err
 	}

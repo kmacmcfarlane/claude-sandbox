@@ -201,8 +201,10 @@ Feature: tmux integration (CS-TMUX)
     Then one line goes to stderr before the session starts:
       "Note: this pane was waiting to restore '<name>' (<id>); resume it with: <exact command>"
     And the command is "cd <project> && [CLAUDE_CONFIG_DIR=<v> ]claude-sandbox --new
-      --worktree=<w>|--no-worktree [--model <m>] -- [<replay>…] --resume <id> [--name <n>]",
-      shell-quoted, --name only for name source "user", CLAUDE_CONFIG_DIR only when recorded non-empty
+      --worktree=<w>|--no-worktree [--model <m>] -- --resume <id> [--name <n>] [<replay>…]",
+      shell-quoted, --name only for name source "user", CLAUDE_CONFIG_DIR only when recorded non-empty;
+      --resume first after "--", so no replayed token can hide the id from the resume guard's scan
+      (CS-TMUX-058)
     And nothing prompts, and the new mark replaces the pending one
     And when any value the command would print (project, CLAUDE_CONFIG_DIR, worktree, model,
       replay values, name, instance) holds a control character, no command is printed: the line is
@@ -569,6 +571,22 @@ Feature: tmux integration (CS-TMUX)
       restarts had <m>. If sessions are missing, list earlier saves: claude-sandbox tmux restore
       --list (ignore this if you closed them on purpose)."
     And the line never changes a decision
+    And a stored notice (F4c's --pin writes "<cache root>/restore-notice.json", 0600, {"v": 1, "stamp",
+      "n", "m", "k", "lifetimes", "at"}, and the tmux global option @claude-sandbox-notice) is printed,
+      on stderr and before anything else, by every command the operator types: "tmux restore" in every
+      form (plain, --from, --drop, --list, --dry-run [--all]) and a hand launch, attach or join in a
+      terminal (stderr is a terminal; not headless, not --detach); a launch or attach a restore
+      started prints nothing
+    And it is CLAIMED only by such a command running inside tmux (TMUX set): the file is renamed aside,
+      the notice printed once, one bounded "tmux set -gu @claude-sandbox-notice" run, and the renamed file
+      removed — or renamed back when that unset fails, so the claim completes or does not happen
+    And a "<notice>.claimed-<pid>" file whose claimant no longer runs (killed between the rename and
+      the remove) is removed by the next claimant
+    And outside tmux the notice is printed and the file and the option stay; a notice that does not
+      read as one (O_NOFOLLOW, a regular file of the user's, at most 4 KiB, "v" 1, a save stamp) is
+      ignored, and one older than 7 days is removed unprinted
+    # Plan 11 § 4, 12 § 1, 13 § 4. The unattended forms (--resurrected, --rearm, --pin; F4c) print and
+    # never claim. Writing the notice is F4c's.
     # The constants live in one place (tmuxpane.SparseLifetimes 3, SparseMinDrop 2, SparseFraction 1/3,
     # ListDays 7): the comparison and the thresholds are operator decision 65, still open.
 
@@ -595,7 +613,7 @@ Feature: tmux integration (CS-TMUX)
       | 12 | the inspect failed for another reason than "no such container"              | pending  |
       | 13 | gone (no id, not found, other labels, created/exited/dead/removing) and no conversation | clear |
       | 14 | gone, a generated worktree whose name was never recorded                     | clear    |
-      | 15 | gone, and the resume guard names a sandbox holding the conversation          | clear    |
+      | 15 | gone, and the resume guard names a sandbox holding the conversation          | clear; pending when that sandbox is only a reservation (created, never started) |
       | 16 | gone, and the guard finds a host claude holding it                           | clear    |
       | 17 | gone, and the guard cannot tell                                              | pending  |
       | 18 | gone, the id is known and open nowhere                                       | resume   |
@@ -610,6 +628,179 @@ Feature: tmux integration (CS-TMUX)
       manual command (tmuxpane.ResumeCommand)
     And a dry-run writes no file, sidecar, index or tmux option, takes no lock and starts nothing; it
       exits 0 whatever it decides
-    And until F4b lands, "tmux restore" without --list or --dry-run exits 2 saying so
+    And "created" is gone for the attach of row 9 (nothing runs in it to attach to); the resume guard
+      still holds a created container labelled with the conversation (CS-SESS-065 rule a), so an
+      orphaned reservation — a launcher that died between its create and its start — or a launch about
+      to start names it at row 15, and the row stays PENDING ("<name> is being started in <holder>
+      (created, not started yet); retry in a minute"), never cleared
+    And a reservation older than the reclaim age (60 s, CS-SESS-052) is an orphan and holds nothing:
+      the guard is run without it, and a resume (row 18) names it in a note ("<name> was created for
+      this conversation but never started (an interrupted launch); the resume's launch removes it") —
+      the launch removes it under the launch lock before its own guard runs, so a pane whose launcher
+      died between create and start is never pending forever
     # Row 6 (the sparse line) is not a decision: CS-TMUX-050's line is printed before the rows and the
     # decisions go on. The acting restore (F4b) reuses this table and adds the effects.
+
+  # ---- F4b: tmux restore, one pane ----
+  #
+  # "claude-sandbox tmux restore", typed by the operator in a pane, brings back
+  # the sandbox session the pane held: it marks the pane pending from its row,
+  # decides the row with CS-TMUX-051's table, then clears the mark, keeps it
+  # pending, attaches to the still-running container, or resumes the
+  # conversation in a new container through the normal launch path. Restores
+  # that start something run one at a time, under a restore-specific start
+  # lock held until the new session is up. Plan 10 § 4/§ 5 as amended by
+  # 11 § 6/7/8, 12 § 1/2/5 and 13 § 4. The hook forms (--pin, --resurrected,
+  # --rearm) and writing the sparse notice are F4c's; --all without --dry-run
+  # is F4d's.
+
+  Scenario: CS-TMUX-052 refusals, and which row a plain or --from restore reads
+    Given "claude-sandbox tmux restore [--from <save>]" or "--drop"
+    Then inside a sandbox, or without TMUX_PANE (outside tmux), it exits 2 with one line
+    And "--drop" with any other flag, "--all" without "--dry-run" or "--list", and "--list" with
+      anything but "--all" exit 2
+    And the pane's coordinates, server and mark come from one bounded "tmux display-message -p -t
+      $TMUX_PANE"; tmux not answering exits 2
+    And the row is the pane's own PENDING mark, else the row at the pane's coordinates in "last"'s
+      save; with "--from <save>" (CS-TMUX-049) that save's row only, even over a pending mark
+    And the row is read once, before any wait; a save without a record, or one that cannot be read, is
+      one line and exit 0; a sparse save prints CS-TMUX-050's line before anything acts
+    And no row at the coordinates prints "nothing recorded for this pane (s:w.p) — the shell is yours"
+      and leaves the pane's mark alone (row 2); a row failing CS-TMUX-046's checks unsets the mark and
+      names the field (row 3)
+    And every decided outcome exits 0, a skipped wait exits 130, and a session started exits with its
+      status (CS-LNCH-085)
+
+  Scenario: CS-TMUX-053 the pane is marked pending from the row before anything waits
+    Given a row that passes the checks
+    Then the pane's mark is set to that row with "state": "pending" (one "tmux set-option -p") before
+      the docker wait, the start lock or any docker call
+    And so a restore cut short anywhere — Ctrl-C, a killed terminal, a failed launch — leaves the pane
+      on the restore list, with CS-TMUX-017's note for the next hand launch in it
+
+  Scenario: CS-TMUX-054 final outcomes clear the mark
+    Given the decision is row 4 (ralph), 5 (join), 9 on screen, 13 (no conversation), 14 (an unknown
+      generated worktree), 15 (a running sandbox holds the conversation) or 16 (a host claude holds it)
+    Then the line of CS-TMUX-051 is printed, with the exact manual command where there is one
+    And the pane's mark is unset with one "tmux set-option -p -u"
+    And nothing is started
+
+  Scenario: CS-TMUX-055 outcomes that may change on a retry keep the mark pending
+    Given the decision is row 7 (the project is missing), 8 (docker does not answer), 10 (paused),
+      11 (restarting), 12 (the inspect failed), 15 for a reservation (CS-TMUX-051) or 17 (the guard
+      cannot tell)
+    Then the line is printed, then "The pane stays pending. Retry: claude-sandbox tmux restore", the
+      exact manual command (tmuxpane.ResumeCommand) when there is one, and how to --drop it
+    And the pending mark set by CS-TMUX-053 stays
+    And row 8 waits for docker first: a bounded "docker version" every 2 s for up to 120 s, printing
+      "waiting for docker… (Ctrl-C to skip)" once, so a restore typed at boot outlasts a docker that
+      starts after tmux
+
+  Scenario: CS-TMUX-056 attach by the 64-hex id to a container whose labels match
+    Given row 9 decides attach: the inspect by the row's 64-hex containerId reads "running" with the
+      row's project and instance labels
+    Then the restore enters the row's project and attaches through the hand attach's path with
+      "docker attach --detach-keys=<the project's cascade keys> <64-hex id>"
+    And the event subscription (CS-LNCH-087) still names the container by its name, which oomreport
+      matches exactly (CS-LNCH-095)
+    And a hand attach whose container was discovered with its full id attaches by the id too
+    And the pane's mark is the attach's (CS-TMUX-012) with the pending row as its prior and the
+      restore-attach rule of CS-TMUX-019, so a container that vanished puts the pending row back
+    And a configuration that drifted since the container started prints one note, never a prompt
+    And paused and restarting stay pending (CS-TMUX-055)
+
+  Scenario: CS-TMUX-057 "already on screen" is decided by containerId
+    Given row 9's container is held by an ACTIVE mark in another pane of the server that runs
+      claude-sandbox (one bounded list-panes)
+    Then the line is "'<name>' is already on screen in s:w.p" and the pane's mark is cleared
+    And an attach releases the start lock only after its pane holds the active mark, so of two panes
+      restoring one container the first attaches and the second finds it on screen
+
+  Scenario: CS-TMUX-058 the resume: its arguments, its config dir and its project
+    Given row 18 decides resume
+    Then the restore enters the row's project and runs the normal launch path, in the same process,
+      with "--new --worktree=<w>|--no-worktree [--model <m>] -- --resume <id> [--name <n>] [<replay>…]"
+      (tmuxpane.ResumeArgs: --name only for name source "user"; replay is the row's allowlisted flags,
+      answer 49 = A6), so it never prompts (prompt.Fixed, the headless precedent)
+    And CLAUDE_CONFIG_DIR is the row's: its recorded value, unset when it recorded "", and the shell's
+      own when the row predates the record — through the launch's environment seam, so the create
+      carries "-e CLAUDE_CONFIG_DIR=<v>" or none; os.Setenv/Unsetenv set the same as a backstop for the
+      docker client the launch runs
+    And PROJECT_DIR is cleared the same way, so a restoring shell that exports PROJECT_DIR still
+      resumes in the row's project (the create's -w and project label name it)
+    And the new container's mark is handed the pending row as its prior, so no CS-TMUX-017 note is
+      printed and a start that fails puts the row back (CS-TMUX-018)
+    And a launch that fails before "docker start" — an image build, a refused env key, the launch lock,
+      or the resume guard's exit 4 (CS-SESS-065; a hand launch raced the restore) — keeps the row
+      PENDING: the launch's error, then the retry and manual commands, and the launch's exit status
+    And so does a session child that could not be run, or a reservation that never started
+      (CS-TMUX-018 puts the row back): docker's error, then the retry and manual commands
+
+  Scenario: CS-TMUX-059 the notes about flags a resume does not replay
+    Given a resume whose row names unreplayed flags, or has "flagsUnknown", or no recorded
+      CLAUDE_CONFIG_DIR
+    Then one line each is printed before the launch: "restored without flags given at launch: <names> —
+      relaunch by hand to use them", "the flags this session was launched with are unknown (it predates
+      the launchflags label)", "its CLAUDE_CONFIG_DIR was not recorded …"
+    And only flag names are printed, never values
+
+  Scenario: CS-TMUX-060 the restore start lock
+    Given a restore whose decision needs the container's state or the resume guard (rows 9 to 18)
+    Then before the first of those checks it takes "<cache root>/restore-start.lock": flock
+      (LOCK_EX|LOCK_NB) polled on an O_RDWR|O_CREAT|O_NOFOLLOW 0600 fd, with NO deadline
+    And while it waits it prints "waiting for <holder> to start (Ctrl-C to skip)…" once, where the holder
+      is the text the current holder wrote through its own locked fd ("s:w.p (<noun>), pid N"), read by
+      a separate O_RDONLY|O_NOFOLLOW|O_NONBLOCK open of a regular file (a FIFO never blocks the
+      waiter), at most 256 bytes, printable characters only
+    And Ctrl-C while waiting (for docker or the lock) leaves the row pending and exits 130
+    And the holder truncates its text before it unlocks
+    And it is released: as soon as a row that starts nothing is decided; for an attach once the pane
+      holds the attach's active mark (right before docker attach); for a resume by the readiness watcher
+      (CS-TMUX-061); and on every return path
+    And it is not launch.FileLock (the launch lock keeps its 30 s deadline), and a hand launch never
+      takes it
+    # No deadline: the holder is bounded by CS-TMUX-061's cap and the gap, except while it builds
+    # images — one build then serves every waiting pane. Plan 11 § 6.
+
+  Scenario: CS-TMUX-061 readiness: up, then the gap; resumed; the caps
+    Given a resume whose session child is about to start
+    Then a watcher polls the new container's registry dir (Plan.RegistryDir) every 500 ms
+    And "up" is a record at the container's pid class (pid % 256) started at or after the reservation
+      (to the second), whatever its sessionId — or, when none appears, the session child having run
+      5 s (UpFallback) without returning
+    And at up it waits the gap of answer 50 d, then releases the start lock: none on a linked
+      ~/.claude.json or a relocated CLAUDE_CONFIG_DIR (LinkedGap, RelocatedGap 0 s), 10 s otherwise
+      (ConfigJSONGap, LegacyGap); a session that ends during the gap releases it at once
+    And the lock is released at ReadyCap (60 s) whatever the session does; the line saying so is
+      printed after the session returns, never into the running TUI
+    And while the 5 s fallback stands, up always comes first, so ReadyCap is a backstop that cannot
+      fire; it matters only if the fallback is dropped after the host check below
+    And after the release the watcher polls every 1 s until "resumed" (a record at the class naming the
+      conversation), the session child's return, or EarlyEnd (60 s after the start)
+    # HOST CHECK OWED (plan 11 § 8; not verified, not run in CI): whether Claude Code 2.1.28x writes its
+    # registry record before any interactive screen of "claude --resume <id>" (a trust or resume
+    # prompt), and whether that first record already names <id>. Until it is checked on the host with
+    # a scratch CLAUDE_CONFIG_DIR, "up" keeps the plan's named fallback (5 s of a running child) beside
+    # the record, so a claude that registers late costs at most 5 s plus the gap per pane, never the
+    # 60 s cap; "resumed" stays a best effort, with EarlyEnd as its backstop. The gap values are
+    # operator decision 66, still open.
+
+  Scenario: CS-TMUX-062 a resume that ends before it was resumed keeps the pane pending
+    Given a resume whose session child returned before "resumed" was seen and within EarlyEnd of its
+      start (a missing conversation, a claude that failed to start)
+    Then the pane's prior mark — the pending row — is put back instead of the session's own mark
+    And the restore prints "the resume of '<name>' (<id>) ended before it was up (exit N) — the
+      conversation may be missing from <configDir>, or claude failed to start (see above). The pane
+      stays pending: …"
+    And the end rules apply in this order: a start that never ran (CS-TMUX-018/019), then this early
+      end, then CS-TMUX-071 — so an early end puts the row back even when CS-TMUX-071 would have
+      kept the session's own mark pending
+    And an end after "resumed", or past EarlyEnd (a /exit an hour later), follows CS-TMUX-071
+    And a hand launch never sets this rule
+
+  Scenario: CS-TMUX-063 --drop forgets this pane's pending mark
+    Given "claude-sandbox tmux restore --drop" typed in a pane
+    Then a PENDING mark is unset and named ("dropped the pending mark of pane s:w.p: '<name>' (<id>)",
+      with no values of a row that fails CS-TMUX-046's checks)
+    And an active mark (a running session) or no mark is left alone with one line
+    And nothing else is read, locked or started; it exits 0
