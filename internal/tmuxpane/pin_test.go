@@ -294,13 +294,29 @@ var _ = Describe("tmux restore: the resurrect hooks (CS-TMUX-064..068)", func() 
 		// rearm runs the hook; the re-check right before each set reads an
 		// idle, unmarked pane unless a test scripted that pane first (the
 		// first matching stub wins).
-		rearm := func() tmuxpane.RearmResult {
+		// rearmWith is rearm with the options adjusted (another runner, the
+		// darwin foreground check).
+		rearmWith := func(mut func(*tmuxpane.HookOptions)) tmuxpane.RearmResult {
 			fake.On("tmux display-message", recheck("zsh", 5000, ""), nil)
 			fake.On(focusPat, "%10\t1\t1\t0\n%11\t1\t1\t0\n%12\t1\t1\t0\n", nil)
 			fake.On("tmux show -gv default-shell", "/bin/zsh\n", nil)
 			o := opts()
 			o.Proc = tmuxpane.ProcOptions{Runner: fake, ProcRoot: proc, GOOS: "linux"}
+			if mut != nil {
+				mut(&o)
+			}
 			return tmuxpane.Rearm(o)
+		}
+		rearm := func() tmuxpane.RearmResult { return rearmWith(nil) }
+		// shellAsks counts the default-shell lookups of the run.
+		shellAsks := func() int {
+			n := 0
+			for _, l := range fake.CommandLines() {
+				if l == "tmux show -gv default-shell" {
+					n++
+				}
+			}
+			return n
 		}
 		BeforeEach(func() {
 			proc = GinkgoT().TempDir()
@@ -360,7 +376,13 @@ var _ = Describe("tmux restore: the resurrect hooks (CS-TMUX-064..068)", func() 
 			Expect(setOn("%3")).To(BeEmpty(), "a pre-existing pane is never marked")
 			Expect(typed()).To(Equal([]string{"tmux send-keys -t %11 C-e C-u claude-sandbox tmux restore --resurrected C-m"}),
 				"the line is cleared first (C-e C-u), as --all does")
-			Expect(fake.CommandLines()).To(ContainElement("tmux show -gv default-shell"))
+			Expect(shellAsks()).To(Equal(1))
+			lines := fake.CommandLines()
+			for i, l := range lines {
+				if strings.HasPrefix(l, "tmux send-keys") {
+					Expect(lines[i-1]).To(HavePrefix("tmux "+focusPat), "the focus re-read is the last call before the keys")
+				}
+			}
 			Expect(res.Consumed).To(BeTrue())
 			Expect(pin).NotTo(BeAnExistingFile())
 			Expect(strings.TrimSuffix(pin, ".json") + ".consumed.json").To(BeAnExistingFile())
@@ -443,6 +465,7 @@ var _ = Describe("tmux restore: the resurrect hooks (CS-TMUX-064..068)", func() 
 			res := rearm()
 			Expect(res.Marked).To(Equal(1))
 			Expect(typed()).To(BeEmpty())
+			Expect(shellAsks()).To(BeZero(), "the default shell is asked only when a pane is to be typed into")
 		})
 
 		It("CS-TMUX-067: a line without field 11 is marked, never typed into", func() {
@@ -451,6 +474,16 @@ var _ = Describe("tmux restore: the resurrect hooks (CS-TMUX-064..068)", func() 
 			res := rearm()
 			Expect(res.Marked).To(Equal(1))
 			Expect(typed()).To(BeEmpty())
+			Expect(shellAsks()).To(BeZero())
+		})
+
+		It("CS-TMUX-067: the default shell is asked once per run, however many panes are typed into", func() {
+			lines := fmt.Sprintf("pane\tmain\t1\t1\t:*\t0\tt\t:%[1]s\t1\tzsh\t:\n"+
+				"pane\tmain\t2\t1\t:*\t0\tt\t:%[1]s\t1\tzsh\t:\n", proj)
+			save(st, &srv, rows[1:3], lines)
+			res := rearm()
+			Expect(res.Retyped).To(Equal(2))
+			Expect(shellAsks()).To(Equal(1))
 		})
 
 		It("CS-TMUX-066: no pin of this server: nothing marked, one log line", func() {
@@ -528,6 +561,8 @@ var _ = Describe("tmux restore: the resurrect hooks (CS-TMUX-064..068)", func() 
 					Expect(setOn("%11")).To(HaveLen(1), c.why)
 					Expect(typed()).To(BeEmpty(), c.why)
 					Expect(logged).To(ContainElement(ContainSubstring("main:1.0: marked only: " + c.why)))
+					Expect(fake.CommandLines()).NotTo(ContainElement(HavePrefix("tmux "+focusPat)),
+						"a cheap refusal needs no focus re-read")
 				}
 			})
 
@@ -549,6 +584,50 @@ var _ = Describe("tmux restore: the resurrect hooks (CS-TMUX-064..068)", func() 
 					}
 				}
 				Expect(focusAt).To(BeNumerically(">", setAt), "the focus re-read follows the mark")
+			})
+
+			It("CS-TMUX-067: darwin's ps is bounded by what the whole-run deadline leaves, never a fixed 1 s", func() {
+				tmuxpane.RearmDeadline = 300 * time.Millisecond
+				fresh()
+				stall := &stallRunner{Fake: fake, hang: []string{"ps -o tpgid="}}
+				start := time.Now()
+				res := rearmWith(func(o *tmuxpane.HookOptions) {
+					o.Runner = stall
+					o.Proc = tmuxpane.ProcOptions{Runner: stall, GOOS: "darwin"}
+				})
+				Expect(time.Since(start)).To(BeNumerically("<", 800*time.Millisecond))
+				Expect(fake.CommandLines()).To(ContainElement(HavePrefix("ps -o tpgid=")))
+				Expect(typed()).To(BeEmpty())
+				Expect(res.Late).To(BeNumerically(">", 0), "a ps the deadline cut makes the row late")
+				Expect(res.Consumed).To(BeFalse())
+			})
+
+			It("CS-TMUX-067: a definite refusal that arrives after the deadline is logged and the row handled", func() {
+				lines := fmt.Sprintf("pane\tmain\t1\t1\t:*\t0\tt\t:%s\t1\tzsh\t:\n", proj)
+				save(st, &srv, rows[1:2], lines)
+				tmuxpane.RearmDeadline = 100 * time.Millisecond
+				fresh()
+				// The darwin ps answers late with another group: definite.
+				fake.OnFunc("ps -o tpgid=", func(execx.Cmd) (string, error) { time.Sleep(150 * time.Millisecond); return "777\n", nil })
+				res := rearmWith(func(o *tmuxpane.HookOptions) { o.Proc = tmuxpane.ProcOptions{Runner: fake, GOOS: "darwin"} })
+				Expect(res.Marked).To(Equal(1))
+				Expect(res.Late).To(BeZero())
+				Expect(res.Consumed).To(BeTrue())
+				Expect(logged).To(ContainElement(ContainSubstring("main:1.0: marked only: a program runs in the foreground of its shell")))
+			})
+
+			It("CS-TMUX-067: keys the deadline leaves no time for are never sent: the row is late, no send-keys failure logged", func() {
+				lines := fmt.Sprintf("pane\tmain\t1\t1\t:*\t0\tt\t:%s\t1\tzsh\t:\n", proj)
+				save(st, &srv, rows[1:2], lines)
+				tmuxpane.RearmDeadline = 100 * time.Millisecond
+				fresh()
+				fake.OnFunc(focusPat, func(execx.Cmd) (string, error) { time.Sleep(150 * time.Millisecond); return "%11\t1\t1\t0\n", nil })
+				res := rearm()
+				Expect(res.Marked).To(Equal(1))
+				Expect(typed()).To(BeEmpty())
+				Expect(res.Late).To(Equal(1))
+				Expect(res.Consumed).To(BeFalse())
+				Expect(logged).NotTo(ContainElement(ContainSubstring("send-keys failed")))
 			})
 
 			It("CS-TMUX-067: a focus re-read tmux does not answer, or that no longer lists the pane, is marked only", func() {

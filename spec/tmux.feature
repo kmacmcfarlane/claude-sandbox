@@ -1079,14 +1079,19 @@ Feature: tmux integration (CS-TMUX)
       command is the basename of "tmux show -gv default-shell" (one bounded call per run, made only
       when a pane is to be typed into), it is in no mode, its window is not synchronized, the pane's
       own process (pane_pid) leads its terminal's foreground process group (Linux /proc stat tpgid
-      through the /proc seam; darwin one bounded "ps -o tpgid="; unreadable = cannot tell), and no
-      client is looking at it, read again after the mark right before the keys across every line of
-      the pane id
+      through the /proc seam; darwin one "ps -o tpgid=" bounded by what the deadline leaves;
+      unreadable = cannot tell), and — checked last, only when every check before passed, as the
+      final call before the keys — no client is looking at it, read again after the mark across
+      every line of the pane id
     And the keys are one bounded "tmux send-keys -t <pane> C-e C-u 'claude-sandbox tmux restore
       --resurrected' C-m", the line cleared first (CS-TMUX-069's keys and per-editor residual)
     And a pane the guard holds back, or whose focus re-read tmux does not answer, keeps its pending mark
       and is logged "marked only: <reason>; type claude-sandbox tmux restore in it"; every call stays
-      within RearmDeadline, and one the deadline cuts makes the rows from there on late (CS-TMUX-066)
+      within RearmDeadline: no call is started once it passed, and a refusal the deadline may have
+      caused (the default shell, the foreground group or the focus could not be read) makes the rows
+      from there on late (CS-TMUX-066), while a definite one (another program, a mode, a synchronized
+      window, a client looking) is logged and the row handled even when it arrived after it; keys the
+      deadline leaves no time for are never sent and the row is late
     # At boot no client is usually attached and a pane resurrect just created sits at its shell, so the
     # guard rarely changes anything here; it is kept uniform with --all (F4d review 2026-10-01: a
     # default-command or a shell rc that starts a program reads as the shell by name alone).

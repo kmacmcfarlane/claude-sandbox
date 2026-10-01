@@ -422,6 +422,9 @@ const rearmPanesFormat = "#{pane_id}\t#{session_name}\t#{window_index}\t#{pane_i
 // (mode, synchronize-panes, the pane's own pid). The mark stays last.
 const rearmRecheckFormat = "#{pane_current_command}\t#{pane_in_mode}\t#{pane_synchronized}\t#{pane_pid}\t#{" + Option + "}"
 
+// rearmFocusUnknown is the refusal when the focus re-read gets no answer.
+const rearmFocusUnknown = "cannot tell whether a client is looking at it (tmux list-panes did not answer)"
+
 type rearmPane struct {
 	id, cmd, path, raw string
 }
@@ -493,8 +496,8 @@ func Rearm(o HookOptions) RearmResult {
 		pre[id] = true
 	}
 
-	// shell is the default shell's basename, asked once, only when a pane
-	// is to be typed into.
+	// shell is the default shell's basename, asked once per run, only when
+	// a pane is to be typed into.
 	var shell string
 	var shellAsked bool
 	for i, row := range sc.Panes {
@@ -583,29 +586,54 @@ func Rearm(o HookOptions) RearmResult {
 		// The typing guard --all uses (CS-TMUX-069): a pane resurrect just
 		// created is rarely anything but its shell at a prompt, but a
 		// default-command, a shell rc that starts a program, or a client
-		// that attached meanwhile can make it so; the keys go only where
-		// IdleShell allows them, focus read again right before them.
-		if shell == "" && !shellAsked {
-			shellAsked = true
-			shell = DefaultShellWithin(o.Runner, dl.left())
-		}
-		focused, known := PaneFocused(o.Runner, dl.left(), p.id)
-		if !known {
+		// that attached meanwhile can make it so. The cheap checks first
+		// (IdleShell with focus unread), focus read again last, right
+		// before the keys. Every call gets what the deadline leaves; a
+		// definite refusal is logged and the row handled, while one the
+		// deadline may have caused (a call cut short) makes it late.
+		if !shellAsked {
 			if late() {
 				break
 			}
-			o.logf("%s: marked only: cannot tell whether a client is looking at it (tmux list-panes did not answer); type claude-sandbox tmux restore in it", coords)
-			continue
+			shellAsked = true
+			shell = DefaultShellWithin(o.Runner, dl.left())
 		}
-		sh.Focused = focused
-		if why := IdleShell(o.Proc, sh, shell); why != "" {
-			if late() {
+		t := dl.left()
+		if t <= 0 {
+			late()
+			break
+		}
+		proc := o.Proc
+		proc.Timeout = t
+		why := IdleShell(proc, sh, shell)
+		if why == "" {
+			t = dl.left()
+			if t <= 0 {
+				late()
+				break
+			}
+			focused, known := PaneFocused(o.Runner, t, p.id)
+			switch {
+			case !known:
+				why = rearmFocusUnknown
+			case focused:
+				why = ReasonFocused
+			}
+		}
+		if why != "" {
+			indefinite := why == ReasonShellUnknown || why == ReasonForegroundUnknown || why == rearmFocusUnknown
+			if indefinite && late() {
 				break
 			}
 			o.logf("%s: marked only: %s; type claude-sandbox tmux restore in it", coords, why)
 			continue
 		}
-		if !TypeRestore(o.Runner, dl.left(), p.id) {
+		t = dl.left()
+		if t <= 0 {
+			late() // the keys were never sent
+			break
+		}
+		if !TypeRestore(o.Runner, t, p.id) {
 			o.logf("%s: tmux send-keys failed; the pane is marked, type claude-sandbox tmux restore in it", coords)
 			if late() {
 				break
