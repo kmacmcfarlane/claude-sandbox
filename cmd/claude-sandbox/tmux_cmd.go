@@ -265,7 +265,10 @@ func restoreProbes(env *Env, self string, panes []tmuxpane.PaneInfo) *tmuxpane.R
 	guard := func(m tmuxpane.Mark) tmuxpane.GuardResult {
 		if !discovered {
 			discovered = true
-			found, derr = sessions.DiscoverAll(env.Runner)
+			// Uncounted: the guard needs states, classes and labels, not a
+			// "docker top" per sandbox; bounded, so a hung daemon fails the
+			// guard closed ("cannot tell") instead of hanging the dry run.
+			found, derr = sessions.DiscoverAllUncounted(tmuxpane.BoundedRunner{R: env.Runner, Timeout: tmuxpane.ProbeTimeout})
 		}
 		cfg := m.ConfigDir
 		if cfg == "" {
@@ -474,20 +477,23 @@ func runRestoreList(env *Env, all bool) error {
 	fmt.Fprintf(out, "tmux-resurrect saves in %s (newest first, last %d days%s):\n", saves.Dir, days, more)
 	heading := "\x00"
 	for _, r := range runs {
-		key := heading
+		// A save without a usable record has no server to sit under: it
+		// gets a heading of its own, never another group's.
+		key := "-"
 		switch {
 		case r.Record && r.Server != nil:
 			key = fmt.Sprintf("%d.%d", r.Server.PID, r.Server.Start)
 		case r.Record:
 			key = "?"
-		case heading == "\x00":
-			key = "?"
 		}
 		if key != heading {
 			heading = key
-			if key == "?" {
+			switch key {
+			case "-":
+				fmt.Fprintln(out, "\nsaves without a usable claude-sandbox record:")
+			case "?":
 				fmt.Fprintln(out, "\nsaves that do not record their tmux server:")
-			} else {
+			default:
 				fmt.Fprintf(out, "\ntmux server started %s (pid %d):\n", time.Unix(r.Server.Start, 0).Local().Format("2006-01-02 15:04"), r.Server.PID)
 			}
 		}

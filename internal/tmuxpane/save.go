@@ -262,16 +262,20 @@ func parseServer(pid, start string) *Server {
 	return &Server{PID: p, Start: st}
 }
 
-// otherServer reports whether the sidecar at path records a tmux server that
-// is not cur (CS-TMUX-047). An unknown current server cannot prove the
-// sidecar its own, so it counts as other; a sidecar that records no server
-// (or cannot be read) is overwritten as before.
+// otherServer reports whether the sidecar at path records a tmux server
+// known to differ from cur (CS-TMUX-037/047). Only a proven difference keeps
+// the sidecar: a current server that is unknown (a tmux without
+// #{start_time}) writes as before, without "server", and so does a sidecar
+// that records none or cannot be read.
 func otherServer(path string, cur *Server) bool {
+	if cur == nil {
+		return false
+	}
 	sc, err := ReadSidecar(path)
 	if err != nil || sc.Server == nil {
 		return false
 	}
-	return !sameServer(sc.Server, cur)
+	return *sc.Server != *cur
 }
 
 // liveStates are the container states an active mark may name.

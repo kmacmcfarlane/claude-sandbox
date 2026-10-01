@@ -345,7 +345,8 @@ Feature: tmux integration (CS-TMUX)
       first save is identical to the previous server's final one — no sidecar is written and the
       lifetimes index is not updated, with one log line: that sidecar is the previous lifetime's final
       state, which "--from previous" and the sparse baseline rely on; the new server gets its own at
-      its first distinct save
+      its first distinct save; only a proven difference counts — a hook whose own server is unknown,
+      or a sidecar that records none, writes as before
     And the sidecar path is the state file's path with ".txt" replaced by ".claude-sandbox.json",
       outside resurrect's prune glob tmux_resurrect_*.txt (tmuxpane.SidecarPath)
 
@@ -526,7 +527,8 @@ Feature: tmux integration (CS-TMUX)
       p pending)", "last" on the run holding last's target, and "sparse (had M)" when CS-TMUX-050
       flags it
     And the runs are grouped under one heading per tmux server ("tmux server started <time>"), and
-      saves recorded before CS-TMUX-047 under one heading of their own
+      saves recorded before CS-TMUX-047 under a heading of their own, and saves with no usable sidecar
+      ("no record", "unreadable") under another, never under a server's heading
     And a state file without a sidecar prints as "no record" and is never sparse
     And it ends with how to use a line, with a stamp and the resolved dir filled in: --from in one
       pane, --dry-run --all --from for every pane, and the two whole-layout procedures:
@@ -599,7 +601,10 @@ Feature: tmux integration (CS-TMUX)
       | 18 | gone, the id is known and open nowhere                                       | resume   |
     And the inspect is one "docker inspect --type container" by the 64-hex id; the on-screen check is
       the one list-panes; the guard is resumeguard.Check against the row's config dir, over one
-      discovery; and a resume shows the gap the restore would wait after "session up": none on a
+      discovery (uncounted: no docker top); every docker call runs in its own process group, killed
+      after its bound ("docker version" 3 s, the inspect and the discovery 5 s each), and one that
+      does not finish reads as "cannot tell"; and a resume shows the gap the restore would wait
+      after "session up": none on a
       linked or relocated global-config layout, 10 s otherwise
     And every decision prints its line, what a restore would do, and, where one exists, the exact
       manual command (tmuxpane.ResumeCommand)

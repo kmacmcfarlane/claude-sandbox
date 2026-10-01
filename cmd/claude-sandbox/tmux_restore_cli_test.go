@@ -171,6 +171,7 @@ var _ = Describe("tmux restore, read-only (CS-TMUX-045..051)", func() {
 					"\ntmux server started " + srvTime(srv(1)) + " (pid 1):\n" +
 					"  " + at(2) + "  " + hm(2) + "  1 save  6 sandbox panes (5 active, 1 pending)\n" +
 					"  " + at(1) + "  " + hm(1) + "  2 saves since " + hm(0) + "  6 sandbox panes (6 active)\n" +
+					"\nsaves without a usable claude-sandbox record:\n" +
 					"  " + at(-30) + "  " + hm(-30) + "  1 save  no record\n"))
 			// The footer: the previous server's newest save, the dir, and
 			// both procedures with the interval as it was.
@@ -294,6 +295,21 @@ var _ = Describe("tmux restore, read-only (CS-TMUX-045..051)", func() {
 			Expect(out).NotTo(ContainSubstring("\x1b"))
 			Expect(f.fake.CommandLines()).To(ContainElement(HavePrefix("tmux list-panes -a -F")))
 			noWrites(before)
+		})
+
+		It("CS-TMUX-051: the guard's discovery is uncounted: no docker top per running sandbox", func() {
+			f.fake.On("tmux list-panes", "", execx.Fail(1))
+			f.fake.On("docker inspect", "", execx.Fail(1))
+			f.fake.On("docker ps", strings.Join([]string{"claude-sandbox-other-x", "Up 5 minutes", "/srv/other", "claude", "murre",
+				"", "", "", "", "", ""}, "\x1f")+"\n", nil)
+			save(at(0), &tmuxpane.Sidecar{Panes: []tmuxpane.Row{
+				{Session: "main", Window: 1, Pane: 0, Mark: mark(func(m *tmuxpane.Mark) { m.ContainerID = "" })},
+			}})
+			Expect(os.Symlink(tmuxpane.StateFileName(at(0)), filepath.Join(dir, "last"))).To(Succeed())
+			Expect(f.run("tmux", "restore", "--dry-run", "--all")).To(Equal(0), f.errw.String())
+			lines := f.fake.CommandLines()
+			Expect(lines).To(ContainElement(HavePrefix("docker ps")))
+			Expect(lines).NotTo(ContainElement(HavePrefix("docker top")))
 		})
 
 		It("CS-TMUX-051: the resume guard runs over one discovery and fails closed when it fails", func() {

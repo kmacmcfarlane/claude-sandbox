@@ -341,7 +341,9 @@ func ValidateRow(m Mark) string {
 	case m.Conversation != "" && !registry.IsUUID(m.Conversation):
 		return "conversation"
 	}
-	for _, v := range []string{m.Container, m.Instance, m.Project, m.CwdRoot, m.ConfigDir, m.Name} {
+	// Unreplayed names reach ResumeNotes' line; Replay and the rest of
+	// what a line prints are printableMark's.
+	for _, v := range append([]string{m.Container, m.Instance, m.Project, m.CwdRoot, m.ConfigDir, m.Name}, m.Unreplayed...) {
 		if strings.IndexFunc(v, unicode.IsControl) >= 0 {
 			return "a control character"
 		}

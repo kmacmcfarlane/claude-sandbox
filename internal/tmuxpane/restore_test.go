@@ -285,6 +285,34 @@ var _ = Describe("tmux restore: the decision (CS-TMUX-051)", func() {
 			Expect(info).To(Equal(tmuxpane.ContainerInfo{State: "running", Name: "claude-sandbox-x", Project: "/srv/proj", Instance: "heron"}))
 		})
 
+		It("CS-TMUX-051: the inspect and the guard's discovery are bounded: a hung docker is killed and reads as 'cannot tell'", func() {
+			DeferCleanup(func(t time.Duration) { tmuxpane.ProbeTimeout = t }, tmuxpane.ProbeTimeout)
+			tmuxpane.ProbeTimeout = 100 * time.Millisecond
+			r := &stallRunner{Fake: fake, hang: []string{"docker inspect", "docker ps"}}
+			start := time.Now()
+			_, err := (&tmuxpane.ReadProbes{Runner: r}).Inspect(cid)
+			Expect(err).To(HaveOccurred())
+			Expect(err).NotTo(MatchError(tmuxpane.ErrNoContainer))
+			Expect(time.Since(start)).To(BeNumerically("<", time.Second))
+			_, err = tmuxpane.BoundedRunner{R: r, Timeout: 100 * time.Millisecond}.Output(execx.Cmd{Name: "docker", Args: []string{"ps"}})
+			Expect(err).To(MatchError(ContainSubstring("docker ps did not finish within 100ms")))
+			for _, c := range fake.Calls {
+				Expect(c.DieWithParent).To(BeTrue(), "own process group, killed with the caller")
+			}
+		})
+
+		It("CS-TMUX-051: BoundedRunner passes stdout, stderr and the exit status through", func() {
+			fake.OnFunc("docker x", func(c execx.Cmd) (string, error) {
+				c.Stderr.Write([]byte("oops"))
+				return "out", execx.Fail(3)
+			})
+			var stderr strings.Builder
+			out, err := tmuxpane.BoundedRunner{R: fake, Timeout: time.Second}.Output(execx.Cmd{Name: "docker", Args: []string{"x"}, Stderr: &stderr})
+			Expect(out).To(Equal("out"))
+			Expect(execx.ExitCode(err)).To(Equal(3))
+			Expect(stderr.String()).To(Equal("oops"))
+		})
+
 		It("CS-TMUX-051: the gap is 0 on a linked or relocated layout and 10 s otherwise", func() {
 			home := GinkgoT().TempDir()
 			m := row(nil).Mark

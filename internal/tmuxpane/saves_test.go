@@ -162,10 +162,13 @@ var _ = Describe("tmux restore: saves (CS-TMUX-045..050)", func() {
 				"a control character": func(m *tmuxpane.Mark) {
 					m.Name = "fix\x1b[2Jit"
 				},
+				"a control character ": func(m *tmuxpane.Mark) {
+					m.Unreplayed = []string{"--docker-socket", "\x1b]0;x\x07\x1b[2J"}
+				},
 			} {
 				m := good
 				mut(&m)
-				Expect(tmuxpane.ValidateRow(m)).To(Equal(field), field)
+				Expect(tmuxpane.ValidateRow(m)).To(Equal(strings.TrimSpace(field)), field)
 			}
 			empty := "" // configDirEnv "" (unset at launch) is fine
 			m := good
@@ -324,6 +327,29 @@ var _ = Describe("tmux restore: saves (CS-TMUX-045..050)", func() {
 			save(at(0), &tmuxpane.Sidecar{})
 			_, err = open().Resolve("previous", srv(3), nil)
 			Expect(err).To(MatchError(tmuxpane.ErrNoPrevious))
+		})
+	})
+
+	Describe("CS-TMUX-049/050: the sidecar scan is capped at ScanMax", func() {
+		// One save of server 1, then ScanMax+1 newer saves of server 2: the
+		// other server's save lies just past the cap.
+		BeforeEach(func() {
+			save(at(0), &tmuxpane.Sidecar{Server: srv(1), Panes: rows(9, tmuxpane.StateActive)})
+			for i := 1; i <= tmuxpane.ScanMax+1; i++ {
+				save(at(i), &tmuxpane.Sidecar{Server: srv(2), Panes: rows(1, tmuxpane.StateActive)})
+			}
+		})
+
+		It("CS-TMUX-049: previous without an index scans at most ScanMax sidecars", func() {
+			_, err := open().Resolve("previous", srv(2), nil)
+			Expect(err).To(MatchError(tmuxpane.ErrNoPrevious))
+		})
+
+		It("CS-TMUX-050: the sparse baseline's scan stops at ScanMax and falls back to the saves right before", func() {
+			v := open().SparseOf(at(tmuxpane.ScanMax+1), 1, srv(2), nil)
+			Expect(v.Lifetimes).To(BeFalse())
+			Expect(v.K).To(Equal(tmuxpane.SparseFallbackSaves))
+			Expect(v.M).To(Equal(1))
 		})
 	})
 

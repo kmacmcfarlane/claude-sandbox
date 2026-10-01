@@ -569,7 +569,8 @@ Each sidecar also records its tmux server (`"server": {"pid", "start"}`, from th
 `claude-sandbox-lifetimes.json` (0600: per server, its first and last save and the last one's
 row count; at most 64), which `tmux restore` reads for `--from previous` and the sparse-save
 warning instead of scanning weeks of sidecars. Overlapping saves update it under a lock waited on
-for up to 500 ms; a late save never moves it backwards. It is derived data: when it is missing,
+for up to 500 ms (an flock on `.claude-sandbox-lifetimes.lock`, an empty 0600 file left in place
+beside it); a late save never moves it backwards. It is derived data: when it is missing,
 the readers scan the sidecars instead.
 
 A stale mark is not recorded: an `active` mark counts only while the pane actually runs
@@ -632,7 +633,9 @@ It reads the saves where resurrect keeps them: `@resurrect-dir` (with `$HOME`, `
   (the resume guard: cleared with an attach command, or pending when it cannot tell); else a
   resume in a new container, with the pause it would take (none on a linked or
   `CLAUDE_CONFIG_DIR` host, 10 s otherwise) and the flags it would not replay — plus the exact
-  manual command.
+  manual command. Each docker call it makes is bounded (`docker version` 3 s; the inspect and
+  the resume guard's container listing 5 s each); one that does not answer reads as "cannot
+  tell", so the row stays pending.
 
 **The sparse-save warning.** A save is *sparse* when it has at least 2 sandbox panes fewer, and
 at least a third fewer, than the median of what the last save of each of the previous 3 tmux

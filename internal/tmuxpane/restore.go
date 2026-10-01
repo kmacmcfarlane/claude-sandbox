@@ -10,6 +10,7 @@ package tmuxpane
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"sync"
@@ -252,6 +253,82 @@ func GapFor(home string, m Mark, configDirEnv string) time.Duration {
 // DockerProbeTimeout bounds the dry-run's one "docker version".
 var DockerProbeTimeout = 3 * time.Second
 
+// ProbeTimeout bounds each of the dry-run's other docker calls — the
+// container inspect and the resume guard's discovery — so a daemon that
+// answers "docker version" but hangs on ps or inspect cannot hang it.
+var ProbeTimeout = 5 * time.Second
+
+// BoundedRunner runs Run and Output through Start in their own process
+// group, killed with the caller (DieWithParent), and kills the whole group
+// after Timeout, returning an error: the bounded helper's shape, for code
+// that takes an execx.Runner (sessions discovery and inspect). Start and
+// RunSession pass through.
+type BoundedRunner struct {
+	R       execx.Runner
+	Timeout time.Duration
+}
+
+func (b BoundedRunner) Output(c execx.Cmd) (string, error) {
+	var out syncBuffer
+	err := b.run(c, &out)
+	return out.String(), err
+}
+
+func (b BoundedRunner) Run(c execx.Cmd) error {
+	var out syncBuffer
+	err := b.run(c, &out)
+	if c.Stdout != nil {
+		io.WriteString(c.Stdout, out.String())
+	}
+	return err
+}
+
+func (b BoundedRunner) Start(c execx.Cmd) (execx.Process, error) { return b.R.Start(c) }
+
+func (b BoundedRunner) RunSession(c execx.Cmd) (execx.SessionResult, error) {
+	return b.R.RunSession(c)
+}
+
+// run starts c with stdout into out; its stderr goes through a private
+// buffer, copied to c.Stderr only once the process is done, so a killed
+// process can never write into the caller's writer afterwards.
+func (b BoundedRunner) run(c execx.Cmd, out *syncBuffer) error {
+	var errBuf syncBuffer
+	stderr := c.Stderr
+	c.Stdout, c.Stderr, c.DieWithParent, c.Detach = out, &errBuf, true, false
+	proc, err := b.R.Start(c)
+	if err != nil {
+		return err
+	}
+	done := make(chan error, 1)
+	go func() { done <- proc.Wait() }()
+	select {
+	case werr := <-done:
+		if stderr != nil {
+			io.WriteString(stderr, errBuf.String())
+		}
+		return werr
+	case <-time.After(b.Timeout):
+		if g, ok := proc.(execx.GroupKiller); ok {
+			g.KillGroup()
+		} else {
+			proc.Signal(os.Kill)
+		}
+		select {
+		case <-done:
+		case <-time.After(b.Timeout):
+		}
+		return fmt.Errorf("%s %s did not finish within %s", c.Name, firstArg(c.Args), b.Timeout)
+	}
+}
+
+func firstArg(a []string) string {
+	if len(a) == 0 {
+		return ""
+	}
+	return a[0]
+}
+
 // PaneInfo is one pane of the running server, from one list-panes.
 type PaneInfo struct {
 	ID, Session    string
@@ -398,7 +475,7 @@ func (p *ReadProbes) Docker() error {
 }
 
 func (p *ReadProbes) Inspect(id string) (ContainerInfo, error) {
-	c, err := sessions.InspectContainer(p.Runner, id)
+	c, err := sessions.InspectContainer(BoundedRunner{R: p.Runner, Timeout: ProbeTimeout}, id)
 	if errors.Is(err, sessions.ErrNoSuchContainer) {
 		return ContainerInfo{}, ErrNoContainer
 	}

@@ -768,6 +768,38 @@ var _ = Describe("tmux save hook (CS-TMUX-030..040)", func() {
 			Expect(lifetimes()[0].Last).To(Equal("20260929T115900"))
 		})
 
+		It("CS-TMUX-037/047: an equal save by a hook whose own server is UNKNOWN writes as before, without server", func() {
+			prev := writeState("tmux_resurrect_20260929T115900.txt", stateLine("main", 1, 0, proj, "claude-sandbox"))
+			Expect(os.Symlink(filepath.Base(prev), filepath.Join(dir, "last"))).To(Succeed())
+			old := tmuxpane.Server{PID: 77, Start: 1780000000}
+			Expect(tmuxpane.WriteSidecar(tmuxpane.SidecarPath(prev), tmuxpane.Sidecar{V: 1, StateFile: filepath.Base(prev), Server: &old})).To(Succeed())
+			fake.On("tmux list-panes", "main\t1\t0\t%1\tzsh\t\t\t\n", nil)
+			res, err := tmuxpane.Save(state, opts())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.Kept).To(BeFalse())
+			sc := readSidecar(tmuxpane.SidecarPath(prev))
+			Expect(sc.Server).To(BeNil())
+			Expect(sc.SavedAt).To(Equal(now.UnixMilli()))
+			Expect(filepath.Join(dir, tmuxpane.LifetimesFile)).NotTo(BeAnExistingFile())
+		})
+
+		It("CS-TMUX-047: the lock wait is cut to what is left of the 3 s deadline", func() {
+			DeferCleanup(func(w time.Duration) { tmuxpane.IndexLockWait = w }, tmuxpane.IndexLockWait)
+			tmuxpane.IndexLockWait = 3 * time.Second
+			tmuxpane.SaveDeadline = 300 * time.Millisecond
+			f, err := os.OpenFile(filepath.Join(dir, ".claude-sandbox-lifetimes.lock"), os.O_RDWR|os.O_CREATE, 0o600)
+			Expect(err).NotTo(HaveOccurred())
+			defer f.Close()
+			Expect(syscall.Flock(int(f.Fd()), syscall.LOCK_EX)).To(Succeed())
+			listPanes(paneRow("main", 1, 0, "%1", "zsh", nil))
+			start := time.Now()
+			res, err := tmuxpane.Save(state, opts())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(time.Since(start)).To(BeNumerically("<", time.Second), "bounded by the deadline, not IndexLockWait")
+			Expect(res.Sidecar).To(BeAnExistingFile())
+			Expect(logs).To(ContainElement(ContainSubstring("lifetimes index not updated")))
+		})
+
 		It("CS-TMUX-047: a held index lock is waited on, then the update is skipped with one line; the sidecar stands", func() {
 			DeferCleanup(func(w time.Duration) { tmuxpane.IndexLockWait = w }, tmuxpane.IndexLockWait)
 			tmuxpane.IndexLockWait = 60 * time.Millisecond
