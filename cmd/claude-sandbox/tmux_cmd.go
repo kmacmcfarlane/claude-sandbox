@@ -17,6 +17,14 @@ package main
 // the row, then clear it, keep it pending, attach to the running container,
 // or resume the conversation in a new one — one start at a time, under the
 // restore start lock.
+//
+// The resurrect hook forms (CS-TMUX-064..068, F4c): --pin (pre-restore-all)
+// and --rearm (post-restore-all) run synchronously inside resurrect's
+// restore, so like the save hook they never print, always exit 0, finish
+// within a whole-run deadline and log to <cache root>/tmux-restore.log.
+// --resurrected is the processes entry resurrect (or --rearm) types into a
+// restored pane: a per-pane restore that reads the pin and prints the sparse
+// notice without claiming it.
 
 import (
 	"context"
@@ -48,7 +56,10 @@ import (
 // tmuxSaveLog is the hook's log, in the cache root (CS-TMUX-030).
 const tmuxSaveLog = "tmux-save.log"
 
-// tmuxSaveLogMax is the size past which the log is emptied before a write.
+// tmuxRestoreLog is the restore hook forms' log, beside it (CS-TMUX-068).
+const tmuxRestoreLog = "tmux-restore.log"
+
+// tmuxSaveLogMax is the size past which a hook log is emptied before a write.
 const tmuxSaveLogMax = 64 << 10
 
 func newTmuxCmd(env *Env) *cobra.Command {
@@ -96,7 +107,7 @@ func runTmuxSave(env *Env, args []string) {
 		if r := recover(); r != nil {
 			logf("panic: %v", r)
 		}
-		writeTmuxSaveLog(env, logged)
+		writeHookLog(env, tmuxSaveLog, "tmux save", logged)
 	}()
 	if len(args) != 1 {
 		logf("expected one argument (the state file), got %d", len(args))
@@ -114,10 +125,11 @@ func runTmuxSave(env *Env, args []string) {
 	}
 }
 
-// writeTmuxSaveLog appends the run's problems to the hook's log, 0600, never
-// through a symlink, emptying it first once it has grown past 64 KiB. A
+// writeHookLog appends a hook run's problems to its log in the cache root
+// (name), 0600, never through a symlink, emptying it first once it has grown
+// past 64 KiB; each line is prefixed with the time and what ran (label). A
 // failure to log is dropped: the hook must stay silent.
-func writeTmuxSaveLog(env *Env, lines []string) {
+func writeHookLog(env *Env, name, label string, lines []string) {
 	if len(lines) == 0 {
 		return
 	}
@@ -125,7 +137,7 @@ func writeTmuxSaveLog(env *Env, lines []string) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return
 	}
-	path := filepath.Join(dir, tmuxSaveLog)
+	path := filepath.Join(dir, name)
 	flags := os.O_WRONLY | os.O_CREATE | os.O_APPEND | syscall.O_NOFOLLOW
 	if fi, err := os.Lstat(path); err == nil && fi.Mode().IsRegular() && fi.Size() > tmuxSaveLogMax {
 		flags |= os.O_TRUNC
@@ -141,7 +153,7 @@ func writeTmuxSaveLog(env *Env, lines []string) {
 	stamp := env.now().UTC().Format("2006-01-02T15:04:05Z")
 	var b strings.Builder
 	for _, l := range lines {
-		fmt.Fprintf(&b, "%s tmux save: %s\n", stamp, strings.ReplaceAll(l, "\n", " "))
+		fmt.Fprintf(&b, "%s %s: %s\n", stamp, label, strings.ReplaceAll(l, "\n", " "))
 	}
 	f.WriteString(b.String())
 }
@@ -166,12 +178,14 @@ func (e *Env) resurrectDir() string {
 type restoreOpts struct {
 	list, all, dryRun, drop bool
 	from                    string
+	// The resurrect hook forms (CS-TMUX-064..068).
+	pin, rearm, resurrected bool
 }
 
 func newTmuxRestoreCmd(env *Env) *cobra.Command {
 	var o restoreOpts
 	c := &cobra.Command{
-		Use:   "restore [--from SAVE | --drop | --list [--all] | --dry-run [--all] [--from SAVE]]",
+		Use:   "restore [--from SAVE | --drop | --list [--all] | --dry-run [--all] [--from SAVE] | --pin | --rearm | --resurrected]",
 		Short: "Restore this tmux pane's sandbox session after a tmux restart; list or preview saves",
 		Long: "Typed in a pane, restore the sandbox session recorded for it: attach to its container\n" +
 			"when it still runs, else resume its conversation in a new container (one restore starts\n" +
@@ -179,7 +193,13 @@ func newTmuxRestoreCmd(env *Env) *cobra.Command {
 			"save's). --drop forgets this pane's pending mark. --list lists the tmux-resurrect saves;\n" +
 			"--dry-run shows what a restore would do in this pane, or in every pane of a save (--all).\n" +
 			"SAVE is last (the default), previous (what the previous tmux server ended with), a stamp\n" +
-			"such as 20260929T120000, or the name of a save in the resurrect dir.",
+			"such as 20260929T120000, or the name of a save in the resurrect dir.\n\n" +
+			"tmux-resurrect runs three forms itself (see docs/tmux-session-restore.md):\n" +
+			"  set -g @resurrect-hook-pre-restore-all  '<shim> tmux restore --pin'\n" +
+			"  set -g @resurrect-hook-post-restore-all '<shim> tmux restore --rearm'\n" +
+			"  set -g @resurrect-processes '\"claude-sandbox->claude-sandbox tmux restore --resurrected\"'\n" +
+			"--pin and --rearm never print and always exit 0; problems go to\n" +
+			"~/.cache/claude-sandbox/" + tmuxRestoreLog + ".",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -193,6 +213,9 @@ func newTmuxRestoreCmd(env *Env) *cobra.Command {
 	f.BoolVar(&o.dryRun, "dry-run", false, "show what a restore would do, without doing it")
 	f.BoolVar(&o.drop, "drop", false, "forget this pane's pending mark (nothing is restored)")
 	f.StringVar(&o.from, "from", "", "the save to read: last, previous, a stamp, or a save's file name")
+	f.BoolVar(&o.pin, "pin", false, "tmux-resurrect's pre-restore-all hook: pin the save this restore reads (silent)")
+	f.BoolVar(&o.rearm, "rearm", false, "tmux-resurrect's post-restore-all hook: mark the restored panes (silent)")
+	f.BoolVar(&o.resurrected, "resurrected", false, "typed by tmux-resurrect into a restored pane: restore it from the pinned save")
 	_ = c.RegisterFlagCompletionFunc("from", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 		out := []string{"last", "previous"}
 		if s, err := tmuxpane.OpenSaves(env.resurrectDir()); err == nil {
@@ -213,16 +236,34 @@ func newTmuxRestoreCmd(env *Env) *cobra.Command {
 // form here is typed by the operator, so each claims a pending sparse notice
 // (CS-TMUX-050) before it does anything else.
 func runTmuxRestore(env *Env, o restoreOpts, fromSet bool) error {
+	if o.pin || o.rearm {
+		if o.pin && o.rearm || o.list || o.all || o.dryRun || o.drop || o.resurrected || fromSet {
+			return exitErr(2, "Error: --pin and --rearm take no other flag")
+		}
+		if o.pin {
+			runRestoreHook(env, "--pin")
+		} else {
+			runRestoreHook(env, "--rearm")
+		}
+		return nil
+	}
 	if hostdirs.InSandbox(env.Getenv) {
 		return exitErr(2, "Error: tmux restore runs on the host only (a sandbox has no tmux server)")
 	}
 	switch {
+	case o.resurrected && (o.list || o.all || o.dryRun || o.drop || fromSet):
+		return exitErr(2, "Error: --resurrected takes no other flag (it never chooses a save)")
 	case o.list && (o.dryRun || fromSet || o.drop):
 		return exitErr(2, "Error: --list takes only --all")
 	case o.drop && (o.dryRun || o.all || fromSet):
 		return exitErr(2, "Error: --drop takes no other flag")
 	case o.all && !o.dryRun && !o.list:
 		return exitErr(2, "Error: --all needs --dry-run or --list (restoring every pane of a save is still to come)")
+	}
+	if o.resurrected {
+		// Typed by resurrect or by --rearm, not by the operator: print the
+		// notice, never claim it (CS-TMUX-050, 12 § 1).
+		return runRestoreAct(env, "", true)
 	}
 	claimNotice(env)
 	switch {
@@ -235,7 +276,37 @@ func runTmuxRestore(env *Env, o restoreOpts, fromSet bool) error {
 	case o.dryRun:
 		return runRestoreDryRun(env, o.from)
 	}
-	return runRestoreAct(env, o.from)
+	return runRestoreAct(env, o.from, false)
+}
+
+// runRestoreHook runs --pin or --rearm (CS-TMUX-064/066/068): host only,
+// silent, exit 0 whatever happens, problems logged to tmux-restore.log.
+func runRestoreHook(env *Env, form string) {
+	if hostdirs.InSandbox(env.Getenv) {
+		return // a sandbox has no tmux socket, and its cache is not the host's
+	}
+	var logged []string
+	logf := func(format string, a ...any) { logged = append(logged, fmt.Sprintf(format, a...)) }
+	cache := env.cacheDir()
+	defer func() {
+		if r := recover(); r != nil {
+			if testing.Testing() {
+				// A seam a test forgot (the resurrect dir, CS-TMUX-045)
+				// fails loudly instead of being logged away.
+				panic(r)
+			}
+			logf("panic: %v", r)
+		}
+		writeHookLog(env, tmuxRestoreLog, "tmux restore "+form, logged)
+	}()
+	// The dir is resolved inside the hook, so its one bounded tmux call
+	// counts against the whole-run deadline.
+	o := tmuxpane.HookOptions{Runner: env.Runner, Dir: env.resurrectDir, CacheDir: cache, Now: env.now, Logf: logf}
+	if form == "--pin" {
+		tmuxpane.PinRestore(o)
+		return
+	}
+	tmuxpane.Rearm(o)
 }
 
 // claimNotice prints a pending sparse-restore notice and, inside tmux,
@@ -799,8 +870,9 @@ func (p *actProbes) Guard(m tmuxpane.Mark) tmuxpane.GuardResult {
 }
 
 // runRestoreAct is the plain restore and "--from SAVE" in one pane
-// (CS-TMUX-052..062).
-func runRestoreAct(env *Env, from string) error {
+// (CS-TMUX-052..062), and "--resurrected" (CS-TMUX-065), which reads this
+// server's pin before last and prints the notice without claiming it.
+func runRestoreAct(env *Env, from string, resurrected bool) error {
 	paneID, ok := tmuxpane.FromEnv(env.Getenv)
 	if !ok {
 		return exitErr(2, "Error: tmux restore runs in a tmux pane (TMUX_PANE is not set); --dry-run --all works anywhere")
@@ -811,9 +883,14 @@ func runRestoreAct(env *Env, from string) error {
 	}
 	coords := tp.Coords()
 	pane := tmuxpane.Pane{Runner: env.Runner, ID: paneID}
+	noticed := ""
+	if resurrected {
+		noticed = tmuxpane.PrintNotice(env.cacheDir(), env.now(), env.Err)
+	}
 
 	// CS-TMUX-052: the pane's own pending mark, else last's row at these
-	// coordinates; --from reads that save only. Read once, before any wait.
+	// coordinates; --from reads that save only. --resurrected reads this
+	// server's pin between the two (CS-TMUX-065). Read once, before any wait.
 	var row *tmuxpane.Row
 	if from == "" && tp.Marked && tp.Mark.State == tmuxpane.StatePending {
 		row = &tmuxpane.Row{Session: tp.Session, Window: tp.Window, Pane: tp.Pane, Mark: tp.Mark}
@@ -822,8 +899,16 @@ func runRestoreAct(env *Env, from string) error {
 		if err != nil {
 			return err
 		}
-		stamp, err := resolveFrom(saves, from, tp.Server, idx)
-		if err != nil {
+		var pinned *tmuxpane.Pin
+		if resurrected && tp.Server != nil {
+			if p, _, ok := tmuxpane.FindPin(saves.Dir, *tp.Server, env.now()); ok && (saves.HasState(p.Stamp) || saves.HasSidecar(p.Stamp)) {
+				pinned = &p
+			}
+		}
+		var stamp string
+		if pinned != nil {
+			stamp = pinned.Stamp
+		} else if stamp, err = resolveFrom(saves, from, tp.Server, idx); err != nil {
 			return err
 		}
 		sc, err := saves.Sidecar(stamp)
@@ -835,7 +920,16 @@ func runRestoreAct(env *Env, from string) error {
 			restoreSay(env, "cannot read save %s (%v): nothing to restore in %s", stamp, err, coords)
 			return nil
 		}
-		if line := saves.SparseOf(stamp, len(sc.Panes), sc.Server, idx).Line(); line != "" {
+		// The pin's verdict when it has one, so the panes of one resurrect
+		// restore do not each scan; a line equal to the notice just printed
+		// is not printed twice.
+		var line string
+		if pinned != nil && pinned.Sparse != nil {
+			line = pinned.Sparse.Line(stamp)
+		} else {
+			line = saves.SparseOf(stamp, len(sc.Panes), sc.Server, idx).Line()
+		}
+		if line != "" && line != noticed {
 			fmt.Fprintln(env.Err, line)
 		}
 		for i := range sc.Panes {

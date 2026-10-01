@@ -588,8 +588,7 @@ ls ~/.local/share/tmux/resurrect/*.claude-sandbox.json   # after prefix + C-s
 ```
 
 `claude-sandbox tmux restore` reads the sidecars (below). Typed by hand it restores one pane;
-the resurrect hooks that run it unattended are still to come, so keep claude-sandbox out of
-`@resurrect-processes` for now (see the tmux doc). Spec: `spec/tmux.feature` CS-TMUX-003, CS-TMUX-030..040, CS-TMUX-047, CS-TMUX-070,
+[the resurrect hooks](#restoring-unattended-the-resurrect-hooks) run it unattended. Spec: `spec/tmux.feature` CS-TMUX-003, CS-TMUX-030..040, CS-TMUX-047, CS-TMUX-070,
 CS-TMUX-072.
 
 ### tmux restore
@@ -645,9 +644,9 @@ at least a third fewer, than the median of what the last save of each of the pre
 servers held (the saves right before it when no earlier server is known). After a bad restore
 continuum writes a sparse save every minute, so comparing with the previous few saves would go
 quiet exactly when it matters. A dry run prints one line before its decisions; ignore it if you
-closed those sessions on purpose. Once the resurrect hooks (still to come) find a restored save
-sparse, they will also keep the warning as a notice (`~/.cache/claude-sandbox/restore-notice.json`
-and the tmux option `@claude-sandbox-notice`); the next command you type — any `tmux restore`, or a
+closed those sessions on purpose. When the resurrect hooks (below) find a restored save sparse, they
+also keep the warning as a notice (`~/.cache/claude-sandbox/restore-notice.json` and the tmux
+option `@claude-sandbox-notice`); the next command you type — any `tmux restore`, or a
 launch, attach or join in a terminal — already prints such a notice once, and inside tmux also
 clears it (outside tmux it only prints, and leaves both). Spec: `spec/tmux.feature` CS-TMUX-045..051.
 
@@ -686,6 +685,49 @@ never more than 60 s (said after the session, not into it). A resumed session th
 conversation (a conversation missing from that config dir, a claude that failed) gets the pending
 row back, with one line saying so. Exit status: 0 for every decided outcome, the session's own
 once one ran. Spec: `spec/tmux.feature` CS-TMUX-052..063.
+
+### Restoring unattended (the resurrect hooks)
+
+tmux-resurrect restores the layout itself — at every tmux server start with tmux-continuum's
+auto-restore, at boot too when the server is started by systemd. Four lines in `~/.tmux.conf` let
+it bring the sandbox panes back as well. The hooks run in the tmux **server's** environment (a
+systemd unit at boot, with no login shell), so name the shim by its absolute path; the processes
+entry is typed into each pane's own shell, so it keeps the bare name:
+
+```tmux
+set -g @resurrect-hook-post-save-layout '/path/to/claude-sandbox/bin/claude-sandbox tmux save'
+set -g @resurrect-hook-pre-restore-all  '/path/to/claude-sandbox/bin/claude-sandbox tmux restore --pin'
+set -g @resurrect-hook-post-restore-all '/path/to/claude-sandbox/bin/claude-sandbox tmux restore --rearm'
+set -g @resurrect-processes '"claude-sandbox->claude-sandbox tmux restore --resurrected"'
+```
+
+(If you already list programs in `@resurrect-processes`, add the quoted entry to that list.)
+
+- **`--pin`**, before resurrect creates any pane, pins the save this restore reads — the one
+  `last` points at, so a continuum save in the middle of the restore cannot change it — and the
+  panes that already exist, in `<resurrect dir>/claude-sandbox-restore-pin.<server pid>.<time>.json`
+  (0600; pruned after a day). It also judges the save by the sparse rule, within its 2 s, and a
+  sparse save leaves the notice above.
+- **`--resurrected`** is what resurrect types into each pane that ran a sandbox. It restores the
+  pane exactly as a typed `claude-sandbox tmux restore`, except that it reads the pinned save
+  (this tmux server's pin, at most 10 minutes old) before `last`, and that it prints the notice
+  without clearing it, so the warning waits for the first command you type yourself.
+- **`--rearm`**, after resurrect has created every pane, gives each pane *this* restore created
+  its row from the pinned save as a pending mark — never a pane that existed before, and never one
+  that is not where the save had it — and types `claude-sandbox tmux restore --resurrected` into
+  the pending ones that sat at a bare shell when saved, so a session that was waiting to be
+  restored retries after a restart too. A ralph row only prints its command; the loop is never
+  restarted.
+
+`--pin` and `--rearm` never print and always exit 0 (problems go to
+`~/.cache/claude-sandbox/tmux-restore.log`), and every tmux call they make is bounded, within 2 s
+and 5 s for the whole run, so they never hold up resurrect. Like `tmux save`, the shim never
+builds for them: after a pull they do nothing until the next ordinary launch rebuilds the binary
+(`--resurrected`, typed into a shell, builds like any launch). Without `--rearm`, the typed
+restores still read the pin, then `last`; without `--pin`, they read `last` and `--rearm` does
+nothing. See [docs/tmux-session-restore.md](docs/tmux-session-restore.md) for the checks after
+wiring them and an optional status-line element showing the notice. Spec: `spec/tmux.feature`
+CS-TMUX-064..068.
 
 ## Headless mode (Paseo and other SDK clients)
 
@@ -2072,7 +2114,7 @@ internal/
   tmuxpane/        tmux pane mark: mark JSON, tmux argv, the restore replay allowlist + names-only flag scan;
                    the tmux save hook (registry match, state-file parser, sidecar, lifetimes index);
                    tmux restore (saves, --from, the sparse rule, the decision table, the start lock,
-                   readiness, the sparse notice)
+                   readiness, the sparse notice, the resurrect hooks --pin/--rearm)
   resumeguard/     Resume guard: is a conversation already open (sandbox labels, hardened registry reads, host claude)
   registry/        The one hardened reader of Claude Code's peer registry, shared by the save hook and the resume guard
   execx/, prompt/  Command-runner and prompt seams (injected in tests)

@@ -22,8 +22,8 @@ import (
 )
 
 // The pause after a resumed session is up, by the host's global-config
-// layout (answer 50 d, 10 § 5.3; the values are operator decision 66, still
-// open): a linked ~/.claude.json or a relocated CLAUDE_CONFIG_DIR tree is
+// layout (answer 50 d, 10 § 5.3; the values are operator answer 66 a, as
+// built): a linked ~/.claude.json or a relocated CLAUDE_CONFIG_DIR tree is
 // safe under concurrent writes, so the next start waits for "up" only; any
 // other layout — a .config.json, the legacy regular file, a missing or
 // refused one — spaces the starts.

@@ -586,9 +586,9 @@ Feature: tmux integration (CS-TMUX)
       read as one (O_NOFOLLOW, a regular file of the user's, at most 4 KiB, "v" 1, a save stamp) is
       ignored, and one older than 7 days is removed unprinted
     # Plan 11 § 4, 12 § 1, 13 § 4. The unattended forms (--resurrected, --rearm, --pin; F4c) print and
-    # never claim. Writing the notice is F4c's.
+    # never claim. --pin writes the notice (CS-TMUX-064).
     # The constants live in one place (tmuxpane.SparseLifetimes 3, SparseMinDrop 2, SparseFraction 1/3,
-    # ListDays 7): the comparison and the thresholds are operator decision 65, still open.
+    # ListDays 7): kept as built (operator answer 65: no tuning until a restore shows they are wrong).
 
   Scenario: CS-TMUX-051 --dry-run decides every row without acting
     Given "claude-sandbox tmux restore --dry-run [--from <save>]" typed in a pane, or
@@ -783,7 +783,7 @@ Feature: tmux integration (CS-TMUX)
     # a scratch CLAUDE_CONFIG_DIR, "up" keeps the plan's named fallback (5 s of a running child) beside
     # the record, so a claude that registers late costs at most 5 s plus the gap per pane, never the
     # 60 s cap; "resumed" stays a best effort, with EarlyEnd as its backstop. The gap values are
-    # operator decision 66, still open.
+    # operator answer 66 a (accepted as built).
 
   Scenario: CS-TMUX-062 a resume that ends before it was resumed keeps the pane pending
     Given a resume whose session child returned before "resumed" was seen and within EarlyEnd of its
@@ -804,3 +804,125 @@ Feature: tmux integration (CS-TMUX)
       with no values of a row that fails CS-TMUX-046's checks)
     And an active mark (a running session) or no mark is left alone with one line
     And nothing else is read, locked or started; it exits 0
+
+  # ---- F4c: the resurrect hooks ----
+  #
+  # tmux-resurrect runs the restore unattended — at every tmux server start
+  # with continuum's auto-restore, at boot too (answer 47 b). Three forms of
+  # "tmux restore" let it: --pin, its pre-restore-all hook, pins the save the
+  # restore reads (last's target, which a continuum save mid-restore would
+  # otherwise move) and judges it by the sparse rule; --resurrected is the
+  # @resurrect-processes entry resurrect types into each restored sandbox pane;
+  # --rearm, its post-restore-all hook, gives the new panes their rows as
+  # pending marks and types the restore into the pending ones that sat at a
+  # bare shell (answer 51 a). The four tmux.conf lines name the shim by its
+  # absolute path (the hooks run in the tmux server's environment, from a
+  # systemd unit at boot); hooper owns that file. Plan 10 § 6, 08 § 1..3,
+  # 11 § 3/§ 4, 12 § 1.
+  #
+  #   set -g @resurrect-hook-post-save-layout '<shim> tmux save'
+  #   set -g @resurrect-hook-pre-restore-all  '<shim> tmux restore --pin'
+  #   set -g @resurrect-hook-post-restore-all '<shim> tmux restore --rearm'
+  #   set -g @resurrect-processes '"claude-sandbox->claude-sandbox tmux restore --resurrected"'
+
+  Scenario: CS-TMUX-064 --pin pins the save, within 2 s, and leaves the sparse notice
+    Given "claude-sandbox tmux restore --pin", run by resurrect before it creates any pane
+    Then one bounded "tmux list-panes -a -F '#{pane_id}\t#{pid}\t#{start_time}'" gives the panes that
+      already exist ("preexisting") and the running server
+    And it writes "<resurrect dir>/claude-sandbox-restore-pin.<server pid>.<at ms>.json" (0600, temp
+      file, fsync, rename): {"v": 1, "serverPid", "server", "at", "stamp", "sidecar", "stateFile",
+      "preexisting", "sparse"}, where stamp is the save the "last" link names
+    And the pin is written first, with "sparse": null; the verdict of CS-TMUX-050 is added only when it
+      finishes inside PinDeadline (2 s for the whole run, the real clock): a sidecar scan the deadline
+      cuts short leaves "sparse": null and one log line
+    And when the verdict is sparse it writes the notice "<cache root>/restore-notice.json" (0600,
+      {"v": 1, "stamp", "n", "m", "k", "lifetimes", "at"}) and runs one bounded "tmux set -g
+      @claude-sandbox-notice 'sparse restore: <n> of <m> sandbox panes — claude-sandbox tmux restore
+      --list'": digits and fixed words only, no "#"
+    And pins older than 1 day, consumed or not, are removed (by the time in their name; regular files
+      matching the pin name only)
+    And no list-panes answer, no server pid and start time, or a "last" that names no save writes no
+      pin and logs one line
+    # Operator answer 65: the sparse constants stay as built (no tuning until a restore shows they are
+    # wrong).
+
+  Scenario: CS-TMUX-065 --resurrected reads the pane's own mark, then this server's pin, then last
+    Given "claude-sandbox tmux restore --resurrected" typed into a restored pane by resurrect (the
+      processes entry) or by --rearm
+    Then its row is the pane's own PENDING mark, else the row at its coordinates in the save named by
+      the running server's pin (its pid, and its start time when the pin has one), else the row in
+      last's save
+    And only the server's NEWEST pin is looked at, consumed or not: when it is consumed, older than 10
+      minutes, dated more than a minute in the future, or does not read as one (CS-TMUX-046's checks;
+      names that do not match its stamp; pane ids not of tmux's shape), there is no pin — an older pin
+      is never taken in its place (its pane list is another restore's)
+    And the sparse line is the pin's stored verdict when it has one (no scan per pane), else
+      CS-TMUX-050's own; a line equal to the notice it already printed is not printed again
+    And it prints a stored notice but never claims it: the file and @claude-sandbox-notice stay for
+      the operator's first typed command (CS-TMUX-050)
+    And it refuses every other flag (exit 2): it never chooses a save
+    And everything else — the pending mark first, the decision table, the start lock, attach, resume,
+      exit statuses — is the plain restore's (CS-TMUX-052..063)
+
+  Scenario: CS-TMUX-066 --rearm marks only the panes this restore created, within 5 s
+    Given "claude-sandbox tmux restore --rearm", run by resurrect after it created every pane and typed
+      every process
+    Then one bounded "tmux list-panes -a" gives each pane's id, coordinates, current path and mark,
+      and the server
+    And it takes that server's pin by CS-TMUX-065's rule (the newest only); with none it logs one line
+      and does nothing — it never guesses which panes are new
+    And it reads the pinned sidecar and the pinned state file (CS-TMUX-046's checks)
+    And for each row, a pane is armed only when it exists at the row's coordinates, is NOT in the
+      pin's "preexisting" (a manual prefix + C-r on a live server never touches a pane in use), has a
+      pane line in the pinned state file, holds no mark (a typed restore that ran first reads its own)
+      and does not run claude-sandbox (a typed restore running there marks it itself); a row failing
+      CS-TMUX-046's checks is not armed
+    And the pane's current path, symlinks resolved, must equal the pinned state file's field 8 (the
+      leading ":" removed, every "\ " turned back into a space, symlinks resolved); an ACTIVE row's
+      field 8 must also be its project or cwdRoot; a dir with single spaces is compared like any
+      other, while a LOSSY one — the pane's path or the saved dir holding a tab, a newline, a run of
+      whitespace or whitespace at either end, which resurrect's "echo $dir" collapses — is not
+      compared, so coordinates and new-pane membership decide alone; a mismatch is logged and the
+      pane left to its typed restore, which then reads last
+    And an armed pane gets the row as a PENDING mark with one bounded "tmux set-option -p", right after
+      one bounded "tmux display-message -p -t <pane> '#{pane_current_command}\t#{@claude-sandbox}'"
+      finds it still unmarked and not running claude-sandbox
+    And when every row was handled the pin is renamed to "….consumed.json"; at RearmDeadline (5 s, the
+      real clock) the rows not yet handled — the one a deadline cut mid-way included — are logged as
+      late, and the pin is left unconsumed for their typed restores
+    # Residual race (review round 2): a typed --resurrected restore that starts AND ends with a final
+    # outcome (clearing its own mark) between the list and the re-check is not seen, and the row's
+    # pending mark is written back; the next restore in that pane decides it final again.
+    And it never shows a message (no display-message: at boot no client is attached)
+
+  Scenario: CS-TMUX-067 --rearm retypes only pending rows whose saved full command was empty
+    Given a pane --rearm armed (CS-TMUX-066)
+    When the row was PENDING and the pane's line in the pinned state file has field 11 exactly ":" (it
+      sat at a bare shell when saved, so resurrect typed nothing into it)
+    Then one bounded "tmux send-keys -t <pane> 'claude-sandbox tmux restore --resurrected' C-m" types
+      the restore into it (answer 51 a), so a waiting session retries after a restart as an active one
+      does
+    And an active row, a pending row whose saved full command was anything else (resurrect typed the
+      processes entry, or another program), or a line with no field 11 is marked only, never typed into
+    And a ralph or join row that is retyped only prints its line (answer 66 a: a ralph pane prints its
+      command, never restarts the loop)
+
+  Scenario: CS-TMUX-068 the hook forms are silent and bounded, and the shim never builds for them
+    Given "tmux restore --pin" or "--rearm"
+    Then they never write stdout or stderr and always exit 0; problems go to
+      "<cache root>/tmux-restore.log" (0600, never through a symlink, emptied past 64 KiB), as the save
+      hook's do (CS-TMUX-030); a panic is logged, not raised
+    And every tmux call is bounded by CallTimeout (1 s) and never past the whole-run deadline, in its
+      own process group killed with the caller (CS-TMUX-016/040)
+    And inside a sandbox they do nothing; any other flag with them is a usage error (exit 2)
+    And under go test the resurrect dir and the cache root panic unless the test set them
+    And bin/claude-sandbox serves "tmux restore --pin" and "tmux restore --rearm" like "tmux save"
+      (CS-TMUX-003): an up-to-date binary is exec'd with argv[0] "claude-sandbox" and stdout and
+      stderr to /dev/null; a missing or stale one is exit 0 at once — no build, no wait on the build
+      lock (CS-TMUX-073)
+    And "tmux restore --resurrected" is not a hook: typed into a pane's shell, it builds under the lock
+      like any launch
+    And the degraded paths: without --rearm, the typed --resurrected restores read the unconsumed pin,
+      then last, so active rows still come back and pending rows that sat at a shell drop out at the
+      next save; without --pin, typed restores read last and --rearm does nothing; without both,
+      typed restores read last

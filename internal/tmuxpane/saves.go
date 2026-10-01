@@ -18,9 +18,9 @@ import (
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
 )
 
-// The sparse rule's and the listing's constants, in one place: the
-// comparison and the thresholds are operator decision 65 (still open), so
-// they are expected to be tuned from use (CS-TMUX-050).
+// The sparse rule's and the listing's constants, in one place
+// (CS-TMUX-050). Operator answer 65 (2026-10-01): kept as built, with no
+// tuning engineered until a real restore shows they are wrong.
 const (
 	// SparseLifetimes is how many earlier tmux server lifetimes the
 	// baseline takes the final save of.
@@ -271,6 +271,14 @@ func median(vs []int) int {
 // SparseOf judges the save stamp, whose sidecar has n rows and server srv
 // (nil when unknown), against the lifetimes before its own (CS-TMUX-050).
 func (s *Saves) SparseOf(stamp string, n int, srv *Server, idx []Lifetime) Sparse {
+	v, _ := s.sparseOf(stamp, n, srv, idx, nil)
+	return v
+}
+
+// sparseOf is SparseOf with a stop the sidecar scan checks before each read
+// (--pin's whole-run deadline, CS-TMUX-064); done is false when it stopped,
+// and the verdict is then not to be used.
+func (s *Saves) sparseOf(stamp string, n int, srv *Server, idx []Lifetime, stop func() bool) (Sparse, bool) {
 	v := Sparse{Stamp: stamp, N: n}
 	var vals []int
 	for _, l := range idx {
@@ -297,6 +305,9 @@ func (s *Saves) SparseOf(stamp string, n int, srv *Server, idx []Lifetime) Spars
 			if scanned++; scanned > ScanMax {
 				break
 			}
+			if stop != nil && stop() {
+				return v, false
+			}
 			sc, err := s.Sidecar(st)
 			if err != nil {
 				continue
@@ -319,11 +330,11 @@ func (s *Saves) SparseOf(stamp string, n int, srv *Server, idx []Lifetime) Spars
 		}
 	}
 	if len(vals) == 0 {
-		return v
+		return v, true
 	}
 	v.Known, v.K, v.M = true, len(vals), median(vals)
 	v.Sparse = IsSparse(n, v.M)
-	return v
+	return v, true
 }
 
 // Line is the one line a restore or a dry-run prints before it acts on a

@@ -46,13 +46,17 @@ case "${1-}" in
         exec -a claude-sandbox "$BIN" "$@"
         ;;
     tmux)
-        # The tmux-resurrect save hook (spec/tmux.feature CS-TMUX-003) runs
-        # inside every save, continuum's minute autosave included: it must
-        # never build (unbounded, and it prints) and never print. A stale
-        # binary is skipped too, not run: one from before the hook existed
-        # would read "tmux save <file>" as a prompt and launch a session. The
-        # next ordinary launch rebuilds, and saves pick up again.
-        if [ "${2-}" = save ]; then
+        # The tmux-resurrect hooks (spec/tmux.feature CS-TMUX-003, CS-TMUX-068)
+        # run synchronously inside resurrect: the save hook inside every save,
+        # continuum's minute autosave included, and "tmux restore --pin" /
+        # "--rearm" inside every restore, at boot too. They must never build
+        # (unbounded, and it prints), never wait on the build lock and never
+        # print. A stale binary is skipped too, not run: one from before a hook
+        # existed would read it as a prompt and launch a session. The next
+        # ordinary launch rebuilds, and the hooks pick up again.
+        # "tmux restore --resurrected" is not a hook: resurrect types it into a
+        # pane's shell, and it builds (under the lock below) like any launch.
+        if [ "${2-}" = save ] || { [ "${2-}" = restore ] && { [ "${3-}" = --pin ] || [ "${3-}" = --rearm ]; }; }; then
             stale && exit 0
             export CLAUDE_SANDBOX_REPO_ROOT="$REPO_ROOT"
             exec -a claude-sandbox "$BIN" "$@" >/dev/null 2>&1

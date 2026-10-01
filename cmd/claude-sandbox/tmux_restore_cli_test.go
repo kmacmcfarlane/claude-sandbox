@@ -100,7 +100,7 @@ var _ = Describe("tmux restore, read-only (CS-TMUX-045..051)", func() {
 	}
 
 	Describe("CS-TMUX-051 row 1 and CS-TMUX-049: refusals exit 2", func() {
-		It("CS-TMUX-051: inside a sandbox, outside a pane, with a form F4c owns, or a bad combination (CS-TMUX-052)", func() {
+		It("CS-TMUX-051: inside a sandbox, outside a pane, or a bad combination (CS-TMUX-052, CS-TMUX-068)", func() {
 			f.envmap["CLAUDE_SANDBOX_PROJECT_DIR"] = f.proj
 			Expect(f.run("tmux", "restore", "--list")).To(Equal(2))
 			Expect(f.errw.String()).To(ContainSubstring("host only"))
@@ -110,7 +110,9 @@ var _ = Describe("tmux restore, read-only (CS-TMUX-045..051)", func() {
 				{"tmux", "restore", "--from", "last"},
 				{"tmux", "restore", "--list", "--dry-run"},
 				{"tmux", "restore", "--list", "--from", "last"},
-				{"tmux", "restore", "--pin"},
+				{"tmux", "restore", "--pin", "--list"},
+				{"tmux", "restore", "--rearm", "--pin"},
+				{"tmux", "restore", "--resurrected", "--from", "last"},
 				{"tmux", "restore", "extra"},
 			} {
 				f.errw.Reset()
