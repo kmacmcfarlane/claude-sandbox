@@ -142,6 +142,20 @@ the containers keep running detached, and you reattach by running it from the
 project directory (attach filters by cwd). Joined sessions (`--join`) cannot
 be reattached.
 
+## Window names
+
+claude-sandbox names the window of every sandbox pane it marks: the
+conversation's own name when you gave it one (`--name`, `/rename`), else the
+project folder's name. It does so with `rename-window`, which switches tmux's
+`automatic-rename` off for that window, so tmux-resurrect saves the name and
+restores it exactly — no `tmux.conf` line is involved, and nothing about it is
+in the sidecar. A `/rename` reaches the window at the next save (within a
+minute) as long as the window still has the name claude-sandbox gave it; a
+name you set yourself always wins. When the session ends the window returns to
+tmux's automatic name, unless the pane is kept pending for a restore. After a
+restore, the resumed session reclaims its window because the restored name is
+the one it would set. `README.md` § tmux window names has the details.
+
 ## The claude-sandbox lines
 
 Add these four lines to `~/.tmux.conf`, before the two `run-shell` lines

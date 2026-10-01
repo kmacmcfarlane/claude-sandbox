@@ -97,6 +97,7 @@ type SaveResult struct {
 	WriteBacks int
 	Skipped    int // write-backs left for the next save at the deadline
 	Superseded int // write-backs dropped: the pane's mark changed since the list
+	Relabeled  int // windows renamed to a /rename (CS-TMUX-041)
 }
 
 // livePane is a pane the hook keeps.
@@ -105,6 +106,9 @@ type livePane struct {
 	orig Mark // the mark as list-panes returned it
 	mark Mark
 	row  Row
+	// superseded is set when the pane's mark changed since the list: its
+	// window is no longer this mark's to rename (CS-TMUX-044).
+	superseded bool
 }
 
 // Save runs the hook for stateFile (CS-TMUX-030..040).
@@ -234,6 +238,7 @@ func Save(stateFile string, o SaveOptions) (SaveResult, error) {
 		}
 		if now, ok := ParseMark(strings.TrimRight(cur, "\r\n")); !ok || now.JSON() != lp.orig.JSON() {
 			res.Superseded++
+			lp.superseded = true
 			o.logf("the mark in %s changed since the list; not written back", lp.id)
 			continue
 		}
@@ -247,6 +252,25 @@ func Save(stateFile string, o SaveOptions) (SaveResult, error) {
 			continue
 		}
 		res.WriteBacks++
+	}
+
+	// CS-TMUX-041..044: an owned window follows a /rename, after the
+	// write-backs and within the deadline.
+	for _, lp := range kept {
+		if lp.superseded || lp.mark.State != StateActive || lp.mark.NameSource != NameSourceUser {
+			continue
+		}
+		if left() <= 0 {
+			o.logf("deadline: window labels left for the next save")
+			break
+		}
+		renamed, problem := RefreshLabel(Pane{Runner: o.Runner, ID: lp.id}, lp.mark, left)
+		if problem != "" {
+			o.logf("%s", problem)
+		}
+		if renamed {
+			res.Relabeled++
+		}
 	}
 	return res, nil
 }

@@ -38,6 +38,9 @@ type paneMark struct {
 	// whether the session ended before it was resumed and within EarlyEnd:
 	// the prior mark (the restore's pending row) then goes back.
 	keepUnlessReady func() bool
+	// name is the conversation name the launch gives claude (--name), the
+	// window label's source (CS-TMUX-021); "" for none.
+	name string
 }
 
 // markedPane is a pane runSession marked.
@@ -49,6 +52,9 @@ type markedPane struct {
 	own tmuxpane.Mark
 	// decided is set once the end is known without CS-TMUX-071's checks.
 	decided bool
+	// owned is true when this launch named the pane's window and owns the
+	// label (CS-TMUX-020..023): only then does the end hand it back.
+	owned bool
 }
 
 // beginMark marks the pane before the session child starts (CS-TMUX-010).
@@ -75,7 +81,21 @@ func beginMark(env *Env, o sessionOpts) *markedPane {
 		m.prior = "" // CS-TMUX-016: an unparsable mark is no mark
 	}
 	m.pane.Set(o.mark.next.JSON())
+	m.owned = m.pane.BeginLabel(tmuxpane.LaunchLabel(labelName(o.mark), o.mark.next.Project))
 	return m
+}
+
+// labelName is the user-given name the window label takes (CS-TMUX-021):
+// the launch's --name, else — for a restore, which hands in the pane's
+// pending row — that row's name when the user gave it.
+func labelName(pm *paneMark) string {
+	if pm.name != "" || pm.prior == nil {
+		return pm.name
+	}
+	if prior, ok := tmuxpane.ParseMark(*pm.prior); ok && prior.NameSource == tmuxpane.NameSourceUser {
+		return prior.Name
+	}
+	return ""
 }
 
 // markEnd is what happens to the pane's mark when the session ends.
@@ -92,7 +112,10 @@ const (
 	markPending
 )
 
-// end settles the pane's mark (CS-TMUX-015/018/019/071).
+// end settles the pane's mark (CS-TMUX-015/018/019/071). Only an unset mark
+// — the session really ended — hands the window label back (CS-TMUX-024): a
+// pane kept pending or given its prior back is waiting to be restored, and
+// keeps its name.
 func (m *markedPane) end(a markEnd) {
 	if m == nil {
 		return
@@ -110,6 +133,9 @@ func (m *markedPane) end(a markEnd) {
 		}
 	}
 	m.pane.Unset()
+	if m.owned {
+		m.pane.EndLabel()
+	}
 }
 
 // pendingMark is the pane's current mark with state pending, when it is
@@ -253,7 +279,7 @@ func newContainerMark(plan *launch.Plan, gitRoot string, rec tmuxpane.LaunchReco
 	if plan.Mode == sessions.ModeRalph {
 		mode = tmuxpane.ModeRalph
 	}
-	return &paneMark{resuming: resuming, next: tmuxpane.Mark{
+	return &paneMark{resuming: resuming, name: rec.Name, next: tmuxpane.Mark{
 		V: tmuxpane.MarkVersion, State: tmuxpane.StateActive, Mode: mode,
 		Container: plan.ContainerName, ContainerID: plan.ContainerID,
 		Instance: plan.Instance, Project: plan.ProjectDir,
@@ -331,5 +357,5 @@ func joinMark(s sessions.Session, home string, wt worktreeChoice, rec tmuxpane.L
 	m.WorktreeGenerated = wt.Enabled && wt.Name == ""
 	m.FlagsUnknown = false
 	m.Model, m.Replay, m.Unreplayed = rec.Model, rec.Replay, rec.Unreplayed
-	return &paneMark{next: m, resuming: resuming}
+	return &paneMark{next: m, resuming: resuming, name: rec.Name}
 }

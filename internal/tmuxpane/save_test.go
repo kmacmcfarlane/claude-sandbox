@@ -484,7 +484,10 @@ var _ = Describe("tmux save hook (CS-TMUX-030..040)", func() {
 			Expect(wb).To(HaveLen(1))
 			Expect(wb[0].Conversation).To(Equal(convID))
 			Expect(wb[0].Name).To(Equal("my task"))
-			last := fake.Calls[len(fake.Calls)-1]
+			// The last call but the window-label refresh's read (CS-TMUX-041),
+			// which an unscripted tmux answers with nothing.
+			last := fake.Calls[len(fake.Calls)-2]
+			Expect(fake.Calls[len(fake.Calls)-1].Args[0]).To(Equal("display-message"))
 			Expect(last.Args[:5]).To(Equal([]string{"set-option", "-p", "-t", "%1", tmuxpane.Option}))
 			Expect(last.DieWithParent).To(BeTrue())
 

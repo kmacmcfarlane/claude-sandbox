@@ -45,7 +45,7 @@ const (
 
 // Mark is the pane mark (CS-TMUX-011/012). Fields a later feature fills — the
 // conversation id, its name and name source (the save hook, F3) — are empty
-// at launch and omitted. Window labels are not part of it (decision 52).
+// at launch and omitted. Window labels live in window options (label.go).
 type Mark struct {
 	V     int    `json:"v"`
 	State string `json:"state"`

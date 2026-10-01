@@ -535,6 +535,29 @@ or when its worktree name is not recorded yet); a start that fails puts that mar
 `spec/tmux.feature` CS-TMUX-010..019, CS-TMUX-071, `spec/launch.feature` CS-LNCH-087..090,
 CS-LNCH-109.
 
+### tmux window names
+
+A launch that marks its pane also names the pane's **window**: the conversation's name when you
+gave it one (`-- --name <n>`, or a later `/rename` — see below), else the project folder's name.
+It uses `rename-window`, which turns tmux's `automatic-rename` off for that window, so
+tmux-resurrect saves the name and restores it exactly; no `tmux.conf` line is needed. The name is
+cleaned (control characters, `#`, `\` and `;` removed) and cut to 40 characters.
+
+- A window you named yourself is never touched — not at launch, not later. A window whose
+  automatic name is on gets the label; one that already carries claude-sandbox's label is taken
+  over only by the pane that set it (or when that pane is gone), so two sandbox panes in one
+  window never fight.
+- The save hook (below) renames the window to a later `/rename` of the conversation, within a
+  minute, while the window still has the name claude-sandbox gave it.
+- When the session ends (the pane's mark is removed), the window goes back to tmux's automatic
+  name, unless you renamed it meanwhile. A pane kept pending for a restore keeps its name.
+- Two window options record this: `@claude-sandbox-label` and `@claude-sandbox-label-pane`
+  (`tmux show-options -w`). resurrect does not save them; the next launch in a restored window
+  reclaims it when the name matches.
+
+Every call is bounded (1 s) and silent, like the mark's. Spec: `spec/tmux.feature`
+CS-TMUX-020..026, CS-TMUX-041..044.
+
 ### tmux save hook
 
 `claude-sandbox tmux save <state-file>` is a tmux-resurrect **post-save-layout hook**. Wire it
