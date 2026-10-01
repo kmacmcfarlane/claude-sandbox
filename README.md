@@ -468,13 +468,14 @@ talked to across trees, and `--attach`/`--join` report the difference.
 
 Run inside tmux, every launch, `--attach` and `--join` records which sandbox its pane holds, in
 the pane user option `@claude-sandbox`, and removes it again when the session child returns
-(detach, exit, a signal). It is the first part of restoring sandbox panes after a tmux server
+(a detach, an exit, a crash, an OOM kill, your own signal) — unless the session was stopped from
+outside (below). It is the first part of restoring sandbox panes after a tmux server
 restart or a reboot with tmux-resurrect (see [docs/tmux-session-restore.md](docs/tmux-session-restore.md));
 the save hook below reads it, and `claude-sandbox tmux restore` is still to come. Nothing
 changes outside tmux (`TMUX`/`TMUX_PANE` unset), in a launcher run inside a sandbox, for
 `headless` or for `--detach`, and a failing tmux never changes the launch: each tmux call is
 killed after 1 s, so a hung tmux server costs at most a few seconds, never the launch. The mark
-is removed on every ordinary exit; a launcher killed outright (or a Ctrl-C in the instant before
+is settled on every ordinary exit; a launcher killed outright (or a Ctrl-C in the instant before
 the session starts) can leave a stale one, which the save hook will check against what the pane
 actually runs.
 
@@ -510,11 +511,28 @@ attach's mark takes them from there; its `unreplayed` holds every name, since an
 saw the values, and it records the container's model only when the launcher's `--model` was the
 one given (a claude `--model` after `--` is labelled `--model:claude` and listed as unreplayed). A container from before these labels gets `"flagsUnknown": true`.
 
+**A session stopped from outside stays pending.** When `docker stop`/`docker kill` (a `kill` or
+`stop` event before the container's `die`), a host shutdown (`systemctl is-system-running`
+prints `stopping`) or an end the launcher cannot read (the docker event stream ended with no
+`die`, or the container cannot be inspected) ends a marked session, the launcher keeps the pane's
+mark with `"state": "pending"` and the last conversation the save hook recorded, so the pane's
+session is restored rather than forgotten — which is what keeps every sandbox row in the save
+tmux-continuum takes at shutdown. A detach unsets only on positive evidence: the event stream was
+still open, the container is running, and the client was `docker attach` (which exits 1 on the
+detach keys) or a `docker start -ai` that exited 0. A crash or an OOM kill
+unsets, as before (the narrow default). A marked `--join` that ends non-zero waits up to 2 s for
+its container's `die` and is judged by it (a join whose container runs on unsets). Every session's
+`docker events` subscription now also carries `kill` and `stop` filters (headless included; they
+never change a report). The checks — one bounded `systemctl is-system-running` when the end would
+otherwise unset, one bounded `docker inspect` when no `die` came — run only for a marked pane:
+headless, `--detach` and sessions outside tmux are unchanged.
+
 If a pane still carries a *pending* mark (a restore waiting to act) and you launch something
 else in it, the launcher prints one `Note: this pane was waiting to restore '<name>' (<id>);
 resume it with: <command>` line first (no command when a mark value holds a control character,
 or when its worktree name is not recorded yet); a start that fails puts that mark back. Spec:
-`spec/tmux.feature` CS-TMUX-010..019, `spec/launch.feature` CS-LNCH-109.
+`spec/tmux.feature` CS-TMUX-010..019, CS-TMUX-071, `spec/launch.feature` CS-LNCH-087..090,
+CS-LNCH-109.
 
 ### tmux save hook
 
@@ -543,8 +561,11 @@ When the save is identical to the previous one — resurrect then deletes the ne
 sidecar goes to the file `last` points at. Sidecars whose save resurrect pruned are removed.
 
 A stale mark is not recorded: an `active` mark counts only while the pane actually runs
-`claude-sandbox` and one `docker ps` (at most 1 s) shows its container; if docker does not
-answer, the marks are kept as they are. A `pending` mark (a restore waiting to act) is copied
+`claude-sandbox`. One `docker ps` (at most 1 s) then checks its container: while the launcher
+still runs but the container has stopped (a shutdown caught inside the launcher's 2 s die wait),
+the row is recorded as `pending` with its last conversation, not dropped, and the launcher
+settles the pane's own mark moments later; if docker does not answer, the marks are kept as they
+are. A `pending` mark (a restore waiting to act, or a session stopped from outside) is copied
 as is. A join whose worktree name claude generated gets it from the record's directory. The
 hook never prints and always exits 0, finishes within about 3 s, and logs problems to
 `~/.cache/claude-sandbox/tmux-save.log` (emptied past 64 KiB):
@@ -555,7 +576,7 @@ ls ~/.local/share/tmux/resurrect/*.claude-sandbox.json   # after prefix + C-s
 
 Nothing reads the sidecars yet: `claude-sandbox tmux restore` is the next step, so keep
 claude-sandbox out of `@resurrect-processes` (see the tmux doc). Spec: `spec/tmux.feature`
-CS-TMUX-003, CS-TMUX-030..040, CS-TMUX-070.
+CS-TMUX-003, CS-TMUX-030..040, CS-TMUX-070, CS-TMUX-072.
 
 ## Headless mode (Paseo and other SDK clients)
 

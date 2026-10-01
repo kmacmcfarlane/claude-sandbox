@@ -305,6 +305,55 @@ var _ = Describe("tmuxpane", func() {
 			Expect(tmuxpane.PendingNote("garbage", "")).To(BeEmpty())
 		})
 	})
+
+	Describe("CS-TMUX-071: the shutdown probe and the inspect", func() {
+		BeforeEach(func() {
+			DeferCleanup(func(d time.Duration) { tmuxpane.CallTimeout = d }, tmuxpane.CallTimeout)
+			tmuxpane.CallTimeout = 50 * time.Millisecond
+		})
+
+		It("CS-TMUX-071: \"stopping\" with a non-zero exit is stopping; the probe is bounded and dies with the launcher", func() {
+			fake := &execx.Fake{}
+			fake.On("systemctl is-system-running", "stopping\n", execx.Fail(1))
+			Expect(tmuxpane.SystemStopping(fake)).To(BeTrue())
+			Expect(fake.CommandLines()).To(Equal([]string{"systemctl is-system-running"}))
+			Expect(fake.Calls[0].DieWithParent).To(BeTrue())
+		})
+
+		It("CS-TMUX-071: degraded, running, empty output, an exec error and a timeout are not stopping", func() {
+			for _, c := range []struct {
+				out string
+				err error
+			}{{"degraded\n", execx.Fail(1)}, {"running\n", nil}, {"", nil}, {"", execx.Fail(1)}, {"stopping-ish\n", nil}} {
+				fake := &execx.Fake{}
+				fake.On("systemctl", c.out, c.err)
+				Expect(tmuxpane.SystemStopping(fake)).To(BeFalse(), "%q", c.out)
+			}
+			Expect(tmuxpane.SystemStopping(&startFails{})).To(BeFalse(), "no systemd")
+			hung := &hangRunner{}
+			start := time.Now()
+			Expect(tmuxpane.SystemStopping(hung)).To(BeFalse(), "a timeout")
+			Expect(time.Since(start)).To(BeNumerically("<", time.Second))
+			Expect(hung.killed).To(Equal(1))
+		})
+
+		It("CS-TMUX-071: the container state comes from one bounded docker inspect", func() {
+			fake := &execx.Fake{}
+			fake.On("docker inspect", "running\n", nil)
+			st, ok := tmuxpane.ContainerState(fake, "cs-x")
+			Expect(ok).To(BeTrue())
+			Expect(st).To(Equal("running"))
+			Expect(fake.CommandLines()).To(Equal([]string{"docker inspect --type container -f {{.State.Status}} cs-x"}))
+			Expect(fake.Calls[0].DieWithParent).To(BeTrue())
+
+			fake = &execx.Fake{}
+			fake.On("docker inspect", "", execx.Fail(1))
+			_, ok = tmuxpane.ContainerState(fake, "cs-x")
+			Expect(ok).To(BeFalse(), "no such container")
+			_, ok = tmuxpane.ContainerState(&hangRunner{}, "cs-x")
+			Expect(ok).To(BeFalse(), "a hung daemon")
+		})
+	})
 })
 
 // hangRunner starts tmux processes that never exit until killed: a hung tmux
@@ -329,3 +378,8 @@ func (r *hangRunner) Start(c execx.Cmd) (execx.Process, error) {
 	}
 	return &hungProc{r: r, done: make(chan struct{})}, nil
 }
+
+// startFails is a runner that cannot start anything (no systemctl).
+type startFails struct{ execx.Fake }
+
+func (*startFails) Start(execx.Cmd) (execx.Process, error) { return nil, errors.New("exec: not found") }

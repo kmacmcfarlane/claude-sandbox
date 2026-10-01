@@ -92,7 +92,7 @@ var _ = Describe("session child and OOM report (CS-LNCH-085..098)", func() {
 		name := nameOf(f.launched().Args)
 		lines := f.fake.CommandLines()
 		Expect(lines[len(lines)-3]).To(MatchRegexp(`^docker events --since \d+\.\d{9} --filter container=` + name +
-			` --filter event=oom --filter event=die --format \{\{json \.\}\}$`))
+			` --filter event=oom --filter event=die --filter event=kill --filter event=stop --format \{\{json \.\}\}$`))
 		Expect(lines[len(lines)-2]).To(Equal("docker start -ai --detach-keys=ctrl-q,ctrl-q " + name))
 		// CS-LNCH-096: then whether the start ever ran the container.
 		Expect(lines[len(lines)-1]).To(HavePrefix("docker inspect --type container "))

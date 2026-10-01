@@ -1,11 +1,12 @@
 package main
 
-// The tmux pane mark (CS-TMUX-010..019, plan sandbox-reboot-restore 05..09):
-// every host launch, attach or join run inside tmux records in a pane user
-// option which sandbox the pane holds, so the save hook (F3) and
-// `claude-sandbox tmux restore` (F4) can bring it back after a tmux server
-// restart or a reboot. runSession sets it before the session child starts and
-// removes it when the child returns. It never changes the launch.
+// The tmux pane mark (CS-TMUX-010..019, CS-TMUX-071, plan
+// sandbox-reboot-restore 05..13): every host launch, attach or join run inside
+// tmux records in a pane user option which sandbox the pane holds, so the save
+// hook (F3) and `claude-sandbox tmux restore` (F4) can bring it back after a
+// tmux server restart or a reboot. runSession sets it before the session child
+// starts and, when the child returns, removes it — or keeps it pending when
+// the session was stopped from outside (F1b). It never changes the launch.
 
 import (
 	"fmt"
@@ -39,6 +40,11 @@ type paneMark struct {
 type markedPane struct {
 	pane  tmuxpane.Pane
 	prior string
+	// own is the mark this launch set: a pending write-back flips only it
+	// (CS-TMUX-071).
+	own tmuxpane.Mark
+	// decided is set once the end is known without CS-TMUX-071's checks.
+	decided bool
 }
 
 // beginMark marks the pane before the session child starts (CS-TMUX-010).
@@ -52,7 +58,7 @@ func beginMark(env *Env, o sessionOpts) *markedPane {
 	if !ok {
 		return nil
 	}
-	m := &markedPane{pane: tmuxpane.Pane{Runner: env.Runner, ID: id}}
+	m := &markedPane{pane: tmuxpane.Pane{Runner: env.Runner, ID: id}, own: o.mark.next}
 	if o.mark.prior != nil {
 		m.prior = *o.mark.prior
 	} else {
@@ -68,17 +74,122 @@ func beginMark(env *Env, o sessionOpts) *markedPane {
 	return m
 }
 
-// end removes the mark, or puts the prior one back when the session never
-// really started (CS-TMUX-015/018/019).
-func (m *markedPane) end(putBack bool) {
+// markEnd is what happens to the pane's mark when the session ends.
+type markEnd int
+
+const (
+	// markUnset removes it (CS-TMUX-015).
+	markUnset markEnd = iota
+	// markPutBack sets the prior mark back: the session never really
+	// started (CS-TMUX-018/019).
+	markPutBack
+	// markPending keeps this session's mark, as pending: it was stopped
+	// from outside (CS-TMUX-071).
+	markPending
+)
+
+// end settles the pane's mark (CS-TMUX-015/018/019/071).
+func (m *markedPane) end(a markEnd) {
 	if m == nil {
 		return
 	}
-	if putBack && m.prior != "" {
-		m.pane.Set(m.prior)
-		return
+	switch a {
+	case markPutBack:
+		if m.prior != "" {
+			m.pane.Set(m.prior)
+			return
+		}
+	case markPending:
+		if raw, ok := m.pendingMark(); ok {
+			m.pane.Set(raw)
+			return
+		}
 	}
 	m.pane.Unset()
+}
+
+// pendingMark is the pane's current mark with state pending, when it is
+// still this session's own (CS-TMUX-071): re-read, because the save hook
+// writes the conversation into it while the session runs (CS-TMUX-035).
+// Another mark, none, or a failed read gives false: the pane is unset.
+func (m *markedPane) pendingMark() (string, bool) {
+	cur, ok := tmuxpane.ParseMark(m.pane.Read())
+	if !ok {
+		return "", false
+	}
+	switch {
+	case m.own.ContainerID != "":
+		ok = cur.ContainerID == m.own.ContainerID
+	case m.own.Container != "":
+		ok = cur.Container == m.own.Container
+	default:
+		ok = false
+	}
+	if !ok {
+		return "", false
+	}
+	cur.State = tmuxpane.StatePending
+	return cur.JSON(), true
+}
+
+// stoppedFromOutside is rows 1 and 2 of CS-TMUX-071: a kill or stop event
+// before the die, or the host shutting down. Always false for an unmarked
+// session, which runs no probe (headless keeps CS-LNCH-091's prompt exit).
+func (m *markedPane) stoppedFromOutside(env *Env, out oomreport.Outcome) bool {
+	if m == nil || m.decided {
+		return false
+	}
+	return out.OutsideStop || tmuxpane.SystemStopping(env.Runner)
+}
+
+// pendingAfter decides the mark of a session that ended without a signal
+// from the launcher (CS-TMUX-071 rows 1, 2 and 4..9). The rows that give
+// pending without a probe are checked first, so the probe runs only when the
+// end would otherwise unset; the verdict is the table's in its order.
+func (m *markedPane) pendingAfter(env *Env, o sessionOpts, w *oomreport.Watch, code int, out oomreport.Outcome, container string) bool {
+	if m == nil || m.decided {
+		return false
+	}
+	if out.OutsideStop {
+		return true // row 1
+	}
+	if m.inconclusive(env, o, w, code, out, container) {
+		return true // rows 6 and 9
+	}
+	return tmuxpane.SystemStopping(env.Runner) // row 2, else rows 4, 5, 7, 8: unset
+}
+
+// inconclusive is rows 4..9 of CS-TMUX-071: true for an end that gives no
+// positive evidence the session ended or detached on its own.
+func (m *markedPane) inconclusive(env *Env, o sessionOpts, w *oomreport.Watch, code int, out oomreport.Outcome, container string) bool {
+	if out.Died {
+		return false // row 4: a clean exit, a crash, an OOM kill
+	}
+	join := o.kind == joinedSession
+	if join && code == 0 {
+		return false // row 5: the joined claude ended on its own
+	}
+	if !w.StreamOpen() {
+		return true // row 6: the daemon went away, or the subscription failed
+	}
+	target := container
+	if m.own.ContainerID != "" {
+		target = m.own.ContainerID
+	}
+	state, ok := tmuxpane.ContainerState(env.Runner, target)
+	if !ok || (state != "running" && state != "paused") {
+		return true // row 6
+	}
+	if o.kind != reservedSession {
+		// Row 8: a join whose container runs on. Row 7, attach: "docker
+		// attach" exits 1 on the detach keys (docker/cli RunAttach returns
+		// the term.EscapeError), so for an attach no die + an open stream +
+		// a running container is a detach whatever the exit code.
+		return false
+	}
+	// Row 7, a new container: "docker start -ai" returns nil on the detach
+	// keys (docker/cli start.go), so a detach exits 0; row 9 otherwise.
+	return code != 0
 }
 
 // vanished reports a restore attach whose container was gone (CS-TMUX-019):

@@ -1858,8 +1858,11 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
   Scenario: CS-LNCH-087 The events subscription starts before the child
     When a session child is about to start for container <name>
     Then "docker events --since <now> --filter container=<name> --filter event=oom
-      --filter event=die --format {{json .}}" is started first, and stopped
-      once the report is decided
+      --filter event=die --filter event=kill --filter event=stop --format {{json .}}"
+      is started first, and stopped once the report is decided
+    And a kill or stop event is recorded only when it arrives before the
+      container's die: a stop from outside, which keeps a marked tmux pane
+      pending (CS-TMUX-071); it never changes a report
     And --since replays whatever the daemon published between <now> and the
       moment the subscription connected, so an instant death is not missed
     And a subscription that cannot start never blocks the session: nothing is
@@ -1876,6 +1879,11 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     And a die with exit 137 and no oom yet waits at most 150 ms more for an
       oom, which the daemon may publish after the die it caused; a 137 with
       none (docker kill, a stop timeout) is then quiet
+    And a joined session in a marked tmux pane (CS-TMUX-071) whose docker exec
+      ended non-zero waits up to 2 s for its container's die, whatever the code,
+      ending at once when it arrives (then 150 ms more only for a 137 — the
+      exec's or the die's — whose oom has not arrived yet);
+      an unmarked join, or one whose exec exited 0, waits as CS-SESS-060 says
 
   Scenario: CS-LNCH-089 An OOM-killed session is reported on stderr
     Given a die event with exitCode 137 and at least one oom event
@@ -1898,6 +1906,7 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       events (CS-LNCH-093), else what the launch resolved, else "not recorded
       on this container"
     And the launcher still exits 137
+    And kill and stop events (CS-LNCH-087) change nothing in this report
 
   Scenario: CS-LNCH-090 An OOM kill the session survived is one softer line
     Given oom events were seen for the container
@@ -1906,7 +1915,8 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       "claude-sandbox: note: the OOM killer killed N processes in this container
       during this session (the container's memoryLimit <limit> (from <source>)
       or the host running out of memory); the session itself was not killed."
-    And a die without any oom event prints nothing
+    And a die without any oom event prints nothing, whatever kill or stop
+      events preceded it (CS-LNCH-087)
 
   Scenario: CS-LNCH-091 A signal-initiated exit is silent and prompt
     # The Paseo headless contract: an SDK client sends SIGTERM and expects the

@@ -7,9 +7,11 @@ package main
 
 import (
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -18,6 +20,7 @@ import (
 
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/launch"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/oomreport"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/sessions"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/tmuxpane"
 )
@@ -95,6 +98,9 @@ var _ = Describe("tmux pane mark (CS-TMUX-010..019)", func() {
 	}
 
 	It("CS-TMUX-010: a launch inside tmux marks its pane before the session and unmarks it after", func() {
+		// A clean exit: the container's die, with no stop from outside
+		// (CS-TMUX-071 row 4).
+		streamEvents(f.fake, dockerEvent("die", "0"))
 		Expect(f.run()).To(Equal(0), f.errw.String())
 		lines := tmuxLines()
 		Expect(lines).To(HaveLen(3))
@@ -329,17 +335,31 @@ var _ = Describe("tmux pane mark (CS-TMUX-010..019)", func() {
 		})
 	})
 
-	Describe("CS-TMUX-015: unmarked on every ordinary return path", func() {
-		It("CS-TMUX-015: a non-zero exit", func() {
+	Describe("CS-TMUX-015: unmarked on a clean exit, a crash, an OOM kill, a detach or the launcher's own signal", func() {
+		var p *paneSim
+		BeforeEach(func() { p = simulatePane(f.fake) })
+
+		It("CS-TMUX-015: a non-zero exit (a crash) with its die", func() {
+			streamEvents(f.fake, dockerEvent("die", "3"))
 			f.fake.On("docker start -ai", "", execx.Fail(3))
 			Expect(f.run()).To(Equal(3))
 			Expect(tmuxLines()[len(tmuxLines())-1]).To(Equal(unset))
+			Expect(p.get()).To(BeEmpty())
+		})
+
+		It("CS-TMUX-015: an OOM kill", func() {
+			streamEvents(f.fake, dockerEvent("oom", ""), dockerEvent("die", "137"))
+			f.fake.On("docker start -ai", "", execx.Fail(137))
+			Expect(f.run()).To(Equal(137))
+			Expect(p.get()).To(BeEmpty())
+			Expect(f.errw.String()).To(ContainSubstring("killed by the OOM killer"))
 		})
 
 		It("CS-TMUX-015: a forwarded signal", func() {
 			f.fake.SessionSignal = syscall.SIGTERM
 			f.run()
 			Expect(tmuxLines()[len(tmuxLines())-1]).To(Equal(unset))
+			Expect(p.get()).To(BeEmpty())
 		})
 
 		It("CS-TMUX-015: a signal during the die wait", func() {
@@ -347,6 +367,7 @@ var _ = Describe("tmux pane mark (CS-TMUX-010..019)", func() {
 			f.run()
 			Expect(tmuxLines()[len(tmuxLines())-1]).To(Equal(unset))
 			Expect(tmuxLines()).To(HaveLen(3))
+			Expect(p.get()).To(BeEmpty())
 		})
 	})
 
@@ -441,6 +462,296 @@ var _ = Describe("tmux pane mark (CS-TMUX-010..019)", func() {
 		})
 	})
 
+	Describe("CS-TMUX-071: a session stopped from outside leaves its pane pending", func() {
+		var (
+			p         *paneSim
+			state     string // what the end's docker inspect reports; "" fails it
+			startCode int    // the session child's status
+		)
+		const probe = "systemctl is-system-running"
+		BeforeEach(func() {
+			p = simulatePane(f.fake)
+			state, startCode = "running", 0
+			f.fake.OnFunc("docker inspect --type container -f {{.State.Status}} ", func(c execx.Cmd) (string, error) {
+				if c.Args[4] != "{{.State.Status}}" {
+					return "", nil // CS-LNCH-096's created check: not created
+				}
+				if state == "" {
+					return "", execx.Fail(1)
+				}
+				return state + "\n", nil
+			})
+			// The save hook writes the conversation into the mark while the
+			// session runs (CS-TMUX-035).
+			f.fake.OnFunc("docker start -ai", func(execx.Cmd) (string, error) {
+				p.update(func(m *tmuxpane.Mark) { m.Conversation = markConv })
+				// The session lasts a moment: events published before it
+				// ends have been read, as a real session's would be (the
+				// forwarded path reads what has arrived without waiting).
+				time.Sleep(20 * time.Millisecond)
+				if startCode != 0 {
+					return "", execx.Fail(startCode)
+				}
+				return "", nil
+			})
+			saved := oomreport.DieWait
+			oomreport.DieWait = 300 * time.Millisecond
+			DeferCleanup(func() { oomreport.DieWait = saved })
+		})
+		stopping := func() { f.fake.On(probe, "stopping\n", execx.Fail(1)) }
+		probes := func() int {
+			n := 0
+			for _, l := range f.fake.CommandLines() {
+				if l == probe {
+					n++
+				}
+			}
+			return n
+		}
+		// pendingNow is the pane's mark, which must be this session's own,
+		// pending, with the conversation the save hook wrote.
+		pendingNow := func() tmuxpane.Mark {
+			m, ok := tmuxpane.ParseMark(p.get())
+			Expect(ok).To(BeTrue(), "a mark is left; tmux: %v", tmuxLines())
+			Expect(m.State).To(Equal(tmuxpane.StatePending))
+			Expect(m.Conversation).To(Equal(markConv))
+			Expect(m.Container).To(Equal(nameOf(f.launched().Args)))
+			return m
+		}
+
+		for name, stream := range map[string][]string{
+			"docker stop (kill, die, stop)": {dockerEvent("kill", ""), dockerEvent("die", "143"), dockerEvent("stop", "")},
+			"a stop before a clean die":     {dockerEvent("stop", ""), dockerEvent("die", "0")},
+		} {
+			It("CS-TMUX-071 row 1: a kill or stop event before the die keeps the pane pending, with no probe: "+name, func() {
+				streamEvents(f.fake, stream...)
+				f.run()
+				pendingNow()
+				Expect(probes()).To(Equal(0))
+				Expect(tmuxLines()).NotTo(ContainElement(unset))
+			})
+		}
+
+		It("CS-TMUX-071 row 1: a stop event after the die changes nothing", func() {
+			streamEvents(f.fake, dockerEvent("die", "0"), dockerEvent("stop", ""))
+			Expect(f.run()).To(Equal(0))
+			Expect(p.get()).To(BeEmpty())
+			Expect(probes()).To(Equal(1), "a clean end asks whether the host is stopping")
+		})
+
+		It("CS-TMUX-071 row 2: systemd reporting stopping (exit 1) keeps a clean-looking end pending", func() {
+			streamEvents(f.fake, dockerEvent("die", "0"))
+			stopping()
+			Expect(f.run()).To(Equal(0))
+			pendingNow()
+			Expect(probes()).To(Equal(1))
+		})
+
+		It("CS-TMUX-071 row 2: degraded (exit 1) or no systemd is not stopping", func() {
+			streamEvents(f.fake, dockerEvent("die", "0"))
+			f.fake.On(probe, "degraded\n", execx.Fail(1))
+			Expect(f.run()).To(Equal(0))
+			Expect(p.get()).To(BeEmpty())
+		})
+
+		It("CS-TMUX-071 rows 2 and 3: shutdown evidence outranks a forwarded signal", func() {
+			f.fake.SessionSignal = syscall.SIGTERM
+			stopping()
+			f.run()
+			pendingNow()
+		})
+
+		It("CS-TMUX-071 rows 1 and 3: a kill seen before the forwarded signal keeps it pending", func() {
+			f.fake.SessionSignal = syscall.SIGTERM
+			streamEvents(f.fake, dockerEvent("kill", ""))
+			f.run()
+			Expect(probes()).To(Equal(0))
+			pendingNow()
+		})
+
+		It("CS-TMUX-071 row 3: a forwarded signal with no outside evidence unsets, after one probe", func() {
+			f.fake.SessionSignal = syscall.SIGTERM
+			f.run()
+			Expect(p.get()).To(BeEmpty())
+			Expect(probes()).To(Equal(1))
+		})
+
+		It("CS-TMUX-071 row 4: a crash or an OOM kill unsets (the narrow default)", func() {
+			streamEvents(f.fake, dockerEvent("oom", ""), dockerEvent("die", "137"))
+			f.run()
+			Expect(p.get()).To(BeEmpty())
+		})
+
+		It("CS-TMUX-071 row 6: a stream that ended with no die is inconclusive: pending, no probe", func() {
+			f.run() // the fake's stream ends at once, with nothing
+			pendingNow()
+			Expect(probes()).To(Equal(0))
+		})
+
+		It("CS-TMUX-071 rows 6 and 7: a detach needs an open stream, exit 0 and a running container", func() {
+			r := &eventsRunner{Fake: f.fake, open: true}
+			f.env.Runner = r
+			f.run()
+			Expect(p.get()).To(BeEmpty(), "a detach")
+			Expect(f.fake.CommandLines()).To(ContainElement(HavePrefix("docker inspect --type container -f {{.State.Status}} claude-sandbox-")))
+
+			for _, st := range []string{"", "exited"} {
+				state = st
+				f.run()
+				pendingNow()
+				p.set("")
+			}
+		})
+
+		It("CS-TMUX-071 row 9: a primary whose child exited non-zero while its container runs on is pending", func() {
+			f.env.Runner = &eventsRunner{Fake: f.fake, open: true}
+			startCode = 1
+			Expect(f.run()).To(Equal(1))
+			pendingNow()
+		})
+
+		It("CS-TMUX-071: the write-back flips only this session's own mark", func() {
+			streamEvents(f.fake, dockerEvent("kill", ""), dockerEvent("die", "143"))
+			other := tmuxpane.Mark{V: 1, State: tmuxpane.StateActive, Mode: "claude", Container: "cs-other"}.JSON()
+			p.onRead = func(cur string) string {
+				if strings.Contains(cur, `"state":"active"`) && strings.Contains(cur, markConv) {
+					return other // relaunched in between
+				}
+				return cur
+			}
+			f.run()
+			Expect(p.get()).To(BeEmpty(), "another mark: unset")
+		})
+
+		It("CS-TMUX-071 / CS-TMUX-017: the next hand launch in a pending pane prints the resume command", func() {
+			streamEvents(f.fake, dockerEvent("kill", ""), dockerEvent("die", "143"))
+			f.run()
+			pend := pendingNow()
+			Expect(tmuxpane.PendingNote(pend.JSON(), "")).To(ContainSubstring("--resume " + markConv))
+			f.errw.Reset()
+			f.run()
+			Expect(f.errw.String()).To(ContainSubstring("Note: this pane was waiting to restore '"))
+			Expect(f.errw.String()).To(ContainSubstring("--resume " + markConv))
+		})
+
+		It("CS-TMUX-071: no probe, inspect or extra tmux call for a headless or an unmarked session", func() {
+			stopping()
+			f.fake.SessionSignal = syscall.SIGTERM
+			Expect(f.run("headless", "--")).To(Equal(0))
+			Expect(probes()).To(Equal(0))
+			Expect(tmuxLines()).To(BeEmpty())
+
+			f.fake.Calls = nil
+			f.fake.SessionSignal = nil
+			delete(f.envmap, "TMUX")
+			f.run()
+			Expect(probes()).To(Equal(0))
+			Expect(tmuxLines()).To(BeEmpty())
+			for _, l := range f.fake.CommandLines() {
+				Expect(l).NotTo(HavePrefix("docker inspect --type container -f {{.State.Status}} claude-"))
+			}
+		})
+
+		It("CS-TMUX-071 row 7: a new container's detach (docker start -ai exits 0 on the detach keys) unsets", func() {
+			f.env.Runner = &eventsRunner{Fake: f.fake, open: true}
+			Expect(f.run()).To(Equal(0))
+			Expect(p.get()).To(BeEmpty())
+		})
+
+		Describe("attach", func() {
+			created := "2026-09-18 12:34:56 +0000 UTC"
+			BeforeEach(func() {
+				f.fake.On("docker ps", psRowMark("cs-otter", f.proj, "claude", "otter", "", "37", "", created, markID,
+					"", f.home+"/.claude/sessions", "")+"\n", nil)
+				f.fake.On("docker top", "PID  COMMAND\n1  claude\n", nil)
+				// docker attach exits 1 on the detach keys (docker/cli
+				// RunAttach returns the term.EscapeError).
+				f.fake.OnFunc("docker attach", func(execx.Cmd) (string, error) {
+					p.update(func(m *tmuxpane.Mark) { m.Conversation = markConv })
+					return "", execx.Fail(1)
+				})
+			})
+
+			It("CS-TMUX-071 row 7: an attach detach (exit 1, stream open, container running) unsets", func() {
+				f.env.Runner = &eventsRunner{Fake: f.fake, open: true}
+				Expect(f.run("--attach=otter")).To(Equal(1))
+				Expect(p.get()).To(BeEmpty(), "tmux: %v", tmuxLines())
+				Expect(f.fake.CommandLines()).To(ContainElement("docker inspect --type container -f {{.State.Status}} " + markID))
+			})
+
+			It("CS-TMUX-071 row 6: an attach whose stream ended with no die is pending", func() {
+				f.run("--attach=otter")
+				m, ok := tmuxpane.ParseMark(p.get())
+				Expect(ok).To(BeTrue(), "tmux: %v", tmuxLines())
+				Expect(m.State).To(Equal(tmuxpane.StatePending))
+				Expect(m.Conversation).To(Equal(markConv))
+			})
+		})
+
+		Describe("joins", func() {
+			created := "2026-09-18 12:34:56 +0000 UTC"
+			BeforeEach(func() {
+				f.fake.On("docker ps", psRowMark("cs-otter", f.proj, "claude", "otter", "", "37", "", created, markID,
+					"", f.home+"/.claude/sessions", "")+"\n", nil)
+				f.fake.On("docker top", "PID  COMMAND\n1  claude\n", nil)
+			})
+			joinExit := func(code int) {
+				f.fake.OnFunc("docker exec", func(execx.Cmd) (string, error) {
+					p.update(func(m *tmuxpane.Mark) { m.Conversation = markConv })
+					if code == 0 {
+						return "", nil
+					}
+					return "", execx.Fail(code)
+				})
+			}
+			joinPending := func() {
+				m, ok := tmuxpane.ParseMark(p.get())
+				Expect(ok).To(BeTrue(), "tmux: %v", tmuxLines())
+				Expect(m.State).To(Equal(tmuxpane.StatePending))
+				Expect(m.Mode).To(Equal(tmuxpane.ModeJoin))
+				Expect(m.Conversation).To(Equal(markConv))
+			}
+
+			It("CS-TMUX-071: a marked join that exits 130 sees the container's clean die moments later and unsets", func() {
+				joinExit(130)
+				state = "" // without the die, the end would be inconclusive (pending)
+				// Later than OOMGrace: only the die wait sees it.
+				f.env.Runner = &eventsRunner{Fake: f.fake, open: true, later: []string{dockerEvent("die", "0")}, delay: 200 * time.Millisecond}
+				Expect(f.run("--join=otter")).To(Equal(130))
+				Expect(p.get()).To(BeEmpty())
+			})
+
+			It("CS-TMUX-071: the same join with a kill before the die is pending", func() {
+				joinExit(137)
+				f.env.Runner = &eventsRunner{Fake: f.fake, open: true,
+					later: []string{dockerEvent("kill", ""), dockerEvent("die", "137")}, delay: 200 * time.Millisecond}
+				f.run("--join=otter")
+				joinPending()
+			})
+
+			It("CS-TMUX-071 row 8: a join that ends non-zero while its container runs on unsets (a Ctrl-C)", func() {
+				joinExit(130)
+				f.env.Runner = &eventsRunner{Fake: f.fake, open: true}
+				f.run("--join=otter")
+				Expect(p.get()).To(BeEmpty())
+				Expect(f.fake.CommandLines()).To(ContainElement("docker inspect --type container -f {{.State.Status}} " + markID))
+			})
+
+			It("CS-TMUX-071 row 5: a join that exits 0 unsets without an inspect", func() {
+				joinExit(0)
+				f.run("--join=otter")
+				Expect(p.get()).To(BeEmpty())
+				Expect(f.fake.CommandLines()).NotTo(ContainElement(HavePrefix("docker inspect --type container -f {{.State.Status}} " + markID)))
+			})
+
+			It("CS-TMUX-071 row 6: a join whose stream ended with no die is pending", func() {
+				joinExit(1)
+				f.run("--join=otter")
+				joinPending()
+			})
+		})
+	})
+
 	It("CS-TMUX-011: sessions.Session carries the full id and the CS-LNCH-109 labels", func() {
 		f.fake.On("docker ps", psRowMark("cs-a", f.proj, "claude", "a", "", "1", "", "", markID, "/c", "/c/sessions", "--bare")+"\n", nil)
 		all, err := sessions.DiscoverAllUncounted(f.fake)
@@ -453,3 +764,120 @@ var _ = Describe("tmux pane mark (CS-TMUX-010..019)", func() {
 		Expect(f.fake.CommandLines()[0]).To(HaveSuffix(" --no-trunc"))
 	})
 })
+
+// paneSim is a tmux pane option the fake tmux reads and writes, so a test
+// sees what the launcher left in the pane.
+type paneSim struct {
+	mu   sync.Mutex
+	mark string
+	// onRead, when set, rewrites what show-options returns.
+	onRead func(cur string) string
+}
+
+func (p *paneSim) get() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.mark
+}
+
+func (p *paneSim) set(raw string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.mark = raw
+}
+
+// update changes the pane's mark as the save hook would.
+func (p *paneSim) update(fn func(*tmuxpane.Mark)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if m, ok := tmuxpane.ParseMark(p.mark); ok {
+		fn(&m)
+		p.mark = m.JSON()
+	}
+}
+
+// simulatePane makes the fake's tmux keep the pane's mark. Registered before
+// any other tmux stub, it answers every tmux call.
+func simulatePane(fake *execx.Fake) *paneSim {
+	p := &paneSim{}
+	fake.OnFunc("tmux ", func(c execx.Cmd) (string, error) {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		switch {
+		case len(c.Args) > 0 && c.Args[0] == "show-options":
+			cur := p.mark
+			if p.onRead != nil {
+				cur = p.onRead(cur)
+			}
+			if cur == "" {
+				return "", nil
+			}
+			return cur + "\n", nil
+		case len(c.Args) > 2 && c.Args[0] == "set-option" && c.Args[2] == "-u":
+			p.mark = ""
+		case len(c.Args) == 6 && c.Args[0] == "set-option":
+			p.mark = c.Args[5]
+		}
+		return "", nil
+	})
+	return p
+}
+
+// streamEvents scripts the subscribed container's event stream, which ends
+// with the lines (thisContainer stands for its name).
+func streamEvents(fake *execx.Fake, lines ...string) {
+	fake.OnFunc("docker events", func(c execx.Cmd) (string, error) {
+		return strings.ReplaceAll(strings.Join(lines, ""), thisContainer, eventsTarget(c)), nil
+	})
+}
+
+// eventsTarget is the container a "docker events" call subscribes to.
+func eventsTarget(c execx.Cmd) string {
+	for _, a := range c.Args {
+		if v, ok := strings.CutPrefix(a, "container="); ok {
+			return v
+		}
+	}
+	return ""
+}
+
+// eventsRunner is the fake whose "docker events" publishes now, then later
+// after delay, and stays open until signalled when open is set — a live
+// subscription, which execx.Fake's ending stream cannot be.
+type eventsRunner struct {
+	*execx.Fake
+	now, later []string
+	delay      time.Duration
+	open       bool
+}
+
+type eventsProc struct {
+	once sync.Once
+	done chan struct{}
+}
+
+func (p *eventsProc) Signal(os.Signal) error { p.once.Do(func() { close(p.done) }); return nil }
+func (p *eventsProc) Wait() error            { <-p.done; return nil }
+func (p *eventsProc) Pid() int               { return 4545 }
+
+func (r *eventsRunner) Start(c execx.Cmd) (execx.Process, error) {
+	if c.Name != "docker" || len(c.Args) == 0 || c.Args[0] != "events" {
+		return r.Fake.Start(c)
+	}
+	r.Fake.Calls = append(r.Fake.Calls, c)
+	name := eventsTarget(c)
+	p := &eventsProc{done: make(chan struct{})}
+	go func() {
+		for _, l := range r.now {
+			io.WriteString(c.Stdout, strings.ReplaceAll(l, thisContainer, name))
+		}
+		time.Sleep(r.delay)
+		for _, l := range r.later {
+			io.WriteString(c.Stdout, strings.ReplaceAll(l, thisContainer, name))
+		}
+		if !r.open {
+			p.Signal(nil)
+		}
+	}()
+	return p, nil
+}

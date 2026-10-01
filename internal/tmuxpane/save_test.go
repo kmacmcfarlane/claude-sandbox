@@ -223,7 +223,7 @@ var _ = Describe("tmux save hook (CS-TMUX-030..040)", func() {
 			Expect(readSidecar(res.Sidecar).Panes).To(BeEmpty())
 		})
 
-		It("CS-TMUX-032: one bounded docker ps; an active mark whose container is gone or exited is dropped", func() {
+		It("CS-TMUX-032, CS-TMUX-072: one bounded docker ps; a launcher-running mark whose container is gone or exited is recorded pending", func() {
 			state = writeState("tmux_resurrect_20260929T120200.txt",
 				stateLine("main", 1, 0, proj, ""), stateLine("main", 2, 0, proj, ""),
 				stateLine("main", 3, 0, proj, ""), stateLine("main", 4, 0, proj, ""))
@@ -237,12 +237,67 @@ var _ = Describe("tmux save hook (CS-TMUX-030..040)", func() {
 			res, err := tmuxpane.Save(state, opts())
 			Expect(err).NotTo(HaveOccurred())
 			Expect(commands("docker ps -a --no-trunc --filter label=claude-sandbox.project --format {{.ID}}\t{{.Names}}\t{{.State}}")).To(Equal(1))
-			var names []string
+			states := map[string]string{}
 			for _, r := range res.Rows {
-				names = append(names, r.Mark.Container)
+				states[r.Mark.Container] = r.Mark.State
 			}
-			Expect(names).To(Equal([]string{live.Container, "c-created"}))
+			Expect(states).To(Equal(map[string]string{
+				live.Container: tmuxpane.StateActive, "c-gone": tmuxpane.StatePending,
+				"c-exited": tmuxpane.StatePending, "c-created": tmuxpane.StateActive,
+			}))
 			Expect(fake.Calls[1].DieWithParent).To(BeTrue(), "docker runs in its own process group, killed with the hook")
+			Expect(readSidecar(res.Sidecar).Panes).To(HaveLen(4))
+		})
+
+		It("CS-TMUX-072: a just-stopped container's mark keeps its last conversation, is not resolved and not written back", func() {
+			// The record would resolve a new conversation for a live mark;
+			// a stopped one keeps what it had (the launcher settles it).
+			record(7, conv2, proj, since+1000, "renamed", "user")
+			m := mark(func(m *tmuxpane.Mark) { m.Conversation, m.Name, m.NameSource = convID, "primary", "user" })
+			listPanes(paneRow("main", 1, 0, "%1", "claude-sandbox", &m))
+			dockerPS() // a successful, empty listing: the --rm container is gone
+			res, err := tmuxpane.Save(state, opts())
+			Expect(err).NotTo(HaveOccurred())
+			want := m
+			want.State = tmuxpane.StatePending
+			Expect(res.Rows).To(HaveLen(1))
+			Expect(res.Rows[0].Mark).To(Equal(want))
+			Expect(readSidecar(res.Sidecar).Panes[0].Mark).To(Equal(want))
+			Expect(writeBacks()).To(BeEmpty())
+			Expect(commands("tmux show-options")).To(Equal(0))
+			Expect(strings.Join(logs, "\n")).To(ContainSubstring("recorded the mark in %1 as pending (container " + m.Container + ": gone"))
+		})
+
+		It("CS-TMUX-072: the shutdown orderings all keep the row (plan 11 § 1.3)", func() {
+			m := mark(func(m *tmuxpane.Mark) { m.Conversation = convID })
+			pend := m
+			pend.State = tmuxpane.StatePending
+			for _, c := range []struct {
+				name   string
+				pane   tmuxpane.Mark
+				cmd    string
+				ps     string
+				psFail bool
+				want   string
+			}{
+				{"save before docker stops", m, "claude-sandbox", saveID + "\t" + m.Container + "\trunning", false, tmuxpane.StateActive},
+				{"docker stopped, launcher classified", pend, "zsh", "", false, tmuxpane.StatePending},
+				{"docker stopped, launcher in its die wait", m, "claude-sandbox", saveID + "\t" + m.Container + "\texited", false, tmuxpane.StatePending},
+				{"docker already down", m, "claude-sandbox", "", true, tmuxpane.StateActive},
+			} {
+				fake = &execx.Fake{}
+				listPanes(paneRow("main", 1, 0, "%1", c.cmd, &c.pane))
+				if c.psFail {
+					fake.On("docker ps", "", execx.Fail(1))
+				} else {
+					dockerPS(c.ps)
+				}
+				res, err := tmuxpane.Save(state, opts())
+				Expect(err).NotTo(HaveOccurred(), c.name)
+				Expect(res.Rows).To(HaveLen(1), c.name)
+				Expect(res.Rows[0].Mark.State).To(Equal(c.want), c.name)
+				Expect(res.Rows[0].Mark.Conversation).To(Equal(convID), c.name)
+			}
 		})
 
 		It("CS-TMUX-032: docker trouble keeps every active mark", func() {
