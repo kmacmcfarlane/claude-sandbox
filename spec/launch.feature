@@ -2162,3 +2162,25 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       cascade report keep naming the original path
     And an env file that cannot be read fails the launch (exit 2) before any
       image work, rather than proceeding past a file it could not check
+
+  Scenario: CS-LNCH-172 A FIFO, device or socket at an env file fails the launch at once, naming it
+    # An env file is session-writable like a config.yaml (CS-CASC-047): every
+    # read of one — the override notice, the lint, the CS-LNCH-132 snapshot —
+    # goes through cascade.ReadRegularFile (non-blocking open, fstat, regular
+    # files only, symlinks followed). Same outcome as config.yaml and the
+    # child Dockerfile's non-absent case (CS-IMG-074): an env file the launch
+    # cannot read is not "no env file" — skipping it would drop its keys (an
+    # upstream token) silently.
+    Given /ws/p/.claude-sandbox/env is a FIFO with no writer
+    When a launch that would create a container starts
+    Then every read returns at once (never waits for a writer)
+    And the override notice and the lint skip the file, as for any unreadable one
+    And the launch fails (exit 2) with "Error: reading env file:" naming the
+      file and "not a regular file", before any image work or docker create
+    And the same holds for a character device or a socket there
+    When the launcher attaches to or joins a session instead
+    Then nothing waits on the file: the drift check cannot compute the hash,
+      prints "WARNING: cannot compute the current configuration for the drift
+      check: <error naming the file>" (the CS-IMG-074 precedent), and reports
+      drift as for any uncomputable hash (a prompt, or exit 3 with no
+      terminal; --allow-config-drift attaches or joins)
