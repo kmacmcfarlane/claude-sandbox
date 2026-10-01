@@ -1213,7 +1213,7 @@ var _ = Describe("image build lifecycle", func() {
 
 	Describe("Version", func() {
 		It("CS-IMG-005: carries git describe --tags --always --dirty of the checkout", func() {
-			fake.On("git -C "+repo+" describe --tags --always --dirty", "v1.2.3-4-gabc123-dirty\n", nil)
+			fake.On(execx.GitSafePrefix+" -C "+repo+" describe --tags --always --dirty", "v1.2.3-4-gabc123-dirty\n", nil)
 			Expect(imagebuild.Version(fake, repo)).To(Equal("v1.2.3-4-gabc123-dirty"))
 		})
 
@@ -1225,6 +1225,26 @@ var _ = Describe("image build lifecycle", func() {
 		It("CS-IMG-005: falls back to \"unknown\" on empty git output", func() {
 			fake.On("git", "  \n", nil)
 			Expect(imagebuild.Version(fake, repo)).To(Equal("unknown"))
+		})
+
+		It("CS-LNCH-177: the describe blanks every filter driver the repository config names", func() {
+			fake.On("config -z --name-only --get-regexp", "filter.lfs.clean\x00filter.lfs.process\x00filter.my.drv.smudge\x00", nil)
+			fake.On("describe --tags", "v1\n", nil)
+			v, warn := imagebuild.Version(fake, repo)
+			Expect(v).To(Equal("v1"))
+			Expect(warn).To(BeEmpty())
+			Expect(fake.CommandLines()).To(ContainElement(execx.GitSafePrefix +
+				" -c filter.lfs.clean= -c filter.lfs.smudge= -c filter.lfs.process= -c filter.lfs.required=false" +
+				" -c filter.my.drv.clean= -c filter.my.drv.smudge= -c filter.my.drv.process= -c filter.my.drv.required=false" +
+				" -C " + repo + " describe --tags --always --dirty"))
+		})
+
+		It("CS-LNCH-177: a driver name a -c cannot carry skips the describe: \"unknown\", with a warning", func() {
+			fake.On("config -z --name-only --get-regexp", "filter.a=b.clean\x00", nil)
+			v, warn := imagebuild.Version(fake, repo)
+			Expect(v).To(Equal("unknown"))
+			Expect(warn).To(ContainSubstring("names a filter driver that cannot be overridden"))
+			Expect(fake.CommandLines()).NotTo(ContainElement(ContainSubstring("describe")))
 		})
 
 		It("CS-IMG-076: a git describe that never answers is killed; the stamp is \"unknown\" with one warning", func() {

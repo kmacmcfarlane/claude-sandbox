@@ -6,6 +6,7 @@ package launch_test
 // existing failure outcome with one warning.
 
 import (
+	"errors"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -35,23 +36,24 @@ func within2s(f func()) {
 }
 
 var _ = Describe("bounded launch-path git calls (CS-LNCH-176)", func() {
-	It("CS-LNCH-176: a hung GitRoot is killed and reads as not a git repository, with one warning", func() {
+	It("CS-LNCH-176: a hung GitRoot is killed and reports the timeout; root is empty", func() {
 		f := hungGit()
-		var root, warn string
-		within2s(func() { root, warn = launch.GitRoot(f, "/p") })
+		var root string
+		var err error
+		within2s(func() { root, err = launch.GitRoot(f, "/p") })
 		Expect(root).To(BeEmpty())
-		Expect(warn).To(Equal("WARNING: git -C /p rev-parse --show-toplevel did not finish within 50ms " +
-			"(a FIFO or other blocking file in its .git or a .gitignore can do this); treating /p as not a git repository."))
+		Expect(errors.Is(err, execx.ErrTimedOut)).To(BeTrue())
+		Expect(err).To(MatchError("git -C /p rev-parse --show-toplevel did not finish within 50ms"))
 		Expect(f.Killed).To(Equal(1))
 		Expect(f.Calls[0].DieWithParent).To(BeTrue())
 	})
 
-	It("CS-LNCH-176: a GitRoot that merely fails stays silent", func() {
+	It("CS-LNCH-176: a GitRoot that merely fails is no error", func() {
 		f := &execx.Fake{}
 		f.On("rev-parse --show-toplevel", "", execx.Fail(128))
-		root, warn := launch.GitRoot(f, "/p")
+		root, err := launch.GitRoot(f, "/p")
 		Expect(root).To(BeEmpty())
-		Expect(warn).To(BeEmpty())
+		Expect(err).NotTo(HaveOccurred())
 	})
 
 	It("CS-LNCH-176: a hung linked-worktree probe is killed and the project launches plain, with one warning", func() {

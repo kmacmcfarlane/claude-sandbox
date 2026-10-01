@@ -463,8 +463,8 @@ func gitignoreAdd(project, gi string, opts Options, lines ...string) bool {
 	// CS-LAY-025: a symlink leading out of the project tree is refused before
 	// any prompt: a session could point it at another file the user can
 	// write, and the default-yes prompt would append the lines there.
-	if target, out := outsideProject(project, gi); out {
-		fmt.Fprintf(opts.errw(), "WARNING: %s is a symlink to %s, outside the project %s; skipping the .gitignore update (the launcher writes .gitignore lines only inside the project).\n", gi, target, project)
+	if _, _, err := resolveInProject(project, gi); err != nil {
+		fmt.Fprintf(opts.errw(), "WARNING: %v; skipping the .gitignore update (the launcher writes .gitignore lines only inside the project).\n", err)
 		return false
 	}
 	existing := map[string]bool{}
@@ -526,8 +526,8 @@ func gitignoreAdd(project, gi string, opts Options, lines ...string) bool {
 // written only through project (CS-LAY-025): a symlink at it may lead
 // anywhere inside the project tree, never out of it.
 func ensureLines(project, file string, lines ...string) error {
-	if target, out := outsideProject(project, file); out {
-		return fmt.Errorf("%s is a symlink to %s, outside the project %s; refusing to write through it", file, target, project)
+	if _, _, err := resolveInProject(project, file); err != nil {
+		return fmt.Errorf("%v; refusing to write through it", err)
 	}
 	// CS-LAY-023: a missing file is empty; one that exists but is not a
 	// readable regular file (a FIFO, device, socket, directory) is an error,
@@ -559,40 +559,58 @@ func ensureLines(project, file string, lines ...string) error {
 	return writeRegularFile(project, file, []byte(b.String()))
 }
 
-// outsideProject reports whether file is a symlink whose target lies outside
-// project (CS-LAY-025), and that target: resolved when it exists, else the
-// link text made absolute — a dangling link to outside is refused too. A
-// file that is not a symlink, or a link inside the tree, is not refused here.
-// This is the check that names the target; the write itself goes through an
-// os.Root of the project, so a link swapped after this look still cannot
-// lead out (writeRegularFile).
-func outsideProject(project, file string) (string, bool) {
-	fi, err := os.Lstat(file)
-	if err != nil || fi.Mode()&os.ModeSymlink == 0 {
-		return "", false
-	}
-	root := project
+// resolveInProject resolves file — every symlink on the way, absolute or
+// relative, and a dangling final link to the path it would create — and
+// returns the physical project root and file's path relative to it
+// (CS-LAY-025). A target outside the project, or a path that cannot be
+// resolved (a symlink loop, a missing directory on the way), is an error
+// naming it: the launcher writes .gitignore lines only inside the project.
+func resolveInProject(project, file string) (root, rel string, err error) {
+	root = filepath.Clean(project)
 	if r, err := filepath.EvalSymlinks(project); err == nil {
 		root = r
 	}
 	target, err := filepath.EvalSymlinks(file)
 	if err != nil {
-		l, lerr := os.Readlink(file)
-		if lerr != nil {
-			return file, true
+		if !errors.Is(err, fs.ErrNotExist) {
+			return "", "", fmt.Errorf("%s cannot be resolved inside the project %s (%v)", file, project, unwrapPathErr(err))
 		}
-		if !filepath.IsAbs(l) {
-			l = filepath.Join(filepath.Dir(file), l)
+		// Missing: the file itself, or the end of a (chain of) dangling
+		// link(s). Follow the links by hand; the directory each lands in
+		// must exist and is resolved physically.
+		t := file
+		for i := 0; ; i++ {
+			if i == 40 {
+				return "", "", fmt.Errorf("%s cannot be resolved inside the project %s (too many levels of symbolic links)", file, project)
+			}
+			dir, derr := filepath.EvalSymlinks(filepath.Dir(t))
+			if derr != nil {
+				return "", "", fmt.Errorf("%s cannot be resolved inside the project %s (%v)", file, project, unwrapPathErr(derr))
+			}
+			t = filepath.Join(dir, filepath.Base(t))
+			fi, lerr := os.Lstat(t)
+			if lerr != nil || fi.Mode()&os.ModeSymlink == 0 {
+				break
+			}
+			l, rerr := os.Readlink(t)
+			if rerr != nil {
+				return "", "", fmt.Errorf("%s cannot be resolved inside the project %s (%v)", file, project, unwrapPathErr(rerr))
+			}
+			if !filepath.IsAbs(l) {
+				l = filepath.Join(filepath.Dir(t), l)
+			}
+			t = filepath.Clean(l)
 		}
-		target = filepath.Clean(l)
-		if within(target, filepath.Clean(project)) {
-			return "", false
-		}
+		target = t
 	}
-	if within(target, root) {
-		return "", false
+	if !within(target, root) {
+		return "", "", fmt.Errorf("%s is a symlink to %s, outside the project %s", file, target, project)
 	}
-	return target, true
+	rel, err = filepath.Rel(root, target)
+	if err != nil || rel == "." {
+		return "", "", fmt.Errorf("%s cannot be resolved inside the project %s", file, project)
+	}
+	return root, rel, nil
 }
 
 // within reports whether path is dir or lies inside it.
@@ -605,16 +623,17 @@ func within(path, dir string) bool {
 // descriptor is a regular file (CS-LAY-023): a FIFO swapped in after the read
 // fails open(2) with ENXIO (no reader) or is refused here, never blocking.
 // O_TRUNC is applied only after the check, so nothing else is truncated.
-// file must lie in dir, and is opened through os.OpenRoot(dir) (CS-LAY-025):
-// symlinks on the way are followed only while they stay inside dir, so a
-// link re-pointed out of the project after outsideProject looked fails the
-// open instead of writing elsewhere.
+// file must resolve inside dir (resolveInProject, CS-LAY-025) and is opened
+// as that resolved relative path through os.OpenRoot of dir's physical path:
+// a symlink to a file inside the project, absolute or relative, is followed,
+// and a link re-pointed out of the project after the resolution fails the
+// open (os.Root refuses any escape) instead of writing elsewhere.
 func writeRegularFile(dir, file string, data []byte) error {
-	rel, err := filepath.Rel(dir, file)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, "../") {
-		return fmt.Errorf("%s is not inside %s", file, dir)
+	rootDir, rel, err := resolveInProject(dir, file)
+	if err != nil {
+		return err
 	}
-	root, err := os.OpenRoot(dir)
+	root, err := os.OpenRoot(rootDir)
 	if err != nil {
 		return err
 	}

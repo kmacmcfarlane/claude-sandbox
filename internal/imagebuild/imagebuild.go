@@ -234,8 +234,27 @@ func bakedSkip(rel string, d os.DirEntry) bool {
 // working on this repository can write them, so a git that does not answer
 // within execx.GitTimeout is killed and the stamp is "unknown", with warning
 // naming the call.
+//
+// --dirty refreshes the index, which runs a filter driver's clean or process
+// program for a file it must re-hash; the drivers are named in the
+// session-writable .git/config, so one bounded "git config --get-regexp"
+// lists them first and the describe blanks each (CS-LNCH-177). A name that
+// cannot be passed on a -c skips the describe: "unknown", with a warning.
 func Version(r execx.Runner, repoRoot string) (version, warning string) {
-	out, err := execx.Git(r, execx.Cmd{Name: "git", Args: []string{"-C", repoRoot, "describe", "--tags", "--always", "--dirty"}})
+	cfg, err := execx.Git(r, execx.Cmd{Name: "git", Args: []string{"-C", repoRoot, "config", "-z", "--name-only", "--get-regexp", `^filter\.`}})
+	if errors.Is(err, execx.ErrTimedOut) {
+		return "unknown", execx.GitTimeoutWarning(err, `using the version stamp "unknown"`)
+	}
+	var names []string
+	if err == nil {
+		names = filterDrivers(cfg)
+	}
+	blank, ok := execx.GitFilterOverrides(names)
+	if !ok {
+		return "unknown", fmt.Sprintf("WARNING: %s/.git/config names a filter driver that cannot be overridden on the command line; skipping git describe (it could run that driver) and using the version stamp \"unknown\".", repoRoot)
+	}
+	args := append(blank, "-C", repoRoot, "describe", "--tags", "--always", "--dirty")
+	out, err := execx.Git(r, execx.Cmd{Name: "git", Args: args})
 	if errors.Is(err, execx.ErrTimedOut) {
 		return "unknown", execx.GitTimeoutWarning(err, `using the version stamp "unknown"`)
 	}
@@ -243,6 +262,28 @@ func Version(r execx.Runner, repoRoot string) (version, warning string) {
 		return "unknown", ""
 	}
 	return strings.TrimSpace(out), ""
+}
+
+// filterDrivers parses "git config -z --name-only" output into the filter
+// driver names: filter.<name>.<key> (the name may hold dots), each once.
+func filterDrivers(out string) []string {
+	seen := map[string]bool{}
+	var names []string
+	for _, k := range strings.Split(out, "\x00") {
+		if !strings.HasPrefix(strings.ToLower(k), "filter.") {
+			continue
+		}
+		rest := k[len("filter."):]
+		i := strings.LastIndex(rest, ".")
+		if i <= 0 {
+			continue
+		}
+		if n := rest[:i]; !seen[n] {
+			seen[n] = true
+			names = append(names, n)
+		}
+	}
+	return names
 }
 
 // EnsureBase builds the base image when missing or stale. Its only input is

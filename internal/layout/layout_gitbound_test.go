@@ -205,6 +205,36 @@ var _ = Describe("CS-LAY-025: .gitignore writes stay inside the project", func()
 		Expect(fi.Mode()&os.ModeSymlink).NotTo(BeZero(), "the link itself stays")
 	})
 
+	It("CS-LAY-025: an ABSOLUTE link to a file inside the project is followed, host and sidecar", func() {
+		shared := filepath.Join(proj, "shared.gitignore")
+		write(shared, "node_modules/\n")
+		Expect(os.Symlink(shared, hostGI)).To(Succeed())
+		sideTarget := filepath.Join(sb, "real.gitignore")
+		Expect(os.Symlink(sideTarget, sideGI)).To(Succeed())
+		Expect(setup(false)).To(Succeed(), errOut.String())
+		Expect(errOut.String()).NotTo(ContainSubstring("outside the project"))
+		Expect(read(shared)).To(ContainSubstring("/.claude-sandbox/"))
+		Expect(read(sideTarget)).To(ContainSubstring("temp/"), "a dangling absolute in-project link creates its target")
+	})
+
+	It("CS-LAY-025: a dangling link through a directory link out of the project is refused before the prompt", func() {
+		Expect(os.Symlink("..", filepath.Join(proj, "up"))).To(Succeed())
+		Expect(os.Symlink("up/newfile", hostGI)).To(Succeed())
+		Expect(setup(true)).To(Succeed())
+		Expect(errOut.String()).To(ContainSubstring("WARNING: " + hostGI + " is a symlink to " + filepath.Join(base, "newfile") +
+			", outside the project " + proj + "; skipping the .gitignore update"))
+		Expect(errOut.String()).NotTo(ContainSubstring("These entries are missing"), "refused before the prompt")
+		Expect(filepath.Join(base, "newfile")).NotTo(BeAnExistingFile())
+
+		Expect(os.Remove(hostGI)).To(Succeed())
+		Expect(os.Symlink("../up/newfile", sideGI)).To(Succeed())
+		errOut.Reset()
+		err := setup(false)
+		Expect(err).To(MatchError(ContainSubstring(sideGI + " is a symlink to " + filepath.Join(base, "newfile") + ", outside the project")))
+		Expect(err).NotTo(MatchError(ContainSubstring("path escapes")), "the CS-LAY-025 refusal, not os.Root's raw error")
+		Expect(filepath.Join(base, "newfile")).NotTo(BeAnExistingFile())
+	})
+
 	It("CS-LAY-025: the writer opens through the project root, so a link re-pointed out after the check cannot write outside", func() {
 		gi := filepath.Join(proj, "gi")
 		Expect(os.Symlink(outside, gi)).To(Succeed())

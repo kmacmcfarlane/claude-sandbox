@@ -52,20 +52,23 @@ func ValidateWorktreeName(name string) error {
 // still counts — claude anchors the worktree at the repository root either way.
 //
 // The call is bounded (CS-LNCH-176): git that does not answer within
-// execx.GitTimeout (a FIFO in .git) is killed and dir is treated as not a
-// git repository — the CS-LNCH-046 stand-down — with warning naming the call.
-func GitRoot(r execx.Runner, dir string) (root, warning string) {
+// execx.GitTimeout (a FIFO in .git) is killed and err is its *TimeoutError,
+// with root "". err is non-nil ONLY for that timeout; any other failure is
+// the plain "not a git repository" (root "", nil). The caller decides what
+// a timeout means: a requested worktree refuses to launch, otherwise it is
+// the CS-LNCH-046 outcome with one warning.
+func GitRoot(r execx.Runner, dir string) (root string, err error) {
 	out, err := execx.Git(r, execx.Cmd{
 		Name: "git",
 		Args: []string{"-C", dir, "rev-parse", "--show-toplevel"},
 	})
 	if errors.Is(err, execx.ErrTimedOut) {
-		return "", execx.GitTimeoutWarning(err, "treating "+dir+" as not a git repository")
+		return "", err
 	}
 	if err != nil {
-		return "", ""
+		return "", nil
 	}
-	return strings.TrimSpace(out), ""
+	return strings.TrimSpace(out), nil
 }
 
 // ExistingWorktrees lists the names under <root>/.claude/worktrees, i.e. the

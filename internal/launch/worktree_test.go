@@ -54,7 +54,7 @@ var _ = Describe("worktree mode", func() {
 	It("CS-LNCH-046: GitRoot asks git for the top level and reports none when outside a repository", func() {
 		fake := &execx.Fake{}
 		Expect(launch.GitRoot(fake, "/p/sub")).To(Equal(""), "an unscripted fake answers nothing")
-		Expect(fake.CommandLines()).To(ContainElement("git -C /p/sub rev-parse --show-toplevel"))
+		Expect(fake.CommandLines()).To(ContainElement(execx.GitSafePrefix + " -C /p/sub rev-parse --show-toplevel"))
 
 		fake = &execx.Fake{}
 		fake.On("rev-parse --show-toplevel", "/p\n", nil)

@@ -811,7 +811,8 @@ Feature: Image build lifecycle (CS-IMG)
     # --dirty refreshes the index and reads every .gitignore of this
     # repository, which a sandbox working on it can write (CS-LNCH-176).
     Given "git -C <repo> describe --tags --always --dirty" does not answer
-      within execx.GitTimeout
+      within execx.GitTimeout (or the "git config" that lists the filter
+      drivers first, CS-LNCH-177, does not)
     Then it is killed and the stamp is "unknown", as outside a git repo
       (CS-IMG-005), and one CS-LNCH-176 warning ending 'using the version
       stamp "unknown"' is printed on stderr (a headless launch's too)

@@ -1103,7 +1103,7 @@ func restoreAttach(env *Env, p *actProbes, m tmuxpane.Mark, d tmuxpane.Decision,
 		}
 	}
 	_, _, _, home := hostIdentity(renv.Getenv)
-	gitRoot, _ := launch.GitRoot(env.Runner, m.Project) // CS-LNCH-176: bounded; a timeout is ""
+	gitRoot, _ := launch.GitRoot(env.Runner, m.Project) // CS-LNCH-176: bounded; a timeout is "", silently
 	mark := attachMark(s, home, gitRoot)
 	mark.prior = &prior
 	mark.restoreAttach = true

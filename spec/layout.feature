@@ -389,9 +389,18 @@ Feature: .claude-sandbox/ layout lifecycle (CS-LAY)
     Given the sidecar .claude-sandbox/.gitignore is such a symlink
     Then the setup fails with an error naming it and its target, as a
       non-regular sidecar .gitignore does (CS-LAY-023), and writes nothing
-    Given either is a symlink to a file inside the project
+    Given either is a symlink (absolute or relative, a dangling one included)
+      to a file inside the project
     Then it is followed: the lines land in the target, as before
-    And every .gitignore write opens the file through os.OpenRoot(<project>),
-      which follows symlinks only while they stay inside the project, so a
-      link re-pointed out after the check fails the write instead of
-      landing outside
+    And the target is resolved before any prompt — every symlink on the way,
+      a dangling final link (or chain) to the path it would create — and a
+      target outside the project, through a directory link too ("up/newfile"
+      with "up -> .."), is refused as above; a path that cannot be resolved
+      (a loop, a missing directory) is refused the same way, naming why
+    And every .gitignore write opens that resolved project-relative path
+      through os.OpenRoot(<physical project>), which refuses any escape, so a
+      link re-pointed out after the check fails the write instead of landing
+      outside
+    And a .claude-sandbox directory that is itself a symlink out of the
+      project makes the sidecar .gitignore resolve outside it, which fails the
+      setup the same way

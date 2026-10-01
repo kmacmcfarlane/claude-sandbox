@@ -177,7 +177,7 @@ var _ = Describe("layout adoption at launch", func() {
 		lines := c2.fake.CommandLines()
 		initIdx, runIdx := -1, -1
 		for i, l := range lines {
-			if strings.Contains(l, "git -C "+sb2+" init -q") {
+			if strings.Contains(l, execx.GitSafePrefix+" -C "+sb2+" init -q") {
 				initIdx = i
 			}
 			if strings.HasPrefix(l, "docker create ") {

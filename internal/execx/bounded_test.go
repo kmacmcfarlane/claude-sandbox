@@ -8,6 +8,9 @@ package execx_test
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -74,5 +77,55 @@ var _ = Describe("Bounded (CS-LNCH-176)", func() {
 		err := &execx.TimeoutError{Command: "git -C /p rev-parse --show-toplevel", After: 5 * time.Second}
 		Expect(execx.GitTimeoutWarning(err, "doing X")).To(Equal(
 			"WARNING: git -C /p rev-parse --show-toplevel did not finish within 5s (a FIFO or other blocking file in its .git or a .gitignore can do this); doing X."))
+	})
+
+	It("CS-LNCH-176: Git's path sends the group SIGTERM first, so git can remove its locks; SIGKILL only after the grace", func() {
+		dir := GinkgoT().TempDir()
+		mark := filepath.Join(dir, "term")
+		script := "trap 'echo term > " + mark + "; exit 0' TERM; sleep 30 & wait"
+		start := time.Now()
+		_, err := execx.BoundedTerm(execx.System{}, 300*time.Millisecond, 2*time.Second, execx.Cmd{Name: "sh", Args: []string{"-c", script}})
+		Expect(errors.Is(err, execx.ErrTimedOut)).To(BeTrue())
+		Expect(time.Since(start)).To(BeNumerically("<", 2*time.Second), "the trap exited at once: no wait for the grace")
+		Expect(mark).To(BeAnExistingFile(), "SIGTERM reached it")
+
+		// Ignoring SIGTERM: SIGKILL after the grace.
+		start = time.Now()
+		_, err = execx.BoundedTerm(execx.System{}, 200*time.Millisecond, 300*time.Millisecond,
+			execx.Cmd{Name: "sh", Args: []string{"-c", "trap '' TERM; sleep 30 & wait"}})
+		Expect(errors.Is(err, execx.ErrTimedOut)).To(BeTrue())
+		Expect(time.Since(start)).To(BeNumerically("<", 3*time.Second))
+	})
+
+	It("CS-LNCH-176: Bounded (tmux's helper) keeps the immediate SIGKILL: no SIGTERM", func() {
+		dir := GinkgoT().TempDir()
+		mark := filepath.Join(dir, "term")
+		_, err := execx.Bounded(execx.System{}, 300*time.Millisecond,
+			execx.Cmd{Name: "sh", Args: []string{"-c", "trap 'echo term > " + mark + "; exit 0' TERM; sleep 30 & wait"}})
+		Expect(errors.Is(err, execx.ErrTimedOut)).To(BeTrue())
+		_, statErr := os.Stat(mark)
+		Expect(os.IsNotExist(statErr)).To(BeTrue())
+	})
+
+	It("CS-LNCH-177: Git puts GitSafeArgs before the caller's args; the prefix constant matches them", func() {
+		Expect(execx.GitSafePrefix).To(Equal("git " + strings.Join(execx.GitSafeArgs, " ")))
+		Expect(execx.GitSafeArgs).To(Equal([]string{"-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "--no-optional-locks"}))
+		f := &execx.Fake{}
+		_, err := execx.Git(f, execx.Cmd{Name: "git", Args: []string{"-C", "/p", "ls-files"}})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(f.CommandLines()).To(Equal([]string{execx.GitSafePrefix + " -C /p ls-files"}))
+	})
+
+	It("CS-LNCH-177: GitFilterOverrides blanks every named driver; a name a -c cannot carry is refused", func() {
+		args, ok := execx.GitFilterOverrides([]string{"lfs", "a.b"})
+		Expect(ok).To(BeTrue())
+		Expect(args).To(Equal([]string{
+			"-c", "filter.lfs.clean=", "-c", "filter.lfs.smudge=", "-c", "filter.lfs.process=", "-c", "filter.lfs.required=false",
+			"-c", "filter.a.b.clean=", "-c", "filter.a.b.smudge=", "-c", "filter.a.b.process=", "-c", "filter.a.b.required=false",
+		}))
+		_, ok = execx.GitFilterOverrides([]string{"x=y"})
+		Expect(ok).To(BeFalse())
+		_, ok = execx.GitFilterOverrides([]string{"x\ny"})
+		Expect(ok).To(BeFalse())
 	})
 })

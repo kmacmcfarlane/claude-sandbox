@@ -699,6 +699,20 @@ type worktreeChoice struct {
 	Root string
 	// Name is the explicit --worktree=NAME value, "" to default (CS-LNCH-043).
 	Name string
+	// GitTimeout is set when the mode resolved on but git did not answer
+	// whether the project is a git work tree (CS-LNCH-176): a new container
+	// or a join refuses (requireWorktreeGit) rather than run unisolated.
+	GitTimeout error
+}
+
+// requireWorktreeGit is the CS-LNCH-176 refusal: a requested worktree whose
+// git pre-check timed out. Exit 2 — before this bound the launch would have
+// hung, and an unattended ralph must not fall back to the shared checkout.
+func (wt worktreeChoice) requireWorktreeGit() error {
+	if wt.GitTimeout == nil {
+		return nil
+	}
+	return exitErr(2, "Error: a worktree was requested, but %v (a FIFO or other blocking file in its .git or a .gitignore can do this); not launching in the shared checkout instead. Remove the blocking file, or pass --no-worktree to launch there.", wt.GitTimeout)
 }
 
 // resolveWorktree applies CLI > CLAUDE_SANDBOX_WORKTREE > merged config >
@@ -722,12 +736,19 @@ func resolveWorktree(env *Env, projectDir string, f *launchFlags, cfg *cascade.C
 	} else {
 		wt.Enabled = launch.ResolveTristate(f.Worktree, env.Getenv("CLAUDE_SANDBOX_WORKTREE"), cfg.Worktree, f.Ralph)
 	}
-	// CS-LNCH-176: a git that does not answer in time is "not a git
-	// repository" (the stand-down below), with one warning.
-	var gitWarn string
-	wt.Root, gitWarn = launch.GitRoot(env.Runner, projectDir)
-	if gitWarn != "" {
-		fmt.Fprintln(env.Err, gitWarn)
+	// CS-LNCH-176: a git that does not answer in time. With a worktree
+	// requested, isolation was asked for and the shared checkout is not a
+	// substitute: GitTimeout makes a new container or a join refuse
+	// (requireWorktreeGit); an attach, which needs no worktree, goes on.
+	// Otherwise it is "not a git repository", with one warning.
+	var gitErr error
+	wt.Root, gitErr = launch.GitRoot(env.Runner, projectDir)
+	if gitErr != nil {
+		if wt.Enabled {
+			wt.Enabled, wt.GitTimeout = false, gitErr
+			return wt
+		}
+		fmt.Fprintln(env.Err, execx.GitTimeoutWarning(gitErr, "treating "+projectDir+" as not a git repository"))
 	}
 	if wt.Enabled && wt.Root == "" {
 		// claude itself refuses "--worktree requires a git repository", so
@@ -1006,6 +1027,11 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 	case actionQuit:
 		return nil
 	case actionAttach, actionJoin:
+		if decision.Action == actionJoin {
+			if err := wt.requireWorktreeGit(); err != nil {
+				return err
+			}
+		}
 		done, aerr := joinExistingSession(env, projectDir, f, cfg, envFiles, decision, wt, linked)
 		if aerr != nil {
 			return aerr
@@ -1014,6 +1040,12 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 			return nil
 		}
 		// The drift prompt chose a new container instead: fall through and launch.
+	}
+
+	// CS-LNCH-176: a new container with a requested worktree whose git
+	// pre-check timed out (an attach's drift prompt may also land here).
+	if err := wt.requireWorktreeGit(); err != nil {
+		return err
 	}
 
 	// CS-LNCH-129/130: this launch will create a container (attach and join

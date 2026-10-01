@@ -146,6 +146,11 @@ func (p *sysProcess) Pid() int                   { return p.cmd.Process.Pid }
 // KillGroup SIGKILLs the process's whole group (Start gives it its own).
 func (p *sysProcess) KillGroup() error { return syscall.Kill(-p.cmd.Process.Pid, syscall.SIGKILL) }
 
+// SignalGroup sends sig to the process's whole group.
+func (p *sysProcess) SignalGroup(sig syscall.Signal) error {
+	return syscall.Kill(-p.cmd.Process.Pid, sig)
+}
+
 // GroupKiller is a Process that leads its own process group and can be
 // killed with everything it started. Fake processes do not implement it, so
 // a test never signals a real process group.
@@ -215,6 +220,12 @@ func (p *tetheredProcess) Pid() int                   { return p.cmd.Process.Pid
 // own, so a grandchild still holding a stdout pipe dies with it and Wait does
 // not wait on the pipe (CS-TMUX-040).
 func (p *tetheredProcess) KillGroup() error { return syscall.Kill(-p.cmd.Process.Pid, syscall.SIGKILL) }
+
+// SignalGroup sends sig to the process's whole group (CS-LNCH-176's SIGTERM
+// before the kill).
+func (p *tetheredProcess) SignalGroup(sig syscall.Signal) error {
+	return syscall.Kill(-p.cmd.Process.Pid, sig)
+}
 
 // startTethered starts c in its own process group with a parent-death
 // signal. Linux delivers that signal when the forking THREAD exits, so one

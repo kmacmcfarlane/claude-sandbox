@@ -953,7 +953,13 @@ started) and the launch goes on with that call's ordinary failure outcome plus o
 `WARNING: <git command> did not finish within 5s …` line — not a git repository (a
 requested worktree stands down), a plain project instead of a linked worktree, the
 version stamp `unknown`, and for the layout's checks an unknown answer: no `.gitignore`
-update and no sidecar git init on that launch.
+update and no sidecar git init on that launch. A launch that asked for a worktree
+(`--worktree`, ralph's default, `CLAUDE_SANDBOX_WORKTREE`, `worktree: true`) is the exception:
+when git does not answer whether the project is a repository it refuses with exit 2
+instead of running in the shared checkout (`--no-worktree` launches there). These git
+commands also never run a program the repository's `.git/config` names: the launcher
+passes `-c core.fsmonitor=false -c core.hooksPath=/dev/null --no-optional-locks` to each,
+and blanks every filter driver for the version stamp's `git describe --dirty`.
 
 Merge rules:
 
@@ -1205,8 +1211,8 @@ duplicated, and skipped when an existing rule such as `.claude/`, `.claude/*` or
 entries are written without a prompt, `--no-gitignore` does the same.
 
 The launcher writes `.gitignore` lines only inside the project. A `.gitignore` (host or
-sidecar) that is a symlink to a file inside the project is followed; one that leads out of
-it is refused — the host one with a `WARNING: … is a symlink to …, outside the project …`
+sidecar) that is a symlink (absolute or relative) to a file inside the project is followed;
+one that leads out of it, directly or through a directory link, is refused — the host one with a `WARNING: … is a symlink to …, outside the project …`
 line and no prompt, the sidecar one by failing the setup naming it — so a session cannot
 point the file at, say, `~/.bashrc` and have the launcher append to that.
 
