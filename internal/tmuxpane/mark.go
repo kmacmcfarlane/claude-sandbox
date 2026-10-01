@@ -45,7 +45,7 @@ const (
 
 // Mark is the pane mark (CS-TMUX-011/012). Fields a later feature fills — the
 // conversation id, its name and name source (the save hook, F3) — are empty
-// at launch and omitted. Window labels are not part of it (decision 52).
+// at launch and omitted. Window labels live in window options (label.go).
 type Mark struct {
 	V     int    `json:"v"`
 	State string `json:"state"`
@@ -90,6 +90,13 @@ type Mark struct {
 	Replay       []string `json:"replay,omitempty"`
 	Unreplayed   []string `json:"unreplayed,omitempty"`
 	FlagsUnknown bool     `json:"flagsUnknown,omitempty"`
+
+	// Labelled is true when this launch named its window and owns the label
+	// (CS-TMUX-020..022). The sidecar keeps it in the row, so a restore of
+	// the row — and only such a restore — may reclaim a window resurrect
+	// restored under that name (case C): a hand name with the same text
+	// looks exactly alike.
+	Labelled bool `json:"labelled,omitempty"`
 
 	// Filled by the save hook (F3); empty at launch.
 	Conversation string `json:"conversation,omitempty"`

@@ -96,7 +96,7 @@ Feature: tmux integration (CS-TMUX)
   # explicit both ways — and a --model given on the command line) plus an
   # allowlist of non-widening claude flags; every other flag given at launch
   # is recorded by NAME only, never by value, so a restore can say what it
-  # left out. Window labels are not part of F1 (decision 52 is open).
+  # left out. Window labels are F2's (below), riding the same gate.
 
   Scenario: CS-TMUX-010 a launch inside tmux marks its pane and unmarks it when the session ends
     Given TMUX and TMUX_PANE (e.g. "%7") are set, on the host, not headless
@@ -171,7 +171,7 @@ Feature: tmux integration (CS-TMUX)
   Scenario: CS-TMUX-014 no tmux call outside tmux, in a sandbox, for headless or --detach
     Given TMUX or TMUX_PANE is unset, or CLAUDE_SANDBOX_PROJECT_DIR is set (a nested launcher),
       or the launch is headless (even with TMUX set), or it is a --detach launch
-    Then the launcher runs no tmux command at all
+    Then the launcher runs no tmux command at all — no mark and no window label (CS-TMUX-020)
 
   Scenario: CS-TMUX-015 the mark is removed on a clean exit, a crash, an OOM kill or a detach
     Given a marked pane
@@ -198,6 +198,10 @@ Feature: tmux integration (CS-TMUX)
       is killed after 1 s (tmuxpane.CallTimeout, the "claude --version" probe precedent), so a hung
       tmux server delays the launch by at most about 1 s per call (read and set before the session,
       the unset after it) and never blocks it
+    # The window label's calls (CS-TMUX-025) follow the same rule: one read; only when it answered
+    # and the launch names the window, up to three writes and one confirming read, plus one owner
+    # read (list-panes) for a window another pane labelled; at the end, two reads and up to three
+    # writes only for a launch that owns the label.
 
   Scenario: CS-TMUX-017 a launch over a pending mark says what the pane was waiting for
     Given the pane's mark is "state": "pending" naming conversation <id> (written by a restore)
@@ -233,6 +237,170 @@ Feature: tmux integration (CS-TMUX)
     Then the prior mark is set back verbatim instead of unsetting the option
     And a hand attach, or one whose container is still there, unmarks as usual
 
+  # ---- F2: the window label (operator answer 52 a = B2e) ----
+  #
+  # A launch in a tmux pane names its window by rule 42: the conversation's
+  # user-given name, else the project folder's base name. It uses
+  # `rename-window`, which turns tmux's automatic-rename off for that window
+  # (tmux.1, automatic-rename: "This flag is automatically disabled for an
+  # individual window when a name is specified ... later with rename-window"),
+  # so tmux-resurrect (cff343c) saves the name and the window-level `off`
+  # (save.sh:63-64, 210-212) and restores both verbatim (restore.sh:296-302):
+  # no tmux.conf line is needed. Two window user options record what
+  # claude-sandbox did — @claude-sandbox-label (the name it gave) and
+  # @claude-sandbox-label-pane (the pane that owns it) — and the pane mark
+  # records "labelled" when its launch owns the label. resurrect saves no user
+  # options, so a restored window is reclaimed only by a restore of a row that
+  # was labelled (CS-TMUX-022). A name the operator gave is never touched.
+  # SECURITY: rename-window format-expands its argument with jobs enabled
+  # (tmux cmd-rename-window.c → format_single_from_target, no FORMAT_NOJOBS),
+  # and a /rename's name comes from a registry record code inside a sandbox
+  # writes; removing every "#" from a label is what stops "#(cmd)" from running
+  # a command on the host (CS-TMUX-021). Plan: sandbox-reboot-restore 14 and 15
+  # (supersede 05 § 4, 06 § 8, 07 § 5 and 09's B0-B5).
+
+  Scenario: CS-TMUX-020 a marked launch names its window
+    Given a launch that marks its pane (CS-TMUX-010: TMUX and a "%N" TMUX_PANE, on the host, not
+      headless, not --detach) — a new container, --branch, an attach, a join or ralph
+    When the pane's prior mark has been read, before the new mark is set and the session child starts
+    Then the launcher runs one "tmux display-message -p -t %N" of the window's id, its effective
+      automatic-rename (#{automatic-rename}: "1" or "on" is on), @claude-sandbox-label-pane, its
+      name and @claude-sandbox-label (that user option last: tmux escapes tabs in window names,
+      not in option values)
+    And for a window whose automatic-rename is on it sets "set-option -w -t %N
+      @claude-sandbox-label <label>", then "set-option -w -t %N @claude-sandbox-label-pane %N",
+      then "rename-window -t %N -- <label>" — which turns automatic-rename off for that window —
+      then reads the window once more to confirm it owns it (CS-TMUX-023)
+    And the options go first: a failed rename leaves a label that does not equal the name, which
+      reads as a name the operator gave and is never touched (the reverse order could freeze a
+      name nobody owns)
+    And the new mark carries "labelled": true exactly when the launch owns the label afterwards
+
+  Scenario: CS-TMUX-021 the label is the user-given name, else the project folder, cleaned
+    Given a launch's label source
+    Then it is the last "--name <v>", "--name=<v>", "-n <v>" or "-n<v>" in the passthrough before
+      the scan's stop (CS-TMUX-013's rules) — a restore resume passes --name for "user" names
+    And for a restore attach with no --name, the restore's pending row's name when its source is
+      "user"
+    And otherwise the base name of the project directory
+    And the label is cleaned: control characters become spaces, format characters are dropped,
+      every "#" is removed, "\" (resurrect reads its state file with read without -r) and ";" (a
+      trailing one is a tmux command separator, even in argv) are removed, whitespace is
+      collapsed, leading "-" and spaces are trimmed, and it is cut to 40 characters
+    And removing "#" is the sandbox-to-host command-execution barrier: rename-window
+      format-expands its argument with jobs on, so a name holding "#(cmd)" — a /rename read from a
+      sandbox-written registry record, or a --name — would otherwise run cmd on the host; no "#"
+      reaches rename-window or a label option
+    And cleaning is idempotent, since ownership is a string comparison
+    And an empty label names nothing (no tmux write)
+
+  Scenario: CS-TMUX-022 a window that is not automatic is left alone unless it carries the label
+    Given the window read of CS-TMUX-020 shows automatic-rename off
+    When @claude-sandbox-label is set and equals the window's name (claude-sandbox's own label)
+    Then the launch takes it over (options set, renamed only when its label differs) when
+      @claude-sandbox-label-pane is this pane or names a pane no longer in the window ("tmux
+      list-panes -t %N -F '#{pane_id}'", one bounded read, run only then)
+    And it leaves the window alone when that pane is still in the window (CS-TMUX-023)
+    When no label option is set, the window's name equals this launch's label, and the launch is a
+      restore (`tmux restore`, which hands in the pane's row) whose row records "labelled": true
+    Then the launch reclaims it (a window resurrect restored: it saves no user options): both
+      options set, no rename
+    And a hand launch, attach or join never reclaims: a window the operator named by hand with the
+      same text (the project folder's name, say) looks exactly alike, and is left alone
+    When the window's name is anything else (a name the operator gave, or a rename since)
+    Then nothing is written, and the session's end does not hand it back
+
+  Scenario: CS-TMUX-023 one pane owns a shared window's name
+    Given two marked panes in one window
+    Then the first that labels the window owns it (@claude-sandbox-label-pane)
+    And a launch in the other pane writes nothing while the owner pane exists, and never hands the
+      window back
+    And when the owner hands the window back (CS-TMUX-024), the window is automatic again and the
+      next launch in any of its panes labels it
+    And after writing, a launch reads the window again: when another pane's options won, it does not
+      own the label, and when its own rename came last (the name is its label but not the winner's)
+      it renames the window to the winner's label, so the window stays owned and consistent
+    # Accepted: the other sandbox panes there stay unlabelled until their next launch; and two launches
+    # racing in one automatic window can still interleave inside that read-and-repair (two tmux
+    # round trips), leaving a name nobody owns with automatic-rename off — narrowed, not closed
+    # (tmux has no compare-and-set; plan 15 § 6).
+
+  Scenario: CS-TMUX-024 the session's end hands the window back
+    Given a launch that labelled, took over or reclaimed its window (it owns the label)
+    When the pane's mark is UNSET at the end (CS-TMUX-015, or CS-TMUX-018 with no prior)
+    Then the pane's mark is read once more (before the unset) for the conversation's user-given name
+    And one window read runs, and when @claude-sandbox-label-pane is still this pane:
+    And when automatic-rename is off and the name still equals @claude-sandbox-label, or equals the
+      cleaned user-given name (a refresh cut between its rename and its option write,
+      CS-TMUX-043), "set-option -w -u -t %N automatic-rename" runs (the window inherits the global
+      again)
+    And then "set-option -w -u -t %N @claude-sandbox-label" and
+      "set-option -w -u -t %N @claude-sandbox-label-pane"
+    And a window renamed by hand since keeps its name and its automatic-rename; only the options go
+    And a mark kept PENDING (CS-TMUX-071) or given its prior back (CS-TMUX-018/019/062) keeps the
+      label: the pane is waiting to be restored, and a shutdown save should record the name
+    And a launch that did not own the label makes no call at the end
+    # "-u", not "on": the window was automatic before the launch (CS-TMUX-020), almost always by
+    # inheriting the global; unsetting restores exactly that, is resurrect's own ":" model
+    # (restore.sh:298-299), and respects a global "automatic-rename off". A window that had an
+    # explicit window-level "on" under a global "off" keeps the name after the session — accepted.
+
+  Scenario: CS-TMUX-025 every label call is bounded and silent
+    Given any window-label tmux call
+    Then it runs through Runner.Start in its own process group and is killed after 1 s
+      (tmuxpane.CallTimeout), like the mark's (CS-TMUX-016)
+    And a failed or unparsable window read writes nothing more, and the end makes no call
+    And no label failure prints anything or changes the launch, its session or its exit status
+
+  Scenario: CS-TMUX-026 no tmux.conf line: resurrect restores the label verbatim
+    Given a window claude-sandbox named (automatic-rename off at the window level)
+    When tmux-resurrect saves it and later restores it
+    Then the saved name and "off" come back (restore.sh: rename-window, then set-option
+      automatic-rename off), so the label is back before any restore of the session runs
+    And the restored session's launch reclaims it (CS-TMUX-022): the row records "labelled", a
+      restore resume passes --name for a "user" name and runs from the project folder, so it
+      computes the saved label
+    And a window handed back (CS-TMUX-024) was saved as ":" and is restored automatic
+    And nothing of the label but the mark's "labelled" bit lives in the sidecar
+
+  Scenario: CS-TMUX-041 the save hook renames an owned window to a /rename
+    Given the save hook (CS-TMUX-030) kept a pane whose mark is ACTIVE and, after the registry
+      match (CS-TMUX-033..035), carries a name with name source "user"
+    When the pane's mark, read again, is still the one this save resolved (CS-TMUX-044), and one
+      bounded window read for that pane shows @claude-sandbox-label-pane = the pane,
+      automatic-rename off, the name equal to @claude-sandbox-label, and that label differs from
+      the cleaned name (CS-TMUX-021)
+    Then "rename-window -t <pane> -- <name>" then "set-option -w -t <pane> @claude-sandbox-label
+      <name>" run, in that order (CS-TMUX-043)
+    And resurrect records the new name at the next save
+
+  Scenario: CS-TMUX-042 a hand rename wins forever
+    Given a window whose name no longer equals @claude-sandbox-label nor the conversation's cleaned
+      user-given name (the operator renamed it)
+    Then neither the save hook's refresh nor the session's end renames it or turns its
+      automatic-rename back on
+    # Accepted: a hand rename to exactly the conversation's own cleaned name is indistinguishable
+    # from a refresh cut after its rename (CS-TMUX-043) and is treated as claude-sandbox's.
+
+  Scenario: CS-TMUX-043 the refresh runs after the write-backs, within the deadline, and never freezes
+    Given the save hook's mark write-backs (CS-TMUX-035/070) are done
+    Then the refresh runs pane by pane while SaveDeadline (3 s) has time left, every call bounded by
+      what is left (at most 1 s)
+    And at the deadline what is left waits for the next save, with one log line
+    And a failed read or write is one line in tmux-save.log; nothing is printed
+    And the rename runs before the option write: a cut between them leaves the name equal to the
+      wanted label with the old option, which the next refresh repairs (an owned window whose name
+      already equals the conversation's cleaned name gets only the option written) and the end
+      hands back (CS-TMUX-024)
+
+  Scenario: CS-TMUX-044 the refresh never acts for another's window or a name the user did not give
+    Then a pending mark, a name whose source is not "user" (never back to the folder name: a --name
+      label whose record is not resolved yet must not flip) and a window owned by another pane are
+      left alone
+    And before each refresh the pane's mark is read again (one bounded show-options) and must equal
+      the mark this save resolved — written back or not — so a pane relaunched during the save never
+      gets the previous conversation's name
+
   # ---- F3: the save hook and its sidecar ----
   #
   # tmux-resurrect (read at cff343c) runs its post-save-layout hook synchronously
@@ -248,8 +416,8 @@ Feature: tmux integration (CS-TMUX)
   # `tmux restore` reads. Continuum saves every minute, so the hook never prints
   # and every tmux or docker call it waits on is bounded. Registry records are written
   # by code inside sandboxes (answer 31b): only the conversation id and the name
-  # are taken from them, both validated. Window labels (decision 52, open) are not
-  # part of F3; the IDs 041 to 044 of this prefix stay reserved for them.
+  # are taken from them, both validated. The window-label refresh the hook also
+  # runs is F2's, specified with it (CS-TMUX-041..044).
 
   Scenario: CS-TMUX-030 the save hook's guards: host only, a resurrect state file, silent, exit 0
     Given the command "claude-sandbox tmux save <state-file>"

@@ -535,6 +535,34 @@ or when its worktree name is not recorded yet); a start that fails puts that mar
 `spec/tmux.feature` CS-TMUX-010..019, CS-TMUX-071, `spec/launch.feature` CS-LNCH-087..090,
 CS-LNCH-109.
 
+### tmux window names
+
+A launch that marks its pane also names the pane's **window**: the conversation's name when you
+gave it one (`-- --name <n>`, or a later `/rename` — see below), else the project folder's name.
+It uses `rename-window`, which turns tmux's `automatic-rename` off for that window, so
+tmux-resurrect saves the name and restores it exactly; no `tmux.conf` line is needed. The name is
+cleaned (control characters, `\` and `;` removed) and cut to 40 characters, and **every `#` is
+removed**: `rename-window` expands tmux formats in its argument, jobs included, and a `/rename`
+name is read from a registry record code inside a sandbox writes, so a `#(command)` there would
+otherwise run that command on the host.
+
+- A window you named yourself is never touched — not at launch, not later. A window whose
+  automatic name is on gets the label; one that already carries claude-sandbox's label is taken
+  over only by the pane that set it (or when that pane is gone), so two sandbox panes in one
+  window never fight.
+- The save hook (below) renames the window to a later `/rename` of the conversation, within a
+  minute, while the window still has the name claude-sandbox gave it.
+- When the session ends (the pane's mark is removed), the window goes back to tmux's automatic
+  name, unless you renamed it meanwhile. A pane kept pending for a restore keeps its name.
+- Two window options record this: `@claude-sandbox-label` and `@claude-sandbox-label-pane`
+  (`tmux show-options -w`), and the pane mark records `"labelled": true`. resurrect does not save
+  the options; `tmux restore` reclaims a restored window when the saved row was labelled and the
+  name matches. A hand launch never does: a window you named by hand with the same text (the
+  folder's name, say) looks exactly alike, and stays yours.
+
+Every call is bounded (1 s) and silent, like the mark's. Spec: `spec/tmux.feature`
+CS-TMUX-020..026, CS-TMUX-041..044.
+
 ### tmux save hook
 
 `claude-sandbox tmux save <state-file>` is a tmux-resurrect **post-save-layout hook**. Wire it

@@ -132,13 +132,17 @@ type LaunchRecord struct {
 	// Unreplayed names every other flag given at launch that a restore will
 	// not pass. Names only.
 	Unreplayed []string
+	// Name is the conversation name the passthrough gives claude (--name),
+	// "" when none: the window label's source (CS-TMUX-021). Never part of
+	// the launchflags label.
+	Name string
 }
 
 // Record classifies a launch: launcherGiven is the canonical names of the
 // launcher flags given on the command line, model the command-line --model,
 // passthrough the claude arguments as given (CS-TMUX-013).
 func Record(launcherGiven []string, model string, passthrough []string, getenv func(string) string) LaunchRecord {
-	r := LaunchRecord{Model: model}
+	r := LaunchRecord{Model: model, Name: NameArg(passthrough)}
 	for _, n := range launcherGiven {
 		if slices.Contains(LauncherNamed, n) {
 			r.Unreplayed = appendName(r.Unreplayed, n)
