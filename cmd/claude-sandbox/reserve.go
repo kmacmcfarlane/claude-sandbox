@@ -333,6 +333,15 @@ func startReserved(env *Env, plan *launch.Plan, headless bool, pre *globalcfg.He
 		// result, and the next launch's check catches the damage.
 		o.after = func() { checkGlobalConfig(env, pre) }
 	}
+	if env.restore != nil && env.restore.onReserved != nil {
+		// CS-TMUX-061/062: a restore resume watches its new session come up
+		// and keeps its pending row when the session ends early.
+		onChild, keep := env.restore.onReserved(plan)
+		o.onChild = onChild
+		if mark != nil {
+			mark.keepUnlessReady = keep
+		}
+	}
 	end, err := runSession(env, plan.StartCmd(), plan.ContainerName, o)
 	if err != nil || end.neverStarted {
 		removeReservation(env, plan)

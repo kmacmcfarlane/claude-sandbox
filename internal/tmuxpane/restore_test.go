@@ -193,6 +193,30 @@ var _ = Describe("tmux restore: the decision (CS-TMUX-051)", func() {
 		Expect(d.Line).To(Equal("cannot tell whether " + convID + " is open elsewhere (docker ps failed)"))
 	})
 
+	It("CS-TMUX-051 row 15: a holder that is only a reservation (created, never started) keeps the row pending", func() {
+		// The F4a review's note: the guard holds a created, resume-labelled
+		// container with no record (CS-SESS-065 rule a). An orphaned
+		// reservation must not clear the row — the row's own container
+		// "created" is gone for the attach, and the guard then names it.
+		for _, own := range []string{"created", "exited"} {
+			p.info.State = own
+			p.guard = tmuxpane.GuardResult{Open: true, Holder: "'murre' (c2)", HolderReserved: true,
+				AttachCommand: "cd /srv/proj && claude-sandbox --attach=murre"}
+			d := decide(row(nil))
+			Expect(d.Row).To(Equal(15), own)
+			Expect(d.Outcome).To(Equal(tmuxpane.OutcomePending), own)
+			Expect(d.Line).To(Equal("'fix the build' is being started in 'murre' (c2) (created, not started yet); retry in a minute: claude-sandbox tmux restore"), own)
+			Expect(d.Manual).To(ContainSubstring("--resume " + convID))
+		}
+	})
+
+	It("CS-TMUX-061: the gap constants by global-config layout", func() {
+		Expect(tmuxpane.LinkedGap).To(BeZero())
+		Expect(tmuxpane.RelocatedGap).To(BeZero())
+		Expect(tmuxpane.ConfigJSONGap).To(Equal(10 * time.Second))
+		Expect(tmuxpane.LegacyGap).To(Equal(10 * time.Second))
+	})
+
 	It("CS-TMUX-051 row 18: resume, with the gap, the A7 notes and the manual command", func() {
 		p.info.State = "exited"
 		p.gap = tmuxpane.LegacyGap

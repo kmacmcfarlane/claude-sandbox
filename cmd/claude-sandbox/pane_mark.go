@@ -34,6 +34,10 @@ type paneMark struct {
 	// resuming is the conversation this launch resumes explicitly, so a
 	// pending mark naming it gets no note (CS-TMUX-017).
 	resuming string
+	// keepUnlessReady, set only by a restore resume (CS-TMUX-062), reports
+	// whether the session ended before it was resumed and within EarlyEnd:
+	// the prior mark (the restore's pending row) then goes back.
+	keepUnlessReady func() bool
 }
 
 // markedPane is a pane runSession marked.

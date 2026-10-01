@@ -391,7 +391,8 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
   Scenario: CS-SESS-031 Attach runs docker attach with safe detach keys
     When attach is chosen
     Then "docker attach --detach-keys=<seq> <container>" runs as the session
-      child the launcher waits on (CS-LNCH-085)
+      child the launcher waits on (CS-LNCH-085), <container> being its full 64-hex id when discovery
+      read one, else its name (CS-TMUX-056)
     And <seq> comes from the detachKeys config key, defaulting to "ctrl-q,ctrl-q"
     And the detach sequence is printed before handing off
     # Docker's own default is ctrl-p,ctrl-q, but the Claude Code TUI binds ctrl+p.

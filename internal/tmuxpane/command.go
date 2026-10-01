@@ -13,18 +13,17 @@ import (
 const NameSourceUser = "user"
 
 // ResumeCommand is the exact manual command that resumes a mark's
-// conversation in a new container (plan 06 § 3 with 09 finding 1 and
-// decision 49):
+// conversation in a new container (plan 06 § 3 with 09 finding 1, decision
+// 49 and 10 § 4.4):
 //
 //	cd <project> && [CLAUDE_CONFIG_DIR=<v> ]claude-sandbox --new
-//	  --worktree=<w>|--no-worktree [--model <m>] -- [<replay>…] --resume <id> [--name <n>]
+//	  --worktree=<w>|--no-worktree [--model <m>] -- --resume <id> [--name <n>] [<replay>…]
 //
 // Every word is shell-quoted. "" when the mark names no conversation, or a
 // worktree whose generated name is not recorded yet.
 func ResumeCommand(m Mark) string {
-	if m.Conversation == "" || (m.WorktreeGenerated && m.Worktree == "") {
-		// No id, or a worktree whose name is not known yet: any worktree
-		// flag would resume in the wrong place (CS-TMUX-012).
+	args := ResumeArgs(m)
+	if args == nil {
 		return ""
 	}
 	var w []string
@@ -34,9 +33,31 @@ func ResumeCommand(m Mark) string {
 	if m.ConfigDirEnv != nil && *m.ConfigDirEnv != "" {
 		w = append(w, "CLAUDE_CONFIG_DIR="+shq(*m.ConfigDirEnv))
 	}
-	w = append(w, "claude-sandbox", "--new")
+	w = append(w, "claude-sandbox")
+	for _, a := range args {
+		w = append(w, shq(a))
+	}
+	return strings.Join(w, " ")
+}
+
+// ResumeArgs are the launcher arguments a restore resumes a mark's
+// conversation with (CS-TMUX-058; 10 § 4.4), unquoted:
+//
+//	--new --worktree=<w>|--no-worktree [--model <m>] -- --resume <id> [--name <n>] [<replay>…]
+//
+// --resume comes first after "--", so no replayed token can hide the id from
+// GuardedResumeID's scan and the resume label is always set. nil when the
+// mark names no conversation, or a worktree whose generated name is not
+// recorded yet.
+func ResumeArgs(m Mark) []string {
+	if m.Conversation == "" || (m.WorktreeGenerated && m.Worktree == "") {
+		// No id, or a worktree whose name is not known yet: any worktree
+		// flag would resume in the wrong place (CS-TMUX-012).
+		return nil
+	}
+	w := []string{"--new"}
 	if m.Worktree != "" {
-		w = append(w, shq("--worktree="+m.Worktree))
+		w = append(w, "--worktree="+m.Worktree)
 	} else {
 		// Explicit both ways: a cascade or env that turned worktree mode on
 		// since would otherwise resume in a new worktree, where the
@@ -44,17 +65,13 @@ func ResumeCommand(m Mark) string {
 		w = append(w, "--no-worktree")
 	}
 	if m.Model != "" {
-		w = append(w, "--model", shq(m.Model))
+		w = append(w, "--model", m.Model)
 	}
-	w = append(w, "--")
-	for _, t := range m.Replay {
-		w = append(w, shq(t))
-	}
-	w = append(w, "--resume", shq(m.Conversation))
+	w = append(w, "--", "--resume", m.Conversation)
 	if m.Name != "" && m.NameSource == NameSourceUser {
-		w = append(w, "--name", shq(registry.Printable(m.Name)))
+		w = append(w, "--name", registry.Printable(m.Name))
 	}
-	return strings.Join(w, " ")
+	return append(w, m.Replay...)
 }
 
 // PendingNote is the one line a launch prints when it replaces a pending mark

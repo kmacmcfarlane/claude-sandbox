@@ -257,7 +257,7 @@ var _ = Describe("tmuxpane", func() {
 			note := tmuxpane.PendingNote(pending.JSON(), "")
 			Expect(note).To(Equal("Note: this pane was waiting to restore 'fix it' (" + convID + "); resume it with: " +
 				"cd /home/u/proj && CLAUDE_CONFIG_DIR='/home/u/work claude' claude-sandbox --new --no-worktree --model opus -- " +
-				"--add-dir '/x y' --resume " + convID + " --name 'fix it'"))
+				"--resume " + convID + " --name 'fix it' --add-dir '/x y'"))
 		})
 
 		It("CS-TMUX-017: a control character in any printed value prints no command", func() {

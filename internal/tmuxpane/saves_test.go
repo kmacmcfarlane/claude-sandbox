@@ -243,11 +243,11 @@ var _ = Describe("tmux restore: saves (CS-TMUX-045..050)", func() {
 				return f
 			}
 			f := lock()
-			go func() {
+			go func(f *os.File) {
 				time.Sleep(200 * time.Millisecond)
 				syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 				f.Close()
-			}()
+			}(f)
 			start := time.Now()
 			Expect(tmuxpane.UpdateLifetimes(dir, *srv(1), at(0), 2, now, tmuxpane.IndexLockWait)).To(Succeed())
 			Expect(time.Since(start)).To(BeNumerically(">=", 150*time.Millisecond))

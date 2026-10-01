@@ -48,6 +48,11 @@ type sessionOpts struct {
 	// mark is the tmux pane mark set while the child runs (CS-TMUX-010);
 	// nil for none. Ignored when headless or outside tmux (CS-TMUX-014).
 	mark *paneMark
+	// onChild runs right after the pane is marked and right before the
+	// session child starts: a restore releases its start lock there after
+	// an attach, or starts its readiness watcher (CS-TMUX-060/061). nil on
+	// every other path.
+	onChild func()
 }
 
 // sessionEnd is how a session child ended.
@@ -86,15 +91,24 @@ func runSession(env *Env, c execx.Cmd, container string, o sessionOpts) (end ses
 	pane := beginMark(env, o)
 	putBack := false
 	pending := false
+	if o.onChild != nil {
+		o.onChild()
+	}
 
 	started := env.now()
 	res, err := env.Runner.RunSession(c)
 	defer res.Done()
 	// Deferred after res.Done, so it runs first: while the session's signal
-	// handlers are still installed, and a signal cannot cut it short.
+	// handlers are still installed, and a signal cannot cut it short. The
+	// rules apply in order (CS-TMUX-062): a start that never ran, then a
+	// restore resume that ended before it was resumed, then CS-TMUX-071.
 	defer func() {
 		switch {
 		case putBack || err != nil || end.neverStarted:
+			pane.end(markPutBack)
+		case o.mark != nil && o.mark.keepUnlessReady != nil && o.mark.keepUnlessReady():
+			// The prior is the restore's pending row; the current mark of a
+			// session under a minute old has no conversation yet.
 			pane.end(markPutBack)
 		case pending:
 			pane.end(markPending)

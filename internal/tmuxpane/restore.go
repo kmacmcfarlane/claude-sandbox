@@ -21,10 +21,18 @@ import (
 	"github.com/kmacmcfarlane/claude-sandbox/internal/sessions"
 )
 
-// LegacyGap is the pause after a resumed session is up on a host whose
-// global config is neither linked nor relocated (answer 50 d, 10 § 5.3): its
-// concurrent writes are not safe, so starts are spaced.
-const LegacyGap = 10 * time.Second
+// The pause after a resumed session is up, by the host's global-config
+// layout (answer 50 d, 10 § 5.3; the values are operator decision 66, still
+// open): a linked ~/.claude.json or a relocated CLAUDE_CONFIG_DIR tree is
+// safe under concurrent writes, so the next start waits for "up" only; any
+// other layout — a .config.json, the legacy regular file, a missing or
+// refused one — spaces the starts.
+const (
+	LinkedGap     = 0 * time.Second
+	RelocatedGap  = 0 * time.Second
+	ConfigJSONGap = 10 * time.Second
+	LegacyGap     = 10 * time.Second
+)
 
 // Outcome is what a restore does with a row.
 type Outcome string
@@ -93,8 +101,14 @@ type GuardResult struct {
 	// cannot be attached.
 	Holder        string
 	AttachCommand string
-	HostPID       int
-	Reason        string
+	// HolderReserved: the holder is a reservation ("created", never
+	// started) — an orphan of a launcher that died between its create and
+	// its start, or a launch about to start. It holds the id for the guard
+	// (CS-SESS-065 rule a), but it is not a session to attach to, so the
+	// row stays pending (CS-TMUX-051 row 15).
+	HolderReserved bool
+	HostPID        int
+	Reason         string
 }
 
 // Probes are Decide's read-only looks at the world, called lazily in table
@@ -201,6 +215,11 @@ func Decide(row *Row, coords string, p Probes) Decision {
 	}
 	g := p.Guard(m)
 	switch {
+	case g.Open && g.Holder != "" && g.HolderReserved:
+		// The guard holds a created, resume-labelled container with no
+		// record yet; clearing the row would lose it if that reservation is
+		// an orphan (the next launch removes one older than 60 s).
+		return pending(15, name+" is being started in "+g.Holder+" (created, not started yet); retry in a minute: claude-sandbox tmux restore")
 	case g.Open && g.Holder != "":
 		line := name + " is already running in " + g.Holder
 		if g.AttachCommand != "" {
@@ -244,8 +263,12 @@ func GapFor(home string, m Mark, configDirEnv string) time.Duration {
 		cde = *m.ConfigDirEnv
 	}
 	switch globalcfg.Classify(home, cde).Mode {
-	case globalcfg.ModeLinked, globalcfg.ModeRelocated:
-		return 0
+	case globalcfg.ModeLinked:
+		return LinkedGap
+	case globalcfg.ModeRelocated:
+		return RelocatedGap
+	case globalcfg.ModeConfigJSON:
+		return ConfigJSONGap
 	}
 	return LegacyGap
 }
@@ -462,16 +485,21 @@ func (p *ReadProbes) IsDir(path string) bool {
 }
 
 func (p *ReadProbes) Docker() error {
-	p.once.Do(func() {
-		out, ran, werr := boundedRun(p.Runner, DockerProbeTimeout, "docker", "version", "--format", "{{.Server.Version}}")
-		switch {
-		case !ran:
-			p.dockerErr = errors.New("docker version did not finish")
-		case werr != nil || strings.TrimSpace(out) == "":
-			p.dockerErr = errors.New("docker version failed")
-		}
-	})
+	p.once.Do(func() { p.dockerErr = DockerAnswers(p.Runner) })
 	return p.dockerErr
+}
+
+// DockerAnswers is one "docker version", bounded by DockerProbeTimeout: nil
+// when the daemon answered (row 8).
+func DockerAnswers(r execx.Runner) error {
+	out, ran, werr := boundedRun(r, DockerProbeTimeout, "docker", "version", "--format", "{{.Server.Version}}")
+	switch {
+	case !ran:
+		return errors.New("docker version did not finish")
+	case werr != nil || strings.TrimSpace(out) == "":
+		return errors.New("docker version failed")
+	}
+	return nil
 }
 
 func (p *ReadProbes) Inspect(id string) (ContainerInfo, error) {
