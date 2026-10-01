@@ -778,8 +778,10 @@ set -g @resurrect-processes '"claude-sandbox->claude-sandbox tmux restore --resu
   its row from the pinned save as a pending mark — never a pane that existed before, and never one
   that is not where the save had it — and types `claude-sandbox tmux restore --resurrected` into
   the pending ones that sat at a bare shell when saved, so a session that was waiting to be
-  restored retries after a restart too. A ralph row only prints its command; the loop is never
-  restarted.
+  restored retries after a restart too — with `--all`'s typing safety: only into a pane whose own
+  shell is at its prompt and nobody is looking at, the line cleared first (otherwise the pane keeps
+  its pending mark; type `claude-sandbox tmux restore` in it). A ralph row only prints its command;
+  the loop is never restarted.
 
 `--pin` and `--rearm` never print and always exit 0 (problems go to
 `~/.cache/claude-sandbox/tmux-restore.log`), and every tmux call they make is bounded, within 2 s

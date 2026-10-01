@@ -124,14 +124,35 @@ var _ = Describe("tmux restore: the resurrect hooks (CS-TMUX-064..068)", func() 
 		pend.State = tmuxpane.StatePending
 		save(stampAt(-1), &srv, pend)
 		pin := writePin(stampAt(-1), now.Add(-2*time.Second), nil)
+		// The pane's shell (pid 3007) leads its terminal's foreground
+		// group, read through the Env.ProcRoot seam; nobody looks at it.
+		proc := GinkgoT().TempDir()
+		f.env.ProcRoot = proc
+		Expect(os.MkdirAll(filepath.Join(proc, "3007"), 0o755)).To(Succeed())
+		Expect(os.WriteFile(filepath.Join(proc, "3007", "stat"), []byte("3007 (zsh) S 1 3007 3007 34816 3007 4194560 0 0\n"), 0o644)).To(Succeed())
+		f.fake.On("list-panes -a -F #{pane_id}\t#{pane_active}", "%7\t1\t1\t0\n", nil)
 		f.fake.On("tmux list-panes", "%7\tmain\t2\t0\t4242\t1727000000\tzsh\t"+f.proj+"\t\n", nil)
-		f.fake.On("tmux display-message -p -t %7", "zsh\t\n", nil)
+		f.fake.On("tmux display-message -p -t %7", "zsh\t0\t0\t3007\t\n", nil)
+		f.fake.On("tmux show -gv default-shell", "/bin/zsh\n", nil)
 		Expect(f.run("tmux", "restore", "--rearm")).To(Equal(0))
 		Expect(f.out.String() + f.errw.String()).To(BeEmpty())
 		Expect(f.fake.CommandLines()).To(ContainElement(HavePrefix("tmux set-option -p -t %7 @claude-sandbox ")))
-		Expect(f.fake.CommandLines()).To(ContainElement("tmux send-keys -t %7 claude-sandbox tmux restore --resurrected C-m"))
+		Expect(f.fake.CommandLines()).To(ContainElement("tmux send-keys -t %7 C-e C-u claude-sandbox tmux restore --resurrected C-m"))
 		Expect(pin).NotTo(BeAnExistingFile(), "consumed")
 		Expect(logFile()).NotTo(BeAnExistingFile())
+
+		// Another program in the foreground of that shell: marked, never
+		// typed into, one log line.
+		Expect(os.Rename(strings.TrimSuffix(pin, ".json")+".consumed.json", pin)).To(Succeed())
+		Expect(os.WriteFile(filepath.Join(proc, "3007", "stat"), []byte("3007 (zsh) S 1 3007 3007 34816 3100 4194560 0 0\n"), 0o644)).To(Succeed())
+		f.fake.Calls = nil
+		Expect(f.run("tmux", "restore", "--rearm")).To(Equal(0))
+		Expect(f.out.String() + f.errw.String()).To(BeEmpty())
+		Expect(f.fake.CommandLines()).To(ContainElement(HavePrefix("tmux set-option -p -t %7 @claude-sandbox ")))
+		Expect(f.fake.CommandLines()).NotTo(ContainElement(HavePrefix("tmux send-keys")))
+		b, err := os.ReadFile(logFile())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(string(b)).To(ContainSubstring("main:2.0: marked only: a program runs in the foreground of its shell"))
 	})
 
 	Describe("CS-TMUX-065: --resurrected", func() {

@@ -1,9 +1,10 @@
 package tmuxpane
 
 // The guard before keys are typed into a pane that claude-sandbox did not
-// start (CS-TMUX-069; F4d review round 1): one helper, so --rearm can adopt
-// it too. A pane may be typed into only when it is provably idle at its own
-// shell; anything else is marked only.
+// start (CS-TMUX-069; F4d review round 1) — --all's armed panes and
+// --rearm's resurrected ones (CS-TMUX-067) alike. A pane may be typed into
+// only when it is provably idle at its own shell; anything else is marked
+// only.
 
 import (
 	"os"
@@ -20,12 +21,23 @@ import (
 // ProcOptions are the seams of the foreground check: ProcRoot is /proc (""
 // means the real one, which panics under go test so no test reads the
 // host's processes), GOOS is runtime.GOOS unless set, Runner runs the darwin
-// "ps".
+// "ps" and Timeout bounds it (0 means CallTimeout; --rearm passes what its
+// whole-run deadline leaves).
 type ProcOptions struct {
 	Runner   execx.Runner
 	ProcRoot string
 	GOOS     string
+	Timeout  time.Duration
 }
+
+// The reasons IdleShell gives that a caller tells apart: the shell or the
+// foreground group could not be read (a call that may have been cut short),
+// and a client looking at the pane (--rearm reads focus last, itself).
+const (
+	ReasonShellUnknown      = "the default shell is unknown (tmux show -gv default-shell did not answer)"
+	ReasonForegroundUnknown = "cannot tell whether its shell is at its prompt (the terminal's foreground process group could not be read)"
+	ReasonFocused           = "a client is looking at it"
+)
 
 // ShellPane is what IdleShell looks at in one pane.
 type ShellPane struct {
@@ -47,7 +59,7 @@ type ShellPane struct {
 func IdleShell(o ProcOptions, p ShellPane, shell string) string {
 	switch {
 	case shell == "":
-		return "the default shell is unknown (tmux show -gv default-shell did not answer)"
+		return ReasonShellUnknown
 	case p.Command != shell:
 		return "it runs " + printable(p.Command) + ", not the shell"
 	case p.InMode:
@@ -55,12 +67,12 @@ func IdleShell(o ProcOptions, p ShellPane, shell string) string {
 	case p.Synchronized:
 		return "its window has synchronize-panes on"
 	case p.Focused:
-		return "a client is looking at it"
+		return ReasonFocused
 	}
 	fg, known := Foreground(o, p.PID)
 	switch {
 	case !known:
-		return "cannot tell whether its shell is at its prompt (the terminal's foreground process group could not be read)"
+		return ReasonForegroundUnknown
 	case !fg:
 		return "a program runs in the foreground of its shell"
 	}
@@ -110,7 +122,11 @@ func Foreground(o ProcOptions, pid int) (fg, known bool) {
 		}
 		tpgid = n
 	case "darwin":
-		out, ok := bounded(o.Runner, CallTimeout, "ps", "-o", "tpgid=", "-p", strconv.Itoa(pid))
+		t := o.Timeout
+		if t == 0 {
+			t = CallTimeout
+		}
+		out, ok := bounded(o.Runner, t, "ps", "-o", "tpgid=", "-p", strconv.Itoa(pid))
 		n, err := strconv.Atoi(strings.TrimSpace(out))
 		if !ok || err != nil {
 			return false, false
@@ -138,6 +154,21 @@ func readProcStat(path string) ([]byte, error) {
 		return nil, err
 	}
 	return b[:n], nil
+}
+
+// DefaultShell is the basename of the server's default-shell, from one
+// bounded "tmux show -gv default-shell"; "" when tmux does not answer.
+func DefaultShell(r execx.Runner) string { return DefaultShellWithin(r, CallTimeout) }
+
+// DefaultShellWithin is DefaultShell bounded by timeout (--rearm's calls
+// never run past its whole-run deadline).
+func DefaultShellWithin(r execx.Runner, timeout time.Duration) string {
+	out, ok := bounded(r, timeout, "tmux", "show", "-gv", "default-shell")
+	sh := strings.TrimSpace(out)
+	if !ok || sh == "" {
+		return ""
+	}
+	return filepath.Base(sh)
 }
 
 // TypeKeys are the keys TypeRestore sends, in one send-keys: C-e then C-u

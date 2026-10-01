@@ -19,7 +19,9 @@ package tmuxpane
 // the operator types prints and claims. --rearm runs after resurrect created
 // the panes and typed their processes: it gives every NEW pane that matches
 // a row of the pinned save that row as a pending mark, and types the restore
-// into the pending ones that sat at a bare shell when saved (answer 51 a).
+// into the pending ones that sat at a bare shell when saved (answer 51 a) —
+// only under --all's typing guard (idleshell.go): the pane's own shell leads
+// its foreground group, nobody looks at it, the line is cleared first.
 
 import (
 	"encoding/json"
@@ -58,9 +60,10 @@ const PinKeep = 24 * time.Hour
 // PinVersion is the pin's schema version ("v").
 const PinVersion = 1
 
-// RetypeKeys is what --rearm types into a pending pane that sat at a bare
-// shell (answer 51 a): the same entry resurrect types into an active one, so
-// only an operator's own typing ever claims the notice (12 § 1).
+// RetypeKeys is the text --rearm types into a pending pane that sat at a
+// bare shell (answer 51 a), and --all into an armed one: the same entry
+// resurrect types into an active one, so only an operator's own typing ever
+// claims the notice (12 § 1). It is sent inside TypeKeys (C-e C-u first).
 const RetypeKeys = "claude-sandbox tmux restore --resurrected"
 
 // pinPrefix names the pins in the resurrect dir:
@@ -122,6 +125,8 @@ type HookOptions struct {
 	Now func() time.Time
 	// Logf records a problem; the caller writes it to the hook's log.
 	Logf func(format string, a ...any)
+	// Proc is --rearm's foreground-process check before it types (IdleShell).
+	Proc ProcOptions
 }
 
 func (o HookOptions) now() time.Time {
@@ -412,8 +417,13 @@ type RearmResult struct {
 // then reads as a mark that does not parse — a pane --rearm leaves alone.
 const rearmPanesFormat = "#{pane_id}\t#{session_name}\t#{window_index}\t#{pane_index}\t#{pid}\t#{start_time}\t#{pane_current_command}\t#{pane_current_path}\t#{" + Option + "}"
 
-// rearmRecheckFormat is the per-pane re-check right before a mark is set.
-const rearmRecheckFormat = "#{pane_current_command}\t#{" + Option + "}"
+// rearmRecheckFormat is the per-pane re-check right before a mark is set: the
+// current command and the mark, plus what IdleShell needs before the keys
+// (mode, synchronize-panes, the pane's own pid). The mark stays last.
+const rearmRecheckFormat = "#{pane_current_command}\t#{pane_in_mode}\t#{pane_synchronized}\t#{pane_pid}\t#{" + Option + "}"
+
+// rearmFocusUnknown is the refusal when the focus re-read gets no answer.
+const rearmFocusUnknown = "cannot tell whether a client is looking at it (tmux list-panes did not answer)"
 
 type rearmPane struct {
 	id, cmd, path, raw string
@@ -486,6 +496,10 @@ func Rearm(o HookOptions) RearmResult {
 		pre[id] = true
 	}
 
+	// shell is the default shell's basename, asked once per run, only when
+	// a pane is to be typed into.
+	var shell string
+	var shellAsked bool
 	for i, row := range sc.Panes {
 		// late stops the run at the deadline: the rows from i on are left
 		// to their typed restore, and the pin stays unconsumed for them.
@@ -544,11 +558,13 @@ func Rearm(o HookOptions) RearmResult {
 			o.logf("%s: tmux display-message failed; not re-armed", coords)
 			continue
 		}
-		f := strings.SplitN(strings.TrimRight(cur, "\r\n"), "\t", 2)
-		if len(f) != 2 || f[1] != "" || f[0] == LauncherCommand {
+		f := strings.SplitN(strings.TrimRight(cur, "\r\n"), "\t", 5)
+		if len(f) != 5 || f[4] != "" || f[0] == LauncherCommand {
 			res.Skipped++
 			continue
 		}
+		pid, _ := strconv.Atoi(f[3]) // 0 when unparsable: Foreground says unknown
+		sh := ShellPane{ID: p.id, Command: f[0], PID: pid, InMode: f[1] == "1", Synchronized: f[2] == "1"}
 		pend := row.Mark
 		pend.State = StatePending
 		if _, ok := bounded(o.Runner, dl.left(), "tmux", "set-option", "-p", "-t", p.id, Option, pend.JSON()); !ok {
@@ -567,7 +583,60 @@ func Rearm(o HookOptions) RearmResult {
 		if row.Mark.State != StatePending || !sp.FullCommandSaved || sp.FullCommand != "" {
 			continue
 		}
-		if _, ok := bounded(o.Runner, dl.left(), "tmux", "send-keys", "-t", p.id, RetypeKeys, "C-m"); !ok {
+		// The typing guard --all uses (CS-TMUX-069): a pane resurrect just
+		// created is rarely anything but its shell at a prompt, but a
+		// default-command, a shell rc that starts a program, or a client
+		// that attached meanwhile can make it so. The cheap checks first
+		// (IdleShell with focus unread), focus read again last, right
+		// before the keys. Every call gets what the deadline leaves; a
+		// definite refusal is logged and the row handled, while one the
+		// deadline may have caused (a call cut short) makes it late.
+		if !shellAsked {
+			if late() {
+				break
+			}
+			shellAsked = true
+			shell = DefaultShellWithin(o.Runner, dl.left())
+		}
+		// Past the deadline the row is late even if a cheap check would
+		// refuse it: IdleShell may start the foreground check, and no call
+		// starts past the deadline.
+		t := dl.left()
+		if t <= 0 {
+			late()
+			break
+		}
+		proc := o.Proc
+		proc.Timeout = t
+		why := IdleShell(proc, sh, shell)
+		if why == "" {
+			t = dl.left()
+			if t <= 0 {
+				late()
+				break
+			}
+			focused, known := PaneFocused(o.Runner, t, p.id)
+			switch {
+			case !known:
+				why = rearmFocusUnknown
+			case focused:
+				why = ReasonFocused
+			}
+		}
+		if why != "" {
+			indefinite := why == ReasonShellUnknown || why == ReasonForegroundUnknown || why == rearmFocusUnknown
+			if indefinite && late() {
+				break
+			}
+			o.logf("%s: marked only: %s; type claude-sandbox tmux restore in it", coords, why)
+			continue
+		}
+		t = dl.left()
+		if t <= 0 {
+			late() // the keys were never sent
+			break
+		}
+		if !TypeRestore(o.Runner, t, p.id) {
 			o.logf("%s: tmux send-keys failed; the pane is marked, type claude-sandbox tmux restore in it", coords)
 			if late() {
 				break

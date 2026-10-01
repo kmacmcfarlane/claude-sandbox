@@ -148,17 +148,6 @@ func (p *ArmPane) setFields(own, view []string, raw string) {
 	p.Mark, p.Marked = ParseMark(raw)
 }
 
-// DefaultShell is the basename of the server's default-shell, from one
-// bounded "tmux show -gv default-shell"; "" when tmux does not answer.
-func DefaultShell(r execx.Runner) string {
-	out, ok := bounded(r, CallTimeout, "tmux", "show", "-gv", "default-shell")
-	sh := strings.TrimSpace(out)
-	if !ok || sh == "" {
-		return ""
-	}
-	return filepath.Base(sh)
-}
-
 // ReadStatePanes reads a save's state file in the resurrect dir with
 // CS-TMUX-046's checks and returns its pane lines.
 func ReadStatePanes(dir, stamp string) ([]StatePane, error) {

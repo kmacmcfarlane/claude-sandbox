@@ -308,7 +308,8 @@ func runRestoreHook(env *Env, form string) {
 	}()
 	// The dir is resolved inside the hook, so its one bounded tmux call
 	// counts against the whole-run deadline.
-	o := tmuxpane.HookOptions{Runner: env.Runner, Dir: env.resurrectDir, CacheDir: cache, Now: env.now, Logf: logf}
+	o := tmuxpane.HookOptions{Runner: env.Runner, Dir: env.resurrectDir, CacheDir: cache, Now: env.now, Logf: logf,
+		Proc: tmuxpane.ProcOptions{Runner: env.Runner, ProcRoot: env.ProcRoot}}
 	if form == "--pin" {
 		tmuxpane.PinRestore(o)
 		return
