@@ -80,9 +80,24 @@ func beginMark(env *Env, o sessionOpts) *markedPane {
 	if _, ok := tmuxpane.ParseMark(m.prior); !ok {
 		m.prior = "" // CS-TMUX-016: an unparsable mark is no mark
 	}
-	m.pane.Set(o.mark.next.JSON())
-	m.owned = m.pane.BeginLabel(tmuxpane.LaunchLabel(labelName(o.mark), o.mark.next.Project))
+	// CS-TMUX-020..022: the window label first, so the mark records whether
+	// this launch owns it (Labelled) — a later restore of the row reclaims
+	// the window only then. The mark is still set before the session child.
+	m.owned = m.pane.BeginLabel(tmuxpane.LaunchLabel(labelName(o.mark), o.mark.next.Project), reclaims(o.mark))
+	m.own.Labelled = m.owned
+	m.pane.Set(m.own.JSON())
 	return m
+}
+
+// reclaims reports whether this launch may reclaim a restored window
+// (CS-TMUX-022 case C): only a restore (which hands its row in as the prior)
+// whose row records that its launch owned the label.
+func reclaims(pm *paneMark) bool {
+	if pm.prior == nil {
+		return false
+	}
+	prior, ok := tmuxpane.ParseMark(*pm.prior)
+	return ok && prior.Labelled
 }
 
 // labelName is the user-given name the window label takes (CS-TMUX-021):
@@ -132,9 +147,17 @@ func (m *markedPane) end(a markEnd) {
 			return
 		}
 	}
+	alt := ""
+	if m.owned {
+		// The conversation's own label: a refresh cut between its rename and
+		// its option write leaves it as the name (CS-TMUX-043).
+		if cur, ok := tmuxpane.ParseMark(m.pane.Read()); ok && cur.NameSource == tmuxpane.NameSourceUser {
+			alt = tmuxpane.Label(cur.Name)
+		}
+	}
 	m.pane.Unset()
 	if m.owned {
-		m.pane.EndLabel()
+		m.pane.EndLabel(alt)
 	}
 }
 

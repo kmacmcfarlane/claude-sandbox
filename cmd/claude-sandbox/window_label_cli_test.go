@@ -175,6 +175,45 @@ var _ = Describe("tmux window label (CS-TMUX-020..024)", func() {
 		Expect(n).To(Equal(1))
 	})
 
+	It("CS-TMUX-022: the mark records that its launch owns the label", func() {
+		streamEvents(f.fake, dockerEvent("die", "0"))
+		var during string
+		f.fake.OnFunc("docker start -ai", func(execx.Cmd) (string, error) {
+			during = p.get()
+			return "", nil
+		})
+		Expect(f.run()).To(Equal(0), f.errw.String())
+		m, ok := tmuxpane.ParseMark(during)
+		Expect(ok).To(BeTrue())
+		Expect(m.Labelled).To(BeTrue())
+	})
+
+	It("CS-TMUX-022: a window named by hand after the project folder keeps its name and its automatic-rename", func() {
+		win.auto, win.name = false, "proj" // the same text as the label, no options
+		streamEvents(f.fake, dockerEvent("die", "0"))
+		var during string
+		f.fake.OnFunc("docker start -ai", func(execx.Cmd) (string, error) {
+			during = p.get()
+			return "", nil
+		})
+		Expect(f.run()).To(Equal(0), f.errw.String())
+		auto, name, label, _ := win.state()
+		Expect(auto).To(BeFalse())
+		Expect(name).To(Equal("proj"))
+		Expect(label).To(BeEmpty())
+		Expect(f.fake.CommandLines()).NotTo(ContainElement(HavePrefix("tmux set-option -w")))
+		m, _ := tmuxpane.ParseMark(during)
+		Expect(m.Labelled).To(BeFalse())
+	})
+
+	It("CS-TMUX-022: only a restore whose row was labelled may reclaim", func() {
+		labelled := tmuxpane.Mark{V: 1, State: tmuxpane.StatePending, Labelled: true}.JSON()
+		plain := tmuxpane.Mark{V: 1, State: tmuxpane.StatePending}.JSON()
+		Expect(reclaims(&paneMark{prior: &labelled})).To(BeTrue())
+		Expect(reclaims(&paneMark{prior: &plain})).To(BeFalse())
+		Expect(reclaims(&paneMark{})).To(BeFalse(), "a hand launch hands in no prior")
+	})
+
 	It("CS-TMUX-021: a restore attach with no --name takes its pending row's user-given name", func() {
 		prior := tmuxpane.Mark{V: 1, State: tmuxpane.StatePending, Project: "/w/proj",
 			Conversation: markConv, Name: "fix the restore", NameSource: tmuxpane.NameSourceUser}.JSON()

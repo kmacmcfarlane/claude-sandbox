@@ -33,6 +33,9 @@ type windowSim struct {
 	// readFails makes the window read fail; garbage makes it unparsable.
 	readFails bool
 	garbage   bool
+	// afterRename runs (under the lock) after each rename: a concurrent
+	// launch's writes landing in between.
+	afterRename func(w *windowSim)
 }
 
 func (w *windowSim) install(fake *execx.Fake) {
@@ -89,6 +92,11 @@ func (w *windowSim) install(fake *execx.Fake) {
 		w.mu.Lock()
 		defer w.mu.Unlock()
 		w.name, w.auto = c.Args[len(c.Args)-1], false // tmux: rename-window turns it off
+		if w.afterRename != nil {
+			f := w.afterRename
+			w.afterRename = nil
+			f(w)
+		}
 		return "", nil
 	})
 }
@@ -157,18 +165,19 @@ var _ = Describe("window labels (CS-TMUX-020..026, 041..044)", func() {
 		})
 
 		It("CS-TMUX-021: an empty label writes nothing", func() {
-			Expect(pane.BeginLabel("")).To(BeFalse())
+			Expect(pane.BeginLabel("", false)).To(BeFalse())
 			Expect(fake.Calls).To(BeEmpty())
 		})
 	})
 
-	It("CS-TMUX-020: an automatic window is named: one read, the options, then rename-window", func() {
-		Expect(pane.BeginLabel("proj")).To(BeTrue())
+	It("CS-TMUX-020: an automatic window is named: one read, the options, the rename, a confirming read", func() {
+		Expect(pane.BeginLabel("proj", false)).To(BeTrue())
 		Expect(tmuxCalls(fake)).To(Equal([]string{
 			readLine,
 			"tmux set-option -w -t %7 @claude-sandbox-label proj",
 			"tmux set-option -w -t %7 @claude-sandbox-label-pane %7",
 			"tmux rename-window -t %7 -- proj",
+			readLine,
 		}))
 		Expect(win.name).To(Equal("proj"))
 		Expect(win.auto).To(BeFalse())
@@ -179,7 +188,7 @@ var _ = Describe("window labels (CS-TMUX-020..026, 041..044)", func() {
 
 	It("CS-TMUX-020: the rename runs even over an equal name — it is what turns automatic-rename off", func() {
 		win.name = "proj"
-		Expect(pane.BeginLabel("proj")).To(BeTrue())
+		Expect(pane.BeginLabel("proj", false)).To(BeTrue())
 		Expect(tmuxCalls(fake)).To(ContainElement("tmux rename-window -t %7 -- proj"))
 	})
 
@@ -188,7 +197,7 @@ var _ = Describe("window labels (CS-TMUX-020..026, 041..044)", func() {
 		fake2.On("tmux set-option -w", "", execx.Fail(1))
 		win.install(fake2)
 		p := tmuxpane.Pane{Runner: fake2, ID: "%7"}
-		Expect(p.BeginLabel("proj")).To(BeFalse())
+		Expect(p.BeginLabel("proj", false)).To(BeFalse())
 		for _, l := range tmuxCalls(fake2) {
 			Expect(l).NotTo(HavePrefix("tmux rename-window"))
 		}
@@ -197,13 +206,13 @@ var _ = Describe("window labels (CS-TMUX-020..026, 041..044)", func() {
 	Describe("CS-TMUX-022: a window that is not automatic", func() {
 		It("CS-TMUX-022: a name the operator gave is left alone", func() {
 			win.auto, win.name = false, "editor"
-			Expect(pane.BeginLabel("proj")).To(BeFalse())
+			Expect(pane.BeginLabel("proj", false)).To(BeFalse())
 			Expect(tmuxCalls(fake)).To(Equal([]string{readLine}))
 		})
 
 		It("CS-TMUX-022: claude-sandbox's own label, owned by this pane, is taken over and renamed", func() {
 			win.auto, win.name, win.label, win.owner = false, "old", "old", "%7"
-			Expect(pane.BeginLabel("proj")).To(BeTrue())
+			Expect(pane.BeginLabel("proj", false)).To(BeTrue())
 			Expect(win.name).To(Equal("proj"))
 			Expect(tmuxCalls(fake)).NotTo(ContainElement(HavePrefix("tmux list-panes")), "own pane: no listing")
 		})
@@ -211,25 +220,37 @@ var _ = Describe("window labels (CS-TMUX-020..026, 041..044)", func() {
 		It("CS-TMUX-022: claude-sandbox's own label whose owner pane is gone is taken over", func() {
 			win.auto, win.name, win.label, win.owner = false, "proj", "proj", "%9"
 			win.panes = []string{"%7", "%8"}
-			Expect(pane.BeginLabel("proj")).To(BeTrue())
+			Expect(pane.BeginLabel("proj", false)).To(BeTrue())
 			Expect(win.owner).To(Equal("%7"))
 			Expect(tmuxCalls(fake)).To(ContainElement("tmux list-panes -t %7 -F #{pane_id}"))
 			Expect(tmuxCalls(fake)).NotTo(ContainElement(HavePrefix("tmux rename-window")), "same name: no rename")
 		})
 
-		It("CS-TMUX-022: a window resurrect restored with this launch's label is reclaimed, not renamed", func() {
+		It("CS-TMUX-022: a restore of a labelled row reclaims the restored window, not renamed", func() {
 			win.auto, win.name = false, "my task"
-			Expect(pane.BeginLabel("my task")).To(BeTrue())
+			Expect(pane.BeginLabel("my task", true)).To(BeTrue())
 			Expect(tmuxCalls(fake)).To(Equal([]string{
 				readLine,
 				"tmux set-option -w -t %7 @claude-sandbox-label my task",
 				"tmux set-option -w -t %7 @claude-sandbox-label-pane %7",
+				readLine,
 			}))
+		})
+
+		It("CS-TMUX-022: a window named by hand after the project folder is never claimed by a hand launch", func() {
+			// The review's case: the same text as the label, no options —
+			// exactly what a restored window looks like.
+			win.auto, win.name = false, "proj"
+			Expect(pane.BeginLabel("proj", false)).To(BeFalse())
+			Expect(tmuxCalls(fake)).To(Equal([]string{readLine}))
+			pane.EndLabel("")
+			Expect(win.auto).To(BeFalse())
+			Expect(win.name).To(Equal("proj"))
 		})
 
 		It("CS-TMUX-022: a restored window whose name is another label is a hand name", func() {
 			win.auto, win.name = false, "other task"
-			Expect(pane.BeginLabel("proj")).To(BeFalse())
+			Expect(pane.BeginLabel("proj", false)).To(BeFalse())
 			Expect(tmuxCalls(fake)).To(Equal([]string{readLine}))
 		})
 	})
@@ -237,26 +258,38 @@ var _ = Describe("window labels (CS-TMUX-020..026, 041..044)", func() {
 	It("CS-TMUX-023: one pane owns a shared window's name; the other writes nothing", func() {
 		win.auto, win.name, win.label, win.owner = false, "proj", "proj", "%8"
 		win.panes = []string{"%7", "%8"}
-		Expect(pane.BeginLabel("other")).To(BeFalse())
+		Expect(pane.BeginLabel("other", false)).To(BeFalse())
 		Expect(win.name).To(Equal("proj"))
 		Expect(win.owner).To(Equal("%8"))
 		// A failed listing counts as present: never fight.
 		fake2 := &execx.Fake{}
 		fake2.On("tmux list-panes", "", execx.Fail(1))
 		win.install(fake2)
-		Expect(tmuxpane.Pane{Runner: fake2, ID: "%7"}.BeginLabel("other")).To(BeFalse())
+		Expect(tmuxpane.Pane{Runner: fake2, ID: "%7"}.BeginLabel("other", false)).To(BeFalse())
 		// And the non-owner's end hands nothing back.
 		fake.Calls = nil
-		pane.EndLabel()
+		pane.EndLabel("")
 		Expect(tmuxCalls(fake)).To(Equal([]string{readLine}))
 		Expect(win.label).To(Equal("proj"))
 	})
 
+	It("CS-TMUX-023: two launches racing in one automatic window: the loser puts the winner's name back", func() {
+		// %8's options land between this pane's options and its rename,
+		// and %8's own rename came first.
+		win.panes = []string{"%7", "%8"}
+		win.afterRename = func(w *windowSim) { w.label, w.owner = "other", "%8" }
+		Expect(pane.BeginLabel("proj", false)).To(BeFalse())
+		Expect(win.name).To(Equal("other"))
+		Expect(win.label).To(Equal("other"))
+		Expect(win.owner).To(Equal("%8"))
+		Expect(tmuxCalls(fake)[len(tmuxCalls(fake))-1]).To(Equal("tmux rename-window -t %7 -- other"))
+	})
+
 	Describe("CS-TMUX-024: the end hands the window back", func() {
 		It("CS-TMUX-024: still ours: automatic-rename unset at the window level, then both options", func() {
-			Expect(pane.BeginLabel("proj")).To(BeTrue())
+			Expect(pane.BeginLabel("proj", false)).To(BeTrue())
 			fake.Calls = nil
-			pane.EndLabel()
+			pane.EndLabel("")
 			Expect(tmuxCalls(fake)).To(Equal([]string{
 				readLine,
 				"tmux set-option -w -u -t %7 automatic-rename",
@@ -269,10 +302,10 @@ var _ = Describe("window labels (CS-TMUX-020..026, 041..044)", func() {
 		})
 
 		It("CS-TMUX-042: renamed by hand since: the name and automatic-rename stay, only the options go", func() {
-			Expect(pane.BeginLabel("proj")).To(BeTrue())
+			Expect(pane.BeginLabel("proj", false)).To(BeTrue())
 			win.name = "mine" // prefix + ,
 			fake.Calls = nil
-			pane.EndLabel()
+			pane.EndLabel("")
 			Expect(tmuxCalls(fake)).To(Equal([]string{
 				readLine,
 				"tmux set-option -w -u -t %7 @claude-sandbox-label",
@@ -286,12 +319,12 @@ var _ = Describe("window labels (CS-TMUX-020..026, 041..044)", func() {
 	Describe("CS-TMUX-025: bounded and silent", func() {
 		It("CS-TMUX-025: a failed or unparsable read writes nothing", func() {
 			win.readFails = true
-			Expect(pane.BeginLabel("proj")).To(BeFalse())
-			pane.EndLabel()
+			Expect(pane.BeginLabel("proj", false)).To(BeFalse())
+			pane.EndLabel("")
 			Expect(tmuxCalls(fake)).To(Equal([]string{readLine, readLine}))
 			win.readFails, win.garbage = false, true
 			fake.Calls = nil
-			Expect(pane.BeginLabel("proj")).To(BeFalse())
+			Expect(pane.BeginLabel("proj", false)).To(BeFalse())
 			Expect(tmuxCalls(fake)).To(Equal([]string{readLine}))
 		})
 
@@ -300,14 +333,14 @@ var _ = Describe("window labels (CS-TMUX-020..026, 041..044)", func() {
 			tmuxpane.CallTimeout = 50 * time.Millisecond
 			h := &stallRunner{Fake: &execx.Fake{}, hang: []string{"display-message"}}
 			start := time.Now()
-			Expect(tmuxpane.Pane{Runner: h, ID: "%7"}.BeginLabel("proj")).To(BeFalse())
+			Expect(tmuxpane.Pane{Runner: h, ID: "%7"}.BeginLabel("proj", false)).To(BeFalse())
 			Expect(time.Since(start)).To(BeNumerically("<", time.Second))
 			Expect(h.Fake.CommandLines()).To(HaveLen(1))
 		})
 	})
 
 	It("CS-TMUX-026: no tmux.conf line: the label is a plain rename-window, nothing in the mark", func() {
-		Expect(pane.BeginLabel("proj")).To(BeTrue())
+		Expect(pane.BeginLabel("proj", false)).To(BeTrue())
 		for _, l := range tmuxCalls(fake) {
 			Expect(l).NotTo(ContainSubstring("automatic-rename-format"))
 			Expect(l).NotTo(HavePrefix("tmux set-option -g"))
@@ -318,9 +351,11 @@ var _ = Describe("window labels (CS-TMUX-020..026, 041..044)", func() {
 		restored := &windowSim{auto: false, name: win.name, panes: []string{"%7"}}
 		fake2 := &execx.Fake{}
 		restored.install(fake2)
-		Expect(tmuxpane.Pane{Runner: fake2, ID: "%7"}.BeginLabel("proj")).To(BeTrue())
+		Expect(tmuxpane.Pane{Runner: fake2, ID: "%7"}.BeginLabel("proj", true)).To(BeTrue())
 		Expect(tmuxCalls(fake2)).NotTo(ContainElement(HavePrefix("tmux rename-window")))
+		// The mark carries only whether its launch owned the label.
 		Expect(tmuxpane.Mark{}.JSON()).NotTo(ContainSubstring("label"))
+		Expect(tmuxpane.Mark{Labelled: true}.JSON()).To(ContainSubstring(`"labelled":true`))
 	})
 })
 
@@ -351,7 +386,20 @@ var _ = Describe("the save hook's window-label refresh (CS-TMUX-041..044)", func
 	}
 	run := func(m tmuxpane.Mark, cmd string) tmuxpane.SaveResult {
 		fake.On("tmux list-panes -a", fmt.Sprintf("main\t1\t0\t%%7\t%s\t%d\t%d\t%s\n", cmd, srvPID, srvStart, m.JSON()), nil)
-		fake.On("tmux show-options", m.JSON()+"\n", nil)
+		// The pane's mark: what the hook lists, and what its write-back sets.
+		var mu sync.Mutex
+		cur := m.JSON()
+		fake.OnFunc("tmux show-options", func(execx.Cmd) (string, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			return cur + "\n", nil
+		})
+		fake.OnFunc("tmux set-option -p -t %7 ", func(c execx.Cmd) (string, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			cur = c.Args[len(c.Args)-1]
+			return "", nil
+		})
 		fake.On("docker ps", saveID+"\t"+m.Container+"\trunning\n", nil)
 		res, err := tmuxpane.Save(state, tmuxpane.SaveOptions{
 			Runner: fake, Now: func() time.Time { return now },
@@ -379,7 +427,7 @@ var _ = Describe("the save hook's window-label refresh (CS-TMUX-041..044)", func
 			tmuxpane.SaveDeadline, tmuxpane.CallTimeout)
 	})
 
-	It("CS-TMUX-041: a /rename (name source user) renames the owned window: option, then rename", func() {
+	It("CS-TMUX-041: a /rename (name source user) renames the owned window: rename, then the option", func() {
 		record("fix the restore", "user")
 		res := run(mark(nil), "claude-sandbox")
 		Expect(res.Relabeled).To(Equal(1))
@@ -388,8 +436,8 @@ var _ = Describe("the save hook's window-label refresh (CS-TMUX-041..044)", func
 		Expect(win.auto).To(BeFalse())
 		calls := tmuxCalls(fake)
 		n := len(calls)
-		Expect(calls[n-2]).To(Equal("tmux set-option -w -t %7 @claude-sandbox-label fix the restore"))
-		Expect(calls[n-1]).To(Equal("tmux rename-window -t %7 -- fix the restore"))
+		Expect(calls[n-2]).To(Equal("tmux rename-window -t %7 -- fix the restore"))
+		Expect(calls[n-1]).To(Equal("tmux set-option -w -t %7 @claude-sandbox-label fix the restore"))
 		// Already the name: one read, no write.
 		fake = &execx.Fake{}
 		win.install(fake)
@@ -475,5 +523,66 @@ var _ = Describe("the save hook's window-label refresh (CS-TMUX-041..044)", func
 			Expect(run(m, "claude-sandbox").Relabeled).To(Equal(0))
 			Expect(win.name).To(Equal("proj"))
 		})
+
+		It("CS-TMUX-044: a pane relaunched during the save with no write-back due is re-checked too", func() {
+			// The listed mark already holds its conversation and name, so no
+			// write-back runs; the pane is relaunched before the refresh.
+			record("old conversation", "user")
+			m := mark(func(m *tmuxpane.Mark) {
+				m.Conversation, m.Name, m.NameSource = convID, "old conversation", "user"
+			})
+			relaunched := mark(func(m *tmuxpane.Mark) {
+				m.Container, m.ContainerID, m.Since = "claude-sandbox-work-proj-abc123-crake", saveID2, since+1
+			})
+			fake.On("tmux show-options", relaunched.JSON()+"\n", nil)
+			res := run(m, "claude-sandbox")
+			Expect(res.WriteBacks).To(Equal(0))
+			Expect(res.Relabeled).To(Equal(0))
+			Expect(win.name).To(Equal("proj"))
+			Expect(tmuxCalls(fake)).NotTo(ContainElement(HavePrefix("tmux display-message")))
+			Expect(logs).To(ContainElement(ContainSubstring("changed since the list; window label not refreshed")))
+		})
+	})
+
+	It("CS-TMUX-043: a refresh cut between its rename and its option write is repaired, never frozen", func() {
+		record("fix the restore", "user")
+		// The rename ran; the option write did not.
+		win.name = "fix the restore"
+		res := run(mark(nil), "claude-sandbox")
+		Expect(res.Relabeled).To(Equal(0))
+		Expect(win.label).To(Equal("fix the restore"))
+		Expect(tmuxCalls(fake)).NotTo(ContainElement(HavePrefix("tmux rename-window")))
+		// And the end hands such a window back through the conversation's label.
+		win.label = "proj"
+		f2 := &execx.Fake{}
+		win.install(f2)
+		tmuxpane.Pane{Runner: f2, ID: "%7"}.EndLabel("fix the restore")
+		Expect(win.auto).To(BeTrue())
+	})
+
+	It("CS-TMUX-021: the command-execution barrier: a /rename of #(cmd) never reaches rename-window with a '#' (host command execution)", func() {
+		// rename-window format-expands its argument with jobs on, so a "#"
+		// from a sandbox-written registry name would run a host command.
+		record("#(touch /tmp/pwned) #{pane_pid} #[fg=red]x", "user")
+		run(mark(nil), "claude-sandbox")
+		renamed := false
+		for _, c := range fake.Calls {
+			// The window-label calls. (The pane mark's own "set-option -p"
+			// carries the raw name inside its JSON; set-option expands no
+			// format without -F.)
+			if c.Name == "tmux" && (c.Args[0] == "rename-window" || (c.Args[0] == "set-option" && c.Args[1] == "-w")) {
+				for _, a := range c.Args {
+					Expect(a).NotTo(ContainSubstring("#("), "%v", c.Args)
+					if c.Args[0] == "rename-window" {
+						Expect(a).NotTo(ContainSubstring("#"), "%v", c.Args)
+						renamed = true
+					}
+				}
+			}
+		}
+		Expect(renamed).To(BeTrue())
+		Expect(win.name).To(Equal("(touch /tmp/pwned) {pane_pid} [fg=red]x"))
+		// The launch's --name is cleaned the same way.
+		Expect(tmuxpane.LaunchLabel("#(rm -rf ~)", "/w/proj")).To(Equal("(rm -rf ~)"))
 	})
 })

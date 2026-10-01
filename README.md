@@ -541,7 +541,10 @@ A launch that marks its pane also names the pane's **window**: the conversation'
 gave it one (`-- --name <n>`, or a later `/rename` — see below), else the project folder's name.
 It uses `rename-window`, which turns tmux's `automatic-rename` off for that window, so
 tmux-resurrect saves the name and restores it exactly; no `tmux.conf` line is needed. The name is
-cleaned (control characters, `#`, `\` and `;` removed) and cut to 40 characters.
+cleaned (control characters, `\` and `;` removed) and cut to 40 characters, and **every `#` is
+removed**: `rename-window` expands tmux formats in its argument, jobs included, and a `/rename`
+name is read from a registry record code inside a sandbox writes, so a `#(command)` there would
+otherwise run that command on the host.
 
 - A window you named yourself is never touched — not at launch, not later. A window whose
   automatic name is on gets the label; one that already carries claude-sandbox's label is taken
@@ -552,8 +555,10 @@ cleaned (control characters, `#`, `\` and `;` removed) and cut to 40 characters.
 - When the session ends (the pane's mark is removed), the window goes back to tmux's automatic
   name, unless you renamed it meanwhile. A pane kept pending for a restore keeps its name.
 - Two window options record this: `@claude-sandbox-label` and `@claude-sandbox-label-pane`
-  (`tmux show-options -w`). resurrect does not save them; the next launch in a restored window
-  reclaims it when the name matches.
+  (`tmux show-options -w`), and the pane mark records `"labelled": true`. resurrect does not save
+  the options; `tmux restore` reclaims a restored window when the saved row was labelled and the
+  name matches. A hand launch never does: a window you named by hand with the same text (the
+  folder's name, say) looks exactly alike, and stays yours.
 
 Every call is bounded (1 s) and silent, like the mark's. Spec: `spec/tmux.feature`
 CS-TMUX-020..026, CS-TMUX-041..044.

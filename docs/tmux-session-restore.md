@@ -153,8 +153,11 @@ in the sidecar. A `/rename` reaches the window at the next save (within a
 minute) as long as the window still has the name claude-sandbox gave it; a
 name you set yourself always wins. When the session ends the window returns to
 tmux's automatic name, unless the pane is kept pending for a restore. After a
-restore, the resumed session reclaims its window because the restored name is
-the one it would set. `README.md` § tmux window names has the details.
+restore, `tmux restore` reclaims the window when the saved row records that
+claude-sandbox named it and the restored name is the one it would set; a
+window you named by hand is never reclaimed. Every `#` is stripped from the
+name, because `rename-window` expands tmux formats (`#(command)` included) and
+a `/rename` name comes from inside a sandbox. `README.md` § tmux window names has the details.
 
 ## The claude-sandbox lines
 

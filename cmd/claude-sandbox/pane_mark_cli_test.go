@@ -105,9 +105,10 @@ var _ = Describe("tmux pane mark (CS-TMUX-010..019)", func() {
 		lines := tmuxLines()
 		Expect(lines).To(HaveLen(4))
 		Expect(lines[0]).To(Equal(show))
-		Expect(lines[1]).To(HavePrefix("tmux set-option -p -t %7 @claude-sandbox {"))
-		// CS-TMUX-020: one read of the window; an empty answer labels nothing.
-		Expect(lines[2]).To(HavePrefix("tmux display-message -p -t %7 "))
+		// CS-TMUX-020: one read of the window (before the mark, which records
+		// whether the launch owns the label); an empty answer labels nothing.
+		Expect(lines[1]).To(HavePrefix("tmux display-message -p -t %7 "))
+		Expect(lines[2]).To(HavePrefix("tmux set-option -p -t %7 @claude-sandbox {"))
 		Expect(lines[3]).To(Equal(unset))
 		start := indexOf("docker start -ai")
 		Expect(start).To(BeNumerically(">", indexOf("tmux set-option -p -t %7")))
@@ -368,7 +369,7 @@ var _ = Describe("tmux pane mark (CS-TMUX-010..019)", func() {
 			f.fake.LateSignal = syscall.SIGTERM
 			f.run()
 			Expect(tmuxLines()[len(tmuxLines())-1]).To(Equal(unset))
-			Expect(tmuxLines()).To(HaveLen(4)) // show, set, the window read (CS-TMUX-020), unset
+			Expect(tmuxLines()).To(HaveLen(4)) // show, the window read (CS-TMUX-020), set, unset
 			Expect(p.get()).To(BeEmpty())
 		})
 	})

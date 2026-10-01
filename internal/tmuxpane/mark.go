@@ -91,6 +91,13 @@ type Mark struct {
 	Unreplayed   []string `json:"unreplayed,omitempty"`
 	FlagsUnknown bool     `json:"flagsUnknown,omitempty"`
 
+	// Labelled is true when this launch named its window and owns the label
+	// (CS-TMUX-020..022). The sidecar keeps it in the row, so a restore of
+	// the row — and only such a restore — may reclaim a window resurrect
+	// restored under that name (case C): a hand name with the same text
+	// looks exactly alike.
+	Labelled bool `json:"labelled,omitempty"`
+
 	// Filled by the save hook (F3); empty at launch.
 	Conversation string `json:"conversation,omitempty"`
 	Name         string `json:"name,omitempty"`

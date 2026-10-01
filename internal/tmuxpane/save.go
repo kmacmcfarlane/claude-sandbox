@@ -264,6 +264,22 @@ func Save(stateFile string, o SaveOptions) (SaveResult, error) {
 			o.logf("deadline: window labels left for the next save")
 			break
 		}
+		// CS-TMUX-044: the pane may have been relaunched since the list
+		// (with or without a write-back): re-read its mark and refresh only
+		// while it is still the one this save resolved.
+		cur, ok := bounded(o.Runner, left(), "tmux", "show-options", "-p", "-q", "-v", "-t", lp.id, Option)
+		if !ok {
+			o.logf("tmux show-options for %s failed; window label not refreshed", lp.id)
+			continue
+		}
+		if now, ok := ParseMark(strings.TrimRight(cur, "\r\n")); !ok || now.JSON() != lp.mark.JSON() {
+			o.logf("the mark in %s changed since the list; window label not refreshed", lp.id)
+			continue
+		}
+		if left() <= 0 {
+			o.logf("deadline: window labels left for the next save")
+			break
+		}
 		renamed, problem := RefreshLabel(Pane{Runner: o.Runner, ID: lp.id}, lp.mark, left)
 		if problem != "" {
 			o.logf("%s", problem)
