@@ -11,6 +11,7 @@ package sessions
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -569,6 +570,68 @@ func Inspect(r execx.Runner, name string) (state string, created time.Time) {
 		}
 	}
 	return f[0], created
+}
+
+// Container is what InspectContainer reads (CS-TMUX-051): the container's
+// name (without docker's leading "/"), state, creation time, and the project,
+// instance and mode labels a restore compares with its recorded row.
+type Container struct {
+	Name, State             string
+	Created                 time.Time
+	Project, Instance, Mode string
+}
+
+// ErrNoSuchContainer is an inspect of a container docker does not know.
+var ErrNoSuchContainer = errors.New("no such container")
+
+// inspectSep separates InspectContainer's fields: a label value may hold a
+// space or a tab, never this.
+const inspectSep = "\x1f"
+
+// InspectContainer is one "docker inspect --type container" of idOrName
+// (CS-TMUX-051). ErrNoSuchContainer when docker reports that the container
+// does not exist; any other failure is returned as it is, so a caller can
+// tell "gone" from "cannot tell".
+func InspectContainer(r execx.Runner, idOrName string) (Container, error) {
+	label := func(k string) string { return `{{index .Config.Labels "` + k + `"}}` }
+	format := strings.Join([]string{"{{.Name}}", "{{.State.Status}}", "{{.Created}}",
+		label(LabelProject), label(LabelInstance), label(LabelMode)}, inspectSep)
+	var stderr strings.Builder
+	out, err := r.Output(execx.Cmd{
+		Name:   "docker",
+		Args:   []string{"inspect", "--type", "container", "-f", format, idOrName},
+		Stderr: &stderr,
+	})
+	if err != nil {
+		if e := strings.ToLower(stderr.String() + " " + err.Error()); strings.Contains(e, "no such container") || strings.Contains(e, "no such object") {
+			return Container{}, ErrNoSuchContainer
+		}
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			return Container{}, fmt.Errorf("docker inspect: %s", lastLine(msg))
+		}
+		return Container{}, fmt.Errorf("docker inspect: %v", err)
+	}
+	f := strings.Split(strings.TrimRight(out, "\r\n"), inspectSep)
+	if len(f) != 6 {
+		return Container{}, fmt.Errorf("docker inspect: unexpected output")
+	}
+	for i := range f {
+		if f[i] == "<no value>" {
+			f[i] = ""
+		}
+	}
+	c := Container{Name: strings.TrimPrefix(f[0], "/"), State: f[1], Project: f[3], Instance: f[4], Mode: f[5]}
+	if t, perr := time.Parse(time.RFC3339Nano, f[2]); perr == nil {
+		c.Created = t
+	}
+	return c, nil
+}
+
+func lastLine(s string) string {
+	if i := strings.LastIndexByte(s, '\n'); i >= 0 {
+		return s[i+1:]
+	}
+	return s
 }
 
 // RemoveReservation removes a created container. Plain "docker rm", never -f:

@@ -85,6 +85,10 @@ type Env struct {
 	// ProcRoot is the /proc the resume guard reads for its host claude check
 	// (CS-SESS-068); "" means the real /proc.
 	ProcRoot string
+	// ResurrectDir is tmux-resurrect's save dir for `tmux restore`
+	// (CS-TMUX-045); "" resolves it as resurrect does. Tests point it at a
+	// scratch directory: resurrectDir() panics under go test when unset.
+	ResurrectDir string
 }
 
 // shadowRoot resolves where this launch makes its shadow directory
@@ -292,6 +296,12 @@ Commands (bootstrap the project, then exit — launcher flags do not apply):
   global-config accept      Record the current global config as the baseline snapshot
   tmux save STATE-FILE      tmux-resurrect post-save-layout hook (host only): record which
                             conversation each sandbox pane holds, beside the save; silent
+  tmux restore --list [--all]
+                            List the tmux-resurrect saves, newest first, as runs of saves
+                            holding the same sandbox sessions (host only)
+  tmux restore --dry-run [--all] [--from SAVE]
+                            Show what a restore would do in this pane (or every pane of the
+                            save); reads only — restoring itself is still to come
   completion SHELL          Print a shell completion script (bash, zsh, fish, powershell)
                             e.g. source <(claude-sandbox completion zsh)
      --track-in-host / --no-track-in-host              set trackInHost (skip the prompt)

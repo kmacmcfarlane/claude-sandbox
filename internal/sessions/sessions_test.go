@@ -599,3 +599,58 @@ var _ = Describe("kept containers (CS-SESS-070..073)", func() {
 		Expect(strings.Count(out, `"keep"`)).To(Equal(1))
 	})
 })
+
+var _ = Describe("InspectContainer (CS-TMUX-051)", func() {
+	const id = "4f1c2a9b8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a3928170615e4d3"
+
+	It("CS-TMUX-051: one docker inspect reads the name, state, creation and the project, instance and mode labels", func() {
+		fake := &execx.Fake{}
+		fake.On("docker inspect", strings.Join([]string{"/claude-sandbox-a-b-c-heron", "running", "2026-09-29T12:00:00.123456789Z",
+			"/srv/my proj", "heron", "claude"}, sep)+"\n", nil)
+		c, err := sessions.InspectContainer(fake, id)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(c.Name).To(Equal("claude-sandbox-a-b-c-heron"))
+		Expect(c.State).To(Equal("running"))
+		Expect(c.Created).To(Equal(time.Date(2026, 9, 29, 12, 0, 0, 123456789, time.UTC)))
+		Expect(c.Project).To(Equal("/srv/my proj"))
+		Expect(c.Instance).To(Equal("heron"))
+		Expect(c.Mode).To(Equal("claude"))
+		Expect(fake.CommandLines()).To(Equal([]string{"docker inspect --type container -f " + strings.Join([]string{
+			"{{.Name}}", "{{.State.Status}}", "{{.Created}}",
+			`{{index .Config.Labels "claude-sandbox.project"}}`, `{{index .Config.Labels "claude-sandbox.instance"}}`,
+			`{{index .Config.Labels "claude-sandbox.mode"}}`}, sep) + " " + id}))
+	})
+
+	It("CS-TMUX-051: 'no such container' is ErrNoSuchContainer; any other failure is returned as it is", func() {
+		fake := &execx.Fake{}
+		fake.OnFunc("docker inspect", func(c execx.Cmd) (string, error) {
+			c.Stderr.Write([]byte("Error: No such container: " + id + "\n"))
+			return "", execx.Fail(1)
+		})
+		_, err := sessions.InspectContainer(fake, id)
+		Expect(err).To(MatchError(sessions.ErrNoSuchContainer))
+
+		fake = &execx.Fake{}
+		fake.OnFunc("docker inspect", func(c execx.Cmd) (string, error) {
+			c.Stderr.Write([]byte("Cannot connect to the Docker daemon at unix:///var/run/docker.sock\n"))
+			return "", execx.Fail(1)
+		})
+		_, err = sessions.InspectContainer(fake, id)
+		Expect(err).To(MatchError(ContainSubstring("Cannot connect to the Docker daemon")))
+		Expect(err).NotTo(MatchError(sessions.ErrNoSuchContainer))
+
+		fake = &execx.Fake{}
+		fake.On("docker inspect", "garbage\n", nil)
+		_, err = sessions.InspectContainer(fake, id)
+		Expect(err).To(MatchError(ContainSubstring("unexpected output")))
+	})
+
+	It("CS-TMUX-051: a label docker renders as <no value> is empty", func() {
+		fake := &execx.Fake{}
+		fake.On("docker inspect", strings.Join([]string{"/x", "exited", "bad", "<no value>", "<no value>", "<no value>"}, sep)+"\n", nil)
+		c, err := sessions.InspectContainer(fake, id)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(c.Project + c.Instance + c.Mode).To(BeEmpty())
+		Expect(c.Created.IsZero()).To(BeTrue())
+	})
+})
