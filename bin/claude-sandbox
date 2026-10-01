@@ -97,11 +97,18 @@ build() {
 # build two binaries and need not wait for each other). The wait is bounded:
 # a hung build (a stuck `docker run golang` pull) must not hold every pane
 # forever, so past BUILD_LOCK_WAIT seconds a waiter warns and builds unlocked,
-# which is what every shim did before the lock. Without flock (util-linux;
+# which is what every shim did before the lock (CLAUDE_SANDBOX_BUILD_LOCK_WAIT,
+# a whole number of seconds, overrides the 600; anything else is ignored). A
+# holder whose build fails leaves the binary stale, so each waiter then builds
+# in turn: N failing builds for N panes, each still one at a time. Without flock (util-linux;
 # macOS has none) or when the lock file cannot be opened, the shim builds
 # unlocked, as before, with no message. The hook fast paths above never reach
 # this point, so they never build and never wait.
 BUILD_LOCK_WAIT=600
+case "${CLAUDE_SANDBOX_BUILD_LOCK_WAIT-}" in
+    '' | *[!0-9]*) ;;
+    *) BUILD_LOCK_WAIT=$CLAUDE_SANDBOX_BUILD_LOCK_WAIT ;;
+esac
 if stale; then
     locked=false
     if command -v flock >/dev/null 2>&1 \
@@ -122,7 +129,10 @@ if stale; then
         build
     fi
     # Release the lock and close the fd so neither reaches the exec'd binary.
-    exec 9>&- 2>/dev/null || true
+    # Only "9>&-": any other redirection on a bare exec would stay applied to
+    # the shell, and so to the launcher it execs (a "2>/dev/null" here once
+    # silenced every stale launch's stderr). Closing a closed fd succeeds.
+    exec 9>&-
 fi
 
 export CLAUDE_SANDBOX_REPO_ROOT="$REPO_ROOT"

@@ -66,8 +66,12 @@ Feature: tmux integration (CS-TMUX)
     And under the lock each checks staleness again: one builds, the others find the binary up to date and exec it without building
     And build output still goes to stderr
     And the lock fd is closed before the exec, so it never reaches the launcher (nor the build commands)
-    When a waiter has waited 600 s
+    And the launcher it execs keeps the caller's stderr, and stdout carries nothing but the launcher's own
+    When a waiter has waited 600 s (CLAUDE_SANDBOX_BUILD_LOCK_WAIT, a whole number of seconds, overrides it)
     Then it prints one WARNING naming the lock file on stderr and builds without the lock
+    When the holder's build fails
+    Then the binary stays stale and each waiter builds in turn under the lock (N failing builds for N
+      shims, never two at once); accepted, since a failing build is the operator's to fix
     When flock is not installed (macOS), or the lock file cannot be opened
     Then the shim builds unlocked, as before, with no message
     When the binary is up to date

@@ -186,20 +186,26 @@ var _ = Describe("shim build lock (spec/tmux.feature)", func() {
 	})
 
 	// built is the body of the "binary" the fakes write: it records one line
-	// per run, "leaked" when fd 9 is open in it.
+	// per run ("leaked" when fd 9 is open in it) and writes one marker line to
+	// each of its stdout and stderr, so a test can see that both reach the
+	// caller unchanged.
 	built := func() string {
-		return "#!/bin/sh\nif [ -e /proc/$$/fd/9 ]; then echo leaked >> '" + ran + "'; else echo ok >> '" + ran + "'; fi\n"
+		return "#!/bin/sh\nif [ -e /proc/$$/fd/9 ]; then echo leaked >> '" + ran + "'; else echo ok >> '" + ran + "'; fi\n" +
+			"echo launcher-stdout\necho launcher-stderr >&2\n"
 	}
+	// The fakes print a line to stdout as a real build may (a first docker
+	// pull's progress); the shim must send it to stderr.
+	const buildNoise = "build-tool-stdout"
 	// fakeGo writes a `go` that takes 1 s and then writes the -o target.
 	fakeGo := func() {
-		script := "#!/bin/sh\necho build >> '" + count + "'\nsleep 1\nout=\nwhile [ $# -gt 0 ]; do [ \"$1\" = -o ] && out=$2; shift; done\n" +
+		script := "#!/bin/sh\necho build >> '" + count + "'\necho " + buildNoise + "\nsleep 1\nout=\nwhile [ $# -gt 0 ]; do [ \"$1\" = -o ] && out=$2; shift; done\n" +
 			"cat > \"$out\" <<'BIN'\n" + built() + "BIN\nchmod +x \"$out\"\n"
 		Expect(os.WriteFile(filepath.Join(pathDir, "go"), []byte(script), 0o755)).To(Succeed())
 	}
 	// fakeDocker writes a `docker` that maps "-v <repo>:/src" and writes
 	// <repo>/bin/dist/claude-sandbox the same way.
 	fakeDocker := func() {
-		script := "#!/bin/sh\necho build >> '" + count + "'\nsleep 1\nsrc=\nwhile [ $# -gt 0 ]; do [ \"$1\" = -v ] && src=${2%:/src}; shift; done\n" +
+		script := "#!/bin/sh\necho build >> '" + count + "'\necho " + buildNoise + "\nsleep 1\nsrc=\nwhile [ $# -gt 0 ]; do [ \"$1\" = -v ] && src=${2%:/src}; shift; done\n" +
 			"out=\"$src/bin/dist/claude-sandbox\"\ncat > \"$out\" <<'BIN'\n" + built() + "BIN\nchmod +x \"$out\"\n"
 		Expect(os.WriteFile(filepath.Join(pathDir, "docker"), []byte(script), 0o755)).To(Succeed())
 	}
@@ -210,23 +216,35 @@ var _ = Describe("shim build lock (spec/tmux.feature)", func() {
 		}
 		Expect(os.Symlink(p, filepath.Join(pathDir, "flock"))).To(Succeed())
 	}
-	shimCmd := func(args ...string) *exec.Cmd {
-		bash := filepath.Join(pathDir, "bash")
-		cmd := exec.Command(bash, append([]string{filepath.Join(repo, "bin", "claude-sandbox")}, args...)...)
-		cmd.Env = []string{"PATH=" + pathDir, "HOME=" + repo}
-		return cmd
+	// holdLock takes the build lock from the test process; the returned func
+	// releases it.
+	holdLock := func() func() {
+		Expect(os.MkdirAll(binDir, 0o755)).To(Succeed())
+		f, err := os.OpenFile(filepath.Join(binDir, ".build.lock"), os.O_RDWR|os.O_CREATE, 0o600)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)).To(Succeed())
+		return func() { _ = f.Close() }
 	}
 	type result struct {
-		out string
-		err error
+		stdout, stderr string
+		err            error
+	}
+	// run runs the shim with stdout and stderr captured apart.
+	run := func(extraEnv []string, args ...string) result {
+		bash := filepath.Join(pathDir, "bash")
+		cmd := exec.Command(bash, append([]string{filepath.Join(repo, "bin", "claude-sandbox")}, args...)...)
+		cmd.Env = append([]string{"PATH=" + pathDir, "HOME=" + repo}, extraEnv...)
+		var stdout, stderr strings.Builder
+		cmd.Stdout, cmd.Stderr = &stdout, &stderr
+		err := cmd.Run()
+		return result{stdout.String(), stderr.String(), err}
 	}
 	race := func(n int) []result {
 		res := make([]result, n)
 		done := make(chan int, n)
 		for i := 0; i < n; i++ {
 			go func(i int) {
-				b, err := shimCmd("--new").CombinedOutput()
-				res[i] = result{string(b), err}
+				res[i] = run(nil, "--new")
 				done <- i
 			}(i)
 		}
@@ -240,6 +258,15 @@ var _ = Describe("shim build lock (spec/tmux.feature)", func() {
 		Expect(err).NotTo(HaveOccurred())
 		return strings.Fields(string(b))
 	}
+	// launched checks one stale run: it succeeded, its stdout is the
+	// launcher's alone, and its stderr still reaches the caller after the
+	// shim's lock handling (a stray redirection on the fd close once sent it
+	// to /dev/null for every stale launch).
+	launched := func(r result) {
+		Expect(r.err).NotTo(HaveOccurred(), r.stderr)
+		Expect(r.stdout).To(Equal("launcher-stdout\n"), "build output and shim messages never reach stdout")
+		Expect(r.stderr).To(HaveSuffix("launcher-stderr\n"), "the exec'd launcher keeps the caller's stderr")
+	}
 
 	for _, kind := range []string{"host go", "docker golang"} {
 		kind := kind
@@ -250,41 +277,68 @@ var _ = Describe("shim build lock (spec/tmux.feature)", func() {
 			} else {
 				fakeDocker()
 			}
-			// The test holds the lock first, so every shim queues behind it
-			// whatever the scheduling; released, one builds and two find the
-			// binary up to date under the lock.
-			Expect(os.MkdirAll(binDir, 0o755)).To(Succeed())
-			f, err := os.OpenFile(filepath.Join(binDir, ".build.lock"), os.O_RDWR|os.O_CREATE, 0o600)
-			Expect(err).NotTo(HaveOccurred())
-			defer f.Close()
-			Expect(syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)).To(Succeed())
-			release := time.AfterFunc(time.Second, func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN) })
-			defer release.Stop()
+			// The test holds the lock for the first second, so the shims queue
+			// behind it; released, one builds and the others find the binary
+			// up to date under the lock. A shim the scheduler starts only
+			// after the build finds it fresh and neither waits nor builds,
+			// which is also correct, so only "at least one waited" is fixed.
+			release := holdLock()
+			defer release()
+			timer := time.AfterFunc(time.Second, release)
+			defer timer.Stop()
 			res := race(3)
 			building, waiting := 0, 0
 			for _, r := range res {
-				Expect(r.err).NotTo(HaveOccurred(), r.out)
-				if strings.Contains(r.out, "Building claude-sandbox binary") {
+				launched(r)
+				if strings.Contains(r.stderr, "Building claude-sandbox binary") {
 					building++
+					Expect(r.stderr).To(ContainSubstring(buildNoise), "build output goes to stderr")
 				}
-				if strings.Contains(r.out, "Waiting for another claude-sandbox build") {
+				if strings.Contains(r.stderr, "Waiting for another claude-sandbox build") {
 					waiting++
 				}
 			}
 			Expect(lines(count)).To(HaveLen(1), "one build for three launches")
 			Expect(building).To(Equal(1))
-			Expect(waiting).To(Equal(3))
+			Expect(waiting).To(BeNumerically(">=", 1))
 			Expect(lines(ran)).To(Equal([]string{"ok", "ok", "ok"}), "every launch execs the binary, and fd 9 never reaches it")
 		})
 	}
+
+	It("CS-TMUX-073: past the bounded wait a waiter warns and builds without the lock", func() {
+		withFlock()
+		fakeGo()
+		release := holdLock()
+		defer release()
+		r := run([]string{"CLAUDE_SANDBOX_BUILD_LOCK_WAIT=1"}, "--new")
+		launched(r)
+		Expect(r.stderr).To(ContainSubstring("Waiting for another claude-sandbox build"))
+		Expect(r.stderr).To(ContainSubstring("WARNING: the other claude-sandbox build still holds " + filepath.Join(binDir, ".build.lock") + " after 1s; building without the lock."))
+		Expect(r.stderr).To(ContainSubstring("Building claude-sandbox binary (host go)"))
+		Expect(lines(count)).To(HaveLen(1))
+		Expect(lines(ran)).To(Equal([]string{"ok"}))
+	})
+
+	It("CS-TMUX-073: a lock file that cannot be opened means an unlocked build, with no message", func() {
+		withFlock()
+		fakeGo()
+		Expect(os.MkdirAll(filepath.Join(binDir, ".build.lock"), 0o755)).To(Succeed())
+		r := run(nil, "--new")
+		launched(r)
+		Expect(r.stderr).NotTo(ContainSubstring("Waiting"))
+		Expect(r.stderr).NotTo(ContainSubstring("WARNING"))
+		Expect(r.stderr).To(ContainSubstring("Building claude-sandbox binary (host go)"))
+		Expect(lines(count)).To(HaveLen(1))
+		Expect(lines(ran)).To(Equal([]string{"ok"}))
+	})
 
 	It("CS-TMUX-073: without flock the shim builds unlocked, as before, with no message", func() {
 		fakeGo()
 		res := race(2)
 		for _, r := range res {
-			Expect(r.err).NotTo(HaveOccurred(), r.out)
-			Expect(r.out).NotTo(ContainSubstring("Waiting"))
-			Expect(r.out).NotTo(ContainSubstring("WARNING"))
+			launched(r)
+			Expect(r.stderr).NotTo(ContainSubstring("Waiting"))
+			Expect(r.stderr).NotTo(ContainSubstring("WARNING"))
 		}
 		Expect(lines(count)).To(HaveLen(2))
 		Expect(filepath.Join(binDir, ".build.lock")).NotTo(BeAnExistingFile())
@@ -296,9 +350,10 @@ var _ = Describe("shim build lock (spec/tmux.feature)", func() {
 		fakeGo()
 		Expect(os.MkdirAll(binDir, 0o755)).To(Succeed())
 		Expect(os.WriteFile(filepath.Join(binDir, "claude-sandbox"), []byte(built()), 0o755)).To(Succeed())
-		b, err := shimCmd("--new").CombinedOutput()
-		Expect(err).NotTo(HaveOccurred(), string(b))
-		Expect(string(b)).To(BeEmpty())
+		r := run(nil, "--new")
+		Expect(r.err).NotTo(HaveOccurred(), r.stderr)
+		Expect(r.stdout).To(Equal("launcher-stdout\n"))
+		Expect(r.stderr).To(Equal("launcher-stderr\n"))
 		Expect(count).NotTo(BeAnExistingFile())
 		Expect(filepath.Join(binDir, ".build.lock")).NotTo(BeAnExistingFile())
 		Expect(lines(ran)).To(Equal([]string{"ok"}))
@@ -309,17 +364,15 @@ var _ = Describe("shim build lock (spec/tmux.feature)", func() {
 		fakeGo()
 		Expect(os.MkdirAll(binDir, 0o755)).To(Succeed())
 		Expect(os.WriteFile(filepath.Join(binDir, "claude-sandbox"), []byte(built()), 0o755)).To(Succeed())
-		f, err := os.OpenFile(filepath.Join(binDir, ".build.lock"), os.O_RDWR|os.O_CREATE, 0o600)
-		Expect(err).NotTo(HaveOccurred())
-		defer f.Close()
-		Expect(syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)).To(Succeed())
+		release := holdLock()
+		defer release()
 		// Stale too: the hook neither builds nor runs it, and never queues.
 		future := time.Now().Add(time.Hour)
 		Expect(os.Chtimes(filepath.Join(repo, "cmd", "claude-sandbox", "main.go"), future, future)).To(Succeed())
 		start := time.Now()
-		b, err := shimCmd("tmux", "save", "/r/tmux_resurrect_x.txt").CombinedOutput()
-		Expect(err).NotTo(HaveOccurred())
-		Expect(string(b)).To(BeEmpty())
+		r := run(nil, "tmux", "save", "/r/tmux_resurrect_x.txt")
+		Expect(r.err).NotTo(HaveOccurred())
+		Expect(r.stdout + r.stderr).To(BeEmpty())
 		Expect(time.Since(start)).To(BeNumerically("<", 5*time.Second))
 		Expect(count).NotTo(BeAnExistingFile())
 		Expect(ran).NotTo(BeAnExistingFile())

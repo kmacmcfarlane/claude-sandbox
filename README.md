@@ -16,9 +16,10 @@ sources change) the shim builds it automatically — with the host Go toolchain 
 one is installed, otherwise via a throwaway `docker run golang` container — so
 the host needs only bash and Docker. The shim resolves its repo root through
 symlinks, so PATH is all you need. Builds serialise on a `flock` of
-`bin/dist/.build.lock` (when util-linux `flock` is installed): many panes started at once (tmux-continuum's
-boot restore) run one build, and the rest wait for it — up to 10 minutes, then they build
-anyway — and use the binary it made.
+`bin/dist/.build.lock` (when util-linux `flock` is installed): many panes started
+at once (tmux-continuum's boot restore) run one build, and the rest wait for it
+and use the binary it made — up to 10 minutes (`CLAUDE_SANDBOX_BUILD_LOCK_WAIT`,
+in seconds), after which they build anyway.
 
 Optionally, enable tab completion for your shell — see [Shell completion](#shell-completion).
 
