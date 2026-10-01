@@ -768,8 +768,18 @@ var _ = Describe("container states in the sessions listing (CS-SESS-070, 074)", 
 		Expect(g.errw.String()).To(ContainSubstring("no running sessions"))
 		Expect(g.fake.Session).To(BeNil())
 
+		j := newCLIFixture()
+		j.fake.On("docker ps", statePsRow("cs-gone", j.proj, "otter", "5", sessions.StateExited)+"\n", nil)
+		Expect(j.run("--join=otter")).To(Equal(2))
+		Expect(j.errw.String()).To(ContainSubstring("no running sessions"))
+		Expect(j.fake.Session).To(BeNil())
+		for _, l := range j.fake.CommandLines() {
+			Expect(l).NotTo(HavePrefix("docker exec"))
+		}
+
 		h := newCLIFixture()
 		h.fake.On("docker ps", statePsRow("cs-gone", h.proj, "otter", "5", sessions.StateExited)+"\n", nil)
 		Expect(h.complete("--attach=").names).To(BeEmpty())
+		Expect(h.complete("--join=").names).To(BeEmpty())
 	})
 })

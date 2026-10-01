@@ -256,9 +256,10 @@ func DiscoverAllUncounted(r execx.Runner) ([]Session, error) {
 }
 
 // DiscoverForLaunch is DiscoverAllUncounted plus the rows it leaves out:
-// exited containers, which docker is still removing (CS-SESS-070). Their bind sources still count for the peers-root pin
-// (CS-DIR-011) — a --rm container being removed may hold the legacy root a
-// moment longer. Same single docker ps.
+// exited containers, which docker is still removing (CS-SESS-070). Their
+// bind sources still count for the peers-root pin (CS-DIR-011) — a --rm
+// container being removed may hold the legacy root a moment longer. Same
+// single docker ps.
 func DiscoverForLaunch(r execx.Runner) (found, removing []Session, err error) {
 	return listAll(r, LabelProject, false)
 }
@@ -266,10 +267,10 @@ func DiscoverForLaunch(r execx.Runner) (found, removing []Session, err error) {
 // list runs one docker ps and reads names, status and every label from the same
 // --format output; no per-container inspect is needed.
 //
-// -a with three status filters (docker ORs values of one filter key) returns
-// the running containers, the paused ones, AND the created ones, i.e. the
-// reservations of launches between "docker create" and "docker start"
-// (CS-SESS-050). Without the reservations a concurrent launch could pick a
+// -a with four status filters (docker ORs values of one filter key) returns
+// the running containers, the paused ones, the exited ones (see below), AND
+// the created ones, i.e. the reservations of launches between "docker
+// create" and "docker start" (CS-SESS-050). Without the reservations a concurrent launch could pick a
 // noun or pid class that is already reserved. Paused containers are listed
 // because plain "docker ps" always listed them (their state is "paused", not
 // "running"): dropping them would hide a paused session from attach and hand

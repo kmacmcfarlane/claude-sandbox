@@ -401,7 +401,7 @@ var _ = Describe("EnsureLink (CS-GCFG-033..037)", func() {
 })
 
 var _ = Describe("ExitMessage (CS-GCFG-038/039)", func() {
-	It("CS-GCFG-038, CS-GCFG-039, CS-GCFG-055: says likely, points at the prefix, names both fixes and docker rm", func() {
+	It("CS-GCFG-038, CS-GCFG-039, CS-GCFG-055: says likely, points at the prefix, names both fixes, and no docker rm", func() {
 		m := globalcfg.ExitMessage("claude-sandbox-x-otter")
 		Expect(m).To(HavePrefix("The session exited with 78, likely the global-config link check"))
 		Expect(m).To(ContainSubstring(`"claude-sandbox: global config link:"`))
@@ -416,7 +416,7 @@ var _ = Describe("ExitMessage (CS-GCFG-038/039)", func() {
 		Expect(m).To(ContainSubstring("\n    claude-sandbox global-config revert\n"))
 		Expect(m).To(ContainSubstring("Fallback, for a launcher without those commands"))
 		Expect(strings.Index(m, "global-config revert")).To(BeNumerically("<", strings.Index(m, "Fallback")))
-		Expect(m).To(ContainSubstring("docker rm claude-sandbox-x-otter"))
+		Expect(m).NotTo(ContainSubstring("docker rm"), "every container is --rm: there is none left to remove")
 	})
 
 	It("CS-GCFG-026: the split-brain warning says to keep a copy first and gives the guarded link step", func() {
