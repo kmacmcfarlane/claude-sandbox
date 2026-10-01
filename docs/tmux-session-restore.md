@@ -71,10 +71,19 @@ tmux source-file ~/.tmux.conf
   `default-command` contains `&&` or `||`. The operator's config sets no
   `default-command`, so this doesn't apply here.
 
-Not enabled: `@continuum-boot 'on'`, which starts a detached tmux server at
-boot via systemd. On Linux this starts only the server, with no terminal
-attached. Combined with auto-restore, sessions would come back before login.
-Left off pending operator decision 47.
+`@continuum-boot 'on'` (operator answer 47 b) starts a detached tmux server
+at boot from a systemd user unit (`tmux.service`), so with auto-restore on the
+sessions are back before login. The operator's machine (hooper) sets it in
+its own tmux config; add it to the block above when you want the same:
+
+```
+set -g @continuum-boot 'on'
+```
+
+On Linux it starts only the server, with no terminal attached, from the
+user manager's environment (no login shell) — which is why the claude-sandbox
+hooks below name the shim by its absolute path. The unit's `ExecStop` runs a
+resurrect save before stopping the server, so a clean shutdown saves.
 
 ## Using it
 

@@ -850,10 +850,12 @@ Feature: tmux integration (CS-TMUX)
     Given "claude-sandbox tmux restore --resurrected" typed into a restored pane by resurrect (the
       processes entry) or by --rearm
     Then its row is the pane's own PENDING mark, else the row at its coordinates in the save named by
-      the newest unconsumed pin of the running server (its pid, and its start time when the pin has
-      one) that is at most 10 minutes old, else the row in last's save
-    And a newest pin that does not read as one (CS-TMUX-046's checks; names that do not match its
-      stamp; pane ids not of tmux's shape) means no pin: an older one is never taken in its place
+      the running server's pin (its pid, and its start time when the pin has one), else the row in
+      last's save
+    And only the server's NEWEST pin is looked at, consumed or not: when it is consumed, older than 10
+      minutes, dated more than a minute in the future, or does not read as one (CS-TMUX-046's checks;
+      names that do not match its stamp; pane ids not of tmux's shape), there is no pin — an older pin
+      is never taken in its place (its pane list is another restore's)
     And the sparse line is the pin's stored verdict when it has one (no scan per pane), else
       CS-TMUX-050's own; a line equal to the notice it already printed is not printed again
     And it prints a stored notice but never claims it: the file and @claude-sandbox-notice stay for
@@ -867,23 +869,30 @@ Feature: tmux integration (CS-TMUX)
       every process
     Then one bounded "tmux list-panes -a" gives each pane's id, coordinates, current path and mark,
       and the server
-    And it takes the newest unconsumed pin of that server at most 10 minutes old (CS-TMUX-065's rule);
-      with none it logs one line and does nothing — it never guesses which panes are new
+    And it takes that server's pin by CS-TMUX-065's rule (the newest only); with none it logs one line
+      and does nothing — it never guesses which panes are new
     And it reads the pinned sidecar and the pinned state file (CS-TMUX-046's checks)
     And for each row, a pane is armed only when it exists at the row's coordinates, is NOT in the
       pin's "preexisting" (a manual prefix + C-r on a live server never touches a pane in use), has a
-      pane line in the pinned state file, and holds no mark (a typed restore that ran first reads its
-      own); a row failing CS-TMUX-046's checks is not armed
+      pane line in the pinned state file, holds no mark (a typed restore that ran first reads its own)
+      and does not run claude-sandbox (a typed restore running there marks it itself); a row failing
+      CS-TMUX-046's checks is not armed
     And the pane's current path, symlinks resolved, must equal the pinned state file's field 8 (the
-      leading ":" removed, the first "\ " turned back into a space, symlinks resolved); an ACTIVE row's
-      field 8 must also be its project or cwdRoot; a saved dir holding whitespace is not compared
-      (resurrect's save collapses whitespace runs), so coordinates and new-pane membership decide
-      alone; a mismatch is logged and the pane left to its typed restore, which then reads last
-    And an armed pane gets the row as a PENDING mark with one bounded "tmux set-option -p", after one
-      bounded "tmux show-options -p" finds it still unmarked
-    And when every row was handled the pin is renamed to "….consumed.json"; rows still left at
-      RearmDeadline (5 s, the real clock) are logged, and the pin is left unconsumed for their typed
-      restores
+      leading ":" removed, every "\ " turned back into a space, symlinks resolved); an ACTIVE row's
+      field 8 must also be its project or cwdRoot; a dir with single spaces is compared like any
+      other, while a LOSSY one — the pane's path or the saved dir holding a tab, a newline, a run of
+      whitespace or whitespace at either end, which resurrect's "echo $dir" collapses — is not
+      compared, so coordinates and new-pane membership decide alone; a mismatch is logged and the
+      pane left to its typed restore, which then reads last
+    And an armed pane gets the row as a PENDING mark with one bounded "tmux set-option -p", right after
+      one bounded "tmux display-message -p -t <pane> '#{pane_current_command}\t#{@claude-sandbox}'"
+      finds it still unmarked and not running claude-sandbox
+    And when every row was handled the pin is renamed to "….consumed.json"; at RearmDeadline (5 s, the
+      real clock) the rows not yet handled — the one a deadline cut mid-way included — are logged as
+      late, and the pin is left unconsumed for their typed restores
+    # Residual race (review round 2): a typed --resurrected restore that starts AND ends with a final
+    # outcome (clearing its own mark) between the list and the re-check is not seen, and the row's
+    # pending mark is written back; the next restore in that pane decides it final again.
     And it never shows a message (no display-message: at boot no client is attached)
 
   Scenario: CS-TMUX-067 --rearm retypes only pending rows whose saved full command was empty

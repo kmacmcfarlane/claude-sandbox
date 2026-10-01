@@ -335,15 +335,20 @@ func prunePins(dir string, now time.Time, o HookOptions) int {
 	return n
 }
 
-// FindPin is the newest unconsumed pin of the running server srv, at most
-// PinMaxAge old (08 § 3): read with CS-TMUX-046's checks, its names checked
-// against its stamp and its pane ids against tmux's shape. ok is false when
-// there is none, or when the newest does not read as one (an older pin is
-// never taken in its place: its pane list is not this restore's).
+// FindPin is the running server srv's newest pin, when it is unconsumed and
+// at most PinMaxAge old (08 § 3): read with CS-TMUX-046's checks, its names
+// checked against its stamp and its pane ids against tmux's shape. Only the
+// newest pin of the server is ever looked at, consumed or not: when it is
+// consumed, too old, from the future or does not read as one, there is no
+// pin. An older pin is never taken in its place — its pane list is not this
+// restore's, so --rearm would type into panes in use.
 func FindPin(dir string, srv Server, now time.Time) (Pin, string, bool) {
 	for _, p := range listPins(dir) {
-		if p.consumed || p.pid != srv.PID {
+		if p.pid != srv.PID {
 			continue
+		}
+		if p.consumed {
+			return Pin{}, "", false
 		}
 		at := time.UnixMilli(p.at)
 		if now.Sub(at) > PinMaxAge || at.Sub(now) > time.Minute {
@@ -405,10 +410,13 @@ type RearmResult struct {
 // rearmPanesFormat is --rearm's one list-panes. The mark stays last (JSON
 // holds no literal tab); a path holding a tab shifts the mark field, which
 // then reads as a mark that does not parse — a pane --rearm leaves alone.
-const rearmPanesFormat = "#{pane_id}\t#{session_name}\t#{window_index}\t#{pane_index}\t#{pid}\t#{start_time}\t#{pane_current_path}\t#{" + Option + "}"
+const rearmPanesFormat = "#{pane_id}\t#{session_name}\t#{window_index}\t#{pane_index}\t#{pid}\t#{start_time}\t#{pane_current_command}\t#{pane_current_path}\t#{" + Option + "}"
+
+// rearmRecheckFormat is the per-pane re-check right before a mark is set.
+const rearmRecheckFormat = "#{pane_current_command}\t#{" + Option + "}"
 
 type rearmPane struct {
-	id, path, raw string
+	id, cmd, path, raw string
 }
 
 // Rearm is --rearm (CS-TMUX-066/067), resurrect's post-restore-all hook.
@@ -428,8 +436,8 @@ func Rearm(o HookOptions) RearmResult {
 	panes := map[string]rearmPane{}
 	var srv *Server
 	for _, line := range strings.Split(out, "\n") {
-		f := strings.SplitN(strings.TrimRight(line, "\r"), "\t", 8)
-		if len(f) != 8 || !paneID.MatchString(f[0]) {
+		f := strings.SplitN(strings.TrimRight(line, "\r"), "\t", 9)
+		if len(f) != 9 || !paneID.MatchString(f[0]) {
 			continue
 		}
 		if srv == nil {
@@ -440,7 +448,7 @@ func Rearm(o HookOptions) RearmResult {
 		if err1 != nil || err2 != nil {
 			continue
 		}
-		panes[coordKey(f[1], w, p)] = rearmPane{id: f[0], path: f[6], raw: f[7]}
+		panes[coordKey(f[1], w, p)] = rearmPane{id: f[0], cmd: f[6], path: f[7], raw: f[8]}
 	}
 	if srv == nil {
 		o.logf("the tmux server reported no pid and start time; nothing re-armed")
@@ -479,9 +487,17 @@ func Rearm(o HookOptions) RearmResult {
 	}
 
 	for i, row := range sc.Panes {
-		if dl.passed() {
+		// late stops the run at the deadline: the rows from i on are left
+		// to their typed restore, and the pin stays unconsumed for them.
+		late := func() bool {
+			if !dl.passed() {
+				return false
+			}
 			res.Late = len(sc.Panes) - i
 			o.logf("deadline: %d row(s) of %s left to their typed restore", res.Late, pin.Stamp)
+			return true
+		}
+		if late() {
 			break
 		}
 		coords := fmt.Sprintf("%s:%d.%d", printable(row.Session), row.Window, row.Pane)
@@ -496,8 +512,10 @@ func Rearm(o HookOptions) RearmResult {
 			o.logf("%s: no pane line in %s; not re-armed", coords, pin.StateFile)
 			continue
 		}
-		if p.raw != "" {
-			res.Skipped++ // a typed restore marked it first; it reads its own mark
+		if p.raw != "" || p.cmd == LauncherCommand {
+			// A typed restore marked it first, or runs there now and marks
+			// it itself; it reads its own mark.
+			res.Skipped++
 			continue
 		}
 		if field := ValidateRow(row.Mark); field != "" {
@@ -511,21 +529,32 @@ func Rearm(o HookOptions) RearmResult {
 			o.logf("%s: %s; not re-armed", coords, why)
 			continue
 		}
-		// The pane may have been marked since the list (its typed restore
-		// ran meanwhile): arm only a pane that still holds no mark.
-		cur, ok := bounded(o.Runner, dl.left(), "tmux", "show-options", "-p", "-q", "-v", "-t", p.id, Option)
+		// The pane may have been marked since the list, or a typed restore
+		// may be running in it now: right before the set, arm only a pane
+		// that still holds no mark and runs no launcher. (A typed restore
+		// that started AND finished with a final outcome — clearing its own
+		// mark — inside this window is not seen; the window is the time
+		// since the list.)
+		cur, ok := bounded(o.Runner, dl.left(), "tmux", "display-message", "-p", "-t", p.id, rearmRecheckFormat)
 		if !ok {
+			if late() {
+				break
+			}
 			res.Skipped++
-			o.logf("%s: tmux show-options failed; not re-armed", coords)
+			o.logf("%s: tmux display-message failed; not re-armed", coords)
 			continue
 		}
-		if strings.TrimRight(cur, "\r\n") != "" {
+		f := strings.SplitN(strings.TrimRight(cur, "\r\n"), "\t", 2)
+		if len(f) != 2 || f[1] != "" || f[0] == LauncherCommand {
 			res.Skipped++
 			continue
 		}
 		pend := row.Mark
 		pend.State = StatePending
 		if _, ok := bounded(o.Runner, dl.left(), "tmux", "set-option", "-p", "-t", p.id, Option, pend.JSON()); !ok {
+			if late() {
+				break
+			}
 			res.Skipped++
 			o.logf("%s: tmux set-option failed; not re-armed", coords)
 			continue
@@ -540,6 +569,9 @@ func Rearm(o HookOptions) RearmResult {
 		}
 		if _, ok := bounded(o.Runner, dl.left(), "tmux", "send-keys", "-t", p.id, RetypeKeys, "C-m"); !ok {
 			o.logf("%s: tmux send-keys failed; the pane is marked, type claude-sandbox tmux restore in it", coords)
+			if late() {
+				break
+			}
 			continue
 		}
 		res.Retyped++
@@ -561,15 +593,18 @@ func consume(path string, o HookOptions) bool {
 // rearmMoved says why a new pane does not match its row's saved place (08 § 2),
 // "" when it does. The pinned state file's field 8 is where resurrect
 // restored the pane: unescaped (resurrect's save writes `echo $dir | sed
-// 's/ /\\ /'`: whitespace runs collapsed, the first space escaped), then
-// compared with the pane's current path, symlinks resolved. A saved dir that
-// holds whitespace may have been collapsed, so it is not compared:
-// coordinates and new-pane membership decide alone. An active row's saved dir
-// must also be its project or cwdRoot: it was saved while the launcher ran
-// from there, so anything else means the layout moved.
+// 's/ /\\ /'`, escaping a space; every "\ " is turned back), then compared
+// with the pane's current path, symlinks resolved. A single space survives
+// that round trip, so such a dir is compared like any other. A LOSSY dir —
+// one holding a tab, a newline or a run of whitespace, which echo collapses —
+// is not compared: coordinates and new-pane membership decide alone. The
+// saved form shows no such run any more, so the pane's current path (where
+// resurrect's cd landed) is what says so. An active row's saved dir must also
+// be its project or cwdRoot: it was saved while the launcher ran from there,
+// so anything else means the layout moved.
 func rearmMoved(field8, current string, m Mark) string {
-	dir := strings.Replace(field8, `\ `, " ", 1)
-	if dir == "" || strings.IndexFunc(dir, unicode.IsSpace) >= 0 {
+	dir := strings.ReplaceAll(field8, `\ `, " ")
+	if dir == "" || lossyDir(dir) || lossyDir(current) {
 		return ""
 	}
 	sd := resolvedDir(dir)
@@ -580,6 +615,24 @@ func rearmMoved(field8, current string, m Mark) string {
 		return "its saved directory is not the session's project"
 	}
 	return ""
+}
+
+// lossyDir reports whether resurrect's save would change p: a tab, newline or
+// other non-space whitespace, a run of two or more whitespace characters, or
+// whitespace at either end (echo drops it).
+func lossyDir(p string) bool {
+	prev := false
+	for i, r := range p {
+		ws := unicode.IsSpace(r)
+		switch {
+		case ws && r != ' ':
+			return true
+		case ws && (prev || i == 0):
+			return true
+		}
+		prev = ws
+	}
+	return prev
 }
 
 // resolvedDir is p with symlinks resolved when that works, cleaned.
