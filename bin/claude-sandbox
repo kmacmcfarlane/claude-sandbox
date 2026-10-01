@@ -69,11 +69,21 @@ esac
 # build lock, below) is closed for the build commands: a lock is held by the
 # open file description, so the shim keeps it either way, and nothing the
 # build leaves behind can hold it after the shim is gone.
+# The build writes a temporary file beside the binary and renames it over the
+# binary (spec/tmux.feature CS-TMUX-073), so bin/dist/claude-sandbox is always
+# a whole binary, old or new. `go build -o` copies its output into place when
+# its work dir is on another filesystem (truncate, then write), and a file
+# being written cannot be exec'd (ETXTBSY) or is exec'd half-written; anything
+# that finds it executable and newer than the sources meanwhile would run it:
+# another shim's up-to-date check, a hook fast path, an unlocked build.
 build() {
     mkdir -p "$BIN_DIR"
+    local tmp_name=".claude-sandbox.build.$$" rc=0
+    local tmp="$BIN_DIR/$tmp_name"
+    rm -f "$tmp"
     if command -v go >/dev/null 2>&1; then
         echo "Building claude-sandbox binary (host go)..." >&2
-        (cd "$REPO_ROOT" && CGO_ENABLED=0 go build -o "$BIN" ./cmd/claude-sandbox) >&2 9>&-
+        (cd "$REPO_ROOT" && CGO_ENABLED=0 go build -o "$tmp" ./cmd/claude-sandbox) >&2 9>&- || rc=$?
     else
         echo "Building claude-sandbox binary (docker $GO_IMAGE)..." >&2
         # Persist the build AND module caches under bin/dist/ (gitignored), so a
@@ -87,8 +97,13 @@ build() {
             -e GOCACHE=/src/bin/dist/gocache \
             -e GOMODCACHE=/src/bin/dist/gomodcache \
             -v "$REPO_ROOT:/src" -w /src \
-            "$GO_IMAGE" go build -o bin/dist/claude-sandbox ./cmd/claude-sandbox >&2 9>&-
+            "$GO_IMAGE" go build -o "bin/dist/$tmp_name" ./cmd/claude-sandbox >&2 9>&- || rc=$?
     fi
+    if [ "$rc" -ne 0 ]; then
+        rm -f "$tmp"
+        exit "$rc"
+    fi
+    mv -f "$tmp" "$BIN"
 }
 
 # Builds serialise on a lock (spec/tmux.feature CS-TMUX-073): tmux-continuum's

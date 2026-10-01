@@ -13,6 +13,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -172,8 +173,12 @@ var _ = Describe("shim argv0 (spec/tmux.feature)", func() {
 // Spec: spec/tmux.feature (CS-TMUX-073) — the shim's builds serialise on a
 // flock in bin/dist/.build.lock. The shim runs for real (bash) in a scratch
 // repo, with a PATH holding only symlinks to the tools it needs plus a fake
-// `go` (or `docker`) that sleeps, counts its builds and writes a script as the
-// binary; that script records whether fd 9 (the lock) reached it.
+// `go` (or `docker`) that sleeps, counts its builds, records its -o target and
+// writes a script there in place, as `go build -o` does when it copies across
+// filesystems; that script records whether fd 9 (the lock) reached it. The
+// shim must hand the build a temporary name and rename it over the binary, or
+// a concurrent shim execs a file still being written (ETXTBSY, or an empty
+// script and no output: the flake this guards against).
 var _ = Describe("shim build lock (spec/tmux.feature)", func() {
 	var (
 		repo    string
@@ -181,9 +186,10 @@ var _ = Describe("shim build lock (spec/tmux.feature)", func() {
 		pathDir string
 		count   string
 		ran     string
+		outs    string
 	)
 
-	tools := []string{"bash", "sh", "readlink", "dirname", "find", "mkdir", "sleep", "chmod", "id", "cat"}
+	tools := []string{"bash", "sh", "readlink", "dirname", "find", "mkdir", "sleep", "chmod", "id", "cat", "mv", "rm"}
 
 	BeforeEach(func() {
 		scratch := GinkgoT().TempDir()
@@ -212,6 +218,7 @@ var _ = Describe("shim build lock (spec/tmux.feature)", func() {
 		}
 		count = filepath.Join(scratch, "builds")
 		ran = filepath.Join(scratch, "ran")
+		outs = filepath.Join(scratch, "outs")
 	})
 
 	// built is the body of the "binary" the fakes write: it records one line
@@ -225,18 +232,38 @@ var _ = Describe("shim build lock (spec/tmux.feature)", func() {
 	// The fakes print a line to stdout as a real build may (a first docker
 	// pull's progress); the shim must send it to stderr.
 	const buildNoise = "build-tool-stdout"
+	// writeOut is the fakes' common tail: record the -o target, then write the
+	// binary there in place (truncate, then write, as `go build -o` copies) and
+	// make it executable.
+	writeOut := func() string {
+		return "echo \"$out\" >> '" + outs + "'\ncat > \"$out\" <<'BIN'\n" + built() + "BIN\nchmod +x \"$out\"\n"
+	}
 	// fakeGo writes a `go` that takes 1 s and then writes the -o target.
 	fakeGo := func() {
-		script := "#!/bin/sh\necho build >> '" + count + "'\necho " + buildNoise + "\nsleep 1\nout=\nwhile [ $# -gt 0 ]; do [ \"$1\" = -o ] && out=$2; shift; done\n" +
-			"cat > \"$out\" <<'BIN'\n" + built() + "BIN\nchmod +x \"$out\"\n"
+		script := "#!/bin/sh\necho build >> '" + count + "'\necho " + buildNoise + "\nsleep 1\nout=\nwhile [ $# -gt 0 ]; do [ \"$1\" = -o ] && out=$2; shift; done\n" + writeOut()
 		Expect(os.WriteFile(filepath.Join(pathDir, "go"), []byte(script), 0o755)).To(Succeed())
 	}
-	// fakeDocker writes a `docker` that maps "-v <repo>:/src" and writes
-	// <repo>/bin/dist/claude-sandbox the same way.
+	// fakeDocker writes a `docker` that maps "-v <repo>:/src" and writes the
+	// -o target (relative to the container's /src) the same way.
 	fakeDocker := func() {
-		script := "#!/bin/sh\necho build >> '" + count + "'\necho " + buildNoise + "\nsleep 1\nsrc=\nwhile [ $# -gt 0 ]; do [ \"$1\" = -v ] && src=${2%:/src}; shift; done\n" +
-			"out=\"$src/bin/dist/claude-sandbox\"\ncat > \"$out\" <<'BIN'\n" + built() + "BIN\nchmod +x \"$out\"\n"
+		script := "#!/bin/sh\necho build >> '" + count + "'\necho " + buildNoise + "\nsleep 1\nsrc=\no=\nwhile [ $# -gt 0 ]; do [ \"$1\" = -v ] && src=${2%:/src}; [ \"$1\" = -o ] && o=$2; shift; done\n" +
+			"out=\"$src/$o\"\n" + writeOut()
 		Expect(os.WriteFile(filepath.Join(pathDir, "docker"), []byte(script), 0o755)).To(Succeed())
+	}
+	// renamedIn checks that every build wrote a temporary file in bin/dist/,
+	// never bin/dist/claude-sandbox itself, and that none is left behind: the
+	// shim renamed each over the binary.
+	renamedIn := func() {
+		b, err := os.ReadFile(outs)
+		Expect(err).NotTo(HaveOccurred())
+		targets := strings.Fields(string(b))
+		Expect(targets).NotTo(BeEmpty())
+		for _, t := range targets {
+			Expect(filepath.Dir(t)).To(Equal(binDir), "the temporary file sits beside the binary (one filesystem, so the rename is atomic)")
+			Expect(filepath.Base(t)).NotTo(Equal("claude-sandbox"), "the build never writes the binary in place")
+			Expect(t).NotTo(BeAnExistingFile(), "renamed over the binary")
+		}
+		Expect(filepath.Join(binDir, "claude-sandbox")).To(BeAnExistingFile())
 	}
 	withFlock := func() {
 		p, err := exec.LookPath("flock")
@@ -331,6 +358,7 @@ var _ = Describe("shim build lock (spec/tmux.feature)", func() {
 			Expect(building).To(Equal(1))
 			Expect(waiting).To(BeNumerically(">=", 1))
 			Expect(lines(ran)).To(Equal([]string{"ok", "ok", "ok"}), "every launch execs the binary, and fd 9 never reaches it")
+			renamedIn()
 		})
 	}
 
@@ -346,6 +374,7 @@ var _ = Describe("shim build lock (spec/tmux.feature)", func() {
 		Expect(r.stderr).To(ContainSubstring("Building claude-sandbox binary (host go)"))
 		Expect(lines(count)).To(HaveLen(1))
 		Expect(lines(ran)).To(Equal([]string{"ok"}))
+		renamedIn()
 	})
 
 	It("CS-TMUX-073: a lock file that cannot be opened means an unlocked build, with no message", func() {
@@ -359,6 +388,7 @@ var _ = Describe("shim build lock (spec/tmux.feature)", func() {
 		Expect(r.stderr).To(ContainSubstring("Building claude-sandbox binary (host go)"))
 		Expect(lines(count)).To(HaveLen(1))
 		Expect(lines(ran)).To(Equal([]string{"ok"}))
+		renamedIn()
 	})
 
 	It("CS-TMUX-073: without flock the shim builds unlocked, as before, with no message", func() {
@@ -372,6 +402,28 @@ var _ = Describe("shim build lock (spec/tmux.feature)", func() {
 		Expect(lines(count)).To(HaveLen(2))
 		Expect(filepath.Join(binDir, ".build.lock")).NotTo(BeAnExistingFile())
 		Expect(lines(ran)).To(Equal([]string{"ok", "ok"}))
+		// Two unlocked builds at once: each writes its own temporary file and
+		// renames it, so neither shim can exec a file the other is writing.
+		renamedIn()
+		Expect(lines(outs)).To(HaveLen(2))
+		Expect(lines(outs)[0]).NotTo(Equal(lines(outs)[1]))
+	})
+
+	It("CS-TMUX-073: a failed build removes its temporary file and leaves the binary as it was", func() {
+		// A `go` that writes part of its output and fails, as a build killed
+		// mid-copy would.
+		script := "#!/bin/sh\necho build >> '" + count + "'\nout=\nwhile [ $# -gt 0 ]; do [ \"$1\" = -o ] && out=$2; shift; done\n" +
+			"echo \"$out\" >> '" + outs + "'\necho '#!/bin/sh' > \"$out\"\nexit 3\n"
+		Expect(os.WriteFile(filepath.Join(pathDir, "go"), []byte(script), 0o755)).To(Succeed())
+		r := run(nil, "--new")
+		var ee *exec.ExitError
+		Expect(errors.As(r.err, &ee)).To(BeTrue(), r.stderr)
+		Expect(ee.ExitCode()).To(Equal(3), "the build's own status")
+		Expect(r.stdout).To(BeEmpty())
+		Expect(lines(outs)).To(HaveLen(1))
+		Expect(lines(outs)[0]).NotTo(BeAnExistingFile(), "the temporary file is removed")
+		Expect(filepath.Join(binDir, "claude-sandbox")).NotTo(BeAnExistingFile(), "nothing half-written takes the binary's place")
+		Expect(ran).NotTo(BeAnExistingFile())
 	})
 
 	It("CS-TMUX-073: an up-to-date binary takes no lock and builds nothing", func() {
