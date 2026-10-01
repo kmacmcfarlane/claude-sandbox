@@ -587,6 +587,9 @@ var _ = Describe("tmux restore: the resurrect hooks (CS-TMUX-064..068)", func() 
 			})
 
 			It("CS-TMUX-067: darwin's ps is bounded by what the whole-run deadline leaves, never a fixed 1 s", func() {
+				// One row only, so its own lateness is what is counted.
+				lines := fmt.Sprintf("pane\tmain\t1\t1\t:*\t0\tt\t:%s\t1\tzsh\t:\n", proj)
+				save(st, &srv, rows[1:2], lines)
 				tmuxpane.RearmDeadline = 300 * time.Millisecond
 				fresh()
 				stall := &stallRunner{Fake: fake, hang: []string{"ps -o tpgid="}}
@@ -597,9 +600,26 @@ var _ = Describe("tmux restore: the resurrect hooks (CS-TMUX-064..068)", func() 
 				})
 				Expect(time.Since(start)).To(BeNumerically("<", 800*time.Millisecond))
 				Expect(fake.CommandLines()).To(ContainElement(HavePrefix("ps -o tpgid=")))
+				Expect(res.Marked).To(Equal(1))
 				Expect(typed()).To(BeEmpty())
-				Expect(res.Late).To(BeNumerically(">", 0), "a ps the deadline cut makes the row late")
+				Expect(res.Late).To(Equal(1), "a ps the deadline cut makes the row late")
 				Expect(res.Consumed).To(BeFalse())
+				Expect(logged).NotTo(ContainElement(ContainSubstring("marked only")), "a refusal the deadline may have caused is not a verdict")
+			})
+
+			It("CS-TMUX-067: a focus re-read the deadline cuts makes the row late, not marked-only", func() {
+				lines := fmt.Sprintf("pane\tmain\t1\t1\t:*\t0\tt\t:%s\t1\tzsh\t:\n", proj)
+				save(st, &srv, rows[1:2], lines)
+				tmuxpane.RearmDeadline = 300 * time.Millisecond
+				fresh()
+				stall := &stallRunner{Fake: fake, hang: []string{focusPat}}
+				res := rearmWith(func(o *tmuxpane.HookOptions) { o.Runner = stall })
+				Expect(fake.CommandLines()).To(ContainElement(HavePrefix("tmux " + focusPat)))
+				Expect(res.Marked).To(Equal(1))
+				Expect(typed()).To(BeEmpty())
+				Expect(res.Late).To(Equal(1))
+				Expect(res.Consumed).To(BeFalse())
+				Expect(logged).NotTo(ContainElement(ContainSubstring("marked only")))
 			})
 
 			It("CS-TMUX-067: a definite refusal that arrives after the deadline is logged and the row handled", func() {

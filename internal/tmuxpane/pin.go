@@ -598,6 +598,9 @@ func Rearm(o HookOptions) RearmResult {
 			shellAsked = true
 			shell = DefaultShellWithin(o.Runner, dl.left())
 		}
+		// Past the deadline the row is late even if a cheap check would
+		// refuse it: IdleShell may start the foreground check, and no call
+		// starts past the deadline.
 		t := dl.left()
 		if t <= 0 {
 			late()
