@@ -1114,9 +1114,14 @@ Feature: tmux integration (CS-TMUX)
   Scenario: CS-TMUX-069 --all arms a chosen save into existing idle panes
     Given "claude-sandbox tmux restore --all [--from <save>]" typed by the operator on the host, in
       tmux or not (it claims the notice like every typed form, CS-TMUX-050)
-    Then one bounded "tmux list-panes -a" gives each pane's id, coordinates, the server, its current
-      command and path, whether it is in a mode (copy mode), synchronized, dead, the pane a client
-      looks at (pane, window and session active and attached), and its mark (last); no answer exits 2
+    Then one bounded "tmux list-panes -a" gives each pane's id, coordinates, the server and its socket,
+      its current command and path, whether it is in a mode (copy mode), synchronized, dead, its own
+      process (#{pane_pid}), whether a client looks at it (pane and window active, session attached),
+      and its mark (last); no answer exits 2; the header names the server (pid and socket), since
+      outside tmux it is the default socket's
+    And a pane listed under several sessions (grouped sessions, a linked window) is one pane: a
+      client looking at it through ANY of them counts, and the first row of the save that reaches its
+      pane id wins it — a later row reaching the same id is skipped as busy
     And the save is chosen as CS-TMUX-049 says ("previous" against the listed server); a save without
       a record, or one that cannot be read, is one line and exit 0; a sparse save prints CS-TMUX-050's
       line first; its state file is read with CS-TMUX-046's checks for each pane's saved directory
@@ -1126,15 +1131,27 @@ Feature: tmux integration (CS-TMUX)
       | 2 | no pane at the row's coordinates, or the state file has no line for them, or the pane's path is not the saved one (CS-TMUX-066's comparison: field 8 unescaped, symlinks resolved; an active row's must be its project or cwdRoot) | skipped as missing or moved; the whole-layout procedures follow the list |
       | 3 | the pane runs claude-sandbox, is the pane the command runs in, is dead, holds an active mark or one that does not parse, or a pending mark for another session (not the row's 64-hex containerId, else conversation, else container) | skipped as busy |
       | 4 | an active mark for the row's container id or conversation is in another pane running claude-sandbox | skipped as on screen |
-      | 5 | CS-TMUX-051's decision for the row, over the dry run's read-only probes, is final (clear) | not armed; its line |
-      | 6 | one bounded "tmux display-message -p -t <pane>" right before the mark finds any listed field changed | skipped as busy |
+      | 5 | CS-TMUX-051's decision for the row, over the dry run's read-only probes, arms nothing (clear, or nothing recorded) | not armed; its line |
+      | 6 | one bounded "tmux display-message -p -t <pane>" right before the mark finds the pane's own fields (command, path, mode, synchronized, dead, pane pid) or its mark changed | skipped as busy |
       | 7 | otherwise | the row is set as the pane's PENDING mark (one bounded set-option -p), every field kept ("labelled" included, so only a labelled row reclaims its window, CS-TMUX-022) |
-    And an armed pane gets the keys "claude-sandbox tmux restore --resurrected" C-m (one bounded
-      send-keys) only when it is provably idle at a shell: its current command is the basename of
-      "tmux show -gv default-shell" (one bounded call for the run), it is in no mode, its window is not
-      synchronized, no client is looking at it, and its saved directory was compared (not empty, not a
-      lossy one CS-TMUX-066 cannot compare); otherwise it is marked only, with the reason and "type
-      claude-sandbox tmux restore in it"
+    And an armed pane is typed into only when it is provably idle at its own shell's prompt: its
+      current command is the basename of "tmux show -gv default-shell" (one bounded call for the
+      run), it is in no mode, its window is not synchronized (send-keys would reach every pane of
+      it), no client is looking at it, the pane's own process leads its terminal's foreground process
+      group (Linux: field 8, tpgid, of /proc/<pane_pid>/stat after the last ")", equal to pane_pid;
+      darwin: one bounded "ps -o tpgid= -p <pane_pid>"; anything unreadable, another OS, or no
+      controlling terminal = cannot tell), and its saved directory was compared (not empty, not a
+      lossy one CS-TMUX-066 cannot compare); otherwise it is marked only, with the reason, "type
+      claude-sandbox tmux restore in it" and how to --drop it
+    # The foreground check: tmux names #{pane_current_command} after the foreground group leader's
+    # argv[0], so a running bash script, a program started from a bash wrapper (same group) and a
+    # "su -" / "sudo -i" root shell all read as "bash"; only the pane's own process leading the group
+    # is the pane's shell at its prompt.
+    And the keys are one bounded "tmux send-keys -t <pane> C-e C-u 'claude-sandbox tmux restore
+      --resurrected' C-m": C-e and C-u as key names first clear what the line editor holds — an
+      emacs-mode readline line (C-y brings it back), an open reverse-i-search, a canonical-mode reader
+      (VKILL); in bash's vi command mode C-e switches to emacs mode first — then the literal text,
+      then Enter
     And --resurrected is typed, never a plain restore, so an armed pane prints the sparse notice but
       never claims it (plan 12 § 1); it reads its own pending mark first, so no pin is consulted
     And every tmux call is bounded by CallTimeout (1 s) in its own process group; a failed call skips
@@ -1143,6 +1160,10 @@ Feature: tmux integration (CS-TMUX)
       passed the checks, and the outcome), then the counts; it exits 0 whatever it decided
     And it takes no lock and starts nothing itself: each armed pane's restore takes the start lock
       (CS-TMUX-060)
-    # Residual: keys typed into a shell that holds a half-typed command line join it; a pane a client
-    # looks at is marked only for that reason. The re-check narrows, and cannot close, the window
-    # between it and the send-keys.
+    And a marked-only pane keeps its pending mark, which every save carries forward, until a restore
+      in it decides it or "claude-sandbox tmux restore --drop" in it forgets it
+    # Residual: C-e C-u does not clear every editor — vi insert mode (C-u kills only back to the
+    # insertion point there), zsh vi insert mode, or a non-readline program that does not treat C-u
+    # as a line kill can still join the keys to what it holds; the foreground and command checks make
+    # that a shell at its prompt. The re-check narrows, and cannot close, the window between it and
+    # the send-keys; two concurrent --all runs rely on it alone.

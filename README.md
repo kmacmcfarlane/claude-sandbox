@@ -727,9 +727,17 @@ recorded (the whole-layout commands are printed after the list), when the pane r
 claude-sandbox or holds another session's mark (or is the pane you typed it in), when the
 session is already on screen in another pane, or when the decision table's answer is final (a
 ralph run, a join, the conversation open elsewhere). An armed pane is typed into only when it is
-provably idle at a shell — running tmux's `default-shell`, not in copy mode, not
-synchronized, not the pane a client is looking at, and its saved directory compared — otherwise
-it is marked only and the line says why; type `claude-sandbox tmux restore` in it yourself. Every
+provably idle at its own shell's prompt — running tmux's `default-shell`, the pane's own shell
+leading its terminal's foreground process group (so a running script, a program started from a
+wrapper, or a `su -` root shell does not count), not in copy mode, not synchronized, not the pane
+a client is looking at through any session, and its saved directory compared. The keys are
+`C-e C-u` first, which clears a half-typed command line (`C-y` brings it back) or an open
+reverse search, then the restore and Enter; a vi-insert-mode line or a program that does not take
+`C-u` as a line kill can still get the text appended, which the shell checks make unlikely.
+Otherwise the pane is marked only and the line says why; type `claude-sandbox tmux restore` in it
+yourself — or, if you do not want it back, `claude-sandbox tmux restore --drop` in it, since a
+pending mark is carried from save to save until something decides it. The header names the tmux
+server it acts on (pid and socket): outside tmux that is the default socket's. Every
 field of the row is kept, so a window that row had named is reclaimed by the restore (and only
 then). It prints one line per row and the counts, and exits 0. Spec: `spec/tmux.feature`
 CS-TMUX-069.

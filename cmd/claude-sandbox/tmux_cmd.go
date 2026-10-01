@@ -727,7 +727,16 @@ func runRestoreArmAll(env *Env, from string) error {
 	if err != nil {
 		return err
 	}
-	stamp, err := resolveFrom(saves, from, srv, idx)
+	var running *tmuxpane.Server
+	server := "the running tmux server"
+	if srv != nil {
+		running = &srv.Server
+		server = fmt.Sprintf("the tmux server pid %d", srv.PID)
+		if srv.Socket != "" && !strings.ContainsFunc(srv.Socket, func(c rune) bool { return c < 0x20 || c == 0x7f }) {
+			server += " (socket " + srv.Socket + ")"
+		}
+	}
+	stamp, err := resolveFrom(saves, from, running, idx)
 	if err != nil {
 		return err
 	}
@@ -749,11 +758,12 @@ func runRestoreArmAll(env *Env, from string) error {
 	for _, p := range panes {
 		infos = append(infos, p.Info())
 	}
-	fmt.Fprintf(out, "Arming save %s%s in %s (%s) into the panes of the running tmux server:\n",
-		stamp, fromLabel(from), saves.Dir, plural(len(sc.Panes), "sandbox pane"))
+	fmt.Fprintf(out, "Arming save %s%s in %s (%s) into the panes of %s:\n",
+		stamp, fromLabel(from), saves.Dir, plural(len(sc.Panes), "sandbox pane"), server)
 	res := tmuxpane.Arm(tmuxpane.ArmOptions{
 		Runner: env.Runner, Rows: sc.Panes, State: state, StateErr: stateErr, Panes: panes,
 		Shell: tmuxpane.DefaultShell(env.Runner), Self: self, Probes: restoreProbes(env, self, infos),
+		Proc: tmuxpane.ProcOptions{Runner: env.Runner, ProcRoot: env.ProcRoot},
 	})
 	counts := map[tmuxpane.ArmVerdict]int{}
 	for _, r := range res {
@@ -784,9 +794,9 @@ func runRestoreArmAll(env *Env, from string) error {
 func armLine(r tmuxpane.ArmRow) string {
 	switch r.Verdict {
 	case tmuxpane.ArmTyped:
-		return "armed: marked pending and typed " + tmuxpane.RetypeKeys + " into it (" + r.Decision.Would() + ")"
+		return "armed: marked pending and typed " + tmuxpane.RetypeKeys + " into it, after clearing its command line (" + r.Decision.Would() + ")"
 	case tmuxpane.ArmMarked:
-		return "armed: marked pending, not typed (" + r.Why + "); type claude-sandbox tmux restore in it"
+		return "armed: marked pending, not typed (" + r.Why + "); type claude-sandbox tmux restore in it, or forget it with claude-sandbox tmux restore --drop there"
 	case tmuxpane.ArmMissing:
 		return "skipped: " + r.Why
 	case tmuxpane.ArmBusy:

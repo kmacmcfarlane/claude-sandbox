@@ -23,20 +23,36 @@ import (
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
 )
 
-// armPaneFields are the per-pane fields --all lists and re-checks right
-// before it marks a pane: everything that says whether the pane is idle, at
-// a shell, in its place and unwatched. The mark stays last (JSON holds no
-// literal tab): a path holding a tab shifts it, and the pane then reads as
-// marked, which --all leaves alone.
-const armPaneFields = "#{pane_current_command}\t#{pane_current_path}\t#{pane_in_mode}\t#{pane_synchronized}\t#{pane_dead}" +
-	"\t#{pane_active}\t#{window_active}\t#{session_attached}\t#{" + Option + "}"
+// armPaneOwn are the fields of the pane itself that --all lists and
+// re-checks right before it marks a pane: whether it is idle, at a shell
+// (its own process, #{pane_pid}), in its place. They read the same through
+// every session the pane is listed under (grouped sessions, linked windows).
+const armPaneOwn = "#{pane_current_command}\t#{pane_current_path}\t#{pane_in_mode}\t#{pane_synchronized}\t#{pane_dead}\t#{pane_pid}"
 
-// armPanesFormat is --all's one list-panes: id, coordinates, the server, then
-// armPaneFields.
-const armPanesFormat = "#{pane_id}\t#{session_name}\t#{window_index}\t#{pane_index}\t#{pid}\t#{start_time}\t" + armPaneFields
+// armPaneView are the per-session fields that say whether a client looks at
+// the pane through this listing's session; they differ between the lines of
+// one pane listed under several sessions, so they are not re-checked.
+const armPaneView = "#{pane_active}\t#{window_active}\t#{session_attached}"
 
-// armFieldCount is the number of tab-separated fields of armPaneFields.
-const armFieldCount = 9
+// armRecheckFormat is the re-check right before the mark: the pane's own
+// fields and its mark. The mark stays last (JSON holds no literal tab): a
+// path holding a tab shifts it, and the pane then reads as marked, which
+// --all leaves alone.
+const armRecheckFormat = armPaneOwn + "\t#{" + Option + "}"
+
+// armPanesFormat is --all's one list-panes: id, coordinates, the server and
+// its socket, the pane's own fields, the view fields, the mark last.
+const armPanesFormat = "#{pane_id}\t#{session_name}\t#{window_index}\t#{pane_index}\t#{pid}\t#{start_time}\t#{socket_path}\t" +
+	armPaneOwn + "\t" + armPaneView + "\t#{" + Option + "}"
+
+// armHead is the number of fields before armPaneOwn; armOwnCount and
+// armViewCount the fields of armPaneOwn and armPaneView.
+const (
+	armHead      = 7
+	armOwnCount  = 6
+	armViewCount = 3
+	armFields    = armHead + armOwnCount + armViewCount + 1
+)
 
 // ArmPane is one pane of the running server as --all sees it.
 type ArmPane struct {
@@ -47,15 +63,19 @@ type ArmPane struct {
 	// InMode: copy mode or another mode, where keys would not reach the
 	// shell. Synchronized: synchronize-panes is on, so keys would reach
 	// every pane of the window. Dead: its program exited (remain-on-exit).
-	// Focused: the active pane of the active window of an attached session —
-	// a client is looking at it.
+	// Focused: the active pane of the active window of an attached session
+	// — a client is looking at it — through ANY session the pane is listed
+	// under (ListArmPanes folds the lines of one pane id together).
 	InMode, Synchronized, Dead, Focused bool
+	// PID is #{pane_pid}, the pane's own process (its shell); 0 when it
+	// did not parse.
+	PID int
 	// Raw is the mark as tmux holds it ("" for none); Mark and Marked its
 	// parse.
 	Raw    string
 	Mark   Mark
 	Marked bool
-	// fields is the armPaneFields text as listed, for the re-check.
+	// fields is the re-check text (armRecheckFormat) as listed.
 	fields string
 }
 
@@ -68,20 +88,30 @@ func (p ArmPane) Info() PaneInfo {
 		Mark: p.Mark, Marked: p.Marked}
 }
 
+// ArmServer is the tmux server --all acts on: its identity and its socket.
+type ArmServer struct {
+	Server
+	Socket string
+}
+
 // ListArmPanes reads every pane of the running server with one bounded
-// list-panes, and the server; ok is false when tmux does not answer.
-func ListArmPanes(r execx.Runner) ([]ArmPane, *Server, bool) {
+// list-panes, and the server; ok is false when tmux does not answer. A pane
+// listed under several sessions (grouped sessions, a linked window) gives
+// one line per session; every line is kept (its coordinates may be a row's),
+// and each is Focused when ANY line of its pane id is.
+func ListArmPanes(r execx.Runner) ([]ArmPane, *ArmServer, bool) {
 	out, ok := bounded(r, CallTimeout, "tmux", "list-panes", "-a", "-F", armPanesFormat)
 	if !ok {
 		return nil, nil, false
 	}
 	var (
 		ps  []ArmPane
-		srv *Server
+		srv *ArmServer
 	)
+	focused := map[string]bool{}
 	for _, line := range strings.Split(out, "\n") {
-		f := strings.SplitN(strings.TrimRight(line, "\r"), "\t", 6+armFieldCount)
-		if len(f) != 6+armFieldCount || !paneID.MatchString(f[0]) {
+		f := strings.SplitN(strings.TrimRight(line, "\r"), "\t", armFields)
+		if len(f) != armFields || !paneID.MatchString(f[0]) {
 			continue
 		}
 		w, err1 := strconv.Atoi(f[2])
@@ -90,23 +120,32 @@ func ListArmPanes(r execx.Runner) ([]ArmPane, *Server, bool) {
 			continue
 		}
 		if srv == nil {
-			srv = parseServer(f[4], f[5])
+			if s := parseServer(f[4], f[5]); s != nil {
+				srv = &ArmServer{Server: *s, Socket: f[6]}
+			}
 		}
 		p := ArmPane{ID: f[0], Session: f[1], Window: w, Pane: pn}
-		p.setFields(f[6:])
+		p.setFields(f[armHead:armHead+armOwnCount], f[armHead+armOwnCount:armFields-1], f[armFields-1])
+		focused[p.ID] = focused[p.ID] || p.Focused
 		ps = append(ps, p)
+	}
+	for i := range ps {
+		ps[i].Focused = focused[ps[i].ID]
 	}
 	return ps, srv, true
 }
 
-// setFields fills the armPaneFields part of p from its armFieldCount values.
-func (p *ArmPane) setFields(f []string) {
-	p.fields = strings.Join(f, "\t")
-	p.Command, p.Path = f[0], f[1]
-	p.InMode, p.Synchronized, p.Dead = f[2] == "1", f[3] == "1", f[4] == "1"
-	p.Focused = f[5] == "1" && f[6] == "1" && f[7] != "" && f[7] != "0"
-	p.Raw = f[8]
-	p.Mark, p.Marked = ParseMark(f[8])
+// setFields fills p from its own fields, its view fields and its raw mark.
+func (p *ArmPane) setFields(own, view []string, raw string) {
+	p.fields = strings.Join(own, "\t") + "\t" + raw
+	p.Command, p.Path = own[0], own[1]
+	p.InMode, p.Synchronized, p.Dead = own[2] == "1", own[3] == "1", own[4] == "1"
+	if pid, err := strconv.Atoi(own[5]); err == nil && pid > 0 {
+		p.PID = pid
+	}
+	p.Focused = view[0] == "1" && view[1] == "1" && view[2] != "" && view[2] != "0"
+	p.Raw = raw
+	p.Mark, p.Marked = ParseMark(raw)
 }
 
 // DefaultShell is the basename of the server's default-shell, from one
@@ -179,6 +218,8 @@ type ArmOptions struct {
 	Shell    string
 	Self     string
 	Probes   Probes
+	// Proc is the foreground-process check of IdleShell.
+	Proc ProcOptions
 }
 
 // Arm arms the save's rows into the existing panes (CS-TMUX-069).
@@ -192,13 +233,17 @@ func Arm(o ArmOptions) []ArmRow {
 		saved[sp.Key()] = sp
 	}
 	out := make([]ArmRow, 0, len(o.Rows))
+	// claimed holds the pane ids an earlier row of this run reached: one
+	// pane listed under two sessions (a linked window, grouped sessions)
+	// can sit at two rows' coordinates, and the first row wins.
+	claimed := map[string]string{}
 	for i := range o.Rows {
-		out = append(out, armRow(o, &o.Rows[i], byCoord, saved))
+		out = append(out, armRow(o, &o.Rows[i], byCoord, saved, claimed))
 	}
 	return out
 }
 
-func armRow(o ArmOptions, row *Row, byCoord map[string]ArmPane, saved map[string]StatePane) ArmRow {
+func armRow(o ArmOptions, row *Row, byCoord map[string]ArmPane, saved map[string]StatePane, claimed map[string]string) ArmRow {
 	coords := fmt.Sprintf("%s:%d.%d", row.Session, row.Window, row.Pane)
 	if strings.ContainsFunc(row.Session, func(c rune) bool { return c < 0x20 || c == 0x7f }) {
 		coords = "(an unprintable session name)"
@@ -219,6 +264,10 @@ func armRow(o ArmOptions, row *Row, byCoord map[string]ArmPane, saved map[string
 	if !ok {
 		return skip(ArmMissing, "no pane at "+coords)
 	}
+	if first, dup := claimed[p.ID]; dup {
+		return skip(ArmBusy, "pane "+p.ID+" is also at "+first+", which an earlier row of this save took")
+	}
+	claimed[p.ID] = coords
 	if o.StateErr != nil {
 		return skip(ArmMissing, "the save's state file cannot be read ("+o.StateErr.Error()+"), so the pane's place cannot be checked")
 	}
@@ -256,7 +305,7 @@ func armRow(o ArmOptions, row *Row, byCoord map[string]ArmPane, saved map[string
 		return skip(ArmFinal, res.Decision.Line)
 	}
 	// 6. Right before the mark, the pane must be exactly as listed.
-	cur, ok := bounded(o.Runner, CallTimeout, "tmux", "display-message", "-p", "-t", p.ID, armPaneFields)
+	cur, ok := bounded(o.Runner, CallTimeout, "tmux", "display-message", "-p", "-t", p.ID, armRecheckFormat)
 	if !ok {
 		return skip(ArmFailed, "tmux did not answer for "+p.ID)
 	}
@@ -270,10 +319,10 @@ func armRow(o ArmOptions, row *Row, byCoord map[string]ArmPane, saved map[string
 	if _, ok := bounded(o.Runner, CallTimeout, "tmux", "set-option", "-p", "-t", p.ID, Option, pend.JSON()); !ok {
 		return skip(ArmFailed, "tmux set-option failed for "+p.ID)
 	}
-	if why := armNoType(p, o.Shell, compared); why != "" {
+	if why := armNoType(o, p, compared); why != "" {
 		return skip(ArmMarked, why)
 	}
-	if _, ok := bounded(o.Runner, CallTimeout, "tmux", "send-keys", "-t", p.ID, RetypeKeys, "C-m"); !ok {
+	if !TypeRestore(o.Runner, CallTimeout, p.ID) {
 		return skip(ArmMarked, "tmux send-keys failed")
 	}
 	res.Verdict = ArmTyped
@@ -293,21 +342,14 @@ func armPlace(field8, current string, m Mark) (compared bool, moved string) {
 }
 
 // armNoType says why an armed pane is marked only, "" when the restore may
-// be typed into it: it must be provably idle at a shell, in its saved place,
-// with no client looking at it.
-func armNoType(p ArmPane, shell string, compared bool) string {
-	switch {
-	case shell == "":
-		return "the default shell is unknown (tmux show -gv default-shell did not answer)"
-	case p.Command != shell:
-		return "it runs " + printable(p.Command) + ", not the shell"
-	case p.InMode:
-		return "it is in copy mode"
-	case p.Synchronized:
-		return "its window has synchronize-panes on"
-	case p.Focused:
-		return "a client is looking at it"
-	case !compared:
+// be typed into it: it must be provably idle at a shell (IdleShell) and in
+// its saved place.
+func armNoType(o ArmOptions, p ArmPane, compared bool) string {
+	if why := IdleShell(o.Proc, ShellPane{ID: p.ID, Command: p.Command, PID: p.PID, InMode: p.InMode,
+		Synchronized: p.Synchronized, Focused: p.Focused}, o.Shell); why != "" {
+		return why
+	}
+	if !compared {
 		return "its saved directory cannot be compared with where it is"
 	}
 	return ""

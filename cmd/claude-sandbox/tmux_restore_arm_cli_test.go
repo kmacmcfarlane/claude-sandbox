@@ -24,6 +24,7 @@ var _ = Describe("tmux restore --all: arming a save into existing panes (CS-TMUX
 	var (
 		f    *cliFixture
 		dir  string
+		proc string
 		base = time.Date(2026, 9, 29, 12, 0, 0, 0, time.Local)
 		now  = base.Add(time.Hour)
 		srv  = tmuxpane.Server{PID: 4242, Start: 1727000000}
@@ -40,6 +41,11 @@ var _ = Describe("tmux restore --all: arming a save into existing panes (CS-TMUX
 		f.env.Now = func() time.Time { return now }
 		f.fake.On("docker version", "29.3.0\n", nil)
 		f.fake.On("tmux show -gv default-shell", "/bin/zsh\n", nil)
+		proc = GinkgoT().TempDir()
+		f.env.ProcRoot = proc
+		// The resume guard's host check reads the same /proc seam.
+		Expect(os.MkdirAll(filepath.Join(proc, "self", "ns"), 0o755)).To(Succeed())
+		Expect(os.Symlink("pid:[4026531836]", filepath.Join(proc, "self", "ns", "pid"))).To(Succeed())
 	})
 
 	mark := func(w int, mut func(*tmuxpane.Mark)) tmuxpane.Mark {
@@ -69,14 +75,19 @@ var _ = Describe("tmux restore --all: arming a save into existing panes (CS-TMUX
 		Expect(tmuxpane.WriteSidecar(filepath.Join(dir, tmuxpane.SidecarName(st)), tmuxpane.Sidecar{
 			V: 1, StateFile: tmuxpane.StateFileName(st), Server: s, Panes: rows})).To(Succeed())
 	}
-	// panes scripts the server's panes: main:<w>.0 is %<w>, in the project,
+	// panes scripts the server's panes: main:<w>.0 is %<w> (pane pid
+	// 2000+w, its shell leading the foreground group), in the project,
 	// running cmd, no client looking at it; %9 is where the command runs.
 	panes := func(cmds map[int]string) {
 		var lines []string
 		add := func(id, sess string, w int, cmd, path string) {
-			fields := strings.Join([]string{cmd, path, "0", "0", "0", "1", "0", "1", ""}, "\t")
-			lines = append(lines, fmt.Sprintf("%s\t%s\t%d\t0\t%d\t%d\t%s", id, sess, w, srv.PID, srv.Start, fields))
-			f.fake.On("tmux display-message -p -t "+id+" ", fields+"\n", nil)
+			pid := 2000 + w
+			own := strings.Join([]string{cmd, path, "0", "0", "0", fmt.Sprint(pid)}, "\t")
+			lines = append(lines, fmt.Sprintf("%s\t%s\t%d\t0\t%d\t%d\t/tmp/tmux-1000/default\t%s\t1\t0\t1\t", id, sess, w, srv.PID, srv.Start, own))
+			f.fake.On("tmux display-message -p -t "+id+" ", own+"\t\n", nil)
+			Expect(os.MkdirAll(filepath.Join(proc, fmt.Sprint(pid)), 0o755)).To(Succeed())
+			Expect(os.WriteFile(filepath.Join(proc, fmt.Sprint(pid), "stat"),
+				[]byte(fmt.Sprintf("%d (%s) S 1 %d %d 34816 %d 0\n", pid, cmd, pid, pid, pid)), 0o644)).To(Succeed())
 		}
 		for w := 1; w <= 8; w++ {
 			if cmd, ok := cmds[w]; ok {
@@ -111,11 +122,11 @@ var _ = Describe("tmux restore --all: arming a save into existing panes (CS-TMUX
 		panes(map[int]string{1: "zsh", 2: "vim", 4: "zsh"})
 		Expect(f.run("tmux", "restore", "--all", "--from", at(0))).To(Equal(0), f.errw.String())
 		out := f.out.String()
-		Expect(out).To(ContainSubstring("Arming save " + at(0) + " in " + dir + " (4 sandbox panes) into the panes of the running tmux server:\n"))
+		Expect(out).To(ContainSubstring("Arming save " + at(0) + " in " + dir + " (4 sandbox panes) into the panes of the tmux server pid 4242 (socket /tmp/tmux-1000/default):\n"))
 		Expect(out).To(ContainSubstring("  main:1.0  'task 1'  n1  00000001-1f2d-4e5f-8a9b-0c1d2e3f4a5b  [claude, active]\n" +
-			"      armed: marked pending and typed claude-sandbox tmux restore --resurrected into it (resume the conversation"))
+			"      armed: marked pending and typed claude-sandbox tmux restore --resurrected into it, after clearing its command line (resume the conversation"))
 		Expect(out).To(ContainSubstring("  main:2.0  'task 2'  n2  00000002-1f2d-4e5f-8a9b-0c1d2e3f4a5b  [claude, active]\n" +
-			"      armed: marked pending, not typed (it runs vim, not the shell); type claude-sandbox tmux restore in it\n"))
+			"      armed: marked pending, not typed (it runs vim, not the shell); type claude-sandbox tmux restore in it, or forget it with claude-sandbox tmux restore --drop there\n"))
 		Expect(out).To(ContainSubstring("  main:3.0  'task 3'  n3  00000003-1f2d-4e5f-8a9b-0c1d2e3f4a5b  [claude, active]\n      skipped: no pane at main:3.0\n"))
 		Expect(out).To(ContainSubstring("      not armed: a ralph run was here"))
 		Expect(out).To(ContainSubstring("Typed the restore into 1, marked 1 only, skipped 2. Each armed pane restores itself, one start at a time.\n"))
@@ -123,7 +134,7 @@ var _ = Describe("tmux restore --all: arming a save into existing panes (CS-TMUX
 		Expect(out).To(ContainSubstring("ln -sf tmux_resurrect_" + at(0) + ".txt " + dir + "/last"))
 
 		lines := f.fake.CommandLines()
-		Expect(lines).To(ContainElement("tmux send-keys -t %1 claude-sandbox tmux restore --resurrected C-m"))
+		Expect(lines).To(ContainElement("tmux send-keys -t %1 C-e C-u claude-sandbox tmux restore --resurrected C-m"))
 		Expect(lines).NotTo(ContainElement(HavePrefix("tmux send-keys -t %2")), "vim is never typed into")
 		var set1 string
 		for _, l := range lines {
