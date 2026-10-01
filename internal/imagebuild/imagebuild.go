@@ -1196,8 +1196,14 @@ func (f fingerprint) add(s string) {
 }
 
 // addFile adds a file's name and content; false when it cannot be read.
+//
+// CS-IMG-075: read non-blocking and only as a regular file — the repo files
+// it reads (the base, tools and CLI Dockerfiles, the baked sources) are
+// session-writable when a sandbox works on this repository, and a FIFO there
+// must make the fingerprint uncomputable (the time-rule fallback), never
+// hang the launch.
 func (f fingerprint) addFile(name, path string) bool {
-	raw, err := os.ReadFile(path)
+	raw, err := cascade.ReadRegularFile(path)
 	if err != nil {
 		return false
 	}

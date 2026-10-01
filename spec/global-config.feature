@@ -786,3 +786,20 @@ Feature: Global config (~/.claude.json) — the linked layout (CS-GCFG)
     Given the link's target lies inside the config dir, or the file is a
       regular file or absent
     Then nothing is printed
+
+  Scenario: CS-GCFG-060 A FIFO, device or socket at the global file is unreadable at once
+    # In the linked layout the global file lives under the read-write config
+    # dir, so a session can replace it. The check's reader is
+    # cascade.ReadRegularFile (non-blocking open, fstat, regular files only,
+    # symlinks followed); the snapshots are read the same way.
+    Given the global file (or a linked layout's target) is a FIFO, device,
+      socket or directory
+    Then the read returns at once, with no CS-GCFG-004 re-reads (a
+      non-regular file is not a torn write)
+    And it is judged as an unreadable file: with a baseline the CS-GCFG-008
+      warning names "it cannot be read (not a regular file (...))"; without
+      one the CS-GCFG-013 warning does
+    And the check stays warn-only: nothing is written to the file and the
+      launch goes on
+    Given a snapshot in the store is such a file
+    Then it is skipped as one that does not parse, never waited on

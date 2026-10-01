@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kmacmcfarlane/claude-sandbox/internal/cascade"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/hostdirs"
 )
 
@@ -46,7 +47,8 @@ type HealthOptions struct {
 	Now             func() time.Time
 	// Sleep waits between reads (CS-GCFG-004); nil means time.Sleep.
 	Sleep func(time.Duration)
-	// ReadFile reads the global file; nil means os.ReadFile.
+	// ReadFile reads the global file; nil means cascade.ReadRegularFile
+	// (CS-GCFG-060: non-blocking, regular files only).
 	ReadFile func(string) ([]byte, error)
 	DirOps   *hostdirs.Ops
 	// Previous is this launch's earlier result (the check before the
@@ -104,7 +106,7 @@ func CheckHealth(o HealthOptions) *Health {
 		o.Sleep = time.Sleep
 	}
 	if o.ReadFile == nil {
-		o.ReadFile = os.ReadFile
+		o.ReadFile = cascade.ReadRegularFile
 	}
 	if o.Err == nil {
 		o.Err = io.Discard
@@ -200,7 +202,7 @@ func CheckHealth(o HealthOptions) *Health {
 // its facts; "" and nil when there is none (CS-GCFG-007).
 func parseableBaseline(store *Store) (string, *configFacts) {
 	for _, p := range store.List(SnapshotPrefix) {
-		b, err := os.ReadFile(p)
+		b, err := cascade.ReadRegularFile(p)
 		if err != nil {
 			continue
 		}
@@ -229,7 +231,9 @@ func readWithRetry(o HealthOptions, file string) ([]byte, *configFacts, error) {
 			if f, perr := readFacts(data); perr == nil {
 				return data, &f, nil
 			}
-		} else if errors.Is(err, fs.ErrNotExist) {
+		} else if errors.Is(err, fs.ErrNotExist) || errors.Is(err, cascade.ErrNotRegular) {
+			// CS-GCFG-060: a FIFO, device or directory is not a partial
+			// write; re-reading would not change the verdict.
 			return nil, nil, err
 		}
 		if i >= len(ReadRetries) {

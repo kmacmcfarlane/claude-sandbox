@@ -17,3 +17,9 @@ func PreSnapshotChildInputs(spec ChildSpec, baseID string) string {
 	f.add(baseID)
 	return sum()
 }
+
+// BaseInputs, ToolsInputs and CLIInputs expose the repo-file fingerprints
+// (CS-IMG-075).
+func BaseInputs(repoRoot string) string          { return baseInputs(repoRoot) }
+func ToolsInputs(repoRoot string) (string, bool) { return toolsInputs(repoRoot) }
+func CLIInputs(repoRoot string) string           { return cliInputs(repoRoot) }

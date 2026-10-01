@@ -295,3 +295,38 @@ Feature: .claude-sandbox/ layout lifecycle (CS-LAY)
     # directory count as not ignored although other new files are. Such a
     # rule can only be written deliberately against this probe; the CS-LAY-018
     # directory probe is unaffected by it.
+
+  Scenario: CS-LAY-023 A FIFO, device or socket at a .gitignore or the seeded CLAUDE.md never blocks the setup
+    # The layout setup runs on the launch path and the project tree is mounted
+    # read-write, so a session can put a FIFO where a .gitignore belongs. The
+    # launcher's own reads go through cascade.ReadRegularFile (non-blocking
+    # open, fstat, regular files only, symlinks followed); its writes open
+    # O_NONBLOCK and write only once the opened descriptor is a regular file
+    # (a FIFO with no reader fails open(2) with ENXIO), truncating only after
+    # that check. The git check-ignore probes (CS-LAY-005/006, 018, 020..022)
+    # open the host .gitignore, and for a path under .claude-sandbox/ the
+    # sidecar one, with git's own blocking open, so they are not run at all
+    # when either is not a readable regular file.
+    Given trackInHost is false and the sidecar .claude-sandbox/.gitignore
+      exists but is not a readable regular file
+    Then the setup fails at once with an error naming it, before any git
+      probe, as a failed write there always did, and leaves it alone
+    Given the host is a git work tree and the host .gitignore (or, with
+      trackInHost true, the sidecar .gitignore) exists but is not a readable
+      regular file (a FIFO, device, socket or directory; or no permission)
+    Then the setup prints one "WARNING: cannot read <file> (<error>);
+      skipping the .gitignore update and the git ignore checks, which would
+      read it." line, asks nothing, writes nothing to the host .gitignore and
+      runs no git check-ignore
+    And with trackInHost false the CS-LAY-020 warning still prints when the
+      host tracks files under .claude-sandbox/ (in its plain form: whether a
+      rule hides them is not asked), the sidecar .gitignore is still written
+      (CS-LAY-004), and the sidecar git init is skipped (it needs a probe)
+    Given anything at .claude-sandbox/CLAUDE.md, a dangling symlink included
+    Then the CS-LAY-002 seed is not written: it is created O_EXCL|O_NOFOLLOW,
+      so an entry that appears after the look is kept, never opened
+    # Was: a dangling symlink there was followed and its target created.
+    # Out of scope: git's other reads (.git/info/exclude, core.excludesFile,
+    # a .git file, a nested .gitignore elsewhere) and every other launch-path
+    # git call can still block on a FIFO; bounding the launch-path git calls
+    # is a separate change.
