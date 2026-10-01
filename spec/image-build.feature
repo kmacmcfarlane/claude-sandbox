@@ -722,8 +722,8 @@ Feature: Image build lifecycle (CS-IMG)
     # When the refresh stamp lands (F2), such a build does not renew it.
 
   Scenario: CS-IMG-067 The entrypoint's root part trusts nothing from the container environment
-    Given entrypoint.sh runs as root on EVERY start of a container — a docker start of
-      a stopped kept container re-runs it — and its environment is the container's,
+    Given entrypoint.sh runs as root on EVERY start of a container — a second start of
+      the same container (e.g. docker restart) re-runs it — and its environment is the container's,
       every --env-file line included
     And the image PATH puts /home/claude/.local/bin and /opt/claude-sandbox/venv/bin,
       both writable by the session user (CS-IMG-052), ahead of /usr/bin
@@ -757,8 +757,8 @@ Feature: Image build lifecycle (CS-IMG)
   Scenario: CS-IMG-068 The entrypoint is idempotent on a restart of the same container
     Given a container whose first start renamed claude to the host user, remapped its
       UID/GID, moved /home/claude to the host home and left /home/claude a symlink
-    When the container is stopped and started again (a kept container, a restart
-      policy) and the entrypoint runs a second time with the same environment
+    When the container is started a second time (a second start of the same
+      container, e.g. docker restart) and the entrypoint runs a second time with the same environment
     Then it resolves the user to operate on by name — "claude" when it exists, else the
       host user — and exits 1 naming both when neither exists, so "id: 'claude': no
       such user" is never printed and every step keys on that user

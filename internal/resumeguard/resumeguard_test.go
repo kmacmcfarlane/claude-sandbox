@@ -155,11 +155,9 @@ var _ = Describe("resume guard", func() {
 			Expect(f.check(sandbox("cs-heron", "running", "7", reg, "")).Run().Open).To(BeFalse())
 		})
 
-		It("CS-SESS-065: an exited kept container holds nothing, label or record", func() {
+		It("CS-SESS-065: a row in any other state (exited) holds nothing, label or record", func() {
 			f.write(reg, 7, record(7, convID, after, "linux::pid:[1]", "1"))
-			s := sandbox("cs-kept", "exited", "7", reg, convID)
-			s.Keep = "unless-stopped"
-			Expect(f.check(s).Run().Open).To(BeFalse())
+			Expect(f.check(sandbox("cs-gone", "exited", "7", reg, convID)).Run().Open).To(BeFalse())
 		})
 	})
 

@@ -71,7 +71,7 @@ type Inputs struct {
 	OOMScoreAdjSource string
 
 	// PeerRoot is the shared peer registry's root chosen under the launch
-	// lock (ChoosePeerRoot, CS-DIR-010..016), or the drift check's root for
+	// lock (ChoosePeerRoot, CS-DIR-010..015), or the drift check's root for
 	// the target container (DriftPeerRoot, CS-DIR-017). Nil means the new
 	// root, hostdirs.PeersRoot, with no drain note.
 	PeerRoot *PeerRootChoice
@@ -169,13 +169,6 @@ type Inputs struct {
 // ModeHeadless is the claude-sandbox.mode label value of a headless container
 // (CS-LNCH-064); discovery keeps such containers out of attach and join.
 const ModeHeadless = "headless"
-
-// LabelKeep marks a kept container — one created without --rm, with a
-// restart policy — and records that policy. Discovery lists an exited or
-// restarting container only when it carries this label (CS-SESS-070); a --rm
-// container is only ever exited while docker removes it. Like every label it
-// is outside the config hash.
-const LabelKeep = "claude-sandbox.keep"
 
 // LabelDetached marks a container launched with --detach (CS-LNCH-118), so
 // later tooling (restore) can tell it was started with no client and relaunch
@@ -1497,7 +1490,7 @@ const worstSocketSuffix = "/" + peerSocketsDir + "/1234567.sock"
 // this session (CS-LNCH-054/055/107) and the plan is exactly the key-off plan.
 // It never fails the launch: every obstacle is a stand-down with one warning.
 //
-// choice is the root chosen for this launch (CS-DIR-010..016): the legacy
+// choice is the root chosen for this launch (CS-DIR-010..015): the legacy
 // root during the drain, else the new one.
 func (in *Inputs) assembleSharedPeerRegistry(p *Plan, configDir string, choice PeerRootChoice) bool {
 	root := choice.Root
@@ -1599,7 +1592,7 @@ func (in *Inputs) assembleSharedPeerRegistry(p *Plan, configDir string, choice P
 }
 
 // peerRootNote is what the one banner line adds during the drain
-// (CS-DIR-011/014/016); "" on the new root with nothing pinning it.
+// (CS-DIR-011/014); "" on the new root with nothing pinning it.
 func peerRootNote(c PeerRootChoice) string {
 	switch {
 	case c.OnLegacy() && c.DiscoveryFailed:
@@ -1607,8 +1600,6 @@ func peerRootNote(c PeerRootChoice) string {
 		return ""
 	case c.OnLegacy():
 		return fmt.Sprintf(" This is the old location: %d container(s) use it. It moves to %s at the first launch when none do (usually after a reboot).", c.Pinned, c.New)
-	case c.Keep && c.Pinned > 0:
-		return fmt.Sprintf(" This kept session cannot see the sessions of the %d container(s) still on the old location %s until those end.", c.Pinned, c.Legacy)
 	}
 	return ""
 }

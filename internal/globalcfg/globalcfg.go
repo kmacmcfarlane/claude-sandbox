@@ -276,25 +276,23 @@ func (l Layout) SplitBrainWarning() string {
 }
 
 // ExitMessage is the launcher's host-side explanation of a session that
-// exited ExitLink (CS-GCFG-038..040). container names the container for the
-// kept-container fix. It says "likely": the status alone is the evidence.
-func ExitMessage(container string) string {
-	if container == "" {
-		container = "<container>"
-	}
+// exited ExitLink (CS-GCFG-038..040). It says "likely": the status alone is
+// the evidence. The container argument is unused: it named the container for
+// a "docker rm" fix that only kept containers needed, and every sandbox
+// container is --rm (a relaunch makes a new one, which checks the link again).
+func ExitMessage(_ string) string {
 	return fmt.Sprintf("The session exited with %d, likely the global-config link check (see the %q line above).\n"+
 		"  Fix, with every Claude session exited (host and sandboxes): make the linked layout with\n"+
 		"    %s\n"+
 		"  or go back to the legacy layout with\n"+
 		"    %s\n"+
 		"  then relaunch.\n"+
-		"  A kept container whose link target moved or vanished fails on every start: docker rm %s, then relaunch.\n"+
 		"  Fallback, for a launcher without those commands — %s. Each step does nothing\n"+
 		"  unless the layout is the one it expects. Make ~/.claude.json a symlink to .claude/.claude.json:\n"+
 		"    %s\n"+
 		"  or undo the link:\n"+
 		"    %s\n",
-		ExitLink, LinkPrefix, MigrateCmd, RevertCmd, container, keepCopy, LinkCmd, UnlinkCmd)
+		ExitLink, LinkPrefix, MigrateCmd, RevertCmd, keepCopy, LinkCmd, UnlinkCmd)
 }
 
 // LinkOps are EnsureLink's filesystem seams. A nil *LinkOps, or a nil field,

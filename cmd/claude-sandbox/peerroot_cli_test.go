@@ -22,14 +22,14 @@ import (
 
 // mountsRow is a discovery row carrying every trailing field through the
 // peerroot label and {{.Mounts}} (CS-DIR-011/012).
-func mountsRow(name, project, class, state, keep, peerRoot string, mounts ...string) string {
+func mountsRow(name, project, class, state, peerRoot string, mounts ...string) string {
 	status := "Up 1 hour"
 	if state == "exited" {
 		status = "Exited (0) 1 second ago"
 	}
 	return strings.Join([]string{
 		name, status, project, "claude", "", "v1", "", "", "", class, "",
-		state, "2026-09-30 12:00:00 +0000 UTC", "", "", keep,
+		state, "2026-09-30 12:00:00 +0000 UTC", "", "", "",
 		"", "", "", "", "", peerRoot, strings.Join(mounts, ","),
 	}, psSep)
 }
@@ -115,7 +115,7 @@ var _ = Describe("peers root move: drain-then-switch (CS-DIR-010..019)", func() 
 
 	It("CS-DIR-011: a container mounting the legacy root pins it, and the banner says so", func() {
 		Expect(os.MkdirAll(legacy, 0o700)).To(Succeed())
-		discoveryRows = mountsRow("cs-a", "/elsewhere", "3", "running", "", "",
+		discoveryRows = mountsRow("cs-a", "/elsewhere", "3", "running", "",
 			"/x/proj", filepath.Join(legacy, "sessions"), legacy) + "\n"
 		args := launch()
 		expectRoot(args, legacy)
@@ -130,8 +130,8 @@ var _ = Describe("peers root move: drain-then-switch (CS-DIR-010..019)", func() 
 
 	It("CS-DIR-011: the sessions/ source alone pins, and so does an exited --rm row docker is still removing", func() {
 		for _, row := range []string{
-			mountsRow("cs-a", "/p", "3", "running", "", "", filepath.Join(legacy, "sessions")+"/"),
-			mountsRow("cs-b", "/p", "4", "exited", "", "", legacy),
+			mountsRow("cs-a", "/p", "3", "running", "", filepath.Join(legacy, "sessions")+"/"),
+			mountsRow("cs-b", "/p", "4", "exited", "", legacy),
 		} {
 			discoveryRows = row + "\n"
 			expectRoot(launch(), legacy)
@@ -140,11 +140,11 @@ var _ = Describe("peers root move: drain-then-switch (CS-DIR-010..019)", func() 
 
 	It("CS-DIR-012: containers that never bridged do not pin, labelled or not; every container says which root it took", func() {
 		discoveryRows = strings.Join([]string{
-			mountsRow("cs-a", "/p", "3", "running", "", "", "/x/proj", filepath.Join(home, ".claude")),
-			mountsRow("cs-b", "/p", "4", "running", "", "none", "/y"),
-			mountsRow("cs-c", "/p", "5", "running", "", newer, newer),
+			mountsRow("cs-a", "/p", "3", "running", "", "/x/proj", filepath.Join(home, ".claude")),
+			mountsRow("cs-b", "/p", "4", "running", "none", "/y"),
+			mountsRow("cs-c", "/p", "5", "running", newer, newer),
 			// A path that merely starts with the legacy root's spelling.
-			mountsRow("cs-d", "/p", "6", "running", "", "", legacy+"-other"),
+			mountsRow("cs-d", "/p", "6", "running", "", legacy+"-other"),
 		}, "\n") + "\n"
 		expectRoot(launch(), newer)
 
@@ -155,7 +155,7 @@ var _ = Describe("peers root move: drain-then-switch (CS-DIR-010..019)", func() 
 	})
 
 	It("CS-DIR-013: another user's legacy root does not pin", func() {
-		discoveryRows = mountsRow("cs-a", "/p", "3", "running", "", "",
+		discoveryRows = mountsRow("cs-a", "/p", "3", "running", "",
 			"/home/other/.cache/claude-sandbox/peers", "/home/other/.cache/claude-sandbox/peers/sessions") + "\n"
 		expectRoot(launch(), newer)
 	})
@@ -215,7 +215,7 @@ var _ = Describe("peers root move: drain-then-switch (CS-DIR-010..019)", func() 
 
 		It("CS-DIR-017: a container on the legacy root, labelled or not, reports no drift after the switch", func() {
 			Expect(os.MkdirAll(legacy, 0o700)).To(Succeed())
-			discoveryRows = mountsRow("cs-a", "/p", "3", "running", "", "", legacy) + "\n"
+			discoveryRows = mountsRow("cs-a", "/p", "3", "running", "", legacy) + "\n"
 			args := launch()
 			onLegacy := labelValue(args, "claude-sandbox.confighash")
 			// Launches have switched: nothing pins the legacy root any more.
