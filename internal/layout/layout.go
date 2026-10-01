@@ -4,13 +4,17 @@
 package layout
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
+	"github.com/kmacmcfarlane/claude-sandbox/internal/cascade"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/paths"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/prompt"
@@ -86,9 +90,11 @@ func Setup(project string, trackInHost bool, opts Options) error {
 	// CS-LAY-002: seed once, never overwrite. Not in the CS-LAY-020 conflict
 	// state: the seed describes a host-ignored directory, which it is not,
 	// and would only add a wrong, untracked host file.
+	// CS-LAY-023: created O_EXCL|O_NOFOLLOW, so whatever appears at the path
+	// after the Stat (a FIFO a session planted) is left alone, never opened.
 	claudeMD := filepath.Join(sb, "CLAUDE.md")
-	if _, err := os.Stat(claudeMD); os.IsNotExist(err) && hostTracked == 0 {
-		if err := os.WriteFile(claudeMD, []byte(claudeMDSeed), 0o644); err != nil {
+	if _, err := os.Lstat(claudeMD); os.IsNotExist(err) && hostTracked == 0 {
+		if err := seedFile(claudeMD, []byte(claudeMDSeed)); err != nil {
 			return err
 		}
 	}
@@ -173,7 +179,9 @@ var worktreesCoveringRules = []string{
 // withWorktreesLine appends worktreesLine to lines unless the host .gitignore
 // already carries a covering rule.
 func withWorktreesLine(gi string, lines ...string) []string {
-	raw, _ := os.ReadFile(gi)
+	// CS-LAY-023: non-blocking, regular files only; anything else reads as no
+	// covering rule (gitignoreAdd then warns about it).
+	raw, _ := cascade.ReadRegularFile(gi)
 	for _, l := range strings.Split(string(raw), "\n") {
 		l = strings.TrimSpace(l)
 		for _, rule := range worktreesCoveringRules {
@@ -310,10 +318,19 @@ func warnHostTracked(w io.Writer, n int, ruleExists, sidecar bool) {
 // Returns true when the lines were added.
 func gitignoreAdd(gi string, opts Options, lines ...string) bool {
 	existing := map[string]bool{}
-	if raw, err := os.ReadFile(gi); err == nil {
+	// CS-LAY-023: the project tree is session-writable, so the read never
+	// blocks (a FIFO, device or socket there) and a file that exists but
+	// cannot be read as a regular file skips the update with one warning,
+	// before any prompt: appending to it could block or write elsewhere.
+	raw, err := cascade.ReadRegularFile(gi)
+	switch {
+	case err == nil:
 		for _, l := range strings.Split(string(raw), "\n") {
 			existing[l] = true
 		}
+	case !errors.Is(err, fs.ErrNotExist):
+		fmt.Fprintf(opts.errw(), "WARNING: cannot read %s (%v); skipping the .gitignore update.\n", gi, unwrapPathErr(err))
+		return false
 	}
 	var missing []string
 	for _, l := range lines {
@@ -357,7 +374,13 @@ func gitignoreAdd(gi string, opts Options, lines ...string) bool {
 // ensureLines appends each line not already present verbatim, keeping the
 // file newline-terminated (CS-LAY-011).
 func ensureLines(file string, lines ...string) error {
-	raw, _ := os.ReadFile(file)
+	// CS-LAY-023: a missing file is empty; one that exists but is not a
+	// readable regular file (a FIFO, device, socket, directory) is an error,
+	// never waited on and never written.
+	raw, err := cascade.ReadRegularFile(file)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
 	content := string(raw)
 	existing := map[string]bool{}
 	for _, l := range strings.Split(content, "\n") {
@@ -378,5 +401,60 @@ func ensureLines(file string, lines ...string) error {
 	if !changed && len(raw) > 0 {
 		return nil
 	}
-	return os.WriteFile(file, []byte(b.String()), 0o644)
+	return writeRegularFile(file, []byte(b.String()))
+}
+
+// writeRegularFile replaces file's content like os.WriteFile (0644 when
+// created), but opens it O_NONBLOCK|O_NOCTTY and writes only when the opened
+// descriptor is a regular file (CS-LAY-023): a FIFO swapped in after the read
+// fails open(2) with ENXIO (no reader) or is refused here, never blocking.
+// O_TRUNC is applied only after the check, so nothing else is truncated.
+func writeRegularFile(file string, data []byte) error {
+	f, err := os.OpenFile(file, os.O_WRONLY|os.O_CREATE|syscall.O_NONBLOCK|syscall.O_NOCTTY, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if !fi.Mode().IsRegular() {
+		return &fs.PathError{Op: "open", Path: file, Err: fmt.Errorf("%w (%s)", cascade.ErrNotRegular, fi.Mode().Type())}
+	}
+	if err := f.Truncate(0); err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		return err
+	}
+	return f.Close()
+}
+
+// seedFile creates file with data, 0644, only when nothing is at the path
+// (O_EXCL|O_NOFOLLOW): an entry that appeared meanwhile is kept (CS-LAY-002,
+// CS-LAY-023).
+func seedFile(file string, data []byte) error {
+	f, err := os.OpenFile(file, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o644)
+	if errors.Is(err, fs.ErrExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+// unwrapPathErr drops a *fs.PathError's path for a message that already
+// names the file.
+func unwrapPathErr(err error) error {
+	var pe *fs.PathError
+	if errors.As(err, &pe) {
+		return pe.Err
+	}
+	return err
 }

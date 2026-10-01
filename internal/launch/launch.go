@@ -927,7 +927,10 @@ func (in *Inputs) tempFile(name string, content []byte) (string, error) {
 
 func (in *Inputs) shadowClaudeMD(p *Plan, configDir string) error {
 	var buf strings.Builder
-	if raw, err := os.ReadFile(filepath.Join(configDir, "CLAUDE.md")); err == nil && len(raw) > 0 {
+	// CS-LNCH-174: the config dir is mounted read-write, so the host memory
+	// file is read non-blocking and only as a regular file; anything else is
+	// missing, as an unreadable one always was.
+	if raw, err := cascade.ReadRegularFile(filepath.Join(configDir, "CLAUDE.md")); err == nil && len(raw) > 0 {
 		// Host memory + a blank line separator; without a host file the temp
 		// file is container-context.md alone (CS-LNCH-010). An empty one is
 		// the mount-point placeholder of CS-LNCH-169 and counts as missing,
@@ -1118,7 +1121,9 @@ func (in *Inputs) shadowSiblings(p *Plan, configDir string) error {
 	content := assets.MCPServers
 	// CS-LNCH-167: an empty or whitespace-only host file is a missing one.
 	// A leading UTF-8 BOM is ignored, and a bare JSON null counts as empty.
-	raw, err := os.ReadFile(hostMCP)
+	// CS-LNCH-174: non-blocking, regular files only; a FIFO, device or
+	// socket is an unreadable host file (the CS-LNCH-168 warning).
+	raw, err := cascade.ReadRegularFile(hostMCP)
 	switch {
 	case err != nil && errors.Is(err, fs.ErrNotExist):
 	case err != nil:
@@ -1149,7 +1154,9 @@ func (in *Inputs) shadowSiblings(p *Plan, configDir string) error {
 
 func (in *Inputs) shadowGitconfig(p *Plan) error {
 	src := filepath.Join(in.Home, ".gitconfig")
-	raw, err := os.ReadFile(src)
+	// CS-LNCH-174: non-blocking, regular files only; anything else is no
+	// gitconfig, as an unreadable one always was.
+	raw, err := cascade.ReadRegularFile(src)
 	if err != nil {
 		return nil // no gitconfig: nothing to mount
 	}

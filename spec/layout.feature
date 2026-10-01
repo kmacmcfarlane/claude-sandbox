@@ -295,3 +295,24 @@ Feature: .claude-sandbox/ layout lifecycle (CS-LAY)
     # directory count as not ignored although other new files are. Such a
     # rule can only be written deliberately against this probe; the CS-LAY-018
     # directory probe is unaffected by it.
+
+  Scenario: CS-LAY-023 A FIFO, device or socket at a .gitignore or the seeded CLAUDE.md never blocks the setup
+    # The layout setup runs on the launch path and the project tree is mounted
+    # read-write, so a session can put a FIFO where a .gitignore belongs. Every
+    # read goes through cascade.ReadRegularFile (non-blocking open, fstat,
+    # regular files only, symlinks followed); every write opens O_NONBLOCK and
+    # writes only once the opened descriptor is a regular file (a FIFO with no
+    # reader fails open(2) with ENXIO), truncating only after that check.
+    Given the host .gitignore exists but is not a readable regular file (a
+      FIFO, device, socket or directory; or no permission)
+    Then the setup prints one "WARNING: cannot read <file> (<error>); skipping
+      the .gitignore update." line, asks nothing and writes nothing there
+    And the rest of the setup goes on (the sidecar .gitignore and git init)
+    And the CS-LAY-017 covering-rule look treats the file as holding no rule
+    Given the sidecar .claude-sandbox/.gitignore is such a file
+    Then the setup fails at once with an error naming it, as a failed write
+      there always did, and leaves it alone
+    Given anything at .claude-sandbox/CLAUDE.md, a dangling symlink included
+    Then the CS-LAY-002 seed is not written: it is created O_EXCL|O_NOFOLLOW,
+      so an entry that appears after the look is kept, never opened
+    # Was: a dangling symlink there was followed and its target created.

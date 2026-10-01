@@ -796,3 +796,13 @@ Feature: Image build lifecycle (CS-IMG)
     # without registry access rebuilt the base. The daemon's built-in frontend
     # already supports COPY --link, --chmod and RUN --mount=type=cache, which is
     # everything these Dockerfiles use.
+
+  Scenario: CS-IMG-075 The repository's fingerprint inputs are read non-blocking, regular files only
+    # When a sandbox works on this repository its files are session-writable;
+    # the base, tools and CLI fingerprints (CS-IMG-032) read Dockerfile,
+    # Dockerfile.tools, Dockerfile.cli and every regular baked source through
+    # cascade.ReadRegularFile.
+    Given one of those Dockerfiles is a FIFO, device or socket
+    Then the read returns at once and that fingerprint is uncomputable, which
+      falls back to the time rule (CS-IMG-035), as for an unreadable file
+    And a baked source that is not a regular file is skipped, as before

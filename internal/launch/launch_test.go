@@ -467,7 +467,9 @@ var _ = Describe("launch.Build", func() {
 		Expect(p.Volumes).To(ContainElement(tmp + ":" + hostMCP + ":ro"))
 		Expect(strings.Count(errw.String(), "WARNING")).To(Equal(1))
 		Expect(errw.String()).To(ContainSubstring("WARNING: " + hostMCP + " cannot be read"))
-		Expect(errw.String()).To(ContainSubstring("is a directory"))
+		// CS-LNCH-174: read through cascade.ReadRegularFile, a directory
+		// opens and is refused as not regular.
+		Expect(errw.String()).To(ContainSubstring("not a regular file"))
 	})
 
 	DescribeTable("CS-LNCH-168: an unparseable host .mcp.json warns once naming the file and uses the fragment",

@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/kmacmcfarlane/claude-sandbox/internal/cascade"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
 )
 
@@ -68,6 +69,8 @@ func ExistingWorktrees(root string) []string {
 	if root == "" {
 		return nil
 	}
+	// CS-LNCH-175: os.ReadDir opens O_DIRECTORY, so a FIFO a session put at
+	// this path fails with ENOTDIR at once; it never waits for a writer.
 	entries, err := os.ReadDir(filepath.Join(root, WorktreeDir))
 	if err != nil {
 		return nil
@@ -155,7 +158,11 @@ func DetectLinkedWorktree(r execx.Runner, dir string) (lw *LinkedWorktree, warni
 	if within(gitDir, top) || within(commonDir, top) || within(top, commonDir) {
 		return nil, ""
 	}
-	back, err := os.ReadFile(filepath.Join(gitDir, "gitdir"))
+	// CS-LNCH-173: the common dir is mounted read-write into the sessions of
+	// any earlier launch, so the back-link is read non-blocking and only as a
+	// regular file; a FIFO, device or socket there is unreadable — not
+	// linked, launch plain — as any other read failure.
+	back, err := cascade.ReadRegularFile(filepath.Join(gitDir, "gitdir"))
 	if err != nil {
 		return nil, ""
 	}

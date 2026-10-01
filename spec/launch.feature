@@ -2184,3 +2184,37 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       check: <error naming the file>" (the CS-IMG-074 precedent), and reports
       drift as for any uncomputable hash (a prompt, or exit 3 with no
       terminal; --allow-config-drift attaches or joins)
+
+  Scenario: CS-LNCH-173 A FIFO at a linked worktree's back-link is "not linked", never a hang
+    # <GitDir>/gitdir lives in the common git dir, which CS-LNCH-071 mounts
+    # read-write into every session of the worktree, so a session can replace
+    # it. It is read through cascade.ReadRegularFile.
+    Given git names a linked worktree whose <GitDir>/gitdir is a FIFO, device
+      or socket
+    Then the read returns at once and the project launches plain, as for a
+      missing or unreadable back-link (CS-LNCH-070): no mount, no warning
+    # A non-regular back-link is unreadable, not "mismatched": there is no
+    # recorded path to name in the repair warning.
+
+  Scenario: CS-LNCH-174 The shadow sources are read non-blocking, regular files only
+    # <config dir>/CLAUDE.md lives under the read-write config-dir bind;
+    # <config parent>/.mcp.json and ~/.gitconfig may lie under a read-write
+    # same-path mount (CS-LNCH-169). All three go through
+    # cascade.ReadRegularFile.
+    Given <config dir>/CLAUDE.md is a FIFO, device, socket or directory
+    Then the shadow CLAUDE.md is container-context.md alone, as for a missing
+      or unreadable host file (CS-LNCH-010)
+    Given the host .mcp.json is such a file
+    Then the CS-LNCH-168 warning names it with "not a regular file" and the
+      fragment alone is mounted
+    Given git access is on and ~/.gitconfig is such a file
+    Then no gitconfig is mounted, as when it is absent (CS-LNCH-017)
+    And no read waits for a writer
+
+  Scenario: CS-LNCH-175 Directory listings on the launch path never block on a FIFO
+    # A pin, not a change: os.ReadDir opens O_DIRECTORY (Go 1.21+), so a FIFO
+    # at the path fails open(2) with ENOTDIR at once.
+    Given <project>/.claude/worktrees is a FIFO
+    Then the noun picker's worktree listing is empty, at once
+    Given a shadow sweep root (CS-LNCH-084/166) is a FIFO
+    Then the sweep fails at once naming it and removes nothing
