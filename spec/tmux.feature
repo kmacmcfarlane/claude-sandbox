@@ -47,6 +47,37 @@ Feature: tmux integration (CS-TMUX)
       prints "Building…"), and no stale binary (one from before the hook existed would read
       "tmux save <file>" as a launch prompt); the next ordinary launch rebuilds and saves resume
 
+  # ---- F0b: shim builds serialise on a lock ----
+  #
+  # tmux-continuum's boot restore types the saved command into every pane
+  # within a second; after a pull each shim found the binary stale and started
+  # its own `go build -o bin/dist/claude-sandbox` onto the same path. The lock
+  # file is bin/dist/.build.lock: beside the binary it guards, gitignored, and
+  # per checkout. The wait is bounded (600 s) because a hung build — a stuck
+  # `docker run golang` pull — would otherwise hold every pane forever; past
+  # it the waiter builds unlocked, which is what every shim did before.
+
+  Scenario: CS-TMUX-073 the shim's builds serialise on a flock
+    Given bin/dist/claude-sandbox is missing or a build source is newer than it
+    And flock (util-linux) is on PATH
+    When several shims start at once
+    Then each takes flock on bin/dist/.build.lock before building, with the host go or with docker golang
+    And a shim that has to wait prints one "Waiting for another claude-sandbox build to finish..." line on stderr
+    And under the lock each checks staleness again: one builds, the others find the binary up to date and exec it without building
+    And build output still goes to stderr
+    And the lock fd is closed before the exec, so it never reaches the launcher (nor the build commands)
+    And the launcher it execs keeps the caller's stderr, and stdout carries nothing but the launcher's own
+    When a waiter has waited 600 s (CLAUDE_SANDBOX_BUILD_LOCK_WAIT, a whole number of seconds, overrides it)
+    Then it prints one WARNING naming the lock file on stderr and builds without the lock
+    When the holder's build fails
+    Then the binary stays stale and each waiter builds in turn under the lock (N failing builds for N
+      shims, never two at once); accepted, since a failing build is the operator's to fix
+    When flock is not installed (macOS), or the lock file cannot be opened
+    Then the shim builds unlocked, as before, with no message
+    When the binary is up to date
+    Then the shim takes no lock, creates no lock file and execs the binary at once
+    And the hook fast paths (CS-TMUX-003, "tmux save") never reach the lock: they never build and never wait
+
   # ---- F1: the pane mark ----
   #
   # Every host launch, attach or join run inside tmux records, in a pane user
