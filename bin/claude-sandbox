@@ -60,17 +60,16 @@ case "${1-}" in
         ;;
 esac
 
-needs_build=false
-if stale; then
-    needs_build=true
-fi
-
-if [ "$needs_build" = true ]; then
+# build: compile bin/dist/claude-sandbox with the host go, else docker golang.
+# Output goes to stderr: stdout belongs to claude in headless mode. fd 9 (the
+# build lock, below) is closed for the build commands: a lock is held by the
+# open file description, so the shim keeps it either way, and nothing the
+# build leaves behind can hold it after the shim is gone.
+build() {
     mkdir -p "$BIN_DIR"
     if command -v go >/dev/null 2>&1; then
         echo "Building claude-sandbox binary (host go)..." >&2
-        # Build output goes to stderr: stdout belongs to claude in headless mode.
-        (cd "$REPO_ROOT" && CGO_ENABLED=0 go build -o "$BIN" ./cmd/claude-sandbox) >&2
+        (cd "$REPO_ROOT" && CGO_ENABLED=0 go build -o "$BIN" ./cmd/claude-sandbox) >&2 9>&-
     else
         echo "Building claude-sandbox binary (docker $GO_IMAGE)..." >&2
         # Persist the build AND module caches under bin/dist/ (gitignored), so a
@@ -84,8 +83,46 @@ if [ "$needs_build" = true ]; then
             -e GOCACHE=/src/bin/dist/gocache \
             -e GOMODCACHE=/src/bin/dist/gomodcache \
             -v "$REPO_ROOT:/src" -w /src \
-            "$GO_IMAGE" go build -o bin/dist/claude-sandbox ./cmd/claude-sandbox >&2
+            "$GO_IMAGE" go build -o bin/dist/claude-sandbox ./cmd/claude-sandbox >&2 9>&-
     fi
+}
+
+# Builds serialise on a lock (spec/tmux.feature CS-TMUX-073): tmux-continuum's
+# boot restore types into every pane within a second, and after a pull each
+# shim would otherwise start its own build onto the same output path. Only a
+# stale binary takes the lock — an up-to-date launch never touches it — and
+# staleness is checked again under it, so a waiter execs what the holder just
+# built instead of building it again. The lock file sits beside the binary in
+# bin/dist/ (gitignored, the shim's own build dir, per checkout: two checkouts
+# build two binaries and need not wait for each other). The wait is bounded:
+# a hung build (a stuck `docker run golang` pull) must not hold every pane
+# forever, so past BUILD_LOCK_WAIT seconds a waiter warns and builds unlocked,
+# which is what every shim did before the lock. Without flock (util-linux;
+# macOS has none) or when the lock file cannot be opened, the shim builds
+# unlocked, as before, with no message. The hook fast paths above never reach
+# this point, so they never build and never wait.
+BUILD_LOCK_WAIT=600
+if stale; then
+    locked=false
+    if command -v flock >/dev/null 2>&1 \
+        && mkdir -p "$BIN_DIR" 2>/dev/null \
+        && { exec 9>>"$BIN_DIR/.build.lock"; } 2>/dev/null; then
+        if flock -n 9 2>/dev/null; then
+            locked=true
+        else
+            echo "Waiting for another claude-sandbox build to finish..." >&2
+            if flock -w "$BUILD_LOCK_WAIT" 9 2>/dev/null; then
+                locked=true
+            else
+                echo "WARNING: the other claude-sandbox build still holds $BIN_DIR/.build.lock after ${BUILD_LOCK_WAIT}s; building without the lock." >&2
+            fi
+        fi
+    fi
+    if [ "$locked" = false ] || stale; then
+        build
+    fi
+    # Release the lock and close the fd so neither reaches the exec'd binary.
+    exec 9>&- 2>/dev/null || true
 fi
 
 export CLAUDE_SANDBOX_REPO_ROOT="$REPO_ROOT"
