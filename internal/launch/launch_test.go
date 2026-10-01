@@ -1978,14 +1978,14 @@ var _ = Describe("launch.Build", func() {
 			}
 
 			It("CS-DIR-010: ChoosePeerRoot takes the new root when no bind source is under the legacy one", func() {
-				c := launch.ChoosePeerRoot(home, [][]string{{"/x"}, nil, {legacy + "x"}}, nil, false, false)
+				c := launch.ChoosePeerRoot(home, [][]string{{"/x"}, nil, {legacy + "x"}}, nil, false)
 				Expect(c.Root).To(Equal(root))
 				Expect(c.Pinned).To(Equal(0))
 				Expect(c.OnLegacy()).To(BeFalse())
 			})
 
 			It("CS-DIR-011: ChoosePeerRoot keeps the legacy root while any bind source is at or under it", func() {
-				c := launch.ChoosePeerRoot(home, [][]string{{"/x", legacy + "/sessions"}, {legacy + "/"}, {"/y"}}, nil, false, false)
+				c := launch.ChoosePeerRoot(home, [][]string{{"/x", legacy + "/sessions"}, {legacy + "/"}, {"/y"}}, nil, false)
 				Expect(c.Root).To(Equal(legacy))
 				Expect(c.Pinned).To(Equal(2))
 				Expect(launch.PinsLegacyRoot(home, launch.SplitMounts("/a, "+legacy+"/cc-socks,/b"))).To(BeTrue())
@@ -2015,19 +2015,19 @@ var _ = Describe("launch.Build", func() {
 			})
 
 			It("CS-DIR-013: another user's legacy root does not pin", func() {
-				c := launch.ChoosePeerRoot(home, [][]string{{"/home/other/.cache/claude-sandbox/peers"}}, nil, false, false)
+				c := launch.ChoosePeerRoot(home, [][]string{{"/home/other/.cache/claude-sandbox/peers"}}, nil, false)
 				Expect(c.Root).To(Equal(root))
 			})
 
 			It("CS-DIR-014: a failed discovery keeps a real legacy directory", func() {
 				mkdir(legacy)
-				c := launch.ChoosePeerRoot(home, nil, errors.New("docker down"), false, false)
+				c := launch.ChoosePeerRoot(home, nil, errors.New("docker down"), false)
 				Expect(c.Root).To(Equal(legacy))
 				Expect(c.DiscoveryFailed).To(BeTrue())
 			})
 
 			It("CS-DIR-015: a failed discovery with no legacy directory takes the new root", func() {
-				c := launch.ChoosePeerRoot(home, nil, errors.New("docker down"), false, false)
+				c := launch.ChoosePeerRoot(home, nil, errors.New("docker down"), false)
 				Expect(c.Root).To(Equal(root))
 				Expect(c.DiscoveryFailed).To(BeTrue())
 			})
@@ -2035,13 +2035,13 @@ var _ = Describe("launch.Build", func() {
 			It("CS-DIR-015: a failed discovery after the switch stays on the new root although the legacy dir remains", func() {
 				mkdir(legacy)
 				mkdir(root)
-				c := launch.ChoosePeerRoot(home, nil, errors.New("docker down"), false, true)
+				c := launch.ChoosePeerRoot(home, nil, errors.New("docker down"), true)
 				Expect(c.Root).To(Equal(root))
 				Expect(c.OnLegacy()).To(BeFalse())
 				// A symlink at the new root is not a switch.
 				Expect(os.Remove(root)).To(Succeed())
 				Expect(os.Symlink(legacy, root)).To(Succeed())
-				Expect(launch.ChoosePeerRoot(home, nil, errors.New("docker down"), false, true).Root).To(Equal(legacy))
+				Expect(launch.ChoosePeerRoot(home, nil, errors.New("docker down"), true).Root).To(Equal(legacy))
 			})
 
 			It("CS-DIR-011: on the host a source reaching the legacy root through a symlinked home still pins", func() {
@@ -2051,12 +2051,12 @@ var _ = Describe("launch.Build", func() {
 				// The container was launched with $HOME spelled through the alias.
 				other := filepath.Join(alias, ".cache", "claude-sandbox", "peers")
 				for _, src := range []string{other, filepath.Join(other, "sessions")} {
-					Expect(launch.ChoosePeerRoot(home, [][]string{{src}}, nil, false, true).Root).To(Equal(legacy), src)
-					Expect(launch.ChoosePeerRoot(home, [][]string{{src}}, nil, false, false).Root).To(Equal(root),
+					Expect(launch.ChoosePeerRoot(home, [][]string{{src}}, nil, true).Root).To(Equal(legacy), src)
+					Expect(launch.ChoosePeerRoot(home, [][]string{{src}}, nil, false).Root).To(Equal(root),
 						"in a sandbox the match stays lexical")
 				}
 				// An unrelated source is never stat'ed into a match.
-				Expect(launch.ChoosePeerRoot(home, [][]string{{alias}}, nil, false, true).Root).To(Equal(root))
+				Expect(launch.ChoosePeerRoot(home, [][]string{{alias}}, nil, true).Root).To(Equal(root))
 			})
 
 			It("CS-DIR-011: only a source ending in /.cache/claude-sandbox/peers is ever stat'ed", func() {
@@ -2067,11 +2067,11 @@ var _ = Describe("launch.Build", func() {
 					return os.Stat(p)
 				}))
 				hung := [][]string{{"/mnt/x/peers", "/mnt/nas/peers/sessions", "/mnt/y/peers/cc-socks", "/srv/claude-sandbox/peers"}}
-				Expect(launch.ChoosePeerRoot(home, hung, nil, false, true).Root).To(Equal(root))
+				Expect(launch.ChoosePeerRoot(home, hung, nil, true).Root).To(Equal(root))
 				Expect(statted).To(BeEmpty(), "no stat of a source that cannot be the legacy root")
 
 				other := "/elsewhere/h/.cache/claude-sandbox/peers"
-				launch.ChoosePeerRoot(home, [][]string{{other + "/sessions"}}, nil, false, true)
+				launch.ChoosePeerRoot(home, [][]string{{other + "/sessions"}}, nil, true)
 				Expect(statted).To(Equal([]string{legacy, other}))
 			})
 
@@ -2082,7 +2082,7 @@ var _ = Describe("launch.Build", func() {
 					return nil, os.ErrNotExist
 				}))
 				row := []string{"/elsewhere/h/.cache/claude-sandbox/peers", legacy + "/sessions"}
-				c := launch.ChoosePeerRoot(home, [][]string{row}, nil, false, true)
+				c := launch.ChoosePeerRoot(home, [][]string{row}, nil, true)
 				Expect(c.Root).To(Equal(legacy))
 				Expect(c.Pinned).To(Equal(1))
 			})
@@ -2098,18 +2098,6 @@ var _ = Describe("launch.Build", func() {
 				in.Home = real
 				enable()
 				Expect(func() { _, _ = launch.Build(in) }).To(PanicWith(ContainSubstring("would create the real peer registry")))
-			})
-
-			It("CS-DIR-016: a launch marked kept ignores the pin, and its banner says what it cannot see", func() {
-				c := launch.ChoosePeerRoot(home, [][]string{{legacy}}, nil, true, false)
-				Expect(c.Root).To(Equal(root))
-				Expect(c.Keep).To(BeTrue())
-				Expect(c.Pinned).To(Equal(1))
-				enable()
-				in.PeerRoot = &c
-				p := build()
-				Expect(envValues(p, "XDG_RUNTIME_DIR")).To(Equal([]string{root}))
-				Expect(out.String()).To(ContainSubstring("This kept session cannot see the sessions of the 1 container(s) still on the old location " + legacy))
 			})
 
 			It("CS-DIR-017: DriftPeerRoot reuses the container's root", func() {

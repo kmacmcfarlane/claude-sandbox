@@ -18,7 +18,6 @@ package cascade
 import (
 	"fmt"
 	"io"
-	"os"
 	"strings"
 	"unicode"
 )
@@ -105,9 +104,11 @@ const utf8BOM = "\xEF\xBB\xBF"
 // is key KEY, resolved against the launcher's environment (CS-CASC-027). A
 // second '\r' survives, as in docker: "KEY\r\r" is key "KEY\r", which
 // docker cannot resolve (CS-CASC-028). It does not reject keys docker would
-// (empty, containing blanks); callers that care filter with validEnvKey.
+// (empty, containing blanks); callers that care filter with validEnvKey. It
+// reads through ReadRegularFile, so a FIFO at an env path is an error (the
+// lint and the override notice skip it) rather than a hang (CS-LNCH-172).
 func readEnvAssignments(path string) ([]envAssignment, error) {
-	raw, err := os.ReadFile(path)
+	raw, err := ReadRegularFile(path)
 	if err != nil {
 		return nil, err
 	}
@@ -123,13 +124,15 @@ type EnvFile struct {
 	Content []byte
 }
 
-// ReadEnvFiles snapshots every path, in order. Any unreadable file is an
-// error: docker create would fail on it anyway, and a launch must never
-// proceed past a file it could not check.
+// ReadEnvFiles snapshots every path, in order, through ReadRegularFile
+// (CS-LNCH-172): a FIFO, device or socket planted at an env path fails at
+// once instead of hanging the launch. Any unreadable or non-regular file is
+// an error naming it: docker create would fail on it anyway, and a launch
+// must never proceed past a file it could not check.
 func ReadEnvFiles(paths []string) ([]EnvFile, error) {
 	out := make([]EnvFile, 0, len(paths))
 	for _, p := range paths {
-		raw, err := os.ReadFile(p)
+		raw, err := ReadRegularFile(p)
 		if err != nil {
 			return nil, err
 		}

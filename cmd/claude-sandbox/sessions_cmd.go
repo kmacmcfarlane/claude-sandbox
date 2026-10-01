@@ -67,8 +67,8 @@ func newSessionsCmd(env *Env) *cobra.Command {
 				fmt.Fprintln(env.Out, string(b))
 				return nil
 			}
-			// "sandbox sessions", not "running": an exited kept container is
-			// listed too (CS-SESS-013, CS-SESS-070).
+			// "sandbox sessions", not "running": a paused one is listed too
+			// (CS-SESS-013).
 			if len(found) == 0 {
 				if all {
 					fmt.Fprintln(env.Out, "No sandbox sessions.")
@@ -118,12 +118,7 @@ func printSessionTable(env *Env, found []sessions.Session, all bool, projectDir 
 		if state == "" {
 			state = "-" // an older docker ps row (CS-SESS-074)
 		}
-		up := uptime(s.Status)
-		if s.Down() {
-			// docker's status reads "Exited (0) 3 hours ago": not an uptime.
-			up = "-"
-		}
-		row := []string{mark + instance, worktree, s.Name, s.Mode, state, up, count}
+		row := []string{mark + instance, worktree, s.Name, s.Mode, state, uptime(s.Status), count}
 		if all {
 			row = append(row, s.Project)
 		}
@@ -244,7 +239,7 @@ func decideSessions(env *Env, projectDir string, f *launchFlags) (sessionDecisio
 	// still reports what is running, which is the discoverability half of the
 	// problem (CS-SESS-034).
 	if f.Ralph {
-		if live := notDown(sessions.Live(found)); len(live) > 0 {
+		if live := sessions.Live(found); len(live) > 0 {
 			reportRunning(env, live)
 		}
 		return sessionDecision{Action: actionNew}, nil
@@ -329,18 +324,6 @@ func reportRunning(env *Env, found []sessions.Session) {
 		fmt.Fprintf(env.Err, "  %-10s up %-12s %d session(s)\n", sessionLabel(s), uptime(s.Status), s.Count)
 	}
 	fmt.Fprintln(env.Err)
-}
-
-// notDown drops exited and restarting kept containers, for reports that
-// list what is running (CS-SESS-073).
-func notDown(all []sessions.Session) []sessions.Session {
-	out := make([]sessions.Session, 0, len(all))
-	for _, s := range all {
-		if !s.Down() {
-			out = append(out, s)
-		}
-	}
-	return out
 }
 
 // resolveTarget picks the session named by an explicit --attach/--join value,
@@ -508,8 +491,12 @@ func wouldBeFingerprint(env *Env, projectDir string, f *launchFlags, cfg *cascad
 		Out: io.Discard, Err: io.Discard,
 	})
 	if err != nil {
-		// Without a comparable hash, drift cannot be judged; confirmDrift treats
-		// an empty want-hash as "no opinion" rather than blocking the attach.
+		// Without a comparable hash, confirmDrift reports drift (a prompt, or
+		// exit 3 without a terminal) against a labelled container. Name the
+		// cause, as for the Dockerfile above: an env file that is a FIFO or
+		// otherwise unreadable (CS-LNCH-172) is skipped by the lint and the
+		// override notice, so this line is the only place it is named.
+		fmt.Fprintf(env.Err, "WARNING: cannot compute the current configuration for the drift check: %v\n", err)
 		return "", nil
 	}
 	return plan.ConfigHash, plan.ConfigInputs

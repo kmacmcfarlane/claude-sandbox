@@ -400,7 +400,8 @@ Feature: Global config (~/.claude.json) — the linked layout (CS-GCFG)
     Then before it burns pids it makes $HOME/.claude.json a symlink to T:
       symlink(T, $HOME/.claude.json.link-<pid>-<rand>), then rename onto $HOME/.claude.json
     Given $HOME/.claude.json already is a symlink whose text is T
-    Then nothing is changed — a kept container's restart and a join are no-ops
+    Then nothing is changed — a second start of the same container (e.g.
+      docker restart) and a join are no-ops
     Given CLAUDE_SANDBOX_GLOBAL_CONFIG is unset or empty
     Then nothing is checked or changed (the legacy and CLAUDE_CONFIG_DIR layouts)
 
@@ -421,8 +422,8 @@ Feature: Global config (~/.claude.json) — the linked layout (CS-GCFG)
 
   Scenario: CS-GCFG-036 The link fails closed with exit 78
     Given CLAUDE_SANDBOX_GLOBAL_CONFIG=T is set
-    And T is missing or not a regular file (a kept container whose target
-      moved or vanished), or T is not exactly $HOME/.claude/.claude.json
+    And T is missing or not a regular file (on a second start of the same
+      container, e.g. docker restart, the target moved or vanished), or T is not exactly $HOME/.claude/.claude.json
       (cleaned), or $HOME is unset,
       or $HOME/.claude.json is a directory, or the link cannot be made
       ($HOME not writable)
@@ -452,8 +453,8 @@ Feature: Global config (~/.claude.json) — the linked layout (CS-GCFG)
       nothing unless the layout is the one it expects:
       link — "test -f ~/.claude.json && ! test -L ~/.claude.json && ! test -e ~/.claude/.claude.json && ! test -L ~/.claude/.claude.json && mv ~/.claude.json ~/.claude/.claude.json && ln -s .claude/.claude.json ~/.claude.json"
       undo — "test -L ~/.claude.json && test -f ~/.claude/.claude.json && ! test -L ~/.claude/.claude.json && rm ~/.claude.json && mv ~/.claude/.claude.json ~/.claude.json"
-      then relaunch; for a kept container whose link target moved or
-      vanished, "docker rm <name>" then relaunch; the checked commands
+      then relaunch, with no "docker rm" (every sandbox container is --rm, so a
+      relaunch makes a new one that checks the link again); the checked commands
       "claude-sandbox global-config migrate" and "... revert" come first and
       the guarded steps are the fallback (CS-GCFG-055)
     # Unguarded, the undo step deletes the only config when the operator has

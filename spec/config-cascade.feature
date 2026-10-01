@@ -500,5 +500,33 @@ Feature: Config cascade and env stacking (CS-CASC)
       fingerprint (which hashes the merged result) all use those bytes
     And a file rewritten after the read changes nothing in this launch
     And a file that cannot be read fails the launch naming it, as before
-    # The path-taking helpers (Load, TrackInHost*, KeySource) remain for callers
-    # outside the launch path (init), each a read followed by the snapshot form.
+    # The path-taking helpers (Load, TrackInHost*, KeySource) remain, each a
+    # read followed by the snapshot form; init uses one snapshot too
+    # (CS-INIT-033).
+
+  # ---- a FIFO never hangs a launch (CS-CASC-047) ----
+  # The project tree is mounted rw, so a session can mkfifo where a
+  # config.yaml belongs. os.ReadFile on a FIFO blocks in open(2) until a writer
+  # appears — the next launch hung forever. Every launch-path read of a
+  # session-writable launch-config file (each cascade config.yaml here, each
+  # env file in CS-LNCH-172, the child Dockerfile in CS-IMG-074) goes through
+  # ONE reader, cascade.ReadRegularFile: open O_NONBLOCK|O_NOCTTY, fstat the
+  # descriptor, read only a regular file. Symlinks are followed, as before.
+
+  Scenario: CS-CASC-047 A FIFO, device or socket at a config.yaml fails the launch at once, naming it
+    Given /ws/p/.claude-sandbox/config.yaml is a FIFO with no writer
+    When a launch starts
+    Then the read returns at once (never waits for a writer)
+    And the launch fails (exit 2) with an error naming the file and "not a
+      regular file", before the session decision, any image work or docker create
+    And the same holds for a character device or a socket (a socket fails
+      open(2) itself) at any level of the cascade
+    And a symlink to a regular file is read through, as before
+    # Why an error and not "absent", as for the Dockerfile precedent
+    # (CS-IMG-074): the cascade walk already found a non-directory at that
+    # path, and a config the launch cannot read is not "no config" — skipping
+    # it would silently drop upstream settings (host access, mounts). A
+    # directory there is not collected by the walk (unchanged), so it stays
+    # absent; a path that vanishes between the walk and the read fails as
+    # before. The path-taking helpers that skip unreadable files
+    # (TrackInHost*, KeySource) skip a FIFO too, without waiting.

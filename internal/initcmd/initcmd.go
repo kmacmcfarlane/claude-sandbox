@@ -65,8 +65,17 @@ func Run(project string, f Flags, d Deps) error {
 	if err != nil {
 		return err
 	}
-	upstreamVal, upstreamSet := cascade.TrackInHostExplicit(upstreamConfigs)
-	upstreamSrc := cascade.TrackInHostSource(upstreamConfigs)
+	// One snapshot of the upstream configs, read through the launch's reader
+	// (non-blocking, regular files only — CS-INIT-033): the explicit value,
+	// its source and the effective value below all come from these bytes.
+	// An upstream config that cannot be read fails init naming it, as it
+	// would fail the next launch (CS-CASC-047).
+	upstreamSnap, err := cascade.ReadConfigFiles(upstreamConfigs)
+	if err != nil {
+		return err
+	}
+	upstreamVal, upstreamSet := cascade.TrackInHostExplicitOf(upstreamSnap)
+	upstreamSrc := cascade.TrackInHostSourceOf(upstreamSnap)
 
 	// Resolve the local trackInHost decision: flag > prompt. When an ancestor
 	// defines it, the prompt shows the inherited value as the default and
@@ -179,11 +188,18 @@ func Run(project string, f Flags, d Deps) error {
 	if f.TrackInHost != nil {
 		effective = *f.TrackInHost
 	} else {
-		all, err := paths.CollectUp(project, paths.Config)
-		if err != nil {
-			return err
+		// The upstream snapshot plus the project's own config.yaml (which
+		// init may just have written), read once: the same set as
+		// CollectUp(project), without re-reading the upstream files.
+		snap := upstreamSnap
+		if fileExists(cfgPath) {
+			own, err := cascade.ReadConfigFiles([]string{cfgPath})
+			if err != nil {
+				return err
+			}
+			snap = append(append([]cascade.ConfigFile{}, upstreamSnap...), own...)
 		}
-		effective = cascade.TrackInHost(all)
+		effective = cascade.TrackInHostOf(snap)
 	}
 	// The trackInHost answer already chose the shape of the host .gitignore,
 	// so init writes the entries without a further prompt (CS-INIT-028):
@@ -252,7 +268,7 @@ func seedDockerfileExample(project, sb string, f Flags, d Deps) error {
 	var seed []byte
 	source := "rename to Dockerfile to activate"
 	if copyParent {
-		seed, err = os.ReadFile(parentDockerfile)
+		seed, err = cascade.ReadRegularFile(parentDockerfile)
 		if err != nil {
 			return err
 		}
@@ -296,7 +312,7 @@ var trackLineRe = regexp.MustCompile(`(?m)^[ \t]*#?[ \t]*trackInHost:.*$`)
 // replacing any existing commented or uncommented line, or appending when
 // absent (CS-INIT-012).
 func SetTrackInHost(cfgPath string, val bool) error {
-	raw, err := os.ReadFile(cfgPath)
+	raw, err := cascade.ReadRegularFile(cfgPath)
 	if err != nil {
 		return err
 	}
@@ -313,7 +329,7 @@ func SetTrackInHost(cfgPath string, val bool) error {
 // setTrackInHostHint rewrites the commented hint line so it reflects the
 // inherited effective value and its source (CS-INIT-016).
 func setTrackInHostHint(cfgPath string, val bool, source string) error {
-	raw, err := os.ReadFile(cfgPath)
+	raw, err := cascade.ReadRegularFile(cfgPath)
 	if err != nil {
 		return err
 	}

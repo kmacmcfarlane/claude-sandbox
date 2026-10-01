@@ -110,7 +110,7 @@ var _ = Describe("global config (CS-GCFG)", func() {
 	Describe("exit 78 (CS-GCFG-038..040)", func() {
 		expectMessage := func(w string, container string) {
 			Expect(w).To(ContainSubstring("The session exited with 78, likely the global-config link check"))
-			Expect(w).To(ContainSubstring("docker rm " + container))
+			Expect(w).NotTo(ContainSubstring("docker rm "+container), "every container is --rm")
 			Expect(strings.Count(w, "likely the global-config link check")).To(Equal(1))
 		}
 

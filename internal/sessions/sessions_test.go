@@ -279,7 +279,7 @@ var _ = Describe("reservations (CS-SESS-050..052)", func() {
 		Expect(sessions.Instances(got)).To(ConsistOf("otter", "heron"), "a reservation's noun is in use")
 		Expect(sessions.Classes(got)).To(ConsistOf("3", "9"), "a reservation's class is in use")
 		Expect(fake.CommandLines()[0]).To(ContainSubstring(
-			"docker ps -a --filter label=claude-sandbox.project --filter status=created --filter status=running --filter status=paused --filter status=exited --filter status=restarting --format "))
+			"docker ps -a --filter label=claude-sandbox.project --filter status=created --filter status=running --filter status=paused --filter status=exited --format "))
 		Expect(got[1].Reserved()).To(BeTrue())
 		Expect(got[1].CreatedAt.Equal(now.Add(-time.Second))).To(BeTrue())
 		Expect(got[0].Reserved()).To(BeFalse())
@@ -349,14 +349,6 @@ var _ = Describe("reservations (CS-SESS-050..052)", func() {
 		Expect(s.Reserved()).To(BeFalse())
 	})
 
-	It("CS-SESS-073: Down falls back on Status when State is absent, like Reserved", func() {
-		Expect(sessions.Session{Status: "Exited (0) 3 hours ago"}.Down()).To(BeTrue())
-		Expect(sessions.Session{Status: "Restarting (1) 5 seconds ago"}.Down()).To(BeTrue())
-		Expect(sessions.Session{Status: "Up 2 hours"}.Down()).To(BeFalse())
-		Expect(sessions.Session{Status: "Created"}.Down()).To(BeFalse())
-		Expect(sessions.Session{State: "running", Status: "Exited (0) 1s ago"}.Down()).To(BeFalse(), "State wins when present")
-	})
-
 	It("CS-SESS-051: reservations are never candidates, never listed, and never docker-top'd", func() {
 		fake.On("docker ps", stateRow("a", "/p", "otter", "", "running", stamp(time.Hour))+"\n"+
 			stateRow("b", "/p", "heron", "", sessions.StateCreated, stamp(time.Second))+"\n", nil)
@@ -375,7 +367,7 @@ var _ = Describe("reservations (CS-SESS-050..052)", func() {
 			{Name: "young", State: sessions.StateCreated, CreatedAt: now.Add(-59 * time.Second)},
 			{Name: "unknown-age", State: sessions.StateCreated},
 			{Name: "running-old", State: "running", CreatedAt: now.Add(-time.Hour)},
-			{Name: "kept-exited", State: sessions.StateExited, Keep: "unless-stopped", CreatedAt: now.Add(-2 * time.Hour)},
+			{Name: "exited-old", State: sessions.StateExited, CreatedAt: now.Add(-2 * time.Hour)},
 		}
 		stale := sessions.Stale(all, now, 60*time.Second)
 		Expect(stale).To(HaveLen(1))
@@ -477,76 +469,71 @@ var _ = Describe("the OOM marker (CS-SESS-061..063)", func() {
 	})
 })
 
-// keptRow is a docker ps line carrying every trailing field through the
-// claude-sandbox.keep label.
-func keptRow(name, project, instance, class, state, keep string) string {
+// fullRow is a docker ps line carrying the trailing fields through the empty
+// slot of the retired keep label.
+func fullRow(name, project, instance, class, state string) string {
 	status := map[string]string{
-		"running":    "Up 1 hour",
-		"paused":     "Up 1 hour (Paused)",
-		"created":    "Created",
-		"exited":     "Exited (0) 3 hours ago",
-		"restarting": "Restarting (1) 5 seconds ago",
+		"running": "Up 1 hour",
+		"paused":  "Up 1 hour (Paused)",
+		"created": "Created",
+		"exited":  "Exited (0) 3 hours ago",
 	}[state]
 	return strings.Join([]string{name, status, project, "claude", instance, "v1", "", "", "", class, "",
-		state, "", "", "", keep}, sep)
+		state, "", "", "", ""}, sep)
 }
 
-var _ = Describe("kept containers (CS-SESS-070..073)", func() {
+var _ = Describe("exited containers and container states (CS-SESS-070, 071, 074)", func() {
 	var fake *execx.Fake
 	BeforeEach(func() { fake = &execx.Fake{} })
 
-	It("CS-SESS-070: exited and restarting rows are listed only with the keep label", func() {
+	It("CS-SESS-070: an exited row is never listed, holds nothing, and reaches only DiscoverForLaunch", func() {
 		fake.On("docker ps", strings.Join([]string{
-			keptRow("k1", "/p", "otter", "1", sessions.StateExited, "unless-stopped"),
-			keptRow("k2", "/p", "heron", "2", sessions.StateRestarting, "unless-stopped"),
-			keptRow("rm", "/p", "wren", "3", sessions.StateExited, ""),
-			keptRow("rr", "/p", "lynx", "4", sessions.StateRestarting, ""),
-			keptRow("up", "/p", "finch", "5", "running", ""),
-			keptRow("upk", "/p", "moth", "6", "running", "unless-stopped"),
-			keptRow("res", "/p", "vole", "7", sessions.StateCreated, ""),
+			fullRow("x", "/p", "otter", "1", sessions.StateExited),
+			row("old", "Exited (0) 3 hours ago", "/p", "claude", "lark", "", "", "", ""),
+			fullRow("up", "/p", "finch", "5", "running"),
+			fullRow("res", "/p", "vole", "7", sessions.StateCreated),
 		}, "\n")+"\n", nil)
 		fake.On("docker top", "PID COMMAND\n1 claude\n", nil)
 
 		got, err := sessions.Discover(fake, "/p")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(fake.CommandLines()[0]).To(ContainSubstring(
-			"--filter status=created --filter status=running --filter status=paused --filter status=exited --filter status=restarting --format "))
-		Expect(sessions.Instances(got)).To(Equal([]string{"otter", "heron", "finch", "moth", "vole"}),
-			"an unlabelled exited or restarting row is a --rm container being removed")
-		Expect(got[0].State).To(Equal(sessions.StateExited))
-		Expect(got[0].Keep).To(Equal("unless-stopped"))
-		Expect(got[1].State).To(Equal(sessions.StateRestarting))
-		Expect(got[3].Keep).To(Equal("unless-stopped"), "a running kept container carries its policy")
-		Expect(got[2].Keep).To(BeEmpty())
-		Expect(got[0].Down()).To(BeTrue())
-		Expect(got[1].Down()).To(BeTrue())
-		Expect(got[2].Down()).To(BeFalse())
+			"--filter status=created --filter status=running --filter status=paused --filter status=exited --format "))
+		Expect(fake.CommandLines()[0]).NotTo(ContainSubstring("status=restarting"))
+		Expect(sessions.Instances(got)).To(Equal([]string{"finch", "vole"}),
+			"an exited row (State, or an older row's Status) is a --rm container being removed")
+		Expect(sessions.Classes(got)).To(Equal([]string{"5", "7"}))
+		for _, l := range fake.CommandLines() {
+			Expect(l).NotTo(HavePrefix("docker top x"))
+		}
+
+		found, removing, err := sessions.DiscoverForLaunch(fake)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(sessions.Instances(found)).To(Equal([]string{"finch", "vole"}))
+		Expect(sessions.Instances(removing)).To(Equal([]string{"otter", "lark"}))
 	})
 
-	It("CS-SESS-070, CS-SESS-006: a row without the trailing keep field still parses", func() {
+	It("CS-SESS-070, CS-SESS-006: a row without the trailing fields still parses", func() {
 		fake.On("docker ps", stateRow("a", "/p", "otter", "3", "running", "")+"\n", nil)
 		fake.On("docker top", "PID COMMAND\n1 claude\n", nil)
 		got, err := sessions.Discover(fake, "/p")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(got).To(HaveLen(1))
-		Expect(got[0].Keep).To(BeEmpty())
 	})
 
 	It("CS-SESS-071: docker top runs only for running and paused containers", func() {
 		legacy := row("old", "Up 2 hours", "/p", "claude", "lark", "", "", "", "")
 		fake.On("docker ps", strings.Join([]string{
-			keptRow("r", "/p", "otter", "", "running", ""),
-			keptRow("p", "/p", "heron", "", "paused", ""),
-			keptRow("c", "/p", "wren", "", sessions.StateCreated, ""),
-			keptRow("x", "/p", "lynx", "", sessions.StateExited, "unless-stopped"),
-			keptRow("s", "/p", "finch", "", sessions.StateRestarting, "unless-stopped"),
+			fullRow("r", "/p", "otter", "", "running"),
+			fullRow("p", "/p", "heron", "", "paused"),
+			fullRow("c", "/p", "wren", "", sessions.StateCreated),
 			legacy,
 		}, "\n")+"\n", nil)
 		fake.On("docker top", "PID COMMAND\n1 claude\n", nil)
 
 		got, err := sessions.Discover(fake, "/p")
 		Expect(err).NotTo(HaveOccurred())
-		Expect(got).To(HaveLen(6))
+		Expect(got).To(HaveLen(4))
 		var tops []string
 		for _, l := range fake.CommandLines() {
 			if strings.HasPrefix(l, "docker top ") {
@@ -558,45 +545,21 @@ var _ = Describe("kept containers (CS-SESS-070..073)", func() {
 		for _, s := range got {
 			counts[s.Name] = s.Count
 		}
-		Expect(counts).To(Equal(map[string]int{"r": 1, "p": 1, "c": 0, "x": 0, "s": 0, "old": 1}))
+		Expect(counts).To(Equal(map[string]int{"r": 1, "p": 1, "c": 0, "old": 1}))
 	})
 
-	It("CS-SESS-072: a stopped kept container holds its noun and pid class", func() {
-		fake.On("docker ps", keptRow("x", "/p", "otter", "5", sessions.StateExited, "unless-stopped")+"\n"+
-			keptRow("s", "/q", "heron", "6", sessions.StateRestarting, "unless-stopped")+"\n", nil)
-		got, err := sessions.DiscoverAllUncounted(fake)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(sessions.Instances(sessions.ForProject(got, "/p"))).To(Equal([]string{"otter"}))
-		Expect(sessions.Classes(got)).To(ConsistOf("5", "6"))
-		Expect(sessions.PickNoun(sessions.Instances(got), func(int) int { return 0 })).NotTo(Or(Equal("otter"), Equal("heron")))
-		Expect(sessions.PickClass(sessions.Classes(got), func(n int) int { return 5 })).NotTo(Or(Equal(5), Equal(6)))
-	})
-
-	It("CS-SESS-073: an exited or restarting kept container is never a candidate but is live", func() {
-		fake.On("docker ps", strings.Join([]string{
-			keptRow("x", "/p", "otter", "", sessions.StateExited, "unless-stopped"),
-			keptRow("s", "/p", "heron", "", sessions.StateRestarting, "unless-stopped"),
-			keptRow("k", "/p", "wren", "", "running", "unless-stopped"),
-		}, "\n")+"\n", nil)
-		fake.On("docker top", "PID COMMAND\n1 claude\n", nil)
-		got, err := sessions.Discover(fake, "/p")
-		Expect(err).NotTo(HaveOccurred())
-		Expect(sessions.Instances(sessions.Interactive(got))).To(Equal([]string{"wren"}),
-			"a running kept container is an ordinary candidate")
-		Expect(sessions.Instances(sessions.Live(got))).To(Equal([]string{"otter", "heron", "wren"}))
-	})
-
-	It("CS-SESS-074: state is always in the JSON, keep only when set", func() {
+	It("CS-SESS-074: state is always in the JSON, and no keep field", func() {
 		b, err := sessions.MarshalJSON([]sessions.Session{
-			{Name: "x", State: sessions.StateExited, Keep: "unless-stopped"},
+			{Name: "p", State: "paused"},
 			{Name: "r", State: "running"},
+			{Name: "o"},
 		})
 		Expect(err).NotTo(HaveOccurred())
 		out := string(b)
-		Expect(out).To(ContainSubstring(`"state": "exited"`))
-		Expect(out).To(ContainSubstring(`"keep": "unless-stopped"`))
+		Expect(out).To(ContainSubstring(`"state": "paused"`))
 		Expect(out).To(ContainSubstring(`"state": "running"`))
-		Expect(strings.Count(out, `"keep"`)).To(Equal(1))
+		Expect(out).To(ContainSubstring(`"state": ""`))
+		Expect(out).NotTo(ContainSubstring(`"keep"`))
 	})
 })
 

@@ -328,3 +328,19 @@ Feature: init subcommand (CS-INIT)
     # upstream refreshes. Re-running init is when an operator is looking, so
     # it names the file rather than staying silent about it. The launch-time
     # per-key override notice is a separate change.
+
+  # ---- one read of the upstream configs ----
+
+  Scenario: CS-INIT-033 init reads each upstream config.yaml once, without blocking
+    Given ancestor .claude-sandbox/config.yaml files above the project
+    When "claude-sandbox init" runs
+    Then each upstream file is read once (cascade.ReadConfigFiles) and the
+      inherited trackInHost value, its source and the effective layout value
+      all come from that snapshot (plus the project's own config.yaml, read
+      once after init seeds it)
+    And the reads go through the launch's reader (CS-CASC-047): a FIFO,
+      device or socket at an upstream config.yaml, at the project's own
+      config.yaml, or at the parent Dockerfile init copies, makes init fail
+      at once with an error naming the file, never a hang
+    And an upstream config that cannot be read fails init naming it, as it
+      would fail the next launch (it used to be skipped silently)
