@@ -192,7 +192,7 @@ heron     -         claude-sandbox-kmacmcfarlane-myproj-1de77a-heron  claude  ru
 
 Each session gets a short **instance noun** (`otter`, `heron`) so it can be named by hand. `SESSIONS` counts the claude processes inside a container, so joined sessions are visible too. A container another launch has reserved but not yet started (see [Launch reservation](#launch-reservation)) is not listed: there is nothing in it to attach to yet. A container started by `claude-sandbox headless` is listed with `headless` in the `MODE` column, but it is never offered to `--attach`, `--join` or the launch-time prompt, and on its own it never triggers that prompt: its stdio is an SDK client's JSON stream ([Headless mode](#headless-mode-paseo-and-other-sdk-clients)).
 
-`STATE` is docker's container state (`running`, `paused`, `exited`, `restarting`); `--json` carries it as `"state"`, plus `"keep"` for a kept container. An ordinary session's container is created `--rm`, so it disappears when it stops and is only ever listed while it runs. A **kept** container — one carrying the `claude-sandbox.keep` label, which records its restart policy — outlives its claude process, so it is also listed while `exited` or `restarting`, with `-` under `UP` and a count of 0 (no `docker top` runs for a container that is not running). It keeps its instance noun and pid class for as long as it exists, so no new launch is handed either, but it is not offered to `--attach`, `--join` or the launch-time prompt and never triggers that prompt on its own: nothing runs in it to attach to. An exited container without the label is never listed. A launcher binary older than this change does not see exited kept containers and can re-issue one's pid class; upgrade every launcher on the host.
+`STATE` is docker's container state (`running` or `paused`); `--json` carries it as `"state"`. Every session's container is created `--rm`, so it disappears when it stops and is only ever listed while it runs: an exited container (one docker is still removing) is never listed and holds no instance noun or pid class.
 
 A container in which the OOM killer has killed a process shows `(OOM)` after its `SESSIONS` count (and `"oomKilled": true` in `--json`), with a legend under the table. Docker sets that flag for a kill at the container's `memoryLimit` and for one by the host's OOM killer alike, so the legend names both (see [When the host runs out of memory](#when-the-host-runs-out-of-memory)). Docker keeps that flag for as long as the container runs, so it surfaces a kill nobody was attached to see: a detached primary, or a joined session. `--attach` and `--join` (and the `[a]`/`[j]` choices) print one note first, e.g. `Note: an earlier process in this container (session 'otter') was killed by the OOM killer (the container's memoryLimit or the host running out of memory); memoryLimit: 16g (from /ws/.claude-sandbox/config.yaml).` — the limit comes from the container's create-time labels, and reads `not recorded on this container` for one started by an older launcher. The note never prompts. The marker costs one batched `docker inspect` across the listed containers; if it fails, the listing is shown unmarked.
 
@@ -256,7 +256,7 @@ Error: conversation 0b5e9c3a-… is already open in 'otter' (claude-sandbox-…-
   (its `claude-sandbox.resume` label, below), a running or paused sandbox's own claude — or a
   join in it — has it open (its peer registry record), or a live `claude` on the host has it
   open (a record in `~/.claude/sessions` in the host's pid namespace whose process is still the
-  one that wrote it). An exited kept container holds nothing. A sandbox's record that names the
+  one that wrote it). A sandbox's record that names the
   conversation is confirmed first: one `docker top` of that container (bounded at 5 s), and the
   record is ruled out only when its processes can be seen and none has the record's start time
   (a nested launcher, which cannot see host pids, never rules one out) — so a join that
@@ -1842,7 +1842,7 @@ container carries a `claude-sandbox.shadowdir` label naming it, and every later 
 directories nothing uses any more. A directory is removed only when its name is exactly
 `claude-sandbox` followed by digits, it is a real directory (symlinks are never followed or
 removed) owned by you, it has not been modified for an hour, and no container on the host — in
-any state, including exited ones kept without `--rm` and containers from older launchers that
+any state, including exited ones and containers from older launchers that
 predate the label — names it in its label or mounts a file from it. The directory is made after
 the lock is taken, so a launch never sees another launch's directory before that launch has
 created its container; the hour covers launches that could not take the lock and older

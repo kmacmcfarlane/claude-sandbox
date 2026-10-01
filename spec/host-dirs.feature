@@ -192,15 +192,8 @@ Feature: Host directories — cache root, state root, owned directories (CS-DIR)
     # every later launch would then pin to it, splitting the fleet until a
     # reboot. No legacy directory, no legacy session to split from.
 
-  Scenario: CS-DIR-016 A launch marked kept ignores the pin
-    # Seam only: no launch is marked kept today (no --keep flag). A kept
-    # container survives reboots, so one created on the legacy root during the
-    # drain would pin it for its whole life (plan 01 § 3, OQ8).
-    Given the legacy root is pinned (CS-DIR-011)
-    And the launch is marked kept
-    Then it takes the new root anyway
-    And its banner adds that it cannot see the sessions still on the legacy
-      root until those end
+  # Number 016 is retired, not reused: it specified a seam for a launch
+  # marked kept, and kept containers (--keep) were dropped.
 
   Scenario: CS-DIR-017 A container on the legacy root reports no drift after the switch
     # attach/join rebuild the would-be plan to compare fingerprints

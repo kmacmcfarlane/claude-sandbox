@@ -137,13 +137,12 @@ func (c Check) Run() Verdict {
 }
 
 // state is a session's docker state, with an older row's derived from its
-// status text; "" for a container that holds nothing (exited, restarting).
+// status text. Discovery never lists an exited container (CS-SESS-070); any
+// state but created, running and paused holds nothing.
 func state(s sessions.Session) string {
 	switch {
 	case s.Reserved():
 		return sessions.StateCreated
-	case s.Down():
-		return ""
 	case s.State == "":
 		return "running"
 	}

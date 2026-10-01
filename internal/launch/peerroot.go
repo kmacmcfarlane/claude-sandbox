@@ -42,9 +42,6 @@ type PeerRootChoice struct {
 	// DiscoveryFailed: the listing failed, and Root was chosen from whether
 	// Legacy exists (CS-DIR-014/015).
 	DiscoveryFailed bool
-	// Keep: the launch is marked kept and took New despite the pin
-	// (CS-DIR-016). Nothing sets it yet: no launch is marked kept.
-	Keep bool
 }
 
 // OnLegacy reports whether the choice is the legacy root.
@@ -115,11 +112,10 @@ func pinsLegacyRoot(home string, sources []string, sameFile bool) bool {
 	return false
 }
 
-// ChoosePeerRoot picks the peers root for a launch (CS-DIR-010..016).
+// ChoosePeerRoot picks the peers root for a launch (CS-DIR-010..015).
 // mounts holds the bind sources of EVERY row the launch's discovery returned,
 // exited ones docker is still removing included; discoveryErr is that
-// discovery's error. keep marks a kept launch (CS-DIR-016; no caller sets it
-// yet). onHost enables the same-file fallback of the pin (CS-DIR-011); a
+// discovery's error. onHost enables the same-file fallback of the pin (CS-DIR-011); a
 // launcher inside a sandbox passes false.
 //
 // A failed discovery (CS-DIR-014/015): the NEW root when it is a real
@@ -128,7 +124,7 @@ func pinsLegacyRoot(home string, sources []string, sameFile bool) bool {
 // back to it and every later launch would pin to it; else the legacy root
 // when it is a real directory (fail closed before the switch: an empty list
 // would read as "nothing pins it"); else the new root.
-func ChoosePeerRoot(home string, mounts [][]string, discoveryErr error, keep, onHost bool) PeerRootChoice {
+func ChoosePeerRoot(home string, mounts [][]string, discoveryErr error, onHost bool) PeerRootChoice {
 	c := PeerRootChoice{Legacy: hostdirs.LegacyPeersRoot(home), New: hostdirs.PeersRoot(home)}
 	if discoveryErr != nil {
 		c.DiscoveryFailed = true
@@ -152,11 +148,7 @@ func ChoosePeerRoot(home string, mounts [][]string, discoveryErr error, keep, on
 	}
 	c.Root = c.New
 	if c.Pinned > 0 {
-		if keep {
-			c.Keep = true
-		} else {
-			c.Root = c.Legacy
-		}
+		c.Root = c.Legacy
 	}
 	return c
 }

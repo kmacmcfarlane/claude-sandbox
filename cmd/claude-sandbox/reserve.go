@@ -170,9 +170,9 @@ func reserveContainer(env *Env, in launch.Inputs, wt worktreeChoice, ralph bool,
 		}
 		in.Worktree = wt.nameFor(instance, ralph)
 		in.PIDClass = pidClassFrom(found)
-		// CS-DIR-010..016: the peers root, from the same discovery and under
+		// CS-DIR-010..015: the peers root, from the same discovery and under
 		// the same lock, so every launcher on the host agrees on it.
-		pr := peerRootFrom(env.Getenv, in.Home, found, removing, derr, false)
+		pr := peerRootFrom(env.Getenv, in.Home, found, removing, derr)
 		in.PeerRoot = &pr
 
 		if attempt > 1 {
@@ -248,15 +248,14 @@ func discoverForReservation(env *Env) (found, removing []sessions.Session, err e
 	return slices.DeleteFunc(found, func(s sessions.Session) bool { return removed[s.Name] }), removing, nil
 }
 
-// peerRootFrom chooses the shared peer registry's root (CS-DIR-010..016) from
-// the bind sources of every row discovery returned. keep marks a kept launch
-// (CS-DIR-016); no launch is marked kept yet.
-func peerRootFrom(getenv func(string) string, home string, found, removing []sessions.Session, derr error, keep bool) launch.PeerRootChoice {
+// peerRootFrom chooses the shared peer registry's root (CS-DIR-010..015) from
+// the bind sources of every row discovery returned.
+func peerRootFrom(getenv func(string) string, home string, found, removing []sessions.Session, derr error) launch.PeerRootChoice {
 	var mounts [][]string
 	for _, s := range append(slices.Clip(found), removing...) {
 		mounts = append(mounts, s.Mounts)
 	}
-	return launch.ChoosePeerRoot(home, mounts, derr, keep, !hostdirs.InSandbox(getenv))
+	return launch.ChoosePeerRoot(home, mounts, derr, !hostdirs.InSandbox(getenv))
 }
 
 // guardResume refuses a launch that would resume a conversation already open

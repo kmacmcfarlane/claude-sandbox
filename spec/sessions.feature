@@ -25,8 +25,7 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
     When sessions are discovered for a project directory
     Then one "docker ps -a" runs with --filter label=claude-sandbox.project=<dir>
       and --filter status=created --filter status=running --filter status=paused
-      --filter status=exited --filter status=restarting (see CS-SESS-050 and
-      CS-SESS-070)
+      --filter status=exited (see CS-SESS-050 and CS-SESS-070)
     And the container name, status, and each claude-sandbox.* label are read from
       the same --format output, with no per-container "docker inspect" (the
       "sessions" subcommand adds ONE batched inspect for the OOM marker,
@@ -108,15 +107,14 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
     When "claude-sandbox sessions --json" is run
     Then the output is a JSON array of session objects
     And each object carries "worktree" when the session has one
-    And each object carries "state", and "keep" when the container is kept
-      (CS-SESS-074)
+    And each object carries "state" (CS-SESS-074)
 
   Scenario: CS-SESS-013 "sessions" with nothing running exits zero
     Given no sandbox containers are listed for this project
     When "claude-sandbox sessions" is run
     Then it prints that there are no sandbox sessions and exits 0
-    # "sandbox sessions", not "running sandbox sessions": a kept container
-    # that has exited is listed too (CS-SESS-070).
+    # "sandbox sessions", not "running sandbox sessions": a paused container
+    # is listed too.
 
   # ---- launch-time discovery and the two-tier prompt ----
 
@@ -522,16 +520,14 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
     # "docker ps", which is exactly what let two launches pick the same noun.
     When sessions are discovered
     Then "docker ps -a --filter status=created --filter status=running
-      --filter status=paused --filter status=exited --filter status=restarting"
-      is used
+      --filter status=paused --filter status=exited" is used
     And both the noun picker and the pid-class allocation (DiscoverAll) see
       created containers as in use
     And paused containers are listed as before: plain "docker ps" always
       included them (their state is "paused", not "running"), so they stay
       attachable and their pid class stays taken
-    And exited and restarting containers are listed only when they carry the
-      claude-sandbox.keep label (CS-SESS-070); every other stopped container
-      is still not listed
+    And exited containers are never listed (CS-SESS-070); no other stopped
+      container is asked for
 
   Scenario: CS-SESS-051 Reserved containers are never session candidates
     Given a container in the "created" state for this project
@@ -697,73 +693,45 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
       for a container without an instance label, else by its container name,
       never ''
 
-  # ---- kept containers: exited and restarting ----
+  # ---- exited rows and container states ----
   #
-  # A kept container (created without --rm, with a restart policy and the
-  # claude-sandbox.keep label) outlives its claude process: it can sit
-  # "exited" after a docker stop, or "restarting" while dockerd brings it
-  # back. It can be started again with its noun, its pid class and its
-  # shadow mounts, so discovery must see it in those states too. A --rm
-  # container is only ever "exited" while docker removes it, which is why the
-  # label, not the state, decides.
+  # Every sandbox container is created --rm, so an "exited" one is a container
+  # docker is removing. Discovery asks for exited rows only because the peers
+  # drain needs their bind sources (CS-DIR-011). Numbers 072 and 073 are
+  # retired, not reused: they specified kept containers (created without --rm,
+  # labelled claude-sandbox.keep), which were dropped with --keep.
 
-  Scenario: CS-SESS-070 Discovery lists exited and restarting kept containers
-    Given a sandbox container of this project in the "exited" state carrying
-      the label claude-sandbox.keep=unless-stopped
-    And another in the "restarting" state carrying the same label
-    And a third in the "exited" state with no claude-sandbox.keep label
+  Scenario: CS-SESS-070 An exited container is never a session
+    Given a sandbox container of this project in the "exited" state
     When sessions are discovered
-    Then the one "docker ps -a" also passes --filter status=exited and
-      --filter status=restarting
-    And the claude-sandbox.keep label is read as an optional trailing field of
-      the same --format output (rows without it still parse, CS-SESS-006)
-    And the two kept containers are returned with their state and keep value
-    And the unlabelled exited container is not returned: an exited or
-      restarting row is kept only when its claude-sandbox.keep label is
-      non-empty, so a --rm container being removed never appears
-    And created, running and paused rows are returned whatever their label
+    Then the one "docker ps -a" passes --filter status=exited, and never
+      --filter status=restarting (a --rm container has no restart policy)
+    And the exited row is not returned: it is not listed by "sessions", holds
+      no noun or pid class, is never a tier-1, --attach, --join or completion
+      candidate, gets no "docker top", and alone never triggers the session
+      decision
+    And a row with no state whose status reads "Exited" is treated alike
+    And the launch's own discovery (DiscoverForLaunch) returns the exited rows
+      apart, for their bind sources only (the peers-root pin, CS-DIR-011)
 
   Scenario: CS-SESS-071 "docker top" runs only for running containers
-    Given discovered containers in the states running, paused, created,
-      exited and restarting
+    Given discovered containers in the states running, paused and created
     When sessions are counted
     Then "docker top" runs for the running and the paused one (docker counts a
       paused container as running, and "docker top" works on it)
-    And the created, exited and restarting ones count 0 with no "docker top"
-      (it fails on a container that is not running)
+    And the created one counts 0 with no "docker top" (it fails on a
+      container that is not running)
     And a row from an older format with no state is counted as before
 
-  Scenario: CS-SESS-072 A kept stopped container holds its noun and pid class
-    Given an exited kept container of this project with instance "otter" and
-      pid class 5
-    When a new container's instance noun and pid class are picked (the early
-      pick and the re-validation under the launch lock, CS-SESS-048/054)
-    Then "otter" is not picked and class 5 is not allocated
-    # It can be started again with both; re-issuing either would give two
-    # containers one name or one peer-registry record.
-
-  Scenario: CS-SESS-073 An exited or restarting kept container is never a session candidate
-    Given the only container of this project is an exited kept container
-    Then it is not offered by the tier-1 decision, --attach, --join or the
-      --attach=/--join= completion, and alone it never triggers the decision
-    And a launch with no other sessions proceeds as a clean launch (CS-SESS-014)
-    And "--attach" or "--join" naming it fails with exit 2, as for a
-      project with no session to attach to
-    And ralph's report of existing sessions (CS-SESS-034) leaves it out: it
-      lists what is running
-    # There is nothing to attach to or exec into until the container is
-    # started again; starting it on attach is a separate feature.
-
   Scenario: CS-SESS-074 "sessions" shows each container's state
-    Given a running container and an exited kept container of this project
+    Given a running container and a paused container of this project
     When "claude-sandbox sessions" is run
     Then both are listed, with a STATE column between MODE and UP holding
-      docker's state ("running", "paused", "exited", "restarting")
-    And the UP column shows "-" for a container that is not running or paused
+      docker's state ("running", "paused")
     And with no state reported (an older docker ps row) STATE shows "-"
     When "claude-sandbox sessions --json" is run
     Then each object carries "state" (docker's state, "" when not reported)
-    And "keep" with the claude-sandbox.keep label value when it is set
+      and no "keep" field
 
   @new
   Scenario: CS-SESS-075 A joined claude knows it is not the container's primary
@@ -818,7 +786,6 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
       and its pid % 256 equals the class: only CS-SESS-068 judges it
     And a record that names <id> counts only once its process is confirmed
       alive (CS-SESS-089)
-    And an exited kept container holds nothing: nothing runs in it
     And exit 4 is new: 0-3 keep their meaning (3 = a decision needs a terminal)
 
   @new
