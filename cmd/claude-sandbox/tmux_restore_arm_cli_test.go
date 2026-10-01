@@ -89,12 +89,15 @@ var _ = Describe("tmux restore --all: arming a save into existing panes (CS-TMUX
 			Expect(os.WriteFile(filepath.Join(proc, fmt.Sprint(pid), "stat"),
 				[]byte(fmt.Sprintf("%d (%s) S 1 %d %d 34816 %d 0\n", pid, cmd, pid, pid, pid)), 0o644)).To(Succeed())
 		}
+		var views []string
 		for w := 1; w <= 8; w++ {
 			if cmd, ok := cmds[w]; ok {
 				add(fmt.Sprintf("%%%d", w), "main", w, cmd, f.proj)
+				views = append(views, fmt.Sprintf("%%%d\t1\t0\t1", w))
 			}
 		}
 		add("%9", "ops", 1, "claude-sandbox", f.home)
+		f.fake.On("list-panes -a -F #{pane_id}\t#{pane_active}", strings.Join(views, "\n")+"\n", nil)
 		f.fake.On("tmux list-panes -a", strings.Join(lines, "\n")+"\n", nil)
 	}
 	linkLast := func(st string) {

@@ -1120,8 +1120,9 @@ Feature: tmux integration (CS-TMUX)
       and its mark (last); no answer exits 2; the header names the server (pid and socket), since
       outside tmux it is the default socket's
     And a pane listed under several sessions (grouped sessions, a linked window) is one pane: a
-      client looking at it through ANY of them counts, and the first row of the save that reaches its
-      pane id wins it — a later row reaching the same id is skipped as busy
+      client looking at it through ANY of them counts, and the first row of the save that ARMS its
+      pane id wins it — a later row reaching the same id is skipped as busy; a row skipped before
+      step 7 claims nothing
     And the save is chosen as CS-TMUX-049 says ("previous" against the listed server); a save without
       a record, or one that cannot be read, is one line and exit 0; a sparse save prints CS-TMUX-050's
       line first; its state file is read with CS-TMUX-046's checks for each pane's saved directory
@@ -1143,15 +1144,17 @@ Feature: tmux integration (CS-TMUX)
       controlling terminal = cannot tell), and its saved directory was compared (not empty, not a
       lossy one CS-TMUX-066 cannot compare); otherwise it is marked only, with the reason, "type
       claude-sandbox tmux restore in it" and how to --drop it
+    And "no client is looking at it" is read again after the mark, right before the keys, with one
+      bounded "tmux list-panes -a -F '#{pane_id}\t#{pane_active}\t#{window_active}\t#{session_attached}'"
+      over every line of that pane id (the listing is seconds old by then: the probes ran in between);
+      focused through any session, tmux not answering, or the pane no longer listed = marked only
     # The foreground check: tmux names #{pane_current_command} after the foreground group leader's
     # argv[0], so a running bash script, a program started from a bash wrapper (same group) and a
     # "su -" / "sudo -i" root shell all read as "bash"; only the pane's own process leading the group
     # is the pane's shell at its prompt.
     And the keys are one bounded "tmux send-keys -t <pane> C-e C-u 'claude-sandbox tmux restore
-      --resurrected' C-m": C-e and C-u as key names first clear what the line editor holds — an
-      emacs-mode readline line (C-y brings it back), an open reverse-i-search, a canonical-mode reader
-      (VKILL); in bash's vi command mode C-e switches to emacs mode first — then the literal text,
-      then Enter
+      --resurrected' C-m": C-e and C-u as key names first, to clear what the line editor holds, then
+      the literal text, then Enter
     And --resurrected is typed, never a plain restore, so an armed pane prints the sparse notice but
       never claims it (plan 12 § 1); it reads its own pending mark first, so no pin is consulted
     And every tmux call is bounded by CallTimeout (1 s) in its own process group; a failed call skips
@@ -1162,8 +1165,18 @@ Feature: tmux integration (CS-TMUX)
       (CS-TMUX-060)
     And a marked-only pane keeps its pending mark, which every save carries forward, until a restore
       in it decides it or "claude-sandbox tmux restore --drop" in it forgets it
-    # Residual: C-e C-u does not clear every editor — vi insert mode (C-u kills only back to the
-    # insertion point there), zsh vi insert mode, or a non-readline program that does not treat C-u
-    # as a line kill can still join the keys to what it holds; the foreground and command checks make
-    # that a shell at its prompt. The re-check narrows, and cannot close, the window between it and
-    # the send-keys; two concurrent --all runs rely on it alone.
+    # What C-e C-u does, per editor (the residual the operator judges):
+    # - bash, zsh and fish in their default (emacs) modes: C-e goes to the end of the line and C-u
+    #   kills it all; an open reverse-i-search is ended and its line killed. Cleared (bash: C-y
+    #   brings the line back).
+    # - bash in vi INSERT mode: C-e is inserted as a literal ^E, and C-u kills from the cursor back to
+    #   the start of the line — text after the cursor survives and joins the restore.
+    # - bash in vi COMMAND mode: C-e is emacs-editing-mode, so that shell is switched to emacs mode
+    #   for the rest of its life (a side effect on the operator's shell); C-u then kills the line.
+    # - zsh in vi insert mode: C-u is vi-kill-line, which kills only back to where insert mode began.
+    # - a shell function or script line waiting in the builtin "read" runs in the shell itself, so
+    #   the pane's process leads the group and it counts as idle: a canonical-mode read gets C-e as a
+    #   literal ^E, C-u (VKILL) kills its line, and the restore text plus Enter becomes its answer.
+    # - a non-readline program the foreground check let through (none known) may treat neither key.
+    # The re-check narrows, and cannot close, the window between it and the send-keys; two concurrent
+    # --all runs rely on it alone.

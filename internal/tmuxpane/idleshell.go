@@ -143,8 +143,10 @@ func readProcStat(path string) ([]byte, error) {
 // TypeKeys are the keys TypeRestore sends, in one send-keys: C-e then C-u
 // (key names) clear what the line editor holds — an emacs-mode readline line
 // (C-y brings it back), an open reverse-i-search, a canonical-mode reader
-// (VKILL); in bash's vi command mode C-e switches to emacs mode first — then
-// the restore as literal text, then Enter.
+// (VKILL); in bash's vi command mode C-e switches that shell to emacs mode
+// (for good) first — then the restore as literal text, then Enter. Not every
+// editor is cleared (bash and zsh vi insert mode, a builtin read): see
+// CS-TMUX-069's residual.
 func TypeKeys() []string { return []string{"C-e", "C-u", RetypeKeys, "C-m"} }
 
 // TypeRestore types the restore into pane id (one bounded send-keys);
@@ -152,4 +154,31 @@ func TypeKeys() []string { return []string{"C-e", "C-u", RetypeKeys, "C-m"} }
 func TypeRestore(r execx.Runner, timeout time.Duration, id string) bool {
 	_, ok := bounded(r, timeout, "tmux", append([]string{"send-keys", "-t", id}, TypeKeys()...)...)
 	return ok
+}
+
+// focusFormat is PaneFocused's list-panes: a pane id, then the view fields
+// that say whether a client looks at it through that line's session.
+const focusFormat = "#{pane_id}\t#{pane_active}\t#{window_active}\t#{session_attached}"
+
+// PaneFocused reads, with one bounded "tmux list-panes -a", whether a client
+// is looking at pane id now: the active pane of the active window of an
+// attached session, through ANY session the pane is listed under (grouped
+// sessions, linked windows). known is false when tmux did not answer or no
+// longer lists the pane.
+func PaneFocused(r execx.Runner, timeout time.Duration, id string) (focused, known bool) {
+	out, ok := bounded(r, timeout, "tmux", "list-panes", "-a", "-F", focusFormat)
+	if !ok {
+		return false, false
+	}
+	for _, line := range strings.Split(out, "\n") {
+		f := strings.Split(strings.TrimRight(line, "\r"), "\t")
+		if len(f) != 4 || f[0] != id {
+			continue
+		}
+		known = true
+		if f[1] == "1" && f[2] == "1" && f[3] != "" && f[3] != "0" {
+			focused = true
+		}
+	}
+	return focused, known
 }

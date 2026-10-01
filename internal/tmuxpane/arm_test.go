@@ -76,8 +76,9 @@ var _ = Describe("tmux restore --all: arming a save into existing panes (CS-TMUX
 	// list scripts the one list-panes, each pane's re-check (the same own
 	// fields and mark, so nothing changed since the list) and its /proc stat.
 	list := func(ps ...pn) []tmuxpane.ArmPane {
-		var lines []string
+		var lines, views []string
 		for _, x := range ps {
+			views = append(views, fmt.Sprintf("%%%d\t%s\t%s\t%s", x.w, def(x.active, "1"), def(x.wactive, "0"), def(x.att, "1")))
 			pid := 1000 + x.w
 			lines = append(lines, fmt.Sprintf("%%%d\t%s\t%d\t0\t4242\t1790000000\t/tmp/tmux-1000/default\t%s\t%s\t%s\t%s\t%s",
 				x.w, def(x.sess, "main"), x.w, own(x), def(x.active, "1"), def(x.wactive, "0"), def(x.att, "1"), x.mark))
@@ -91,6 +92,9 @@ var _ = Describe("tmux restore --all: arming a save into existing panes (CS-TMUX
 				Expect(os.WriteFile(filepath.Join(proc, fmt.Sprint(pid), "stat"), []byte(statLine(pid, tp)), 0o644)).To(Succeed())
 			}
 		}
+		// The focus re-read (registered first: the listing's stub would
+		// match it too); a test that moves focus registers its own before.
+		fake.On("list-panes -a -F #{pane_id}\t#{pane_active}", strings.Join(views, "\n")+"\n", nil)
 		fake.On("tmux list-panes -a", strings.Join(lines, "\n")+"\n", nil)
 		panes, srv, ok := tmuxpane.ListArmPanes(fake)
 		Expect(ok).To(BeTrue())
@@ -431,7 +435,43 @@ var _ = Describe("tmux restore --all: arming a save into existing panes (CS-TMUX
 		res := arm(panes, st, "zsh", row(1, mark(nil)), tmuxpane.Row{Session: "grp", Window: 1, Pane: 0, Mark: other})
 		Expect(res[0].Verdict).To(Equal(tmuxpane.ArmTyped), res[0].Why)
 		Expect(res[1].Verdict).To(Equal(tmuxpane.ArmBusy))
-		Expect(res[1].Why).To(Equal("pane %1 is also at main:1.0, which an earlier row of this save took"))
+		Expect(res[1].Why).To(Equal("pane %1 is also at main:1.0, which an earlier row of this save armed"))
 		Expect(writes()).To(HaveLen(2), "one set-option and one send-keys")
+	})
+
+	It("CS-TMUX-069: a first row skipped before arming claims nothing: a later row at the same pane is armed", func() {
+		panes := list(pn{w: 1, cmd: "zsh", path: proj}, pn{w: 1, cmd: "zsh", path: proj, sess: "grp"})
+		// main:1.0 has no state-file line (skipped as missing); grp:1.0 does.
+		st := []tmuxpane.StatePane{{Session: "grp", Window: 1, Pane: 0, Dir: proj, FullCommandSaved: true}}
+		other := mark(func(m *tmuxpane.Mark) { m.Conversation = "1b5e9c3a-1f2d-4e5f-8a9b-0c1d2e3f4a5b" })
+		res := arm(panes, st, "zsh", row(1, mark(nil)), tmuxpane.Row{Session: "grp", Window: 1, Pane: 0, Mark: other})
+		Expect(res[0].Verdict).To(Equal(tmuxpane.ArmMissing))
+		Expect(res[1].Verdict).To(Equal(tmuxpane.ArmTyped), res[1].Why)
+	})
+
+	It("CS-TMUX-069: focus is read again right before the keys: a pane selected after the listing is marked only", func() {
+		fake.On("list-panes -a -F #{pane_id}\t#{pane_active}", "%1\t1\t0\t1\n%1\t1\t1\t1\n", nil)
+		res := arm(list(pn{w: 1, cmd: "zsh", path: proj}), state(1), "zsh", row(1, mark(nil)))
+		Expect(res[0].Verdict).To(Equal(tmuxpane.ArmMarked))
+		Expect(res[0].Why).To(Equal("a client is looking at it"))
+		Expect(fake.CommandLines()).NotTo(ContainElement(HavePrefix("tmux send-keys")))
+		lines := fake.CommandLines()
+		Expect(lines[len(lines)-1]).To(HavePrefix("tmux list-panes -a -F #{pane_id}\t#{pane_active}"), "the last call, after the mark")
+
+		fake = &execx.Fake{}
+		fake.On("list-panes -a -F #{pane_id}\t#{pane_active}", "", execx.Fail(1))
+		res = arm(list(pn{w: 1, cmd: "zsh", path: proj}), state(1), "zsh", row(1, mark(nil)))
+		Expect(res[0].Verdict).To(Equal(tmuxpane.ArmMarked))
+		Expect(res[0].Why).To(ContainSubstring("cannot tell whether a client is looking at it"))
+
+		fake = &execx.Fake{}
+		fake.On("list-panes -a -F #{pane_id}\t#{pane_active}", "%2\t1\t1\t1\n", nil)
+		res = arm(list(pn{w: 1, cmd: "zsh", path: proj}), state(1), "zsh", row(1, mark(nil)))
+		Expect(res[0].Verdict).To(Equal(tmuxpane.ArmMarked), "a pane no longer listed: cannot tell")
+
+		fake = &execx.Fake{}
+		fake.On("list-panes -a -F #{pane_id}\t#{pane_active}", "%1\t1\t1\t0\n%1\t0\t1\t1\n", nil)
+		res = arm(list(pn{w: 1, cmd: "zsh", path: proj, wactive: "1"}), state(1), "zsh", row(1, mark(nil)))
+		Expect(res[0].Verdict).To(Equal(tmuxpane.ArmTyped), "focus that went away since the listing: typed")
 	})
 })

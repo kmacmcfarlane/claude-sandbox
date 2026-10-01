@@ -730,10 +730,16 @@ ralph run, a join, the conversation open elsewhere). An armed pane is typed into
 provably idle at its own shell's prompt — running tmux's `default-shell`, the pane's own shell
 leading its terminal's foreground process group (so a running script, a program started from a
 wrapper, or a `su -` root shell does not count), not in copy mode, not synchronized, not the pane
-a client is looking at through any session, and its saved directory compared. The keys are
-`C-e C-u` first, which clears a half-typed command line (`C-y` brings it back) or an open
-reverse search, then the restore and Enter; a vi-insert-mode line or a program that does not take
-`C-u` as a line kill can still get the text appended, which the shell checks make unlikely.
+a client is looking at through any session, and its saved directory compared. Whether a client is looking at
+it is read again right before the keys. The keys are `C-e C-u` first, then the restore and
+Enter. In bash, zsh and fish's default (emacs) editing that clears a half-typed line (bash: `C-y`
+brings it back) and ends an open reverse search. It does not in every case: in bash's vi insert
+mode `C-e` is inserted as a literal `^E` and `C-u` kills only back from the cursor, so text after
+the cursor joins the restore; in bash's vi command mode `C-e` switches that shell to emacs mode for
+the rest of its life; in zsh's vi insert mode `C-u` kills only back to where insert mode began; and
+a shell function waiting in the builtin `read` counts as idle, so the restore text becomes its
+answer. If you use vi editing or leave `read` prompts open, preview with `--dry-run --all` and
+type the restore yourself.
 Otherwise the pane is marked only and the line says why; type `claude-sandbox tmux restore` in it
 yourself — or, if you do not want it back, `claude-sandbox tmux restore --drop` in it, since a
 pending mark is carried from save to save until something decides it. The header names the tmux

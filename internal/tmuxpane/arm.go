@@ -233,9 +233,10 @@ func Arm(o ArmOptions) []ArmRow {
 		saved[sp.Key()] = sp
 	}
 	out := make([]ArmRow, 0, len(o.Rows))
-	// claimed holds the pane ids an earlier row of this run reached: one
+	// claimed holds the pane ids an earlier row of this run armed: one
 	// pane listed under two sessions (a linked window, grouped sessions)
-	// can sit at two rows' coordinates, and the first row wins.
+	// can sit at two rows' coordinates, and the first row ARMED wins; a row
+	// skipped earlier claims nothing.
 	claimed := map[string]string{}
 	for i := range o.Rows {
 		out = append(out, armRow(o, &o.Rows[i], byCoord, saved, claimed))
@@ -265,9 +266,8 @@ func armRow(o ArmOptions, row *Row, byCoord map[string]ArmPane, saved map[string
 		return skip(ArmMissing, "no pane at "+coords)
 	}
 	if first, dup := claimed[p.ID]; dup {
-		return skip(ArmBusy, "pane "+p.ID+" is also at "+first+", which an earlier row of this save took")
+		return skip(ArmBusy, "pane "+p.ID+" is also at "+first+", which an earlier row of this save armed")
 	}
-	claimed[p.ID] = coords
 	if o.StateErr != nil {
 		return skip(ArmMissing, "the save's state file cannot be read ("+o.StateErr.Error()+"), so the pane's place cannot be checked")
 	}
@@ -319,6 +319,15 @@ func armRow(o ArmOptions, row *Row, byCoord map[string]ArmPane, saved map[string
 	if _, ok := bounded(o.Runner, CallTimeout, "tmux", "set-option", "-p", "-t", p.ID, Option, pend.JSON()); !ok {
 		return skip(ArmFailed, "tmux set-option failed for "+p.ID)
 	}
+	claimed[p.ID] = coords
+	// Focus is per client and moves at any time: the listing is seconds old
+	// by now (the probes), so it is read again, across every session the
+	// pane is listed under, right before the keys.
+	focused, known := PaneFocused(o.Runner, CallTimeout, p.ID)
+	if !known {
+		return skip(ArmMarked, "cannot tell whether a client is looking at it (tmux list-panes did not answer)")
+	}
+	p.Focused = focused
 	if why := armNoType(o, p, compared); why != "" {
 		return skip(ArmMarked, why)
 	}
