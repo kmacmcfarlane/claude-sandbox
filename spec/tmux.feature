@@ -67,6 +67,10 @@ Feature: tmux integration (CS-TMUX)
     And build output still goes to stderr
     And the lock fd is closed before the exec, so it never reaches the launcher (nor the build commands)
     And the launcher it execs keeps the caller's stderr, and stdout carries nothing but the launcher's own
+    And every build, locked or not, writes a temporary file in bin/dist/ and renames it over
+      bin/dist/claude-sandbox, so that path is always a whole binary: a shim, a hook fast path or an
+      unlocked build never execs a file another build is still writing (ETXTBSY, or a half-written
+      binary that is already newer than the sources); a failed build removes its temporary file
     When a waiter has waited 600 s (CLAUDE_SANDBOX_BUILD_LOCK_WAIT, a whole number of seconds, overrides it)
     Then it prints one WARNING naming the lock file on stderr and builds without the lock
     When the holder's build fails
