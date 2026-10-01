@@ -167,13 +167,15 @@ type ConfigFile struct {
 	Content []byte
 }
 
-// ReadConfigFiles snapshots every path, in order, one read each. Any
-// unreadable file is an error naming it: a launch must never proceed past a
+// ReadConfigFiles snapshots every path, in order, one read each, through
+// ReadRegularFile (CS-CASC-047): a FIFO, device or socket planted at a
+// config.yaml fails at once instead of hanging the launch. Any unreadable or
+// non-regular file is an error naming it: a launch must never proceed past a
 // config file it could not read.
 func ReadConfigFiles(files []string) ([]ConfigFile, error) {
 	out := make([]ConfigFile, 0, len(files))
 	for _, f := range files {
-		raw, err := os.ReadFile(f)
+		raw, err := ReadRegularFile(f)
 		if err != nil {
 			return nil, fmt.Errorf("cascade: reading %s: %w", f, err)
 		}
@@ -296,11 +298,12 @@ func (c *Config) Validate(files []string) error {
 var trackRe = regexp.MustCompile(`(?m)^[ \t]*trackInHost:[ \t]*(true|false)([ \t].*)?$`)
 
 // readable reads the files that can be read, skipping the rest: the
-// path-taking helpers below have always ignored an unreadable file.
+// path-taking helpers below have always ignored an unreadable file. It reads
+// through ReadRegularFile, so a FIFO is skipped rather than waited on.
 func readable(files []string) []ConfigFile {
 	out := make([]ConfigFile, 0, len(files))
 	for _, f := range files {
-		if raw, err := os.ReadFile(f); err == nil {
+		if raw, err := ReadRegularFile(f); err == nil {
 			out = append(out, ConfigFile{Path: f, Content: raw})
 		}
 	}

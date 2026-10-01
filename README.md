@@ -869,7 +869,9 @@ Each `config.yaml` is read once per launch: the cascade report, the merge and ev
 that names a key's file (such as `memoryLimit`'s in the OOM report) use those bytes, so a
 file rewritten while the launch builds images changes nothing until the next launch. Env
 files are handled the same way (docker gets verbatim copies of the bytes the launcher
-checked).
+checked). Only regular files are read: a FIFO, device or socket at a `config.yaml` or `env`
+path fails the launch at once with an error naming it (exit 2), never a hang; `init` reads
+the same way.
 
 Merge rules:
 

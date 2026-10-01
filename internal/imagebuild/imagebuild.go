@@ -33,6 +33,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kmacmcfarlane/claude-sandbox/internal/cascade"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/paths"
 )
@@ -596,29 +597,19 @@ func used(dockerfile, context string, content []byte) ChildSpec {
 // the way): that level has no child. Every other failure is an error naming
 // the file — an unreadable Dockerfile is not "no Dockerfile". The open is
 // non-blocking so a FIFO planted at the path cannot hang the launch; only a
-// regular file is read. An empty file is returned as found, with no bytes.
+// regular file is read (cascade.ReadRegularFile, the reader the config and
+// env files share). An empty file is returned as found, with no bytes.
 func readChild(path string) (content []byte, found bool, err error) {
-	fh, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	raw, err := cascade.ReadRegularFile(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
 			return nil, false, nil
 		}
+		var pe *fs.PathError
+		if errors.Is(err, cascade.ErrNotRegular) && errors.As(err, &pe) {
+			err = pe.Err // "not a regular file (<type>)": the path is named below
+		}
 		return nil, false, fmt.Errorf("reading child Dockerfile %s: %w", path, err)
-	}
-	defer fh.Close()
-	fi, err := fh.Stat()
-	if err != nil {
-		return nil, false, fmt.Errorf("reading child Dockerfile %s: %w", path, err)
-	}
-	if !fi.Mode().IsRegular() {
-		return nil, false, fmt.Errorf("reading child Dockerfile %s: not a regular file (%s)", path, fi.Mode().Type())
-	}
-	raw, err := io.ReadAll(fh)
-	if err != nil {
-		return nil, false, fmt.Errorf("reading child Dockerfile %s: %w", path, err)
-	}
-	if raw == nil {
-		raw = []byte{}
 	}
 	return raw, true, nil
 }
@@ -813,26 +804,15 @@ func buildChild(o Options, spec ChildSpec, fp string) error {
 // treats it: the build then uses stdin and the context's own .dockerignore.
 // Only a regular file that cannot be read is an error.
 func readDockerignore(path string) (content []byte, found bool, err error) {
-	fh, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	raw, err := cascade.ReadRegularFile(path)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
+		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) || errors.Is(err, cascade.ErrNotRegular) {
 			return nil, false, nil
 		}
+		// A socket fails open(2) itself (ENXIO): still not a regular file.
 		if fi, serr := os.Stat(path); serr == nil && !fi.Mode().IsRegular() {
 			return nil, false, nil
 		}
-		return nil, false, fmt.Errorf("reading %s: %w", path, err)
-	}
-	defer fh.Close()
-	fi, err := fh.Stat()
-	if err != nil {
-		return nil, false, fmt.Errorf("reading %s: %w", path, err)
-	}
-	if !fi.Mode().IsRegular() {
-		return nil, false, nil
-	}
-	raw, err := io.ReadAll(fh)
-	if err != nil {
 		return nil, false, fmt.Errorf("reading %s: %w", path, err)
 	}
 	return raw, true, nil
