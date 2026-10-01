@@ -138,17 +138,22 @@ Feature: tmux integration (CS-TMUX)
       or the launch is headless (even with TMUX set), or it is a --detach launch
     Then the launcher runs no tmux command at all
 
-  Scenario: CS-TMUX-015 the mark is removed on every ordinary return path
+  Scenario: CS-TMUX-015 the mark is removed on a clean exit, a crash, an OOM kill or a detach
     Given a marked pane
-    When the session child exits normally, exits non-zero, is ended by a forwarded signal, or
-      a signal arrives during the die wait
+    When the session child ends with a die of its container (any exit code: /exit, Ctrl-D, a crash,
+      an OOM kill) and no evidence of a stop from outside (CS-TMUX-071), or the client detached
+      (CS-TMUX-071's positive evidence), or the launcher's own signal ended it (forwarded, or during
+      the die wait) with no such evidence
     Then "tmux set-option -p -u -t <pane> @claude-sandbox" runs once, after the child returned
     And a join or an attach unmarks the same way
-    # Removal covers these ordinary return paths only. A launcher killed outright (SIGKILL, a
-    # crash) or interrupted between setting the mark and the session child's signal handlers
-    # (a Ctrl-C in that instant) leaves a stale "active" mark behind; the save hook (F3) must
-    # therefore check liveness (the pane runs claude-sandbox, the container exists) rather than
-    # trust an active mark.
+    And a session stopped from outside (a kill or stop event before the die, the host shutting down)
+      or one whose end is inconclusive leaves the pane PENDING instead (CS-TMUX-071)
+    # The narrow default (plan 12 § 3.1, open question 1): a crash or an OOM kill unsets, as before
+    # F1b; only outside-stop evidence keeps the row. Removal covers these ordinary return paths only.
+    # A launcher killed outright (SIGKILL, a crash) or interrupted between setting the mark and the
+    # session child's signal handlers (a Ctrl-C in that instant) leaves a stale "active" mark behind;
+    # the save hook (F3) therefore checks liveness (the pane runs claude-sandbox, the container
+    # exists) rather than trust an active mark.
 
   Scenario: CS-TMUX-016 tmux failures never change the launch
     Given every tmux command fails
@@ -230,19 +235,21 @@ Feature: tmux integration (CS-TMUX)
     And when list-panes fails or times out, the hook logs, writes no sidecar and leaves the previous
       one alone
 
-  Scenario: CS-TMUX-032 liveness: a stale active mark is dropped, a pending mark is carried verbatim
+  Scenario: CS-TMUX-032 liveness: a stale active mark is dropped, a stopped one is pending, a pending mark is carried verbatim
     Given a kept pane with an "active" mark
     Then it is recorded only while its pane_current_command is "claude-sandbox": a mark left behind by
       a launcher killed outright (CS-TMUX-015) sits under a shell prompt and is dropped
-    And only while its container is live: one "docker ps -a --no-trunc --filter
+    And its container is checked with one "docker ps -a --no-trunc --filter
       label=claude-sandbox.project --format {{.ID}}<TAB>{{.Names}}<TAB>{{.State}}", run only when an
       active mark remains, bounded at 1 s; a container found by containerId (else by name) in state
-      created, running, paused or restarting is live, one absent from a successful listing (or
-      exited, dead, removing) is not
+      created, running, paused or restarting is live and the mark is resolved as usual
+    And a container absent from a successful listing (or exited, dead, removing) while the launcher
+      still runs in the pane is recorded PENDING in the sidecar row, never dropped (CS-TMUX-072)
     And when docker fails or times out, the active marks are kept as they are: docker trouble never
       drops a row and never holds the save beyond the bound
-    And a "pending" mark (a restore waiting to act, F4) is recorded verbatim whatever the pane runs,
-      never re-resolved against the registry and never checked with docker
+    And a "pending" mark (a restore waiting to act, F4, or a session stopped from outside, F1b) is
+      recorded verbatim whatever the pane runs, never re-resolved against the registry and never
+      checked with docker
 
   Scenario: CS-TMUX-033 which registry record holds the pane's conversation
     Given a kept active mark of mode "claude" or "join"
@@ -337,3 +344,74 @@ Feature: tmux integration (CS-TMUX)
     # The re-read narrows the race to the moment between two tmux calls. A tmux-side compare-and-set
     # (if-shell -F) was not used: the mark is JSON, which tmux's format and command quoting would
     # have to carry verbatim.
+
+  # ---- F1b: marks survive a stop from outside ----
+  #
+  # tmux-continuum's unit saves once more at shutdown (ExecStop), and docker may
+  # stop the containers before that save runs. Before F1b the launcher unset its
+  # pane's mark on every end and the save hook dropped an active mark whose
+  # container had stopped, so that final save lost every sandbox row and a clean
+  # reboot restored only shells. F1b keeps such a pane PENDING, with the last
+  # conversation the save hook recorded. Plan 11 § 1, 12 § 3/5/6, 13 § 1/2/5.
+
+  Scenario: CS-TMUX-071 how a marked session's end decides its mark
+    Given a marked pane (TMUX and TMUX_PANE on the host, not headless) whose session child returned
+    When the launch never really started (CS-TMUX-018) or a restore attach found its container gone
+      (CS-TMUX-019)
+    Then the prior mark goes back, before any rule below
+    And otherwise the first matching row decides:
+      | # | evidence                                                                          | mark    |
+      | 1 | a kill or stop event for the container arrived before its die                     | pending |
+      | 2 | "systemctl is-system-running" prints "stopping" (the host is shutting down)        | pending |
+      | 3 | the launcher's own signal ended the session (forwarded, CS-LNCH-091, or during the die wait, CS-LNCH-097) | unset |
+      | 4 | the container's die arrived (any exit code: a clean exit, a crash, an OOM kill)    | unset   |
+      | 5 | a join whose docker exec exited 0 (the joined claude ended on its own)            | unset   |
+      | 6 | no die, and the event stream ended, or the inspect failed, timed out or found the container neither running nor paused | pending |
+      | 7 | a primary session: no die while the stream stayed open, the child exited 0 and the container is running or paused (a detach) | unset |
+      | 8 | a join: no die while the stream stayed open and the container is running or paused (it runs on) | unset |
+      | 9 | a primary session whose child exited non-zero while its container runs on          | pending |
+    And "pending" re-reads the pane's current mark with one bounded "tmux show-options -p -q -v -t
+      <pane> @claude-sandbox" and, only when it is still this session's own (the same containerId, else
+      the same container), sets it back with "state": "pending" and nothing else changed — so it keeps
+      the conversation id the save hook wrote into it; any other mark, none, or a failed read unsets
+    And the docker events subscription of CS-LNCH-087 also carries "--filter event=kill --filter
+      event=stop", and only events whose name is exactly the container's count (CS-LNCH-095)
+    And the probe of row 2 is one "systemctl is-system-running" through Runner.Start in its own process
+      group (DieWithParent), killed after 1 s; its stdout is read WHATEVER its exit status ("stopping"
+      and "degraded" exit non-zero): only a trimmed stdout of exactly "stopping" counts, and an exec
+      error (no systemd), a timeout or any other output is "not stopping"
+    And the inspect of rows 6..9 is one bounded "docker inspect --type container -f {{.State.Status}}
+      <containerId or name>", killed after 1 s
+    And a marked join whose docker exec ended non-zero waits up to 2 s (DieWait) for its container's
+      die, ending at once when it arrives, so rows 4 and 6 judge the container, not the exec's status
+      (an exec ends non-zero whenever its container goes, a clean primary exit included)
+    And none of this runs for an unmarked session: outside tmux, in a sandbox, headless (the Paseo
+      SIGTERM contract, CS-LNCH-091) and --detach make no probe, no inspect and no extra tmux call
+    And the rows are checked so that a pending verdict from rows 6 and 9 needs no probe: the probe runs
+      only when the end would otherwise unset
+    # Rows 6 and 9 are the "inconclusive" ends: a docker daemon going away drops the client's
+    # connection and ends the event stream, so a missing die is never read as a detach without a live
+    # stream and a running container. Row 8 settles the plan review's low on joins: a Ctrl-C in a
+    # joined claude ends the exec non-zero while its container runs on, and that join unsets (plan
+    # 12 § 6, third bullet) rather than going pending. A pending row is visible: the next hand launch
+    # in the pane prints CS-TMUX-017's note with the exact resume command.
+    # Host checks still owed (plan 11 § 1.4, 12 § 3.4; not verified, not run in CI): the docker events
+    # for "docker stop", "docker kill" and "systemctl stop docker" with a throwaway sandbox running —
+    # in particular whether a daemon shutdown emits kill for the containers it stops; what
+    # "systemctl is-system-running" prints during a real shutdown (a logging user unit across a
+    # reboot); the docker client's exit status on a detach for "start -ai" and "attach"; and claude's
+    # exit codes for /exit, Ctrl-D, a double Ctrl-C and SIGTERM (under this narrow default none of
+    # them changes a decision: any die without outside evidence unsets).
+
+  Scenario: CS-TMUX-072 the save hook records a just-stopped container's mark as pending
+    Given a kept pane with an "active" mark whose pane_current_command is still "claude-sandbox" (its
+      launcher is in its die wait, up to about 2 s, CS-LNCH-088)
+    When the successful docker listing of CS-TMUX-032 shows its container exited, dead, removing or gone
+    Then the sidecar row records the mark with "state": "pending", its conversation as last recorded
+    And the mark is not resolved against the registry and not written back to the pane: the launcher
+      settles it moments later (CS-TMUX-071)
+    And one line is logged
+    # Every shutdown order keeps the row (plan 11 § 1.3): a save before docker stops the containers
+    # records them active and live; one after the launchers classified records their pending marks
+    # verbatim; one inside a launcher's die wait records pending here; and one with docker already down
+    # keeps the active marks unchecked (CS-TMUX-032).

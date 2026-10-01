@@ -178,19 +178,30 @@ func (p Pane) run(args ...string) (string, bool) {
 // returns stdout and whether the command finished successfully. The save
 // hook's docker call shares it (CS-TMUX-032/040).
 func bounded(r execx.Runner, timeout time.Duration, name string, args ...string) (string, bool) {
-	if timeout <= 0 {
+	out, ran, werr := boundedRun(r, timeout, name, args...)
+	if !ran || werr != nil {
 		return "", false
 	}
-	var out syncBuffer
-	proc, err := r.Start(execx.Cmd{Name: name, Args: args, Stdout: &out, Stderr: io.Discard, DieWithParent: true})
+	return out, true
+}
+
+// boundedRun is bounded's core. ran is false when the command could not be
+// started or timed out (its output is then ""); otherwise out is its stdout
+// WHATEVER its exit status, and werr that status.
+func boundedRun(r execx.Runner, timeout time.Duration, name string, args ...string) (out string, ran bool, werr error) {
+	if timeout <= 0 {
+		return "", false, nil
+	}
+	var buf syncBuffer
+	proc, err := r.Start(execx.Cmd{Name: name, Args: args, Stdout: &buf, Stderr: io.Discard, DieWithParent: true})
 	if err != nil {
-		return "", false
+		return "", false, nil
 	}
 	done := make(chan error, 1)
 	go func() { done <- proc.Wait() }()
 	select {
 	case werr := <-done:
-		return out.String(), werr == nil
+		return buf.String(), true, werr
 	case <-time.After(timeout):
 		// The whole group: a grandchild holding the stdout pipe would
 		// otherwise keep Wait (and so this call) waiting (CS-TMUX-040).
@@ -203,8 +214,27 @@ func bounded(r execx.Runner, timeout time.Duration, name string, args ...string)
 		case <-done:
 		case <-time.After(timeout):
 		}
-		return "", false
+		return "", false, nil
 	}
+}
+
+// SystemStopping reports whether the host is shutting down (CS-TMUX-071 row
+// 2): one "systemctl is-system-running", bounded like a tmux call. Its stdout
+// is read whatever its exit status — "stopping" and "degraded" exit non-zero
+// — and only exactly "stopping" counts; an exec error (no systemd), a timeout
+// or any other output is "not stopping".
+func SystemStopping(r execx.Runner) bool {
+	out, ran, _ := boundedRun(r, CallTimeout, "systemctl", "is-system-running")
+	return ran && strings.TrimSpace(out) == "stopping"
+}
+
+// ContainerState is a container's docker state ("running", "exited", ...)
+// from one bounded "docker inspect" (CS-TMUX-071); ok is false when the
+// inspect failed, timed out or printed nothing.
+func ContainerState(r execx.Runner, container string) (state string, ok bool) {
+	out, ok := bounded(r, CallTimeout, "docker", "inspect", "--type", "container", "-f", "{{.State.Status}}", container)
+	state = strings.TrimSpace(out)
+	return state, ok && state != ""
 }
 
 // Read returns the pane's current mark, raw; "" when there is none or tmux

@@ -45,11 +45,58 @@ func watch(stream string) (*oomreport.Watch, *execx.Fake) {
 }
 
 var _ = Describe("oomreport", func() {
-	It("CS-LNCH-087: subscribes to the container's oom and die events from a given moment", func() {
+	It("CS-LNCH-087: subscribes to the container's oom, die, kill and stop events from a given moment", func() {
 		w, fake := watch("")
 		defer w.Stop()
 		Expect(fake.CommandLines()).To(ConsistOf(
-			"docker events --since 1700000000.000000005 --filter container=cs-x --filter event=oom --filter event=die --format {{json .}}"))
+			"docker events --since 1700000000.000000005 --filter container=cs-x --filter event=oom --filter event=die" +
+				" --filter event=kill --filter event=stop --format {{json .}}"))
+	})
+
+	It("CS-LNCH-087, CS-TMUX-071: a kill or stop before the die is a stop from outside; after it, nothing", func() {
+		for _, c := range []struct {
+			stream string
+			want   bool
+		}{
+			{ev("kill", "") + ev("die", "143") + ev("stop", ""), true}, // docker stop
+			{ev("kill", "") + ev("die", "137"), true},                  // docker kill
+			{ev("stop", "") + ev("die", "0"), true},
+			{ev("die", "0") + ev("stop", "") + ev("kill", ""), false},
+			{ev("die", "1"), false},
+		} {
+			w, _ := watch(c.stream)
+			o, _ := w.Await(time.Second, oomreport.Never, nil)
+			Expect(o.OutsideStop).To(Equal(c.want), c.stream)
+			Expect(o.Died).To(BeTrue())
+		}
+		other := strings.ReplaceAll(ev("kill", ""), `"name":"cs-x"`, `"name":"cs-x0"`)
+		w, _ := watch(other + ev("die", "0"))
+		o, _ := w.Await(time.Second, oomreport.Died, nil)
+		Expect(o.OutsideStop).To(BeFalse(), "CS-LNCH-095: another container's kill")
+	})
+
+	It("CS-LNCH-089, CS-LNCH-090: kill and stop events change no verdict", func() {
+		w, _ := watch(ev("kill", "") + ev("die", "137"))
+		o, _ := w.Await(time.Second, oomreport.Never, nil)
+		Expect(oomreport.Primary(o)).To(Equal(oomreport.Quiet))
+		w, _ = watch(ev("oom", "") + ev("kill", "") + ev("die", "137"))
+		o, _ = w.Await(time.Second, oomreport.Never, nil)
+		Expect(oomreport.Primary(o)).To(Equal(oomreport.Killed))
+		w, _ = watch(ev("oom", "") + ev("stop", "") + ev("die", "143"))
+		o, _ = w.Await(time.Second, oomreport.Never, nil)
+		Expect(oomreport.Primary(o)).To(Equal(oomreport.Survived))
+	})
+
+	It("CS-TMUX-071: the stream is open until the subscription ends", func() {
+		w, _ := watch(ev("die", "0"))
+		w.Await(time.Second, oomreport.Never, nil)
+		Expect(w.StreamOpen()).To(BeFalse(), "the stub's output ended")
+		w = oomreport.Start(openStream{&execx.Fake{}}, "cs-x", time.Now())
+		defer w.Stop()
+		Expect(w.StreamOpen()).To(BeTrue())
+		w2 := oomreport.Start(failStart{&execx.Fake{}}, "cs-x", time.Now())
+		w2.Await(time.Second, oomreport.Never, nil)
+		Expect(w2.StreamOpen()).To(BeFalse(), "a subscription that never started")
 	})
 
 	It("CS-LNCH-087: a subscription that cannot start has seen nothing and never blocks", func() {
@@ -163,15 +210,55 @@ var _ = Describe("oomreport", func() {
 		w := oomreport.Start(&scripted{lines: []string{ev("die", "137")}}, "cs-x", time.Now())
 		defer w.Stop()
 		start := time.Now()
-		o, _ := w.AwaitJoined(137, nil)
+		o, _ := w.AwaitJoined(137, false, nil)
 		Expect(time.Since(start)).To(BeNumerically("<", oomreport.DieWait))
 		Expect(oomreport.Joined(137, o)).To(Equal(oomreport.Quiet))
+	})
+
+	It("CS-LNCH-088, CS-TMUX-071: a marked join that ended non-zero waits for the container's die, whatever the code", func() {
+		saved := oomreport.DieWait
+		DeferCleanup(func() { oomreport.DieWait = saved })
+		oomreport.DieWait = 400 * time.Millisecond
+		w := oomreport.Start(&scripted{later: []string{ev("die", "0")}, delay: 100 * time.Millisecond}, "cs-x", time.Now())
+		defer w.Stop()
+		start := time.Now()
+		o, stopped := w.AwaitJoined(130, true, nil)
+		Expect(stopped).To(BeFalse())
+		Expect(o.Died).To(BeTrue(), "the die 100 ms later is seen")
+		Expect(time.Since(start)).To(BeNumerically("<", oomreport.DieWait), "it ends when the die arrives")
+
+		w = oomreport.Start(&scripted{later: []string{ev("kill", ""), ev("die", "137")}, delay: 100 * time.Millisecond}, "cs-x", time.Now())
+		defer w.Stop()
+		o, _ = w.AwaitJoined(137, true, nil)
+		Expect(o.Died).To(BeTrue())
+		Expect(o.OutsideStop).To(BeTrue())
+
+		w = oomreport.Start(openStream{&execx.Fake{}}, "cs-x", time.Now())
+		defer w.Stop()
+		start = time.Now()
+		o, _ = w.AwaitJoined(1, true, nil)
+		Expect(o.Died).To(BeFalse())
+		Expect(time.Since(start)).To(BeNumerically(">=", oomreport.DieWait), "no die: the whole die wait")
+	})
+
+	It("CS-LNCH-088: an unmarked join, or a marked one that exited 0, keeps the grace-only wait", func() {
+		for _, c := range []struct {
+			code   int
+			forDie bool
+		}{{130, false}, {0, true}, {0, false}} {
+			w := oomreport.Start(&scripted{later: []string{ev("die", "0")}, delay: 400 * time.Millisecond}, "cs-x", time.Now())
+			start := time.Now()
+			o, _ := w.AwaitJoined(c.code, c.forDie, nil)
+			Expect(time.Since(start)).To(BeNumerically("<", 350*time.Millisecond), "%+v", c)
+			Expect(o.Died).To(BeFalse(), "%+v", c)
+			w.Stop()
+		}
 	})
 
 	It("CS-SESS-060: a joined exit other than 137 waits the grace for ooms in flight", func() {
 		w := oomreport.Start(&scripted{later: []string{ev("oom", "")}, delay: 30 * time.Millisecond}, "cs-x", time.Now())
 		defer w.Stop()
-		o, _ := w.AwaitJoined(0, nil)
+		o, _ := w.AwaitJoined(0, false, nil)
 		Expect(oomreport.Joined(0, o)).To(Equal(oomreport.Survived))
 	})
 

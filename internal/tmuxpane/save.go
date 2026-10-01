@@ -152,7 +152,7 @@ func Save(stateFile string, o SaveOptions) (SaveResult, error) {
 			row: Row{Session: f[0], Window: w, Pane: p}})
 	}
 
-	kept = dropDeadContainers(kept, o, left)
+	pendStoppedContainers(kept, o, left)
 
 	// CS-TMUX-033..036: resolve each active mark against the registry.
 	regs := registryCache{}
@@ -223,10 +223,15 @@ var liveStates = map[string]bool{
 	sessions.StateCreated: true, "running": true, "paused": true, sessions.StateRestarting: true,
 }
 
-// dropDeadContainers removes active marks whose container a successful
-// docker listing does not show live (CS-TMUX-032). Any docker trouble keeps
-// every mark.
-func dropDeadContainers(kept []*livePane, o SaveOptions, left func() time.Duration) []*livePane {
+// pendStoppedContainers records as pending the active marks whose container a
+// successful docker listing does not show live (CS-TMUX-032/072). Every kept
+// active mark's pane still runs the launcher (a mark left by a launcher killed
+// outright was dropped by the pane_current_command filter), so a stopped
+// container here is one its launcher is still classifying — in its die wait at
+// a shutdown, say — and the row is kept with the last good conversation. The
+// pane's own mark is not written back: the launcher settles it moments later
+// (CS-TMUX-071). Any docker trouble keeps every mark active.
+func pendStoppedContainers(kept []*livePane, o SaveOptions, left func() time.Duration) {
 	need := false
 	for _, lp := range kept {
 		if lp.mark.State == StateActive && (lp.mark.ContainerID != "" || lp.mark.Container != "") {
@@ -234,13 +239,13 @@ func dropDeadContainers(kept []*livePane, o SaveOptions, left func() time.Durati
 		}
 	}
 	if !need {
-		return kept
+		return
 	}
 	out, ok := bounded(o.Runner, left(), "docker", "ps", "-a", "--no-trunc",
 		"--filter", "label="+sessions.LabelProject, "--format", dockerPSFormat)
 	if !ok {
 		o.logf("docker ps failed or timed out; active marks kept unchecked")
-		return kept
+		return
 	}
 	byID, byName := map[string]string{}, map[string]string{}
 	for _, line := range strings.Split(out, "\n") {
@@ -250,7 +255,6 @@ func dropDeadContainers(kept []*livePane, o SaveOptions, left func() time.Durati
 		}
 		byID[f[0]], byName[strings.TrimPrefix(f[1], "/")] = f[2], f[2]
 	}
-	var live []*livePane
 	for _, lp := range kept {
 		if lp.mark.State == StateActive {
 			var state string
@@ -264,13 +268,11 @@ func dropDeadContainers(kept []*livePane, o SaveOptions, left func() time.Durati
 				found, state = true, "running"
 			}
 			if !found || !liveStates[state] {
-				o.logf("dropped a stale mark in %s (container %s: %s)", lp.id, lp.mark.Container, orGone(state, found))
-				continue
+				o.logf("recorded the mark in %s as pending (container %s: %s; its launcher still runs)", lp.id, lp.mark.Container, orGone(state, found))
+				lp.mark.State = StatePending
 			}
 		}
-		live = append(live, lp)
 	}
-	return live
 }
 
 func orGone(state string, found bool) string {

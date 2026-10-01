@@ -79,29 +79,45 @@ func runSession(env *Env, c execx.Cmd, container string, o sessionOpts) (end ses
 	w := oomreport.Start(env.Runner, container, env.now())
 	defer w.Stop()
 
-	// CS-TMUX-010: the pane mark is set before the child starts and removed
-	// once it returned — on every path (CS-TMUX-015), unless the session
-	// never really started, when the prior mark goes back (CS-TMUX-018/019).
+	// CS-TMUX-010: the pane mark is set before the child starts and settled
+	// once it returned: unset on a clean exit, a crash or a detach
+	// (CS-TMUX-015), pending after a stop from outside (CS-TMUX-071), and the
+	// prior mark back when the session never really started (CS-TMUX-018/019).
 	pane := beginMark(env, o)
 	putBack := false
+	pending := false
 
 	started := env.now()
 	res, err := env.Runner.RunSession(c)
 	defer res.Done()
 	// Deferred after res.Done, so it runs first: while the session's signal
 	// handlers are still installed, and a signal cannot cut it short.
-	defer func() { pane.end(putBack || err != nil || end.neverStarted) }()
+	defer func() {
+		switch {
+		case putBack || err != nil || end.neverStarted:
+			pane.end(markPutBack)
+		case pending:
+			pane.end(markPending)
+		default:
+			pane.end(markUnset)
+		}
+	}()
 	if err != nil {
 		return sessionEnd{code: res.Code}, err
 	}
 	end = sessionEnd{code: res.Code}
 	if pane != nil && vanished(env, o, res.Code, started) {
+		// The prior mark goes back before any CS-TMUX-071 row: no probe.
 		putBack = true
+		pane.decided = true
 	}
 	if res.Forwarded != nil {
 		// CS-LNCH-091: whoever sent the signal ended the session on
 		// purpose, and an SDK client expects a prompt exit: no die wait, no
 		// report. The shadow directory is left to a later launch's sweep.
+		// A marked pane still looks for a stop from outside first: systemd
+		// signals the launchers of a shutting-down host (CS-TMUX-071).
+		pending = pane.stoppedFromOutside(env, w.Snapshot())
 		return end, nil
 	}
 
@@ -123,12 +139,15 @@ func runSession(env *Env, c execx.Cmd, container string, o sessionOpts) (end ses
 		verdict = oomreport.Primary(out)
 		end.gone = out.Died
 	case joinedSession:
-		out, stopped = w.AwaitJoined(res.Code, res.Late)
+		// A marked join waits for its container's die (CS-TMUX-071).
+		out, stopped = w.AwaitJoined(res.Code, pane != nil, res.Late)
 		verdict = oomreport.Joined(res.Code, out)
 	}
 	if stopped {
 		// CS-LNCH-097: a signal after the child exited asks for the exit
-		// now — with the child's status, silently.
+		// now — with the child's status, silently. Like a forwarded signal,
+		// it unsets unless a stop from outside is in evidence.
+		pending = pane.stoppedFromOutside(env, out)
 		return end, nil
 	}
 	if end.code == globalcfg.ExitLink {
@@ -151,6 +170,8 @@ func runSession(env *Env, c execx.Cmd, container string, o sessionOpts) (end ses
 	case oomreport.Survived:
 		fmt.Fprint(env.Err, oomreport.SurvivedReport(out.OOMKills, lim))
 	}
+	// CS-TMUX-071: after the report, so a probe or an inspect never delays it.
+	pending = pane.pendingAfter(env, o, w, res.Code, out, container)
 	if o.after != nil {
 		// Still under the session's handlers (deferred res.Done): a signal
 		// now lands on Late and is dropped, and the child's status stands.

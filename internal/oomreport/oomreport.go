@@ -78,6 +78,11 @@ type Outcome struct {
 	// Limit is read from the events' labels (empty on a container that
 	// predates them).
 	Limit Limit
+	// OutsideStop is true when a kill or stop event arrived before the die:
+	// something outside the session stopped the container (docker stop,
+	// docker kill, a daemon stopping it). It never changes a report; a marked
+	// tmux pane stays pending for it (CS-TMUX-071).
+	OutsideStop bool
 }
 
 // Watch is a running "docker events" subscription for one container.
@@ -102,10 +107,11 @@ func EventsArgs(container string, since time.Time) []string {
 		"--since", fmt.Sprintf("%d.%09d", since.Unix(), since.Nanosecond()),
 		"--filter", "container=" + container,
 		"--filter", "event=oom", "--filter", "event=die",
+		"--filter", "event=kill", "--filter", "event=stop",
 		"--format", "{{json .}}"}
 }
 
-// Start subscribes to container's oom and die events. It never fails: a
+// Start subscribes to container's oom, die, kill and stop events. It never fails: a
 // subscription that cannot start yields a Watch that has seen nothing and
 // whose stream has ended, so the session still runs and nothing is reported.
 func Start(r execx.Runner, container string, since time.Time) *Watch {
@@ -163,6 +169,12 @@ func (w *Watch) read(r io.Reader) {
 		case "die":
 			w.out.Died = true
 			w.out.ExitCode, _ = strconv.Atoi(e.Actor.Attributes["exitCode"])
+		case "kill", "stop":
+			// Only before the die: "docker stop" publishes kill, die, stop,
+			// and the stop after the die adds nothing (CS-TMUX-071).
+			if !w.out.Died {
+				w.out.OutsideStop = true
+			}
 		default:
 			w.mu.Unlock()
 			continue
@@ -237,8 +249,19 @@ func (w *Watch) AwaitDeath(stop <-chan os.Signal) (Outcome, bool) {
 // AwaitJoined is the wait of a joined session that ended with status code
 // (CS-SESS-060). With 137, up to DieWait for an oom — ending early when the
 // container's die arrives, then OOMGrace more for a trailing oom; otherwise
-// OOMGrace for ooms still in flight.
-func (w *Watch) AwaitJoined(code int, stop <-chan os.Signal) (Outcome, bool) {
+// OOMGrace for ooms still in flight. forDie is set for a join in a marked tmux
+// pane (CS-LNCH-088, CS-TMUX-071): a non-zero exec then waits up to DieWait
+// for the container's die whatever the code, ending at once when it arrives,
+// then OOMGrace for an oom not seen yet — so the pane's mark is judged by the
+// container, not by the exec, which ends non-zero whenever its container goes.
+func (w *Watch) AwaitJoined(code int, forDie bool, stop <-chan os.Signal) (Outcome, bool) {
+	if forDie && code != 0 {
+		o, stopped := w.Await(DieWait, Died, stop)
+		if stopped || o.OOMKills > 0 {
+			return o, stopped
+		}
+		return w.Await(OOMGrace, SawOOM, stop)
+	}
 	if code != OOMExit {
 		return w.Await(OOMGrace, Never, stop)
 	}
@@ -247,6 +270,18 @@ func (w *Watch) AwaitJoined(code int, stop <-chan os.Signal) (Outcome, bool) {
 		return o, stopped
 	}
 	return w.Await(OOMGrace, SawOOM, stop)
+}
+
+// StreamOpen reports whether the event stream is still open: a docker daemon
+// going away ends it, so a missing die with an ended stream is never read as a
+// detach (CS-TMUX-071). A subscription that never started is not open.
+func (w *Watch) StreamOpen() bool {
+	select {
+	case <-w.ended:
+		return false
+	default:
+		return true
+	}
 }
 
 // Snapshot returns what has arrived so far.
