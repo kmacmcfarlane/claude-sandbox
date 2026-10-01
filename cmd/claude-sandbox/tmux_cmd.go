@@ -25,6 +25,11 @@ package main
 // --resurrected is the processes entry resurrect (or --rearm) types into a
 // restored pane: a per-pane restore that reads the pin and prints the sparse
 // notice without claiming it.
+//
+// --all without --dry-run (CS-TMUX-069, F4d) arms a chosen save into the
+// panes of the running server that already exist: each pane idle at a shell
+// in its saved place gets its row as a pending mark and --resurrected typed
+// into it, and then restores itself.
 
 import (
 	"context"
@@ -185,13 +190,15 @@ type restoreOpts struct {
 func newTmuxRestoreCmd(env *Env) *cobra.Command {
 	var o restoreOpts
 	c := &cobra.Command{
-		Use:   "restore [--from SAVE | --drop | --list [--all] | --dry-run [--all] [--from SAVE] | --pin | --rearm | --resurrected]",
+		Use:   "restore [--from SAVE | --drop | --list [--all] | --dry-run [--all] [--from SAVE] | --all [--from SAVE] | --pin | --rearm | --resurrected]",
 		Short: "Restore this tmux pane's sandbox session after a tmux restart; list or preview saves",
 		Long: "Typed in a pane, restore the sandbox session recorded for it: attach to its container\n" +
 			"when it still runs, else resume its conversation in a new container (one restore starts\n" +
 			"at a time). The row is the pane's own pending mark, else the save's (--from SAVE: that\n" +
 			"save's). --drop forgets this pane's pending mark. --list lists the tmux-resurrect saves;\n" +
 			"--dry-run shows what a restore would do in this pane, or in every pane of a save (--all).\n" +
+			"--all (without --dry-run) arms every row of the save into its pane of the running tmux server,\n" +
+			"when that pane is idle at a shell in its saved place: marked pending, the restore typed into it.\n" +
 			"SAVE is last (the default), previous (what the previous tmux server ended with), a stamp\n" +
 			"such as 20260929T120000, or the name of a save in the resurrect dir.\n\n" +
 			"tmux-resurrect runs three forms itself (see docs/tmux-session-restore.md):\n" +
@@ -209,7 +216,7 @@ func newTmuxRestoreCmd(env *Env) *cobra.Command {
 	}
 	f := c.Flags()
 	f.BoolVar(&o.list, "list", false, "list the saves, newest first, as runs of saves holding the same sandbox sessions")
-	f.BoolVar(&o.all, "all", false, "with --list: 30 days instead of 7; with --dry-run: every pane of the save")
+	f.BoolVar(&o.all, "all", false, "with --list: 30 days instead of 7; with --dry-run: every pane of the save; alone: arm every pane of the save")
 	f.BoolVar(&o.dryRun, "dry-run", false, "show what a restore would do, without doing it")
 	f.BoolVar(&o.drop, "drop", false, "forget this pane's pending mark (nothing is restored)")
 	f.StringVar(&o.from, "from", "", "the save to read: last, previous, a stamp, or a save's file name")
@@ -257,8 +264,6 @@ func runTmuxRestore(env *Env, o restoreOpts, fromSet bool) error {
 		return exitErr(2, "Error: --list takes only --all")
 	case o.drop && (o.dryRun || o.all || fromSet):
 		return exitErr(2, "Error: --drop takes no other flag")
-	case o.all && !o.dryRun && !o.list:
-		return exitErr(2, "Error: --all needs --dry-run or --list (restoring every pane of a save is still to come)")
 	}
 	if o.resurrected {
 		// Typed by resurrect or by --rearm, not by the operator: print the
@@ -275,6 +280,8 @@ func runTmuxRestore(env *Env, o restoreOpts, fromSet bool) error {
 		return runRestoreDryRunAll(env, o.from)
 	case o.dryRun:
 		return runRestoreDryRun(env, o.from)
+	case o.all:
+		return runRestoreArmAll(env, o.from)
 	}
 	return runRestoreAct(env, o.from, false)
 }
@@ -638,7 +645,7 @@ Use a save by its stamp (%[1]s here):
   one pane, typed in that pane:   claude-sandbox tmux restore --from %[1]s
   preview it first:               claude-sandbox tmux restore --dry-run --from %[1]s
   every pane of the save:         claude-sandbox tmux restore --dry-run --all --from %[1]s
-  (restoring every pane at once is still to come; the dry run prints each pane's manual command)
+  then arm the panes that exist:  claude-sandbox tmux restore --all --from %[1]s
 A whole layout from a save, when its windows are gone:
 `, example)
 	for _, l := range tmuxpane.Procedures(saves.Dir, example, tmuxpane.SaveInterval(env.Runner)) {
@@ -702,6 +709,102 @@ func exampleStamp(runs []tmuxpane.Run) string {
 		return runs[1].Newest
 	}
 	return runs[0].Newest
+}
+
+// ---- F4d: arming a save into the existing panes (CS-TMUX-069) ----
+
+// runRestoreArmAll is "--all [--from SAVE]" (CS-TMUX-069): every row of the
+// save into its pane of the running tmux server, when that pane is idle at a
+// shell in its saved place. It takes no lock and starts nothing: each armed
+// pane's own restore does, one at a time.
+func runRestoreArmAll(env *Env, from string) error {
+	out := env.Out
+	panes, srv, ok := tmuxpane.ListArmPanes(env.Runner)
+	if !ok {
+		return exitErr(2, "Error: no tmux server answered; --all arms the panes of the running tmux server (preview a save anywhere with --dry-run --all)")
+	}
+	saves, idx, err := openRestoreSaves(env)
+	if err != nil {
+		return err
+	}
+	var running *tmuxpane.Server
+	server := "the running tmux server"
+	if srv != nil {
+		running = &srv.Server
+		server = fmt.Sprintf("the tmux server pid %d", srv.PID)
+		if srv.Socket != "" && !strings.ContainsFunc(srv.Socket, func(c rune) bool { return c < 0x20 || c == 0x7f }) {
+			server += " (socket " + srv.Socket + ")"
+		}
+	}
+	stamp, err := resolveFrom(saves, from, running, idx)
+	if err != nil {
+		return err
+	}
+	sc, err := saves.Sidecar(stamp)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		fmt.Fprintf(out, "Save %s%s in %s has no claude-sandbox record (the save hook was not wired then): nothing to arm.\n", stamp, fromLabel(from), saves.Dir)
+		return nil
+	case err != nil:
+		fmt.Fprintf(out, "Cannot read save %s%s in %s (%v): nothing to arm.\n", stamp, fromLabel(from), saves.Dir, err)
+		return nil
+	}
+	if line := saves.SparseOf(stamp, len(sc.Panes), sc.Server, idx).Line(); line != "" {
+		fmt.Fprintln(env.Err, line)
+	}
+	state, stateErr := tmuxpane.ReadStatePanes(saves.Dir, stamp)
+	self, _ := tmuxpane.FromEnv(env.Getenv)
+	infos := make([]tmuxpane.PaneInfo, 0, len(panes))
+	for _, p := range panes {
+		infos = append(infos, p.Info())
+	}
+	fmt.Fprintf(out, "Arming save %s%s in %s (%s) into the panes of %s:\n",
+		stamp, fromLabel(from), saves.Dir, plural(len(sc.Panes), "sandbox pane"), server)
+	res := tmuxpane.Arm(tmuxpane.ArmOptions{
+		Runner: env.Runner, Rows: sc.Panes, State: state, StateErr: stateErr, Panes: panes,
+		Shell: tmuxpane.DefaultShell(env.Runner), Self: self, Probes: restoreProbes(env, self, infos),
+		Proc: tmuxpane.ProcOptions{Runner: env.Runner, ProcRoot: env.ProcRoot},
+	})
+	counts := map[tmuxpane.ArmVerdict]int{}
+	for _, r := range res {
+		counts[r.Verdict]++
+		label := "(a row that cannot be used)"
+		if r.Verdict != tmuxpane.ArmUnusable {
+			label = rowLabel(r.Row.Mark)
+		}
+		fmt.Fprintf(out, "  %s  %s\n      %s\n", r.Coords, label, armLine(r))
+	}
+	fmt.Fprintf(out, "Typed the restore into %d, marked %d only, skipped %d.",
+		counts[tmuxpane.ArmTyped], counts[tmuxpane.ArmMarked],
+		len(res)-counts[tmuxpane.ArmTyped]-counts[tmuxpane.ArmMarked])
+	if counts[tmuxpane.ArmTyped]+counts[tmuxpane.ArmMarked] > 0 {
+		fmt.Fprint(out, " Each armed pane restores itself, one start at a time.")
+	}
+	fmt.Fprintln(out)
+	if counts[tmuxpane.ArmMissing] > 0 {
+		fmt.Fprintln(out, "For panes that are gone or moved, restore the whole layout from this save:")
+		for _, l := range tmuxpane.Procedures(saves.Dir, stamp, tmuxpane.SaveInterval(env.Runner)) {
+			fmt.Fprintln(out, "  "+l)
+		}
+	}
+	return nil
+}
+
+// armLine is one row's outcome in --all's listing.
+func armLine(r tmuxpane.ArmRow) string {
+	switch r.Verdict {
+	case tmuxpane.ArmTyped:
+		return "armed: marked pending and typed " + tmuxpane.RetypeKeys + " into it, after clearing its command line (" + r.Decision.Would() + ")"
+	case tmuxpane.ArmMarked:
+		return "armed: marked pending, not typed (" + r.Why + "); type claude-sandbox tmux restore in it, or forget it with claude-sandbox tmux restore --drop there"
+	case tmuxpane.ArmMissing:
+		return "skipped: " + r.Why
+	case tmuxpane.ArmBusy:
+		return "skipped, busy: " + r.Why
+	case tmuxpane.ArmFinal:
+		return "not armed: " + r.Why
+	}
+	return "skipped: " + r.Why
 }
 
 // ---- F4b: acting in one pane (CS-TMUX-052..063) ----
