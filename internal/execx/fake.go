@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Fake is a scripted, recording Runner for tests.
@@ -27,7 +28,26 @@ type Fake struct {
 	LateSignal os.Signal
 	// Released counts the Release calls of RunSession results.
 	Released int
-	stubs    []stub
+	// GitBound, when positive, replaces GitTimeout for the git calls run
+	// through Git with this runner, so a test of a hung git (OnHang) returns
+	// in milliseconds rather than the real bound.
+	GitBound time.Duration
+	// Killed counts the processes started with Start that were signalled
+	// while still running — a hung command killed at its bound.
+	Killed int
+	stubs  []stub
+	hangs  []string
+}
+
+func (f *Fake) gitTimeout() time.Duration { return f.GitBound }
+
+// OnHang scripts commands whose "name args..." string contains pattern to
+// hang when started with Start: the process never exits until it is
+// signalled — a git blocked on a FIFO. Checked before the On stubs.
+func (f *Fake) OnHang(pattern string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.hangs = append(f.hangs, pattern)
 }
 
 type stub struct {
@@ -70,6 +90,18 @@ func (f *Fake) match(c Cmd) (string, error) {
 	return "", nil
 }
 
+func (f *Fake) hung(c Cmd) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	line := c.Name + " " + strings.Join(c.Args, " ")
+	for _, h := range f.hangs {
+		if strings.Contains(line, h) {
+			return true
+		}
+	}
+	return false
+}
+
 func (f *Fake) record(c Cmd) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -94,15 +126,33 @@ type fakeProcess struct {
 	err  error
 	done chan struct{}
 	once sync.Once
+	// hung marks an OnHang process; its Signal counts a kill.
+	hung bool
+	f    *Fake
 }
 
-func (p *fakeProcess) Signal(sig os.Signal) error { p.stop(); return nil }
-func (p *fakeProcess) stop()                      { p.once.Do(func() { close(p.done) }) }
-func (p *fakeProcess) Wait() error                { <-p.done; return p.err }
-func (p *fakeProcess) Pid() int                   { return 4242 }
+func (p *fakeProcess) Signal(sig os.Signal) error {
+	if p.hung {
+		p.once.Do(func() {
+			p.f.mu.Lock()
+			p.f.Killed++
+			p.f.mu.Unlock()
+			close(p.done)
+		})
+		return nil
+	}
+	p.stop()
+	return nil
+}
+func (p *fakeProcess) stop()       { p.once.Do(func() { close(p.done) }) }
+func (p *fakeProcess) Wait() error { <-p.done; return p.err }
+func (p *fakeProcess) Pid() int    { return 4242 }
 
 func (f *Fake) Start(c Cmd) (Process, error) {
 	f.record(c)
+	if f.hung(c) {
+		return &fakeProcess{err: errors.New("signal: killed"), done: make(chan struct{}), hung: true, f: f}, nil
+	}
 	out, err := f.match(c)
 	if c.Stdout != nil && out != "" {
 		io.WriteString(c.Stdout, out)

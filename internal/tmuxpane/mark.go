@@ -12,8 +12,8 @@ package tmuxpane
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
-	"os"
 	"regexp"
 	"strings"
 	"sync"
@@ -180,10 +180,10 @@ func (p Pane) run(args ...string) (string, bool) {
 	return bounded(p.Runner, CallTimeout, "tmux", args...)
 }
 
-// bounded runs name args through Runner.Start in its own process group,
-// killed with the caller (DieWithParent), and kills it after timeout. It
-// returns stdout and whether the command finished successfully. The save
-// hook's docker call shares it (CS-TMUX-032/040).
+// bounded runs name args through execx.Bounded — Runner.Start in its own
+// process group, killed with the caller (DieWithParent), the whole group
+// killed after timeout. It returns stdout and whether the command finished
+// successfully. The save hook's docker call shares it (CS-TMUX-032/040).
 func bounded(r execx.Runner, timeout time.Duration, name string, args ...string) (string, bool) {
 	out, ran, werr := boundedRun(r, timeout, name, args...)
 	if !ran || werr != nil {
@@ -196,33 +196,12 @@ func bounded(r execx.Runner, timeout time.Duration, name string, args ...string)
 // started or timed out (its output is then ""); otherwise out is its stdout
 // WHATEVER its exit status, and werr that status.
 func boundedRun(r execx.Runner, timeout time.Duration, name string, args ...string) (out string, ran bool, werr error) {
-	if timeout <= 0 {
+	out, err := execx.Bounded(r, timeout, execx.Cmd{Name: name, Args: args, Stderr: io.Discard})
+	var se *execx.StartError
+	if errors.As(err, &se) || errors.Is(err, execx.ErrTimedOut) {
 		return "", false, nil
 	}
-	var buf syncBuffer
-	proc, err := r.Start(execx.Cmd{Name: name, Args: args, Stdout: &buf, Stderr: io.Discard, DieWithParent: true})
-	if err != nil {
-		return "", false, nil
-	}
-	done := make(chan error, 1)
-	go func() { done <- proc.Wait() }()
-	select {
-	case werr := <-done:
-		return buf.String(), true, werr
-	case <-time.After(timeout):
-		// The whole group: a grandchild holding the stdout pipe would
-		// otherwise keep Wait (and so this call) waiting (CS-TMUX-040).
-		if g, ok := proc.(execx.GroupKiller); ok {
-			g.KillGroup()
-		} else {
-			proc.Signal(os.Kill)
-		}
-		select {
-		case <-done:
-		case <-time.After(timeout):
-		}
-		return "", false, nil
-	}
+	return out, true, err
 }
 
 // SystemStopping reports whether the host is shutting down (CS-TMUX-071 row

@@ -806,3 +806,13 @@ Feature: Image build lifecycle (CS-IMG)
     Then the read returns at once and that fingerprint is uncomputable, which
       falls back to the time rule (CS-IMG-035), as for an unreadable file
     And a baked source that is not a regular file is skipped, as before
+
+  Scenario: CS-IMG-076 The version stamp's git describe is bounded
+    # --dirty refreshes the index and reads every .gitignore of this
+    # repository, which a sandbox working on it can write (CS-LNCH-176).
+    Given "git -C <repo> describe --tags --always --dirty" does not answer
+      within execx.GitTimeout
+    Then it is killed and the stamp is "unknown", as outside a git repo
+      (CS-IMG-005), and one CS-LNCH-176 warning ending 'using the version
+      stamp "unknown"' is printed on stderr (a headless launch's too)
+    And the launch, or "--version", goes on

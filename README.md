@@ -947,8 +947,13 @@ the shadow copies, the global config the health check reads, and this repository
 Dockerfiles for the rebuild fingerprint — never wait on such a file either: each treats it
 as unreadable (a `.gitignore` one is skipped with a warning, and the `git check-ignore`
 checks that would read it are skipped too). The `git` commands a launch runs read files
-of their own (`.git`, `.git/info/exclude`, a worktree's git dir) and are not covered by
-this: a FIFO there can still hold the launch inside git.
+of their own (`.git`, `.git/info/exclude`, a worktree's git dir) with blocking opens, so
+every one is bounded: a git that has not answered within 5 s is killed (with anything it
+started) and the launch goes on with that call's ordinary failure outcome plus one
+`WARNING: <git command> did not finish within 5s …` line — not a git repository (a
+requested worktree stands down), a plain project instead of a linked worktree, the
+version stamp `unknown`, and for the layout's checks an unknown answer: no `.gitignore`
+update and no sidecar git init on that launch.
 
 Merge rules:
 
@@ -1198,6 +1203,12 @@ duplicated, and skipped when an existing rule such as `.claude/`, `.claude/*` or
 `/.claude/worktrees/` already covers it. Declining the launch-time prompt (or setting
 `CS_GITIGNORE_ASSUME=n`) skips this line along with the rest; on `init`, where the
 entries are written without a prompt, `--no-gitignore` does the same.
+
+The launcher writes `.gitignore` lines only inside the project. A `.gitignore` (host or
+sidecar) that is a symlink to a file inside the project is followed; one that leads out of
+it is refused — the host one with a `WARNING: … is a symlink to …, outside the project …`
+line and no prompt, the sidecar one by failing the setup naming it — so a session cannot
+point the file at, say, `~/.bashrc` and have the launcher append to that.
 
 ### `.claude-sandbox/env`
 
@@ -2056,7 +2067,7 @@ Images from before the `df-` tagging scheme (`claude-sandbox-<project>`) are dea
 
 ### Versioning
 
-The launcher stamps each tools-image build with `git describe --tags --always --dirty`, baked in as `/opt/claude-sandbox/version` and the `org.opencontainers.image.revision` label; the cap sets `$CLAUDE_SANDBOX_VERSION` from that label. Check it with:
+The launcher stamps each tools-image build with `git describe --tags --always --dirty`, baked in as `/opt/claude-sandbox/version` and the `org.opencontainers.image.revision` label; the cap sets `$CLAUDE_SANDBOX_VERSION` from that label. (Outside a git checkout, or when `git describe` has not answered within 5 s — it is then killed, with one warning — the stamp is `unknown`.) Check it with:
 
 ```bash
 claude-sandbox --version

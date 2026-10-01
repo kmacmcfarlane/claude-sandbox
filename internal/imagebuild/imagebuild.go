@@ -228,13 +228,21 @@ func bakedSkip(rel string, d os.DirEntry) bool {
 	return strings.HasSuffix(name, "_test.go") || strings.HasSuffix(name, ".pyc") || strings.HasSuffix(name, ".pyo")
 }
 
-// Version computes the git-describe version of the repo checkout.
-func Version(r execx.Runner, repoRoot string) string {
-	out, err := r.Output(execx.Cmd{Name: "git", Args: []string{"-C", repoRoot, "describe", "--tags", "--always", "--dirty"}, Stderr: io.Discard})
-	if err != nil || strings.TrimSpace(out) == "" {
-		return "unknown"
+// Version computes the git-describe version of the repo checkout (CS-IMG-005),
+// "unknown" when git fails or prints nothing. The call is bounded (CS-IMG-076):
+// --dirty refreshes the index and reads every .gitignore, and a sandbox
+// working on this repository can write them, so a git that does not answer
+// within execx.GitTimeout is killed and the stamp is "unknown", with warning
+// naming the call.
+func Version(r execx.Runner, repoRoot string) (version, warning string) {
+	out, err := execx.Git(r, execx.Cmd{Name: "git", Args: []string{"-C", repoRoot, "describe", "--tags", "--always", "--dirty"}})
+	if errors.Is(err, execx.ErrTimedOut) {
+		return "unknown", execx.GitTimeoutWarning(err, `using the version stamp "unknown"`)
 	}
-	return strings.TrimSpace(out)
+	if err != nil || strings.TrimSpace(out) == "" {
+		return "unknown", ""
+	}
+	return strings.TrimSpace(out), ""
 }
 
 // EnsureBase builds the base image when missing or stale. Its only input is

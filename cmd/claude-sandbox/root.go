@@ -722,7 +722,13 @@ func resolveWorktree(env *Env, projectDir string, f *launchFlags, cfg *cascade.C
 	} else {
 		wt.Enabled = launch.ResolveTristate(f.Worktree, env.Getenv("CLAUDE_SANDBOX_WORKTREE"), cfg.Worktree, f.Ralph)
 	}
-	wt.Root = launch.GitRoot(env.Runner, projectDir)
+	// CS-LNCH-176: a git that does not answer in time is "not a git
+	// repository" (the stand-down below), with one warning.
+	var gitWarn string
+	wt.Root, gitWarn = launch.GitRoot(env.Runner, projectDir)
+	if gitWarn != "" {
+		fmt.Fprintln(env.Err, gitWarn)
+	}
 	if wt.Enabled && wt.Root == "" {
 		// claude itself refuses "--worktree requires a git repository", so
 		// standing down is the only outcome that launches — however the mode
@@ -818,7 +824,10 @@ func runLaunch(env *Env, args []string) error {
 		return nil
 	}
 	rr := repoRoot(env.Getenv)
-	version := imagebuild.Version(env.Runner, rr)
+	version, verWarn := imagebuild.Version(env.Runner, rr)
+	if verWarn != "" {
+		fmt.Fprintln(env.Err, verWarn)
+	}
 	if f.Version {
 		imagebuild.PrintVersion(imagebuild.Options{Runner: env.Runner, Out: env.Out, RepoRoot: rr, Version: version})
 		return nil
@@ -848,7 +857,11 @@ func runHeadless(env *Env, args []string) error {
 	// controlling terminal; every question takes its default.
 	h.Prompter = &prompt.Fixed{Out: env.Err}
 	rr := repoRoot(h.Getenv)
-	return launchWith(&h, f, rr, imagebuild.Version(h.Runner, rr), true)
+	version, verWarn := imagebuild.Version(h.Runner, rr)
+	if verWarn != "" {
+		fmt.Fprintln(h.Err, verWarn) // CS-IMG-076; stderr, as every headless message
+	}
+	return launchWith(&h, f, rr, version, true)
 }
 
 // headlessRejection reports the launcher flags a headless launch refuses. It is

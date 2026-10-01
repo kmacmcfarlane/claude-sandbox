@@ -1226,6 +1226,29 @@ var _ = Describe("image build lifecycle", func() {
 			fake.On("git", "  \n", nil)
 			Expect(imagebuild.Version(fake, repo)).To(Equal("unknown"))
 		})
+
+		It("CS-IMG-076: a git describe that never answers is killed; the stamp is \"unknown\" with one warning", func() {
+			fake.GitBound = 50 * time.Millisecond
+			fake.OnHang("describe --tags --always --dirty")
+			done := make(chan struct{})
+			var v, warn string
+			go func() {
+				defer GinkgoRecover()
+				defer close(done)
+				v, warn = imagebuild.Version(fake, repo)
+			}()
+			Eventually(done, 2*time.Second).Should(BeClosed())
+			Expect(v).To(Equal("unknown"))
+			Expect(warn).To(HavePrefix("WARNING: git -C " + repo + " describe --tags --always --dirty did not finish within 50ms"))
+			Expect(warn).To(HaveSuffix(`; using the version stamp "unknown".`))
+			Expect(fake.Killed).To(Equal(1))
+
+			// A plain failure stays silent (CS-IMG-005).
+			g := &execx.Fake{}
+			g.On("git", "", execx.Fail(128))
+			_, warn = imagebuild.Version(g, repo)
+			Expect(warn).To(BeEmpty())
+		})
 	})
 
 	// ---- Claude Code update check ----

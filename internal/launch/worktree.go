@@ -9,8 +9,8 @@ package launch
 // must not reopen one by accident, CS-SESS-045).
 
 import (
+	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -50,16 +50,22 @@ func ValidateWorktreeName(name string) error {
 // or "" when dir is not inside one (CS-LNCH-046). It asks git rather than
 // looking for a .git entry so a project that is a subdirectory of a repository
 // still counts — claude anchors the worktree at the repository root either way.
-func GitRoot(r execx.Runner, dir string) string {
-	out, err := r.Output(execx.Cmd{
-		Name:   "git",
-		Args:   []string{"-C", dir, "rev-parse", "--show-toplevel"},
-		Stderr: io.Discard,
+//
+// The call is bounded (CS-LNCH-176): git that does not answer within
+// execx.GitTimeout (a FIFO in .git) is killed and dir is treated as not a
+// git repository — the CS-LNCH-046 stand-down — with warning naming the call.
+func GitRoot(r execx.Runner, dir string) (root, warning string) {
+	out, err := execx.Git(r, execx.Cmd{
+		Name: "git",
+		Args: []string{"-C", dir, "rev-parse", "--show-toplevel"},
 	})
-	if err != nil {
-		return ""
+	if errors.Is(err, execx.ErrTimedOut) {
+		return "", execx.GitTimeoutWarning(err, "treating "+dir+" as not a git repository")
 	}
-	return strings.TrimSpace(out)
+	if err != nil {
+		return "", ""
+	}
+	return strings.TrimSpace(out), ""
 }
 
 // ExistingWorktrees lists the names under <root>/.claude/worktrees, i.e. the
@@ -106,7 +112,8 @@ type LinkedWorktree struct {
 // worktree, and verifies the answer (CS-LNCH-070). It returns nil — launch
 // as a plain project — when git fails, when dir is a main checkout or not a
 // repository at all, and when verification fails; warning is non-empty only
-// for a worktree git knows but whose back-link does not match (moved).
+// for a worktree git knows but whose back-link does not match (moved), and
+// for a git that did not answer within execx.GitTimeout (CS-LNCH-176).
 //
 // The verification is the security gate for the read-write mount of
 // CommonDir: the .git file is data in the project tree, and a crafted one
@@ -114,11 +121,15 @@ type LinkedWorktree struct {
 // <GitDir>/gitdir, which only "git worktree add" (or "repair") in THAT
 // repository writes, must name <Top>/.git.
 func DetectLinkedWorktree(r execx.Runner, dir string) (lw *LinkedWorktree, warning string) {
-	out, err := r.Output(execx.Cmd{
-		Name:   "git",
-		Args:   []string{"-C", dir, "rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel"},
-		Stderr: io.Discard,
+	// CS-LNCH-176: bounded; git reads the .git file, <GitDir>/commondir and
+	// the config with blocking opens, and the common dir is session-writable.
+	out, err := execx.Git(r, execx.Cmd{
+		Name: "git",
+		Args: []string{"-C", dir, "rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel"},
 	})
+	if errors.Is(err, execx.ErrTimedOut) {
+		return nil, execx.GitTimeoutWarning(err, "launching as a plain project, without the linked-worktree check")
+	}
 	if err != nil {
 		return nil, ""
 	}
