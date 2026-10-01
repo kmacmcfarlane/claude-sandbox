@@ -1,8 +1,9 @@
 # Restoring tmux sessions after a reboot
 
 This sets up tmux-resurrect and tmux-continuum so tmux windows — layout,
-working directories, window names — come back after a reboot or a crash.
-claude-sandbox has no restore integration of its own yet; this is a stopgap.
+working directories, window names — come back after a reboot or a crash, and
+wires in claude-sandbox's own hooks so sandbox panes come back too (see
+[The claude-sandbox lines](#the-claude-sandbox-lines)).
 
 ## What it does and doesn't do
 
@@ -11,16 +12,18 @@ window names, each pane's working directory, the active window/pane, and
 grouped sessions. tmux-continuum autosaves on an interval and can restore
 automatically when the tmux server starts.
 
-Until claude-sandbox has its own restore integration, this gets every window
-back at the right directory with the right name. A pane that was running a
-sandbox comes back as a plain shell sitting in that directory — it does not
-relaunch the sandbox for you. You do that by hand, e.g.:
+This gets every window back at the right directory with the right name.
+Without the claude-sandbox lines below, a pane that was running a sandbox
+comes back as a plain shell sitting in that directory, and you relaunch it by
+hand, e.g.:
 
 ```
 claude-sandbox --new -- --resume
 ```
 
-and pick the conversation from the picker.
+and pick the conversation from the picker. With them, each such pane runs
+`claude-sandbox tmux restore`, which attaches to the container if it still
+runs, or resumes the conversation in a new one.
 
 ## Install
 
@@ -130,42 +133,66 @@ the containers keep running detached, and you reattach by running it from the
 project directory (attach filters by cwd). Joined sessions (`--join`) cannot
 be reattached.
 
-## Do not add claude-sandbox to `@resurrect-processes` yet
+## The claude-sandbox lines
 
-resurrect restores a program by typing its saved command line into the
-pane's shell (`tmux send-keys … C-m`, from
-`scripts/process_restore_helpers.sh`), so the shell underneath survives even
-after the program exits.
+Add these four lines to `~/.tmux.conf`, before the two `run-shell` lines
+(resurrect reads the options when it saves and restores). Replace
+`/path/to/claude-sandbox` with your checkout:
 
-For a sandbox session, the saved command line is wrong after a reboot:
+```
+set -g @resurrect-hook-post-save-layout '/path/to/claude-sandbox/bin/claude-sandbox tmux save'
+set -g @resurrect-hook-pre-restore-all  '/path/to/claude-sandbox/bin/claude-sandbox tmux restore --pin'
+set -g @resurrect-hook-post-restore-all '/path/to/claude-sandbox/bin/claude-sandbox tmux restore --rearm'
+set -g @resurrect-processes '"claude-sandbox->claude-sandbox tmux restore --resurrected"'
+```
 
-- A plain `claude-sandbox` starts a *new* conversation instead of resuming
-  the old one.
-- `claude-sandbox --attach=<noun>` names a container that no longer exists
-  after a reboot.
-- Nothing prevents resuming a conversation that's already live elsewhere —
-  two sessions attached to one conversation can corrupt its transcript.
+If you already set `@resurrect-processes`, add the quoted entry to your list.
 
-So leave claude-sandbox out of `@resurrect-processes` for now. Sandbox panes
-come back as a shell in the right directory, and you relaunch by hand.
+- The three hooks run in the tmux **server's** environment. With
+  `@continuum-boot 'on'` that is the systemd user unit's, with no login
+  shell, so they name the shim by its absolute path.
+- The processes entry keeps the bare name: resurrect types it into each
+  restored pane's own shell, which reads your shell's rc files. resurrect
+  matches it against the first word of the saved command, which the shim
+  makes `claude-sandbox`.
+- `tmux save` records which conversation each sandbox pane holds, beside each
+  save. `--pin` pins the save a restore reads and the panes that already
+  exist. `--rearm` marks the panes the restore created and retypes the
+  restore into pending ones that sat at a shell. All three never print,
+  always exit 0, and finish within a few seconds; problems go to
+  `~/.cache/claude-sandbox/tmux-save.log` and `tmux-restore.log`. The shim
+  never builds for them: after a `git pull` they do nothing until your next
+  ordinary `claude-sandbox` launch rebuilds the binary.
 
-## Planned integration (not built yet)
+Check the wiring after reloading the config:
 
-Tracked under work item `restore-short-window-names-and-per-group-1d0e`
-(operator decisions 45b and 46a). resurrect will keep owning the layout;
-claude-sandbox will add:
+```
+command -v claude-sandbox                     # in a pane: the processes entry needs it on your shell's PATH
+tmux show -gv @resurrect-hook-post-save-layout
+tmux show -gv @resurrect-hook-pre-restore-all
+tmux show -gv @resurrect-hook-post-restore-all
+tmux show -gv @resurrect-processes
+```
 
-- A save hook (`@resurrect-hook-post-save-layout`, which receives the state
-  file path) that records which conversation each sandbox pane is running.
-  **Built:** `claude-sandbox tmux save` (see the README's "tmux save hook"),
-  wired with `set -g @resurrect-hook-post-save-layout 'claude-sandbox tmux save'`.
-  On its own it only writes
-  `*.claude-sandbox.json` sidecars beside the saves; nothing reads them until
-  the restore command below exists.
-- A `@resurrect-processes` entry whose substituted command, typed into the
-  pane on restore, resumes that conversation — attaching to the container if
-  it's still live, or leaving the shell alone if the conversation is already
-  running somewhere else.
+If a hook is missing or fails, restores degrade rather than break: without
+`--rearm`, the typed restores still read the pinned save and active sessions
+come back, but a session that was waiting to be restored at a bare shell
+drops out at the next save; without `--pin`, the typed restores read `last`
+and `--rearm` does nothing. See the README's "tmux restore" sections for what
+a restore decides in each pane.
+
+### Optional: show the sparse-restore notice in the status line
+
+When `--pin` finds that the save being restored has markedly fewer sandbox
+panes than earlier tmux servers ended with, it sets the tmux option
+`@claude-sandbox-notice` until the first `claude-sandbox` command you type
+inside tmux prints and clears it. To see it the moment you attach, add this
+line **before** continuum's `run-shell` line (continuum's own `status-right`
+hook must stay last):
+
+```
+set -ga status-right '#{?@claude-sandbox-notice, #[reverse] #{@claude-sandbox-notice} #[default],}'
+```
 
 Note on hooks: upstream `docs/hooks.md` lists four hooks — post-save-layout,
 post-save-all, pre-restore-all, pre-restore-pane-processes — and

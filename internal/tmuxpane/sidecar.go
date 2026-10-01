@@ -48,13 +48,16 @@ func SidecarPath(stateFile string) string {
 // StatePane is one "pane" line of a resurrect state file. Session, Window and
 // Pane are the coordinates the sidecar is keyed by; Dir (field 8, the leading
 // ":" removed, still in resurrect's escaped form) and FullCommand (field 11,
-// "" for a bare shell) are for `tmux restore` (F4).
+// "" for a bare shell) are for `tmux restore` (F4). FullCommandSaved is false
+// when the line has no field 11 at all, so an empty FullCommand then says
+// nothing about a bare shell (CS-TMUX-067).
 type StatePane struct {
-	Session     string
-	Window      int
-	Pane        int
-	Dir         string
-	FullCommand string
+	Session          string
+	Window           int
+	Pane             int
+	Dir              string
+	FullCommand      string
+	FullCommandSaved bool
 }
 
 // Key is the pane's coordinates as one comparable string.
@@ -87,6 +90,7 @@ func ParseStateFile(data []byte) []StatePane {
 		}
 		if len(f) > 10 {
 			sp.FullCommand = strings.TrimPrefix(f[10], ":")
+			sp.FullCommandSaved = true
 		}
 		out = append(out, sp)
 	}

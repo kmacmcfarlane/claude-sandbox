@@ -186,3 +186,27 @@ func pruneClaimed(path string) {
 		}
 	}
 }
+
+// PrintNotice prints the pending notice, if any, and never claims it
+// (CS-TMUX-050, 12 § 1): what an unattended restore — "--resurrected", typed
+// by resurrect or by --rearm — does in its pane, so the notice and the tmux
+// option stay for the operator's own first command. A notice older than 7
+// days is removed unprinted, as ClaimNotice does. It returns the line it
+// printed, "" for none.
+func PrintNotice(cacheDir string, now time.Time, out io.Writer) string {
+	if cacheDir == "" {
+		return ""
+	}
+	path := filepath.Join(cacheDir, NoticeFile)
+	n, ok := readNotice(path)
+	if !ok {
+		return ""
+	}
+	if now.Sub(time.UnixMilli(n.At)) > NoticeMaxAge {
+		os.Remove(path)
+		return ""
+	}
+	line := n.Line()
+	fmt.Fprintln(out, line)
+	return line
+}

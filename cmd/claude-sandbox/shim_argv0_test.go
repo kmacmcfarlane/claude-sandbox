@@ -1,6 +1,6 @@
 package main
 
-// Spec: spec/tmux.feature (CS-TMUX-001..002) — the bin/claude-sandbox shim
+// Spec: spec/tmux.feature (CS-TMUX-001..003, CS-TMUX-068) — the bin/claude-sandbox shim
 // execs the launcher with argv[0] "claude-sandbox", so the first word of the
 // full command line tmux-resurrect saves matches a plain `claude-sandbox`
 // @resurrect-processes entry (the bin/dist path, possibly with a space, never did).
@@ -129,6 +129,35 @@ var _ = Describe("shim argv0 (spec/tmux.feature)", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(combined).To(BeEmpty())
 		Expect(out).NotTo(BeAnExistingFile())
+	})
+
+	It("CS-TMUX-068: tmux restore --pin and --rearm exec an up-to-date binary with argv[0] \"claude-sandbox\" and print nothing", func() {
+		for _, form := range []string{"--pin", "--rearm"} {
+			Expect(os.RemoveAll(out)).To(Succeed())
+			combined, err := shimRaw("tmux", "restore", form)
+			Expect(err).NotTo(HaveOccurred(), form)
+			Expect(combined).To(BeEmpty(), form)
+			b, err := os.ReadFile(out)
+			Expect(err).NotTo(HaveOccurred(), form)
+			var rec shimArgv0Record
+			Expect(json.Unmarshal(b, &rec)).To(Succeed())
+			Expect(rec.Args).To(Equal([]string{"claude-sandbox", "tmux", "restore", form}))
+		}
+	})
+
+	It("CS-TMUX-068: tmux restore --pin and --rearm never build: a stale binary is exit 0, silent, and not run", func() {
+		src := filepath.Join(repo, "cmd", "claude-sandbox", "main.go")
+		Expect(os.MkdirAll(filepath.Dir(src), 0o755)).To(Succeed())
+		Expect(os.WriteFile(src, []byte("package main\n"), 0o644)).To(Succeed())
+		future := time.Now().Add(time.Hour)
+		Expect(os.Chtimes(src, future, future)).To(Succeed())
+		for _, form := range []string{"--pin", "--rearm"} {
+			combined, err := shimRaw("tmux", "restore", form)
+			Expect(err).NotTo(HaveOccurred(), form)
+			Expect(combined).To(BeEmpty(), form)
+			Expect(out).NotTo(BeAnExistingFile(), form)
+		}
+		Expect(filepath.Join(repo, "bin", "dist", "gocache")).NotTo(BeADirectory())
 	})
 
 	It("CS-TMUX-002: the completion fast path execs with the same argv[0]", func() {
@@ -357,6 +386,30 @@ var _ = Describe("shim build lock (spec/tmux.feature)", func() {
 		Expect(count).NotTo(BeAnExistingFile())
 		Expect(filepath.Join(binDir, ".build.lock")).NotTo(BeAnExistingFile())
 		Expect(lines(ran)).To(Equal([]string{"ok"}))
+	})
+
+	It("CS-TMUX-068: the tmux restore --pin/--rearm fast path never waits on a held build lock; --resurrected builds", func() {
+		withFlock()
+		fakeGo()
+		Expect(os.MkdirAll(binDir, 0o755)).To(Succeed())
+		Expect(os.WriteFile(filepath.Join(binDir, "claude-sandbox"), []byte(built()), 0o755)).To(Succeed())
+		future := time.Now().Add(time.Hour)
+		Expect(os.Chtimes(filepath.Join(repo, "cmd", "claude-sandbox", "main.go"), future, future)).To(Succeed())
+		release := holdLock()
+		for _, form := range []string{"--pin", "--rearm"} {
+			start := time.Now()
+			r := run(nil, "tmux", "restore", form)
+			Expect(r.err).NotTo(HaveOccurred(), form)
+			Expect(r.stdout+r.stderr).To(BeEmpty(), form)
+			Expect(time.Since(start)).To(BeNumerically("<", 5*time.Second), form)
+		}
+		Expect(count).NotTo(BeAnExistingFile())
+		Expect(ran).NotTo(BeAnExistingFile())
+		release()
+		// Typed into a pane's shell, --resurrected is no hook: it builds.
+		r := run(nil, "tmux", "restore", "--resurrected")
+		launched(r)
+		Expect(lines(count)).To(HaveLen(1))
 	})
 
 	It("CS-TMUX-073: the tmux save fast path never waits on a held build lock", func() {
