@@ -705,7 +705,8 @@ Feature: tmux integration (CS-TMUX)
       ("no record", "unreadable") under another, never under a server's heading
     And a state file without a sidecar prints as "no record" and is never sparse
     And it ends with how to use a line, with a stamp and the resolved dir filled in: --from in one
-      pane, --dry-run --all --from for every pane, and the two whole-layout procedures:
+      pane, --dry-run --all --from to preview every pane and --all --from to arm them (CS-TMUX-069),
+      and the two whole-layout procedures:
       A, in the running server: "tmux set -g @continuum-save-interval 0", "ln -sf
       tmux_resurrect_<stamp>.txt <dir>/last", prefix + C-r, then the interval as it was — read with
       one bounded "tmux show -gqv @continuum-save-interval" and printed only when it matches ^[0-9]+$,
@@ -746,7 +747,7 @@ Feature: tmux integration (CS-TMUX)
     And a stored notice (F4c's --pin writes "<cache root>/restore-notice.json", 0600, {"v": 1, "stamp",
       "n", "m", "k", "lifetimes", "at"}, and the tmux global option @claude-sandbox-notice) is printed,
       on stderr and before anything else, by every command the operator types: "tmux restore" in every
-      form (plain, --from, --drop, --list, --dry-run [--all]) and a hand launch, attach or join in a
+      form (plain, --from, --drop, --list, --all, --dry-run [--all]) and a hand launch, attach or join in a
       terminal (stderr is a terminal; not headless, not --detach); a launch or attach a restore
       started prints nothing
     And it is CLAIMED only by such a command running inside tmux (TMUX set): the file is renamed aside,
@@ -824,13 +825,13 @@ Feature: tmux integration (CS-TMUX)
   # lock held until the new session is up. Plan 10 § 4/§ 5 as amended by
   # 11 § 6/7/8, 12 § 1/2/5 and 13 § 4. The hook forms (--pin, --resurrected,
   # --rearm) and writing the sparse notice are F4c's; --all without --dry-run
-  # is F4d's.
+  # is F4d's (CS-TMUX-069).
 
   Scenario: CS-TMUX-052 refusals, and which row a plain or --from restore reads
     Given "claude-sandbox tmux restore [--from <save>]" or "--drop"
     Then inside a sandbox, or without TMUX_PANE (outside tmux), it exits 2 with one line
-    And "--drop" with any other flag, "--all" without "--dry-run" or "--list", and "--list" with
-      anything but "--all" exit 2
+    And "--drop" with any other flag, and "--list" with anything but "--all", exit 2 ("--all" alone,
+      or with "--from", is F4d's, CS-TMUX-069)
     And the pane's coordinates, server and mark come from one bounded "tmux display-message -p -t
       $TMUX_PANE"; tmux not answering exits 2
     And the row is the pane's own PENDING mark, else the row at the pane's coordinates in "last"'s
@@ -1098,3 +1099,50 @@ Feature: tmux integration (CS-TMUX)
       then last, so active rows still come back and pending rows that sat at a shell drop out at the
       next save; without --pin, typed restores read last and --rearm does nothing; without both,
       typed restores read last
+
+  # ---- F4d: arm a chosen save into the panes that exist ----
+  #
+  # After a bad restore the windows are usually there, as shells. "tmux restore
+  # --all [--from <save>]" brings their sessions back without a fresh tmux
+  # server: for every row of the chosen save it finds the pane at the row's
+  # coordinates, proves it is idle at a shell in its saved place, gives it the
+  # row as a pending mark and types the restore into it; each armed pane then
+  # restores itself (CS-TMUX-052..062), one start at a time. It is the only
+  # form that touches panes it did not create, so it is typed by the operator
+  # only, never run by a hook. Plan 10 § 7 as amended by 12 § 1.
+
+  Scenario: CS-TMUX-069 --all arms a chosen save into existing idle panes
+    Given "claude-sandbox tmux restore --all [--from <save>]" typed by the operator on the host, in
+      tmux or not (it claims the notice like every typed form, CS-TMUX-050)
+    Then one bounded "tmux list-panes -a" gives each pane's id, coordinates, the server, its current
+      command and path, whether it is in a mode (copy mode), synchronized, dead, the pane a client
+      looks at (pane, window and session active and attached), and its mark (last); no answer exits 2
+    And the save is chosen as CS-TMUX-049 says ("previous" against the listed server); a save without
+      a record, or one that cannot be read, is one line and exit 0; a sparse save prints CS-TMUX-050's
+      line first; its state file is read with CS-TMUX-046's checks for each pane's saved directory
+    And for each row, in order, the first that applies decides, and nothing is touched before step 7:
+      | # | condition                                                                        | outcome |
+      | 1 | the row fails CS-TMUX-046's checks                                               | skipped, naming the field |
+      | 2 | no pane at the row's coordinates, or the state file has no line for them, or the pane's path is not the saved one (CS-TMUX-066's comparison: field 8 unescaped, symlinks resolved; an active row's must be its project or cwdRoot) | skipped as missing or moved; the whole-layout procedures follow the list |
+      | 3 | the pane runs claude-sandbox, is the pane the command runs in, is dead, holds an active mark or one that does not parse, or a pending mark for another session (not the row's 64-hex containerId, else conversation, else container) | skipped as busy |
+      | 4 | an active mark for the row's container id or conversation is in another pane running claude-sandbox | skipped as on screen |
+      | 5 | CS-TMUX-051's decision for the row, over the dry run's read-only probes, is final (clear) | not armed; its line |
+      | 6 | one bounded "tmux display-message -p -t <pane>" right before the mark finds any listed field changed | skipped as busy |
+      | 7 | otherwise | the row is set as the pane's PENDING mark (one bounded set-option -p), every field kept ("labelled" included, so only a labelled row reclaims its window, CS-TMUX-022) |
+    And an armed pane gets the keys "claude-sandbox tmux restore --resurrected" C-m (one bounded
+      send-keys) only when it is provably idle at a shell: its current command is the basename of
+      "tmux show -gv default-shell" (one bounded call for the run), it is in no mode, its window is not
+      synchronized, no client is looking at it, and its saved directory was compared (not empty, not a
+      lossy one CS-TMUX-066 cannot compare); otherwise it is marked only, with the reason and "type
+      claude-sandbox tmux restore in it"
+    And --resurrected is typed, never a plain restore, so an armed pane prints the sparse notice but
+      never claims it (plan 12 § 1); it reads its own pending mark first, so no pin is consulted
+    And every tmux call is bounded by CallTimeout (1 s) in its own process group; a failed call skips
+      that pane (a failed send-keys leaves it marked)
+    And it prints one line per row (the coordinates, the row's name, noun and conversation only once it
+      passed the checks, and the outcome), then the counts; it exits 0 whatever it decided
+    And it takes no lock and starts nothing itself: each armed pane's restore takes the start lock
+      (CS-TMUX-060)
+    # Residual: keys typed into a shell that holds a half-typed command line join it; a pane a client
+    # looks at is marked only for that reason. The re-check narrows, and cannot close, the window
+    # between it and the send-keys.

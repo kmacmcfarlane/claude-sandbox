@@ -633,6 +633,7 @@ claude-sandbox tmux restore --list            # the saves of the last 7 days (--
 claude-sandbox tmux restore --dry-run         # in a pane: what a restore would do there
 claude-sandbox tmux restore --dry-run --all   # anywhere: every pane of the save
 claude-sandbox tmux restore --dry-run --all --from previous
+claude-sandbox tmux restore --all --from previous   # arm that save into the panes that exist
 ```
 
 It reads the saves where resurrect keeps them: `@resurrect-dir` (with `$HOME`, `$HOSTNAME` and
@@ -643,7 +644,8 @@ It reads the saves where resurrect keeps them: `@resurrect-dir` (with `$HOME`, `
   <time>`), collapsing consecutive saves that hold the same sandbox sessions into one line: the
   stamp, its time, how many saves, `N sandbox panes (a active, p pending)`, `last` on the save
   the `last` link points at, and `sparse (had M)` (below). A save without a sidecar (the hook
-  was not wired then) says `no record`. It ends with how to use a stamp and the two ways to
+  was not wired then) says `no record`. It ends with how to use a stamp (in one pane, as a
+  preview of every pane, and armed into every pane with `--all --from`), the two ways to
   restore a whole layout from an earlier save, with the stamp and dir filled in — in the running
   server (autosave off, `ln -sf tmux_resurrect_<stamp>.txt <dir>/last`, `prefix + C-r`, the
   autosave interval put back as it was), or a fresh server (`systemctl --user stop
@@ -713,6 +715,24 @@ never more than 60 s (said after the session, not into it). A resumed session th
 conversation (a conversation missing from that config dir, a claude that failed) gets the pending
 row back, with one line saying so. Exit status: 0 for every decided outcome, the session's own
 once one ran. Spec: `spec/tmux.feature` CS-TMUX-052..063.
+
+**Arming a save into the panes that exist.** After a bad restore the windows are usually back as
+shells. `claude-sandbox tmux restore --all [--from SAVE]` (typed by you, in tmux or not; never
+run by a hook) goes through every row of the save and, for the pane of the running tmux server
+at the row's coordinates, gives it the row as a *pending* mark and types `claude-sandbox tmux
+restore --resurrected` into it — each pane then restores itself as above, one start at a time.
+Preview it first with `--dry-run --all --from SAVE`. A row is skipped, touching nothing, when it
+fails the checks, has no pane at its coordinates or the pane is not in the directory the save
+recorded (the whole-layout commands are printed after the list), when the pane runs
+claude-sandbox or holds another session's mark (or is the pane you typed it in), when the
+session is already on screen in another pane, or when the decision table's answer is final (a
+ralph run, a join, the conversation open elsewhere). An armed pane is typed into only when it is
+provably idle at a shell — running tmux's `default-shell`, not in copy mode, not
+synchronized, not the pane a client is looking at, and its saved directory compared — otherwise
+it is marked only and the line says why; type `claude-sandbox tmux restore` in it yourself. Every
+field of the row is kept, so a window that row had named is reclaimed by the restore (and only
+then). It prints one line per row and the counts, and exits 0. Spec: `spec/tmux.feature`
+CS-TMUX-069.
 
 ### Restoring unattended (the resurrect hooks)
 

@@ -126,7 +126,7 @@ var _ = Describe("tmux restore, read-only (CS-TMUX-045..051)", func() {
 			for _, args := range [][]string{
 				{"tmux", "restore", "--drop", "--from", "last"},
 				{"tmux", "restore", "--drop", "--dry-run"},
-				{"tmux", "restore", "--all"},
+				{"tmux", "restore", "--all", "--drop"},
 				{"tmux", "restore", "--list", "--drop"},
 			} {
 				f.errw.Reset()
