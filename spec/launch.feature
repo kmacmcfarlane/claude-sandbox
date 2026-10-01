@@ -2179,5 +2179,8 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       file and "not a regular file", before any image work or docker create
     And the same holds for a character device or a socket there
     When the launcher attaches to or joins a session instead
-    Then nothing waits on the file: the drift check cannot compute the hash
-      and treats it as for any uncomputable hash
+    Then nothing waits on the file: the drift check cannot compute the hash,
+      prints "WARNING: cannot compute the current configuration for the drift
+      check: <error naming the file>" (the CS-IMG-074 precedent), and reports
+      drift as for any uncomputable hash (a prompt, or exit 3 with no
+      terminal; --allow-config-drift attaches or joins)

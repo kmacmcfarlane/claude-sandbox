@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -117,6 +118,8 @@ var _ = Describe("cascade.ReadRegularFile (CS-CASC-047, CS-LNCH-172)", func() {
 		bounded(func() { _, err = cascade.ReadConfigFiles(append(files, fifo)) })
 		Expect(err).To(MatchError(ContainSubstring(fifo)))
 		Expect(err).To(MatchError(ContainSubstring("not a regular file")))
+		Expect(strings.Count(err.Error(), fifo)).To(Equal(1), "the path prints once: %v", err)
+		Expect(errors.Is(err, cascade.ErrNotRegular)).To(BeTrue())
 		bounded(func() { _, err = cascade.Load(append(files, fifo)) })
 		Expect(err).To(MatchError(ContainSubstring(fifo)))
 	})

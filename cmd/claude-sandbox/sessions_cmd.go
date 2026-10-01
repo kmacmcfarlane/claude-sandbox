@@ -508,8 +508,12 @@ func wouldBeFingerprint(env *Env, projectDir string, f *launchFlags, cfg *cascad
 		Out: io.Discard, Err: io.Discard,
 	})
 	if err != nil {
-		// Without a comparable hash, drift cannot be judged; confirmDrift treats
-		// an empty want-hash as "no opinion" rather than blocking the attach.
+		// Without a comparable hash, confirmDrift reports drift (a prompt, or
+		// exit 3 without a terminal) against a labelled container. Name the
+		// cause, as for the Dockerfile above: an env file that is a FIFO or
+		// otherwise unreadable (CS-LNCH-172) is skipped by the lint and the
+		// override notice, so this line is the only place it is named.
+		fmt.Fprintf(env.Err, "WARNING: cannot compute the current configuration for the drift check: %v\n", err)
 		return "", nil
 	}
 	return plan.ConfigHash, plan.ConfigInputs

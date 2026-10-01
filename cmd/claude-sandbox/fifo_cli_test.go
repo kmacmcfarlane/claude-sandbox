@@ -13,6 +13,8 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
+	"github.com/kmacmcfarlane/claude-sandbox/internal/prompt"
 )
 
 // plantLaunchFIFO makes a FIFO at path; cleanup opens it for writing
@@ -67,5 +69,39 @@ var _ = Describe("a FIFO at a launch-config file never hangs a launch (CS-CASC-0
 			Expect(c.Args).NotTo(ContainElement("build"), "no image work")
 			Expect(c.Args).NotTo(ContainElement("buildx"), "no image work")
 		}
+	})
+
+	Describe("CS-LNCH-172: attach and join with a FIFO env file", func() {
+		var env string
+		BeforeEach(func() {
+			env = filepath.Join(f.proj, ".claude-sandbox", "env")
+			plantLaunchFIFO(env)
+			f.fake.On("docker ps", psRowFull("cs-a", "Up 1 hour", f.proj, "otter", "", "stalehash1234", "[]")+"\n", nil)
+			f.fake.On("docker top", "PID  COMMAND\n1  claude\n", nil)
+			f.env.Prompter = &prompt.Scripted{IsTTY: false}
+		})
+
+		DescribeTable("the drift check returns at once and names the file, then reports drift as for any uncomputable hash",
+			func(flag string) {
+				Expect(runBounded(f, flag)).To(Equal(3), "drift needs a decision; no terminal")
+				Expect(f.errw.String()).To(ContainSubstring("WARNING: cannot compute the current configuration for the drift check:"))
+				Expect(f.errw.String()).To(ContainSubstring(env))
+				Expect(f.errw.String()).To(ContainSubstring("not a regular file"))
+				Expect(f.errw.String()).To(ContainSubstring("different configuration"))
+				Expect(createdAny(f)).To(BeFalse())
+			},
+			Entry("CS-LNCH-172: --attach", "--attach=otter"),
+			Entry("CS-LNCH-172: --join", "--join=otter"),
+		)
+
+		DescribeTable("with --allow-config-drift the session is reached, the FIFO never waited on",
+			func(flag, verb string) {
+				Expect(runBounded(f, flag, "--allow-config-drift")).To(Equal(0))
+				Expect(f.sessionLine()).To(HavePrefix("docker " + verb))
+				Expect(createdAny(f)).To(BeFalse())
+			},
+			Entry("CS-LNCH-172: --attach", "--attach=otter", "attach"),
+			Entry("CS-LNCH-172: --join", "--join=otter", "exec"),
+		)
 	})
 })

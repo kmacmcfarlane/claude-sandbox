@@ -6,8 +6,10 @@
 package cascade
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -177,6 +179,12 @@ func ReadConfigFiles(files []string) ([]ConfigFile, error) {
 	for _, f := range files {
 		raw, err := ReadRegularFile(f)
 		if err != nil {
+			// The *fs.PathError already names f; keep its cause only, so the
+			// path prints once (errors.Is still sees the cause).
+			var pe *fs.PathError
+			if errors.As(err, &pe) && pe.Path == f {
+				err = pe.Err
+			}
 			return nil, fmt.Errorf("cascade: reading %s: %w", f, err)
 		}
 		out = append(out, ConfigFile{Path: f, Content: raw})

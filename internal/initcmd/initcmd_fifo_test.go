@@ -6,6 +6,7 @@ package initcmd_test
 // fails init at once naming it, never hangs it.
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -15,7 +16,24 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/kmacmcfarlane/claude-sandbox/internal/initcmd"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/prompt"
 )
+
+// rewritingPrompter answers Enter (inherit) and, on its first question,
+// rewrites path: a file changed after init's snapshot.
+type rewritingPrompter struct {
+	*prompt.Scripted
+	path, content string
+	rewrote       bool
+}
+
+func (p *rewritingPrompter) Ask(preamble, question string, d time.Duration) string {
+	if !p.rewrote {
+		Expect(os.WriteFile(p.path, []byte(p.content), 0o644)).To(Succeed())
+		p.rewrote = true
+	}
+	return p.Scripted.Ask(preamble, question, d)
+}
 
 func plantInitFIFO(path string) {
 	mkdir(filepath.Dir(path))
@@ -73,16 +91,26 @@ var _ = Describe("CS-INIT-033: init reads the upstream configs once, without blo
 		Expect(err).To(MatchError(ContainSubstring(df)))
 	})
 
-	It("CS-INIT-033: the inherited value, its source and the layout value come from one upstream snapshot", func() {
+	It("CS-INIT-033: the layout value comes from the same upstream snapshot as the prompt, not a second read", func() {
 		up := filepath.Join(ws, ".claude-sandbox", "config.yaml")
 		write(up, "trackInHost: true\n")
-		r := &run{}
-		Expect(initBounded(r, proj, initcmd.Flags{Yes: true})).To(Succeed())
+		// The upstream file is rewritten after init read it (while the
+		// prompt is up). A second read for the layout value would see false
+		// and set up the sidecar (its .gitignore, CS-LAY-004).
+		p := &rewritingPrompter{Scripted: &prompt.Scripted{IsTTY: true}, path: up, content: "trackInHost: false\n"}
+		var out, errOut bytes.Buffer
+		done := make(chan error, 1)
+		go func() {
+			defer GinkgoRecover()
+			done <- initcmd.Run(proj, initcmd.Flags{}, initcmd.Deps{Runner: nonGitFake(), Prompter: p, Out: &out, Err: &errOut})
+		}()
+		var err error
+		Eventually(done, 5*time.Second).Should(Receive(&err))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(p.rewrote).To(BeTrue(), "the inherited-value prompt ran")
 		cfg := read(filepath.Join(proj, ".claude-sandbox", "config.yaml"))
 		Expect(cfg).To(ContainSubstring("# trackInHost: true   # inherited from " + up))
-		// The layout ran with the inherited true: no sidecar repo or its
-		// .gitignore, which trackInHost false would set up (CS-LAY-004).
 		Expect(filepath.Join(proj, ".claude-sandbox", ".gitignore")).NotTo(BeAnExistingFile())
-		Expect(r.out.String()).NotTo(ContainSubstring("Initialized sidecar"))
+		Expect(out.String()).NotTo(ContainSubstring("Initialized sidecar"))
 	})
 })
