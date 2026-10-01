@@ -981,11 +981,12 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 	if err != nil {
 		return err
 	}
-	if decision.Action != actionQuit && !headless && !f.Detach && env.restore == nil {
+	if decision.Action != actionQuit && !headless && !f.Detach && env.restore == nil && env.isTerminal(env.Err) {
 		// CS-TMUX-050: a hand launch, attach or join in a terminal prints a
 		// pending sparse-restore notice before its session, and claims it
 		// inside tmux. A launch a restore started prints nothing (its pane
-		// already did).
+		// already did); nor does a scripted one whose stderr is no terminal
+		// (nobody would read it).
 		claimNotice(env)
 	}
 	switch decision.Action {

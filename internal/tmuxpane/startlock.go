@@ -114,13 +114,19 @@ func (l *StartLock) Held() bool {
 }
 
 // ReadStartLockHolder is the holder text a waiter prints: a separate
-// O_RDONLY|O_NOFOLLOW open, at most 256 bytes, printable characters only.
+// O_RDONLY|O_NOFOLLOW|O_NONBLOCK open of a regular file, at most 256 bytes,
+// printable characters only.
 func ReadStartLockHolder(path string) string {
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	// O_NONBLOCK: a FIFO swapped in must not block the waiter in open(),
+	// where Ctrl-C could not end it.
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return ""
 	}
 	defer f.Close()
+	if fi, err := f.Stat(); err != nil || !fi.Mode().IsRegular() {
+		return ""
+	}
 	b, _ := io.ReadAll(io.LimitReader(f, holderMax))
 	s := strings.Map(func(r rune) rune {
 		if r == unicode.ReplacementChar || !unicode.IsPrint(r) {

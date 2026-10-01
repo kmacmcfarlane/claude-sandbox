@@ -575,10 +575,13 @@ Feature: tmux integration (CS-TMUX)
       "n", "m", "k", "lifetimes", "at"}, and the tmux global option @claude-sandbox-notice) is printed,
       on stderr and before anything else, by every command the operator types: "tmux restore" in every
       form (plain, --from, --drop, --list, --dry-run [--all]) and a hand launch, attach or join in a
-      terminal (not headless, not --detach); a launch or attach a restore started prints nothing
+      terminal (stderr is a terminal; not headless, not --detach); a launch or attach a restore
+      started prints nothing
     And it is CLAIMED only by such a command running inside tmux (TMUX set): the file is renamed aside,
       the notice printed once, one bounded "tmux set -gu @claude-sandbox-notice" run, and the renamed file
       removed — or renamed back when that unset fails, so the claim completes or does not happen
+    And a "<notice>.claimed-<pid>" file whose claimant no longer runs (killed between the rename and
+      the remove) is removed by the next claimant
     And outside tmux the notice is printed and the file and the option stay; a notice that does not
       read as one (O_NOFOLLOW, a regular file of the user's, at most 4 KiB, "v" 1, a save stamp) is
       ignored, and one older than 7 days is removed unprinted
@@ -629,8 +632,12 @@ Feature: tmux integration (CS-TMUX)
       still holds a created container labelled with the conversation (CS-SESS-065 rule a), so an
       orphaned reservation — a launcher that died between its create and its start — or a launch about
       to start names it at row 15, and the row stays PENDING ("<name> is being started in <holder>
-      (created, not started yet); retry in a minute"), never cleared: the next launch removes a
-      reservation older than 60 s (CS-SESS-052), and the retry then resumes
+      (created, not started yet); retry in a minute"), never cleared
+    And a reservation older than the reclaim age (60 s, CS-SESS-052) is an orphan and holds nothing:
+      the guard is run without it, and a resume (row 18) names it in a note ("<name> was created for
+      this conversation but never started (an interrupted launch); the resume's launch removes it") —
+      the launch removes it under the launch lock before its own guard runs, so a pane whose launcher
+      died between create and start is never pending forever
     # Row 6 (the sparse line) is not a decision: CS-TMUX-050's line is printed before the rows and the
     # decisions go on. The acting restore (F4b) reuses this table and adds the effects.
 
@@ -726,6 +733,8 @@ Feature: tmux integration (CS-TMUX)
     And a launch that fails before "docker start" — an image build, a refused env key, the launch lock,
       or the resume guard's exit 4 (CS-SESS-065; a hand launch raced the restore) — keeps the row
       PENDING: the launch's error, then the retry and manual commands, and the launch's exit status
+    And so does a session child that could not be run, or a reservation that never started
+      (CS-TMUX-018 puts the row back): docker's error, then the retry and manual commands
 
   Scenario: CS-TMUX-059 the notes about flags a resume does not replay
     Given a resume whose row names unreplayed flags, or has "flagsUnknown", or no recorded
@@ -741,7 +750,8 @@ Feature: tmux integration (CS-TMUX)
       (LOCK_EX|LOCK_NB) polled on an O_RDWR|O_CREAT|O_NOFOLLOW 0600 fd, with NO deadline
     And while it waits it prints "waiting for <holder> to start (Ctrl-C to skip)…" once, where the holder
       is the text the current holder wrote through its own locked fd ("s:w.p (<noun>), pid N"), read by
-      a separate O_RDONLY|O_NOFOLLOW open, at most 256 bytes, printable characters only
+      a separate O_RDONLY|O_NOFOLLOW|O_NONBLOCK open of a regular file (a FIFO never blocks the
+      waiter), at most 256 bytes, printable characters only
     And Ctrl-C while waiting (for docker or the lock) leaves the row pending and exits 130
     And the holder truncates its text before it unlocks
     And it is released: as soon as a row that starts nothing is decided; for an attach once the pane
@@ -761,7 +771,10 @@ Feature: tmux integration (CS-TMUX)
     And at up it waits the gap of answer 50 d, then releases the start lock: none on a linked
       ~/.claude.json or a relocated CLAUDE_CONFIG_DIR (LinkedGap, RelocatedGap 0 s), 10 s otherwise
       (ConfigJSONGap, LegacyGap); a session that ends during the gap releases it at once
-    And the lock is released at ReadyCap (60 s) whatever the session does, with one line
+    And the lock is released at ReadyCap (60 s) whatever the session does; the line saying so is
+      printed after the session returns, never into the running TUI
+    And while the 5 s fallback stands, up always comes first, so ReadyCap is a backstop that cannot
+      fire; it matters only if the fallback is dropped after the host check below
     And after the release the watcher polls every 1 s until "resumed" (a record at the class naming the
       conversation), the session child's return, or EarlyEnd (60 s after the start)
     # HOST CHECK OWED (plan 11 § 8; not verified, not run in CI): whether Claude Code 2.1.28x writes its

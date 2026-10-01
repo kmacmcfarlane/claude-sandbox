@@ -12,6 +12,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -61,6 +62,10 @@ var _ = Describe("tmux restore, one pane (CS-TMUX-052..063)", func() {
 		f.env.ResurrectDir = dir
 		f.env.Now = func() time.Time { return base.Add(time.Hour) }
 		lockPath = filepath.Join(f.cache, tmuxpane.StartLockFile)
+		// Never the real SIGINT handler under go test (it panics unset).
+		f.env.interrupt = func() (context.Context, context.CancelFunc) { return context.WithCancel(context.Background()) }
+		// The notice is a terminal's (CS-TMUX-050).
+		f.env.IsTerminal = func(io.Writer) bool { return true }
 		// A relocated config dir: no gap after up (answer 50 d).
 		cfgDir = filepath.Join(f.home, "work-claude")
 		Expect(os.MkdirAll(filepath.Join(cfgDir, "sessions"), 0o700)).To(Succeed())
@@ -379,6 +384,7 @@ var _ = Describe("tmux restore, one pane (CS-TMUX-052..063)", func() {
 			g.envmap["TMUX"], g.envmap["TMUX_PANE"] = "x", "%7"
 			g.envmap["CLAUDE_CONFIG_DIR"] = cfgDir
 			g.env.ResurrectDir = dir
+			g.env.interrupt = f.env.interrupt
 			g.fake.On("tmux display-message -p -t %7", "main\t2\t0\t1\t2\t"+row(func(m *tmuxpane.Mark) { m.ConfigDirEnv = nil }).JSON()+"\n", nil)
 			g.fake.On("docker version", "29.3.0\n", nil)
 			streamEvents(g.fake, dockerEvent("die", "0"))
@@ -413,6 +419,36 @@ var _ = Describe("tmux restore, one pane (CS-TMUX-052..063)", func() {
 			Expect(f.run("tmux", "restore")).To(Equal(0), f.errw.String())
 			Expect(tmuxLines()[len(tmuxLines())-1]).To(Equal(unset))
 			Expect(f.out.String()).NotTo(ContainSubstring("ended before it was up"))
+		})
+
+		It("CS-TMUX-058: a reservation that never started puts the row back with the retry and manual commands", func() {
+			pane(row(nil).JSON())
+			f.fake.On("docker inspect", "created 2026-09-29T12:00:00Z\n", nil)
+			f.fake.On("docker start -ai", "", execx.Fail(1))
+			Expect(f.run("tmux", "restore")).To(Equal(1))
+			ms := marksSet()
+			Expect(ms[len(ms)-1]).To(Equal(ms[0]), "CS-TMUX-018: the pending row went back")
+			Expect(unsets()).To(BeZero())
+			out := f.out.String()
+			Expect(out).To(ContainSubstring("did not start (see above)"))
+			Expect(out).To(ContainSubstring("The pane stays pending. Retry: claude-sandbox tmux restore"))
+			Expect(out).To(ContainSubstring("By hand:  cd " + f.proj))
+			Expect(out).NotTo(ContainSubstring("ended before it was up"))
+		})
+
+		It("CS-TMUX-061: the ReadyCap line is printed after the session, never into it", func() {
+			tmuxpane.UpFallback, tmuxpane.ReadyCap = time.Hour, 20*time.Millisecond
+			pane(row(nil).JSON())
+			streamEvents2()
+			var during string
+			f.fake.OnFunc("docker start -ai", func(execx.Cmd) (string, error) {
+				time.Sleep(80 * time.Millisecond)
+				during = f.errw.String() + f.out.String()
+				return "", nil
+			})
+			f.run("tmux", "restore")
+			Expect(during).NotTo(ContainSubstring("was not up after"))
+			Expect(f.out.String()).To(ContainSubstring("'fix the build' was not up after 0 s; the next restore was let start then"))
 		})
 
 		It("CS-TMUX-058: the launch's resume guard refusing (exit 4) keeps the row pending", func() {
@@ -465,6 +501,20 @@ var _ = Describe("tmux restore, one pane (CS-TMUX-052..063)", func() {
 		Expect(f.out.String()).To(ContainSubstring("The pane stays pending."))
 		Expect(unsets()).To(BeZero())
 		Expect(f.fake.CommandLines()).NotTo(ContainElement(HavePrefix("docker create")))
+	})
+
+	It("CS-TMUX-051, CS-TMUX-058: an orphaned reservation older than 60 s does not hold the row; the resume's launch removes it", func() {
+		pane(row(nil).JSON())
+		orphan := "claude-sandbox-x-proj-abc123-murre"
+		f.fake.On("docker ps", psRowResume(orphan, f.proj, "claude", "murre", "12", "created",
+			base, cfgDir+"/sessions", markConv)+"\n", nil) // an hour before the clock
+		streamEvents(f.fake, dockerEvent("die", "0"))
+		f.fake.On("docker start -ai", "", nil)
+		Expect(f.run("tmux", "restore")).To(Equal(0), f.errw.String())
+		Expect(f.out.String()).To(ContainSubstring("note: " + orphan + " was created for this conversation but never started (an interrupted launch); the resume's launch removes it"))
+		Expect(f.fake.CommandLines()).To(ContainElement("docker rm " + orphan))
+		Expect(indexOf("docker rm " + orphan)).To(BeNumerically("<", indexOf("docker create")))
+		Expect(f.sessionLine()).To(HavePrefix("docker start -ai"))
 	})
 
 	Describe("CS-TMUX-063: --drop", func() {
@@ -535,12 +585,23 @@ var _ = Describe("tmux restore, one pane (CS-TMUX-052..063)", func() {
 			Expect(filepath.Join(f.cache, tmuxpane.NoticeFile)).NotTo(BeAnExistingFile())
 
 			g := newCLIFixture()
+			g.env.IsTerminal = func(io.Writer) bool { return true }
 			notice(g)
 			streamEvents(g.fake, dockerEvent("die", "0"))
 			Expect(g.run()).To(Equal(0), g.errw.String())
 			Expect(g.errw.String()).To(ContainSubstring(text))
 			Expect(filepath.Join(g.cache, tmuxpane.NoticeFile)).To(BeAnExistingFile())
 			Expect(g.fake.CommandLines()).NotTo(ContainElement(HavePrefix("tmux")))
+		})
+
+		It("CS-TMUX-050: a scripted launch whose stderr is no terminal neither prints nor claims it", func() {
+			notice(f)
+			f.env.IsTerminal = func(io.Writer) bool { return false }
+			streamEvents(f.fake, dockerEvent("die", "0"))
+			Expect(f.run()).To(Equal(0), f.errw.String())
+			Expect(f.errw.String()).NotTo(ContainSubstring(text))
+			Expect(f.fake.CommandLines()).NotTo(ContainElement("tmux set -gu @claude-sandbox-notice"))
+			Expect(filepath.Join(f.cache, tmuxpane.NoticeFile)).To(BeAnExistingFile())
 		})
 
 		It("CS-TMUX-050: a resume a restore started prints nothing more; --detach and headless never print it", func() {

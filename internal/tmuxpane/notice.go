@@ -11,10 +11,13 @@ package tmuxpane
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -138,6 +141,7 @@ func ClaimNotice(o ClaimOptions) bool {
 		return false
 	}
 	path := filepath.Join(o.CacheDir, NoticeFile)
+	pruneClaimed(path)
 	n, ok := readNotice(path)
 	if !ok {
 		return false
@@ -161,4 +165,24 @@ func ClaimNotice(o ClaimOptions) bool {
 	}
 	os.Remove(aside)
 	return true
+}
+
+// pruneClaimed removes "<notice>.claimed-<pid>" files whose claimant is gone
+// (killed between its rename and its remove): the name carries the pid, so a
+// file is stale when that process no longer exists. The renamed file keeps
+// the notice's own mtime, so its age says nothing about the claim.
+func pruneClaimed(path string) {
+	matches, _ := filepath.Glob(path + ".claimed-*")
+	for _, m := range matches {
+		pid, err := strconv.Atoi(strings.TrimPrefix(m, path+".claimed-"))
+		if err != nil || pid <= 0 || pid == os.Getpid() {
+			continue
+		}
+		if fi, err := os.Lstat(m); err != nil || !fi.Mode().IsRegular() {
+			continue
+		}
+		if errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) {
+			os.Remove(m)
+		}
+	}
 }

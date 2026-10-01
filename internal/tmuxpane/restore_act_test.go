@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -77,6 +78,14 @@ var _ = Describe("tmux restore: the start lock (CS-TMUX-060)", func() {
 		Expect(h).NotTo(ContainSubstring("\x1b"))
 		Expect(len(h)).To(BeNumerically("<=", 256))
 	})
+
+	It("CS-TMUX-060: a FIFO in the lock's place never blocks the waiter's read of the holder", func() {
+		Expect(os.MkdirAll(filepath.Dir(path), 0o700)).To(Succeed())
+		Expect(syscall.Mkfifo(path, 0o600)).To(Succeed())
+		done := make(chan string, 1)
+		go func() { done <- tmuxpane.ReadStartLockHolder(path) }()
+		Eventually(done).Should(Receive(Equal("")))
+	})
 })
 
 var _ = Describe("tmux restore: claiming the sparse notice (CS-TMUX-050)", func() {
@@ -116,6 +125,16 @@ var _ = Describe("tmux restore: claiming the sparse notice (CS-TMUX-050)", func(
 		Expect(out.String()).To(Equal(line))
 		Expect(fake.Calls).To(BeEmpty())
 		Expect(noticePath()).To(BeAnExistingFile())
+	})
+
+	It("CS-TMUX-050: a file a killed claimant left aside is pruned; a live claimant's is kept", func() {
+		dead := filepath.Join(dir, tmuxpane.NoticeFile+".claimed-999999999")
+		live := filepath.Join(dir, fmt.Sprintf("%s.claimed-%d", tmuxpane.NoticeFile, os.Getppid()))
+		Expect(os.WriteFile(dead, []byte("{}"), 0o600)).To(Succeed())
+		Expect(os.WriteFile(live, []byte("{}"), 0o600)).To(Succeed())
+		claim(false)
+		Expect(dead).NotTo(BeAnExistingFile())
+		Expect(live).To(BeAnExistingFile())
 	})
 
 	It("CS-TMUX-050: a failed unset renames the file back", func() {

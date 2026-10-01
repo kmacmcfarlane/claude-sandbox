@@ -645,11 +645,11 @@ at least a third fewer, than the median of what the last save of each of the pre
 servers held (the saves right before it when no earlier server is known). After a bad restore
 continuum writes a sparse save every minute, so comparing with the previous few saves would go
 quiet exactly when it matters. A dry run prints one line before its decisions; ignore it if you
-closed those sessions on purpose. When a resurrect restore found its save sparse, the warning is
-also kept as a notice (`~/.cache/claude-sandbox/restore-notice.json` and the tmux option
-`@claude-sandbox-notice`): the next command you type — any `tmux restore`, or a launch, attach or
-join in a terminal — prints it once; inside tmux it also clears it (outside tmux it only prints, and
-leaves both). Spec: `spec/tmux.feature` CS-TMUX-045..051.
+closed those sessions on purpose. Once the resurrect hooks (still to come) find a restored save
+sparse, they will also keep the warning as a notice (`~/.cache/claude-sandbox/restore-notice.json`
+and the tmux option `@claude-sandbox-notice`); the next command you type — any `tmux restore`, or a
+launch, attach or join in a terminal — already prints such a notice once, and inside tmux also
+clears it (outside tmux it only prints, and leaves both). Spec: `spec/tmux.feature` CS-TMUX-045..051.
 
 **Restoring a pane.** `claude-sandbox tmux restore`, typed in a pane, reads the pane's own pending
 mark, else the row `last` (or `--from SAVE`) holds at the pane's coordinates, and first marks the
@@ -663,15 +663,17 @@ decision table above:
 - **kept pending** (the line, `Retry: claude-sandbox tmux restore`, the exact manual command, and
   `--drop`): the project missing, docker not answering — it waits up to 120 s for docker first,
   so a restore typed right after boot works — a paused or restarting container, a check that
-  cannot tell, or the conversation held by a container that was created but never started (an
-  interrupted launch; the next launch removes it after 60 s);
+  cannot tell, or the conversation held by a container created less than 60 s ago but not started
+  yet (a launch in progress). One older than that is an interrupted launch's leftover: the restore
+  goes on to resume, and its launch removes it;
 - **attach**: the container still runs — `docker attach` by its full id, from the project, with its
   detach keys; a configuration that changed since is one note, never a prompt;
 - **resume**: the conversation in a new container, through the normal launch with
   `--new --worktree=<w>|--no-worktree [--model M] -- --resume <id> [--name N] <replayed flags>`,
   `CLAUDE_CONFIG_DIR` as the session had it and `PROJECT_DIR` ignored, never a prompt. Flags it
   does not replay are named in one line (names only). A launch that fails before the container
-  starts — the resume guard's exit 4 included — keeps the pane pending.
+  starts — the resume guard's exit 4 included, or a container that never started — keeps the pane
+  pending, with the retry and manual commands.
 
 Restores that start something run **one at a time** on `~/.cache/claude-sandbox/restore-start.lock`
 (not the launch lock): a second pane prints `waiting for <pane (noun), pid> to start (Ctrl-C to
@@ -680,7 +682,7 @@ releases the lock once its pane is marked; a resume once its claude is **up** �
 at its pid class, or 5 s of a running session (whether Claude Code writes the record before an
 interactive screen of `--resume` is not verified yet) — plus a pause of 10 s on a host whose
 `~/.claude.json` is not linked (`global-config migrate`) and whose `CLAUDE_CONFIG_DIR` is unset;
-never more than 60 s. A resumed session that ends within 60 s before its record names the
+never more than 60 s (said after the session, not into it). A resumed session that ends within 60 s before its record names the
 conversation (a conversation missing from that config dir, a claude that failed) gets the pending
 row back, with one line saying so. Exit status: 0 for every decided outcome, the session's own
 once one ran. Spec: `spec/tmux.feature` CS-TMUX-052..063.

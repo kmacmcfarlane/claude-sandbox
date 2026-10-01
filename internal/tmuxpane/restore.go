@@ -109,6 +109,10 @@ type GuardResult struct {
 	HolderReserved bool
 	HostPID        int
 	Reason         string
+	// Orphans name reservations for the conversation older than the
+	// reclaim age (60 s, CS-SESS-052): they hold nothing, and the resume's
+	// launch removes them under the launch lock.
+	Orphans []string
 }
 
 // Probes are Decide's read-only looks at the world, called lazily in table
@@ -219,7 +223,8 @@ func Decide(row *Row, coords string, p Probes) Decision {
 		// The guard holds a created, resume-labelled container with no
 		// record yet; clearing the row would lose it if that reservation is
 		// an orphan (the next launch removes one older than 60 s).
-		return pending(15, name+" is being started in "+g.Holder+" (created, not started yet); retry in a minute: claude-sandbox tmux restore")
+		return pending(15, name+" is being started in "+g.Holder+" (created, not started yet); retry in a minute: claude-sandbox tmux restore "+
+			"(a reservation that never starts is removed after 60 s, and the retry then resumes)")
 	case g.Open && g.Holder != "":
 		line := name + " is already running in " + g.Holder
 		if g.AttachCommand != "" {
@@ -235,6 +240,9 @@ func Decide(row *Row, coords string, p Probes) Decision {
 	d := Decision{Row: 18, Outcome: OutcomeResume, Manual: manual, Gap: p.Gap(m),
 		Line: "resume " + name + " (" + m.Conversation + ") in a new container"}
 	d.Notes = ResumeNotes(m)
+	for _, o := range g.Orphans {
+		d.Notes = append(d.Notes, o+" was created for this conversation but never started (an interrupted launch); the resume's launch removes it")
+	}
 	return d
 }
 

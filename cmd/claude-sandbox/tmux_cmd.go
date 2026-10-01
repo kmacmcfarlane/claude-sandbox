@@ -317,11 +317,31 @@ func restoreProbes(env *Env, self string, panes []tmuxpane.PaneInfo) *tmuxpane.R
 			}
 		}
 		id := strings.ToLower(m.Conversation)
+		// A reservation older than the reclaim age is an orphan: the launch
+		// the resume runs removes it under the launch lock before its own
+		// guard runs (CS-SESS-052), so it must not hold the row here
+		// either — or a pane whose launcher died between create and start
+		// would stay pending forever (CS-TMUX-051 row 15).
+		stale := map[string]bool{}
+		for _, s := range sessions.Stale(found, env.now(), staleReservationAge) {
+			stale[s.Name] = true
+		}
+		var orphans []string
+		var sess []sessions.Session
+		for _, s := range found {
+			if stale[s.Name] {
+				if strings.EqualFold(s.Resume, id) {
+					orphans = append(orphans, s.Name)
+				}
+				continue
+			}
+			sess = append(sess, s)
+		}
 		v := resumeguard.Check{
-			ID: id, Sessions: found, DiscoveryErr: derr, Runner: env.Runner,
+			ID: id, Sessions: sess, DiscoveryErr: derr, Runner: env.Runner,
 			Home: home, ConfigDir: cfg, ProcRoot: env.ProcRoot,
 		}.Run()
-		g := tmuxpane.GuardResult{Open: v.Open, HostPID: v.HostPID, Reason: v.Reason}
+		g := tmuxpane.GuardResult{Open: v.Open, HostPID: v.HostPID, Reason: v.Reason, Orphans: orphans}
 		if h := v.Holder; h != nil {
 			g.Holder = h.Name
 			// A created, never-started reservation holds the id for the
@@ -640,6 +660,11 @@ var (
 // environment (execx), and resolves a bare env-file line against it. A
 // variable so tests never change their own process environment.
 var restoreSetenv = func(k string, v *string) {
+	if testing.Testing() {
+		// The cacheDir rule: a forgotten fixture fails loudly instead of
+		// changing the test process's own environment.
+		panic("a test reached the real os.Setenv backstop; replace restoreSetenv")
+	}
 	if v == nil {
 		os.Unsetenv(k)
 		return
@@ -651,6 +676,9 @@ var restoreSetenv = func(k string, v *string) {
 func (e *Env) interruptContext() (context.Context, context.CancelFunc) {
 	if e.interrupt != nil {
 		return e.interrupt()
+	}
+	if testing.Testing() {
+		panic("a test reached the real SIGINT handler; set Env.interrupt")
 	}
 	return signal.NotifyContext(context.Background(), os.Interrupt)
 }
@@ -1015,7 +1043,7 @@ func restoreResume(env *Env, p *actProbes, m tmuxpane.Mark, d tmuxpane.Decision,
 	id := strings.ToLower(m.Conversation)
 	name := tmuxpane.RowName(m)
 	var w *tmuxpane.Watcher
-	started := false
+	started, capped := false, false
 	hooks := &restoreHooks{prior: prior}
 	hooks.onReserved = func(plan *launch.Plan) (func(), func() bool) {
 		class, err := strconv.Atoi(plan.PIDClass)
@@ -1028,10 +1056,9 @@ func restoreResume(env *Env, p *actProbes, m tmuxpane.Mark, d tmuxpane.Decision,
 			w = tmuxpane.StartWatcher(tmuxpane.ReadyOptions{
 				RegistryDir: plan.RegistryDir, Class: class, Since: reserved, ID: id,
 				Gap: d.Gap, Release: p.release,
-				OnCap: func() {
-					fmt.Fprintf(env.Err, "claude-sandbox: '%s' is not up after %d s; the next restore may start now\n",
-						name, int(tmuxpane.ReadyCap/time.Second))
-				},
+				// Recorded, printed after the session: the TUI owns the
+				// terminal while it runs.
+				OnCap: func() { capped = true },
 			})
 		}
 		keep := func() bool {
@@ -1045,6 +1072,9 @@ func restoreResume(env *Env, p *actProbes, m tmuxpane.Mark, d tmuxpane.Decision,
 	err := runLaunch(renv, tmuxpane.ResumeArgs(m))
 	w.ChildReturned()
 	p.release()
+	if capped {
+		restoreSay(env, "'%s' was not up after %d s; the next restore was let start then", name, int(tmuxpane.ReadyCap/time.Second))
+	}
 	switch {
 	case !started:
 		// CS-TMUX-058: the launch failed before docker start (an image
@@ -1063,6 +1093,10 @@ func restoreResume(env *Env, p *actProbes, m tmuxpane.Mark, d tmuxpane.Decision,
 			fmt.Fprintf(env.Err, "Error: %v\n", err)
 			err = &execx.CodeError{Code: 2}
 		}
+		restorePending(env, fmt.Sprintf("the resume of '%s' (%s) did not start (see above)", name, id), d.Manual)
+	case !hooks.early && err != nil && !w.Up():
+		// The session child could not be run, or the reservation never
+		// started (CS-TMUX-018): the pending row went back; docker said why.
 		restorePending(env, fmt.Sprintf("the resume of '%s' (%s) did not start (see above)", name, id), d.Manual)
 	case hooks.early:
 		cfg := m.ConfigDir

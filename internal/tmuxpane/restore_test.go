@@ -205,9 +205,18 @@ var _ = Describe("tmux restore: the decision (CS-TMUX-051)", func() {
 			d := decide(row(nil))
 			Expect(d.Row).To(Equal(15), own)
 			Expect(d.Outcome).To(Equal(tmuxpane.OutcomePending), own)
-			Expect(d.Line).To(Equal("'fix the build' is being started in 'murre' (c2) (created, not started yet); retry in a minute: claude-sandbox tmux restore"), own)
+			Expect(d.Line).To(HavePrefix("'fix the build' is being started in 'murre' (c2) (created, not started yet); retry in a minute: claude-sandbox tmux restore"), own)
 			Expect(d.Manual).To(ContainSubstring("--resume " + convID))
 		}
+	})
+
+	It("CS-TMUX-051 row 18: an orphaned reservation (older than 60 s) does not hold the row; the resume names it", func() {
+		p.info.State = "created"
+		p.guard = tmuxpane.GuardResult{Orphans: []string{"c2"}}
+		d := decide(row(nil))
+		Expect(d.Row).To(Equal(18))
+		Expect(d.Outcome).To(Equal(tmuxpane.OutcomeResume))
+		Expect(d.Notes).To(ContainElement("c2 was created for this conversation but never started (an interrupted launch); the resume's launch removes it"))
 	})
 
 	It("CS-TMUX-061: the gap constants by global-config layout", func() {
