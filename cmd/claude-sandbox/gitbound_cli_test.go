@@ -98,4 +98,23 @@ var _ = Describe("bounded launch-path git calls (CS-LNCH-176)", func() {
 		Expect(f.errw.String()).To(ContainSubstring("treating " + f.proj + " as not a git repository."))
 		Expect(created(f)).To(BeTrue())
 	})
+
+	It("CS-LNCH-176: a requested worktree's GitRoot timeout lets an attach go on, with the warning; a join refuses", func() {
+		f := hungGitFixture()
+		f.fake.On("docker ps", psRow("cs-a", "Up 1 hour", f.proj, "otter")+"\n", nil)
+		f.fake.On("docker top", "PID  COMMAND\n1  claude\n", nil)
+		Expect(runWithin(f, "--worktree", "--attach=otter", "--allow-config-drift")).To(Equal(0), f.errw.String())
+		Expect(f.errw.String()).To(ContainSubstring("rev-parse --show-toplevel did not finish within 50ms"))
+		Expect(f.errw.String()).To(ContainSubstring("; attaching anyway: an attach starts no worktree."))
+		Expect(f.sessionLine()).To(HavePrefix("docker attach"))
+
+		g := hungGitFixture()
+		g.fake.On("docker ps", psRow("cs-a", "Up 1 hour", g.proj, "otter")+"\n", nil)
+		g.fake.On("docker top", "PID  COMMAND\n1  claude\n", nil)
+		Expect(runWithin(g, "--worktree", "--join=otter", "--allow-config-drift")).To(Equal(2))
+		Expect(g.errw.String()).To(ContainSubstring("Error: a worktree was requested, but"))
+		for _, l := range g.fake.CommandLines() {
+			Expect(l).NotTo(HavePrefix("docker exec"))
+		}
+	})
 })

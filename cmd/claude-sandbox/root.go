@@ -1031,6 +1031,10 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 			if err := wt.requireWorktreeGit(); err != nil {
 				return err
 			}
+		} else if wt.GitTimeout != nil {
+			// CS-LNCH-176: an attach uses no worktree, so it goes on, but
+			// the timeout is still said.
+			fmt.Fprintln(env.Err, execx.GitTimeoutWarning(wt.GitTimeout, "attaching anyway: an attach starts no worktree"))
 		}
 		done, aerr := joinExistingSession(env, projectDir, f, cfg, envFiles, decision, wt, linked)
 		if aerr != nil {

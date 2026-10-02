@@ -6,6 +6,7 @@ package layout_test
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -233,6 +234,35 @@ var _ = Describe("CS-LAY-025: .gitignore writes stay inside the project", func()
 		Expect(err).To(MatchError(ContainSubstring(sideGI + " is a symlink to " + filepath.Join(base, "newfile") + ", outside the project")))
 		Expect(err).NotTo(MatchError(ContainSubstring("path escapes")), "the CS-LAY-025 refusal, not os.Root's raw error")
 		Expect(filepath.Join(base, "newfile")).NotTo(BeAnExistingFile())
+	})
+
+	It("CS-LAY-025: a .claude-sandbox directory linked out of the project skips the whole layout, both modes, naming the directory; nothing is written there", func() {
+		for _, track := range []bool{false, true} {
+			out := filepath.Join(base, fmt.Sprintf("outside-%v", track))
+			Expect(os.MkdirAll(out, 0o755)).To(Succeed())
+			Expect(os.RemoveAll(sb)).To(Succeed())
+			Expect(os.Symlink(out, sb)).To(Succeed())
+			errOut.Reset()
+			fake = &execx.Fake{}
+			Expect(setup(track)).To(Succeed(), "track=%v", track)
+			Expect(errOut.String()).To(Equal("WARNING: " + sb + " is a symlink to " + out + ", outside the project " + proj +
+				"; skipping the layout setup (the temp/ and reports/ skeleton, the CLAUDE.md seed, the .gitignore entries and the sidecar git repo), which would write there.\n"))
+			ents, err := os.ReadDir(out)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(ents).To(BeEmpty(), "track=%v: nothing created outside", track)
+			Expect(hostGI).NotTo(BeAnExistingFile(), "no host .gitignore update either")
+			Expect(fake.Calls).To(BeEmpty(), "no git call")
+		}
+	})
+
+	It("CS-LAY-025: a .claude-sandbox directory linked inside the project is followed", func() {
+		in := filepath.Join(proj, "shared-sandbox")
+		Expect(os.MkdirAll(in, 0o755)).To(Succeed())
+		Expect(os.RemoveAll(sb)).To(Succeed())
+		Expect(os.Symlink(in, sb)).To(Succeed())
+		Expect(setup(false)).To(Succeed(), errOut.String())
+		Expect(filepath.Join(in, "temp")).To(BeADirectory())
+		Expect(read(filepath.Join(in, ".gitignore"))).To(ContainSubstring("temp/"))
 	})
 
 	It("CS-LAY-025: the writer opens through the project root, so a link re-pointed out after the check cannot write outside", func() {

@@ -228,22 +228,33 @@ func bakedSkip(rel string, d os.DirEntry) bool {
 	return strings.HasSuffix(name, "_test.go") || strings.HasSuffix(name, ".pyc") || strings.HasSuffix(name, ".pyo")
 }
 
-// Version computes the git-describe version of the repo checkout (CS-IMG-005),
-// "unknown" when git fails or prints nothing. The call is bounded (CS-IMG-076):
-// --dirty refreshes the index and reads every .gitignore, and a sandbox
-// working on this repository can write them, so a git that does not answer
-// within execx.GitTimeout is killed and the stamp is "unknown", with warning
-// naming the call.
+// Version computes the git-describe version of the repo checkout (CS-IMG-005):
+// "git describe --tags --always", plus "-dirty" when tracked files differ
+// from HEAD; "unknown" when git fails or prints nothing. Every call is bounded
+// (CS-IMG-076): a sandbox working on this repository can write its .git, so a
+// git that does not answer within execx.GitTimeout is killed and the stamp is
+// "unknown", with warning naming the call.
 //
-// --dirty refreshes the index, which runs a filter driver's clean or process
-// program for a file it must re-hash; the drivers are named in the
-// session-writable .git/config, so one bounded "git config --get-regexp"
-// lists them first and the describe blanks each (CS-LNCH-177). A name that
-// cannot be passed on a -c skips the describe: "unknown", with a warning.
+// No call refreshes the index (CS-LNCH-177): "describe --dirty" did, and a
+// refresh runs filter drivers' clean/process programs for the checkout and,
+// through a child git per submodule, for every submodule — all named in
+// session-writable config. Instead the describe runs WITHOUT --dirty (it
+// reads only refs), and dirtiness is "git diff-index --quiet
+// --ignore-submodules=all HEAD --", which refreshes nothing and starts no
+// child git, so a stat-only change (a touched file) reads as dirty and a
+// change inside a submodule does not. diff-index still re-hashes a RACILY
+// clean entry (one no older than the index), through the clean filter, so the
+// checkout's own drivers are listed first (one "git config --get-regexp",
+// which runs nothing) and blanked on it. A driver name that cannot be passed
+// on a -c skips both: "unknown", with a warning. A diff-index that fails
+// otherwise leaves the describe output as is.
 func Version(r execx.Runner, repoRoot string) (version, warning string) {
+	timedOut := func(err error) (string, string) {
+		return "unknown", execx.GitTimeoutWarning(err, `using the version stamp "unknown"`)
+	}
 	cfg, err := execx.Git(r, execx.Cmd{Name: "git", Args: []string{"-C", repoRoot, "config", "-z", "--name-only", "--get-regexp", `^filter\.`}})
 	if errors.Is(err, execx.ErrTimedOut) {
-		return "unknown", execx.GitTimeoutWarning(err, `using the version stamp "unknown"`)
+		return timedOut(err)
 	}
 	var names []string
 	if err == nil {
@@ -251,17 +262,25 @@ func Version(r execx.Runner, repoRoot string) (version, warning string) {
 	}
 	blank, ok := execx.GitFilterOverrides(names)
 	if !ok {
-		return "unknown", fmt.Sprintf("WARNING: %s/.git/config names a filter driver that cannot be overridden on the command line; skipping git describe (it could run that driver) and using the version stamp \"unknown\".", repoRoot)
+		return "unknown", fmt.Sprintf("WARNING: %s/.git/config names a filter driver that cannot be overridden on the command line; skipping git describe (its dirty check could run that driver) and using the version stamp \"unknown\".", repoRoot)
 	}
-	args := append(blank, "-C", repoRoot, "describe", "--tags", "--always", "--dirty")
-	out, err := execx.Git(r, execx.Cmd{Name: "git", Args: args})
+	out, err := execx.Git(r, execx.Cmd{Name: "git", Args: []string{"-C", repoRoot, "describe", "--tags", "--always"}})
 	if errors.Is(err, execx.ErrTimedOut) {
-		return "unknown", execx.GitTimeoutWarning(err, `using the version stamp "unknown"`)
+		return timedOut(err)
 	}
-	if err != nil || strings.TrimSpace(out) == "" {
+	v := strings.TrimSpace(out)
+	if err != nil || v == "" {
 		return "unknown", ""
 	}
-	return strings.TrimSpace(out), ""
+	args := append(blank, "-C", repoRoot, "diff-index", "--quiet", "--ignore-submodules=all", "HEAD", "--")
+	_, err = execx.Git(r, execx.Cmd{Name: "git", Args: args})
+	switch {
+	case errors.Is(err, execx.ErrTimedOut):
+		return timedOut(err)
+	case execx.ExitCode(err) == 1:
+		return v + "-dirty", ""
+	}
+	return v, ""
 }
 
 // filterDrivers parses "git config -z --name-only" output into the filter

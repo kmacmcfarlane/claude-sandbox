@@ -401,6 +401,17 @@ Feature: .claude-sandbox/ layout lifecycle (CS-LAY)
       through os.OpenRoot(<physical project>), which refuses any escape, so a
       link re-pointed out after the check fails the write instead of landing
       outside
-    And a .claude-sandbox directory that is itself a symlink out of the
-      project makes the sidecar .gitignore resolve outside it, which fails the
-      setup the same way
+    Given the .claude-sandbox directory itself is a symlink whose target lies
+      outside the project (either trackInHost mode)
+    Then the setup checks it FIRST and skips the whole layout with one
+      "WARNING: <project>/.claude-sandbox is a symlink to <target>, outside the
+      project <project>; skipping the layout setup (the temp/ and reports/
+      skeleton, the CLAUDE.md seed, the .gitignore entries and the sidecar git
+      repo), which would write there." line: no directory, file, .gitignore
+      line or git call, inside or outside, and the launch goes on
+    # Skipped, not refused: nothing on the launch path reads what the layout
+    # makes (the cascade reads config.yaml and env through the link as
+    # before; ralph makes its own runtime dirs), so a refusal would only stop
+    # a deliberately linked directory from launching. A link to a directory
+    # inside the project is followed. init's own seeding of the scaffold files
+    # (not the launch path) is out of scope.

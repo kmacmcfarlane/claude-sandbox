@@ -79,8 +79,16 @@ Feature: Image build lifecycle (CS-IMG)
     # (and every cap) on the next launch.
 
   Scenario: CS-IMG-005 Version stamp
-    Then the tools image build arg CLAUDE_SANDBOX_VERSION carries "git describe --tags --always --dirty"
-      of the repo checkout, or "unknown" outside a git repo
+    Then the tools image build arg CLAUDE_SANDBOX_VERSION carries "git describe --tags --always"
+      of the repo checkout, with "-dirty" appended when "git diff-index --quiet
+      --ignore-submodules=all HEAD --" exits 1, or "unknown" outside a git repo
+    # Not "describe --dirty": its index refresh runs filter programs from
+    # session-writable config, a submodule's included (CS-LNCH-177). The
+    # format is unchanged ("<describe>-dirty"), but the dirty test is not
+    # quite the same: without a refresh, a stat-only change (a touched file
+    # whose content is unchanged) can read as dirty, and a change inside a
+    # submodule does not. Any other diff-index failure leaves the describe
+    # output as is.
     And the tools image bakes it into /opt/claude-sandbox/version and its
       org.opencontainers.image.revision label
     And the cap sets ENV CLAUDE_SANDBOX_VERSION to the tools image's revision label, so every
@@ -807,13 +815,13 @@ Feature: Image build lifecycle (CS-IMG)
       falls back to the time rule (CS-IMG-035), as for an unreadable file
     And a baked source that is not a regular file is skipped, as before
 
-  Scenario: CS-IMG-076 The version stamp's git describe is bounded
-    # --dirty refreshes the index and reads every .gitignore of this
-    # repository, which a sandbox working on it can write (CS-LNCH-176).
-    Given "git -C <repo> describe --tags --always --dirty" does not answer
-      within execx.GitTimeout (or the "git config" that lists the filter
-      drivers first, CS-LNCH-177, does not)
+  Scenario: CS-IMG-076 The version stamp's git calls are bounded
+    # A sandbox working on this repository can write its .git (CS-LNCH-176).
+    Given any of the stamp's three git calls — the filter-driver listing
+      (CS-LNCH-177), "describe --tags --always", the "diff-index" dirty check —
+      does not answer within execx.GitTimeout
     Then it is killed and the stamp is "unknown", as outside a git repo
-      (CS-IMG-005), and one CS-LNCH-176 warning ending 'using the version
-      stamp "unknown"' is printed on stderr (a headless launch's too)
+      (CS-IMG-005) — never a clean stamp for a dirty check that hung — and one
+      CS-LNCH-176 warning ending 'using the version stamp "unknown"' is
+      printed on stderr (a headless launch's too)
     And the launch, or "--version", goes on

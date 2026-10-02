@@ -71,6 +71,18 @@ func (o *Options) errw() io.Writer {
 // .gitignore, and (when trackInHost is false) the sidecar git repo.
 func Setup(project string, trackInHost bool, opts Options) error {
 	sb := paths.SandboxDir(project)
+	// CS-LAY-025: a .claude-sandbox directory that is a symlink out of the
+	// project would put every write below — the skeleton, the CLAUDE.md seed,
+	// the sidecar .gitignore and repo — outside it. Checked FIRST, before any
+	// mkdir, in both trackInHost modes. The whole layout is skipped with one
+	// warning rather than failing the launch: nothing on the launch path
+	// reads what the layout creates (the cascade reads config.yaml/env
+	// through the link as before; ralph makes its own runtime dirs), so a
+	// refusal would only stop a deliberately linked directory from launching.
+	if _, _, err := resolveInProject(project, sb); err != nil {
+		fmt.Fprintf(opts.errw(), "WARNING: %v; skipping the layout setup (the temp/ and reports/ skeleton, the CLAUDE.md seed, the .gitignore entries and the sidecar git repo), which would write there.\n", err)
+		return nil
+	}
 	// The skeleton is temp/ and reports/ only. investigations/ is a claude-kit
 	// investigate/implement convention, not a sandbox path: never created here,
 	// and an existing one is user data that is left alone.

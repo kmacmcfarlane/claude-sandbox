@@ -2258,7 +2258,8 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       launch there." line — no CS-LNCH-046 stand-down banner, no warning, no
       docker create: isolation was asked for, an unattended ralph must not
       run in the shared checkout, and before this bound the launch hung
-    And an attach, which uses no worktree, goes on
+    And an attach, which uses no worktree, goes on, printing the CS-LNCH-176
+      warning ending "attaching anyway: an attach starts no worktree"
     And a genuine "not a git repository" (git answers and fails) still stands
       the worktree down with the CS-LNCH-046 banner
     Given the linked-worktree "git rev-parse --git-dir --git-common-dir
@@ -2278,32 +2279,41 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     # can write, and some keys make git run a program on the HOST. Every
     # launch-path git call (execx.Git) starts with execx.GitSafeArgs:
     #   -c core.fsmonitor=false     the fsmonitor hook runs on any index read:
-    #                               describe --dirty, ls-files, check-ignore
-    #                               without --no-index (verified on git 2.39)
-    #   -c core.hooksPath=/dev/null the post-index-change hook runs on describe
-    #                               --dirty's index refresh, even with
-    #                               --no-optional-locks (verified); no hook is
-    #                               found under /dev/null
-    #   --no-optional-locks         describe does not rewrite the index
+    #                               ls-files, check-ignore without --no-index,
+    #                               diff-index (verified on git 2.39)
+    #   -c core.hooksPath=/dev/null the post-index-change hook runs on an index
+    #                               refresh, even with --no-optional-locks
+    #                               (verified); no hook is found under /dev/null
+    #   --no-optional-locks         nothing rewrites the index
     # Filter drivers (filter.<name>.clean/process, assigned by a session-
-    # writable .gitattributes) run when an index refresh must re-hash a file —
-    # describe --dirty only. Their names are per repository, so the version
-    # stamp first lists them (one bounded "git config -z --name-only
-    # --get-regexp ^filter\.", which runs nothing) and passes
+    # writable .gitattributes) run whenever git re-hashes a worktree file.
+    # "describe --dirty" did that through an index refresh — for the checkout
+    # AND, through a child git per submodule, for every submodule, whose
+    # drivers live in .git/modules/<sub>/config (reproduced: a submodule's
+    # clean filter ran on the host). So the version stamp (CS-IMG-005) never
+    # refreshes: "describe --tags --always" reads only refs, and dirtiness is
+    # "diff-index --quiet --ignore-submodules=all HEAD --", which starts no
+    # child git. diff-index still re-hashes a RACILY clean entry (one no older
+    # than the index file, which a session can arrange by back-dating the
+    # index; verified), through the checkout's clean filter, so the stamp
+    # first lists the checkout's drivers (one bounded "git config -z
+    # --name-only --get-regexp ^filter\.", which runs nothing) and passes
     # "-c filter.<name>.{clean,smudge,process}= -c filter.<name>.required=false"
-    # for each — an empty command runs nothing (verified).
+    # for each to the diff-index — an empty command runs nothing (verified).
     # Not applicable to these subcommands, so not overridden: core.pager and
     # pager.* (stdout is a pipe, never a terminal), core.editor, credential
     # helpers, core.sshCommand and other transport keys (no network),
-    # gpg.program (nothing is verified), diff textconv/external (describe's
-    # dirty check makes no patch). rev-parse, check-ignore and init run no
-    # hooks; init in .claude-sandbox/ reads no repository config.
+    # gpg.program (nothing is verified), diff textconv/external (--quiet makes
+    # no patch). rev-parse, check-ignore, describe and init run no hooks; init
+    # in .claude-sandbox/ reads no repository config.
     Given the project's .git/config sets core.fsmonitor to a program
     Then no launch-path git call runs it (GitRoot, the linked-worktree probe,
       the layout's rev-parse, ls-files, check-ignore probes and sidecar init)
     Given this repository's .git/config sets a filter driver's clean or
-      process program and .git/hooks/post-index-change exists
-    Then the version stamp's git describe --dirty runs neither
+      process program, a submodule's .git/modules/<sub>/config sets one too,
+      .git/hooks/post-index-change exists, and every tracked file is racily
+      clean or touched
+    Then the version stamp's git calls run none of them
     Given a filter driver name that cannot be passed on a -c (it holds "=" or
       a newline)
     Then the describe is skipped: the stamp is "unknown", with one WARNING
