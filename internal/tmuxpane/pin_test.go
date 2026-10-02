@@ -451,6 +451,15 @@ var _ = Describe("tmux restore: the resurrect hooks (CS-TMUX-064..068)", func() 
 			Expect(res.Marked).To(BeZero(), "the collapsed saved dir is compared like any other")
 			Expect(logged).To(ContainElement(ContainSubstring("main:1.0: the pane is not in its saved directory")))
 
+			// When the collapsed path exists and the pane sits there, it matches.
+			collapsed := filepath.Join(proj, "a b")
+			Expect(os.Mkdir(collapsed, 0o700)).To(Succeed())
+			Expect(os.Rename(strings.TrimSuffix(pin, ".json")+".consumed.json", pin)).To(Succeed()) // a fresh restore
+			fake = &execx.Fake{}
+			fake.On(listPat, paneLine("%11", 1, collapsed, ""), nil)
+			res = rearm()
+			Expect(res.Marked).To(Equal(1), "compared like any other, and equal")
+
 			// A pane whose current path is lossy (reached through a symlink, say)
 			// is not compared: coordinates and new-pane membership decide.
 			Expect(os.Rename(strings.TrimSuffix(pin, ".json")+".consumed.json", pin)).To(Succeed()) // a fresh restore

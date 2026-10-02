@@ -538,7 +538,9 @@ func Rearm(o HookOptions) RearmResult {
 			continue
 		}
 		if why := rearmMoved(sp.Dir, p.path, row.Mark); why != "" {
-			// That pane's typed restore then reads last (round-4 low 4).
+			// That pane's typed restore then reads this server's unconsumed
+			// pin (at most PinMaxAge old; consumed only when this run ends)
+			// before last (round-4 low 4).
 			res.Skipped++
 			o.logf("%s: %s; not re-armed", coords, why)
 			continue

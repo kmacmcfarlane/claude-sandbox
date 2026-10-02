@@ -649,7 +649,8 @@ It reads the saves where resurrect keeps them: `@resurrect-dir` (with `$HOME`, `
   restore a whole layout from an earlier save, with the stamp and dir filled in — in the running
   server (autosave off, `ln -sf tmux_resurrect_<stamp>.txt <dir>/last`, `prefix + C-r`, the
   autosave interval put back as it was), or a fresh server (`systemctl --user stop
-  tmux.service`, the `ln -sf`, `systemctl --user start tmux.service`). A reboot never restores a
+  tmux.service`, the `ln -sf`, `systemctl --user start tmux.service`, typed outside tmux and only
+  once the unit runs your server — see the guide below). A reboot never restores a
   chosen save: its shutdown save moves `last` again.
 - **`--from SAVE`** chooses the save: `last` (the default), `previous` (the newest save of the
   previous tmux server, which needs tmux), a stamp such as `20260929T120000`, or the file name of
@@ -791,7 +792,8 @@ builds for them: after a pull they do nothing until the next ordinary launch reb
 restores still read the pin, then `last`; without `--pin`, they read `last` and `--rearm` does
 nothing. [docs/tmux-session-restore.md](docs/tmux-session-restore.md) is the operator's guide:
 the whole `~/.tmux.conf` block (with `@continuum-boot 'on'`), the checks after wiring it, the
-kill-server, reboot and sparse-save drills, the whole-layout procedures, what to do before a
+restart, reboot and sparse-save drills, putting the tmux server under continuum's unit (and why a
+plain `tmux kill-server` is a trap once it is), the whole-layout procedures, what to do before a
 reboot, the degraded paths, an optional status-line element showing the notice, and the host
 checks still owed. Spec: `spec/tmux.feature` CS-TMUX-064..068.
 

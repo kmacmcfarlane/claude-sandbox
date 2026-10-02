@@ -53,10 +53,11 @@ What it does not do:
 
 ### Who owns `~/.tmux.conf`
 
-On the operator's workstation (hooper) the tmux configuration belongs to the hooper repository
-(its work item 857d; `~/.tmux.conf` is a symlink into it). That repository has no document of
-the tmux setup yet, so the lines are given here; when hooper documents its config, this section
-should link to it instead.
+On the operator's workstation (hooper) the tmux configuration is to move into the hooper
+repository (its work item 857d, still to do), which will install `~/.tmux.conf` as a symlink to
+a tracked copy. Until then `~/.tmux.conf` is a plain file, and no hooper document describes the
+tmux setup, so the lines are given here; once hooper documents its config, this section should
+link to it instead.
 
 ### Install the plugins
 
@@ -109,12 +110,15 @@ What each generic option does:
   off). Autosave needs the status line on (the default).
 - `@continuum-restore 'on'`: restore the last save when the tmux server starts. It does not
   fire when you re-source the config.
-- `@continuum-boot 'on'` (operator answer 47 b): continuum writes and enables a systemd user
-  unit, `~/.config/systemd/user/tmux.service`, that starts a detached tmux server at boot, so
-  the sessions are back before you log in. Its `ExecStop` runs a resurrect save before
-  `tmux kill-server`, so a clean shutdown saves. continuum writes the unit only when it does
-  not exist yet. A user unit starts at boot only when lingering is enabled for your user
-  (`loginctl enable-linger`), otherwise at your first login; hooper 857d decides which.
+- `@continuum-boot 'on'` (operator answer 47 b): continuum writes and **enables** a systemd
+  user unit, `~/.config/systemd/user/tmux.service`, that starts a detached tmux server at boot,
+  so the sessions are back before you log in. Its `ExecStop` runs a resurrect save, then
+  `tmux kill-server`, so a clean shutdown saves. continuum writes the unit only when it does not
+  exist yet, and only enables it: it does **not** start it, so the tmux server you are using
+  when you set this up is not the unit's (see
+  [Put the tmux server under the unit](#put-the-tmux-server-under-the-unit)). A user unit starts
+  at boot only when lingering is enabled for your user (`loginctl enable-linger`), otherwise at
+  your first login; hooper 857d decides which.
 - `@resurrect-capture-pane-contents 'on'`: restore what was on screen in each pane. It breaks
   if a pane's `default-command` contains `&&` or `||` (the operator's config sets none).
 
@@ -123,12 +127,17 @@ What each generic option does:
 When `--pin` finds that the save being restored has markedly fewer sandbox panes than earlier
 tmux servers ended with (see [Choosing an earlier save](#choosing-an-earlier-save)), it sets the
 tmux option `@claude-sandbox-notice` until the first `claude-sandbox` command you type inside
-tmux prints and clears it. To see it the moment you attach after a boot, add this line
-**before** continuum's `run-shell` line:
+tmux prints and clears it. To see it the moment you attach after a boot, add the element to
+your status line **before** continuum's `run-shell` line. If your config sets `status-right`
+itself, put it at the end of that value, so every `tmux source-file` sets the whole line again:
 
 ```
-set -ga status-right '#{?@claude-sandbox-notice, #[reverse] #{@claude-sandbox-notice} #[default],}'
+set -g status-right '<your status-right>#{?@claude-sandbox-notice, #[reverse] #{@claude-sandbox-notice} #[default],}'
 ```
+
+The shorter `set -ga status-right '#{?@claude-sandbox-notice, …}'` (append) also works, but each
+`tmux source-file` appends another copy, so the notice shows twice after one reload, three times
+after two; a new server starts with one.
 
 ### Sessions started before the hooks
 
@@ -148,7 +157,14 @@ tmux show -gv @resurrect-hook-post-restore-all
 tmux show -gv @resurrect-processes
 tmux run-shell 'test -x /path/to/claude-sandbox/bin/claude-sandbox && echo found'   # the hooks' path, as the server sees it
 systemctl --user is-enabled tmux.service        # enabled, with @continuum-boot on
+systemctl --user is-active tmux.service         # active: the unit runs a tmux server
+systemctl --user show -p MainPID --value tmux.service; tmux display -p '#{pid}'   # the same pid: your server IS the unit's
 ```
+
+If the last two checks fail — the unit is inactive, or its pid differs from your server's —
+your tmux server was started outside the unit. **Do not run the drills or Procedure B until it
+is under the unit**: `systemctl --user stop`/`start` act on the unit, not on your server, and a
+`systemctl --user start` while your own server runs is expected to kill that server (below).
 
 Then save and check what was recorded:
 
@@ -163,6 +179,42 @@ pane that is missing is unmarked (see the previous section) or the save hook did
 look in `~/.cache/claude-sandbox/tmux-save.log`. The first `claude-sandbox` command after a
 `git pull` of the claude-sandbox checkout also rebuilds the binary, which the hooks need (see
 [Degraded paths](#degraded-paths)).
+
+### Put the tmux server under the unit
+
+Once, after setting up, when the checks above show your server is not the unit's:
+
+1. Save your work in every pane that is not a sandbox (editors, shells running jobs): step 3
+   ends every program in the server. The sandbox containers keep running.
+2. Save: `prefix + C-s`, wait for "Tmux environment saved!", and check `--list` as above.
+3. From a terminal **outside tmux** (a plain terminal window, or an ssh session not in tmux):
+   `tmux kill-server`. The unit is not active, so this is the plain kill it looks like.
+4. From the same terminal: `systemctl --user start tmux.service`, then `tmux attach`. continuum
+   restores the save from step 2, and each sandbox pane reattaches.
+5. Run the checks above again: `is-active` says `active` and the two pids match.
+
+Why it matters (expected from systemd's rules for a `Type=forking` unit, not yet observed — see
+[Host checks still owed](#host-checks-still-owed)): with your own server running,
+`systemctl --user start tmux.service` runs `tmux new-session -d`, which only adds a session to
+that server and exits; nothing is left in the unit, so systemd considers it stopped and runs
+its `ExecStop`, whose `tmux kill-server` ends your server.
+
+### Stopping and restarting tmux
+
+While the unit runs your server, stop tmux only with `systemctl --user stop tmux.service`, from a
+terminal outside tmux (it ends every pane, the one you type it in included), and start it with
+`systemctl --user start tmux.service`. **Never use a plain `tmux kill-server` then**: systemd is
+expected to run the unit's `ExecStop` after the server is gone, and resurrect's save with no
+server writes an empty save and points `last` at it. No sidecar is written for it, so the next
+start restores an empty layout and `--pin` raises no notice (a save without a record is never
+sparse). Expected from systemd's and resurrect's behaviour, not yet observed (host check below).
+
+If it happened: `claude-sandbox tmux restore --list` shows the newest save as `no record`; pick
+the save before it and use [Procedure B](#restore-a-whole-layout-from-an-earlier-save) (the unit
+is already stopped, so its first line does nothing).
+
+hooper 857d's relayed safe-shutdown procedure ends with `tmux kill-server`; with the unit
+active that is this trap, so 857d should use `systemctl --user stop tmux.service` instead.
 
 ## How a restore decides
 
@@ -189,25 +241,30 @@ before anything else, so a restore cut short anywhere leaves it on the list. The
 **Pacing.** Restores that start something run one at a time, on
 `~/.cache/claude-sandbox/restore-start.lock`; a waiting pane prints which pane it waits for
 (Ctrl-C skips it and leaves it pending). A resume holds the lock until its claude is up (at
-most 60 s), plus 10 s unless `~/.claude.json` is linked or `CLAUDE_CONFIG_DIR` is set: in the
-legacy layout several claudes starting at once can overwrite each other's writes to that one
-file.
+most 60 s), plus a gap: none when `CLAUDE_CONFIG_DIR` is set, or when `~/.claude.json` is linked
+and there is no `~/.claude/.config.json`; 10 s otherwise. In the legacy layout several claudes
+starting at once can overwrite each other's writes to that one file;
 `claude-sandbox global-config migrate` (see the README's
 [Global config](../README.md#global-config-claudejson)) removes the cause, and the 10 s with it.
+A `~/.claude/.config.json` (which Claude Code prefers) keeps the 10 s even after a migrate.
 
 ## Drills
 
-Run these once after setting up, and again after a change to the tmux config.
+Run these once after setting up, and again after a change to the tmux config. **First make
+sure your server is the unit's** ([Verify the wiring](#verify-the-wiring)); until it is, the
+`systemctl` steps below act on nothing or kill your server. Type every `systemctl` line from a
+terminal outside tmux: stopping the unit ends every pane.
 
-**Kill-server drill** (no reboot; safe, the sandboxes keep running):
+**Restart drill** (no reboot; the sandboxes keep running, other programs in tmux end):
 
 1. With a few sandbox sessions running, save (`prefix + C-s`) and check `--list` as above.
-2. `systemctl --user stop tmux.service` (or `tmux kill-server` without the unit). The
-   containers keep running: they were created with a TTY, and losing the terminal does not
-   stop them.
-3. `systemctl --user start tmux.service` (or start `tmux`), and attach.
+2. `systemctl --user stop tmux.service`. The containers keep running: they were created with a
+   TTY, and losing the terminal does not stop them.
+3. `systemctl --user start tmux.service`, then `tmux attach`.
 4. Each sandbox pane prints its restore and reattaches, one at a time. `claude-sandbox
    sessions` shows the same containers as before.
+
+Without the unit (no `@continuum-boot`), steps 2 and 3 are `tmux kill-server` and `tmux`.
 
 **Reboot drill** (with `@continuum-boot 'on'`):
 
@@ -225,7 +282,8 @@ Run these once after setting up, and again after a change to the tmux config.
 running, throwaway ones if you prefer):
 
 1. In `~/.tmux.conf`, comment out the `@resurrect-hook-pre-restore-all` and
-   `@resurrect-processes` lines, then `systemctl --user stop tmux.service` and `start` it. The
+   `@resurrect-processes` lines, then (outside tmux) `systemctl --user stop tmux.service` and
+   `start` it. The
    windows come back as plain shells (the containers still run, unattached).
 2. Wait for an autosave (a minute) or press `prefix + C-s`: that save has no sandbox panes.
 3. Put both lines back, stop and start the unit again. `--pin` finds the restored save sparse:
@@ -236,6 +294,8 @@ running, throwaway ones if you prefer):
    `claude-sandbox tmux restore --all --from <stamp>`: each pane is armed and reattaches. The
    pane you are looking at is only marked (see [Typing safety](#typing-safety)): type
    `claude-sandbox tmux restore` in it.
+6. If a session still does not come back, its container is still running: from its project
+   directory, `claude-sandbox --attach=<noun>` (`claude-sandbox sessions` lists the nouns).
 
 ## Procedures
 
@@ -280,7 +340,9 @@ coordinate is left alone; arm its row with `--all --from <stamp>` (below) or typ
 windows may occupy saved indices: `claude-sandbox tmux restore --dry-run --all --from <stamp>`
 first shows which rows land where.
 
-**B, with a fresh tmux server:**
+**B, with a fresh tmux server** (needs the unit to run your server, see
+[Verify the wiring](#verify-the-wiring); type it from a terminal **outside tmux** — the first line
+ends every pane, the one it is pasted into included):
 
 ```
 systemctl --user stop tmux.service          # its shutdown save moves last now
@@ -323,8 +385,16 @@ pane. In both, the keys go in only when the pane is provably idle at its own she
 - the pane's own shell leads its terminal's foreground process group (so a running script, a
   program started from a wrapper, or a `su -` root shell does not count);
 - it is not in copy mode and its window is not synchronized;
-- no client is looking at it, through any session, read again right before the keys;
-- its saved directory was compared with where it is.
+- no client is looking at it, through any session, read again right before the keys.
+
+The saved directory is checked differently:
+
+- **`--all`** types only when the saved directory could be compared with where the pane is and
+  matched. A pane whose saved directory is empty, or whose current path holds a tab, a newline
+  or a run of whitespace (which resurrect's save cannot record), is only marked.
+- **`--rearm`** never touches a pane that is somewhere other than its saved directory. When the
+  directory cannot be compared (an empty saved directory, or such a current path) it arms and
+  types on the other checks alone: the pane was just created by this restore at that place.
 
 The keys are `C-e C-u` (clear the line), then `claude-sandbox tmux restore --resurrected` and
 Enter. Otherwise the pane is only marked pending, with the reason; type
@@ -351,15 +421,22 @@ restores yourself.
 
 ## Before a reboot
 
-With `@continuum-boot 'on'`, in this order:
+With `@continuum-boot 'on'` and your server under the unit, in this order:
 
+0. If you pulled the claude-sandbox checkout since the last launch, run any `claude-sandbox`
+   command first (`claude-sandbox tmux restore --list` will do): it rebuilds the binary, and
+   until then the save hook writes nothing.
 1. Let each session finish its turn. Do not `/exit` the sessions you want back: a clean exit
    removes the pane's mark, and the next save drops the session.
 2. Optional: `tmux set -g @continuum-save-interval 0` and wait a few seconds, so no autosave
    runs alongside the shutdown save.
 3. Save while the sandboxes still run: `prefix + C-s`, and wait for "Tmux environment saved!".
-4. `claude-sandbox tmux restore --list`: the newest run holds every sandbox pane, active.
-5. Reboot. Do not kill tmux first: the unit's `ExecStop` saves once more on the way down.
+4. `claude-sandbox tmux restore --list`: the newest run holds every sandbox pane, active. If it
+   says `no record`, the save hook did not run: check `~/.cache/claude-sandbox/tmux-save.log`,
+   run step 0, and save again.
+5. Reboot. Do not stop tmux first, and never with `tmux kill-server` (see
+   [Stopping and restarting tmux](#stopping-and-restarting-tmux)): the unit's `ExecStop` saves
+   once more on the way down.
 
 Without the unit, stop tmux yourself after step 4: `tmux kill-server`. The sandboxes keep
 running until the reboot stops them.
@@ -375,7 +452,7 @@ every sandbox row whichever stops first. Two of those signals are not yet confir
 shutdown (see [Host checks still owed](#host-checks-still-owed)), which is why step 3 saves
 while everything still runs.
 
-Killing tmux without rebooting stops no sandbox: the containers run on, and a restore (or
+Stopping tmux without rebooting stops no sandbox: the containers run on, and a restore (or
 `claude-sandbox --attach` from the project directory) reattaches them. Joined sessions
 (`--join`) cannot be reattached.
 
@@ -394,6 +471,8 @@ Killing tmux without rebooting stops no sandbox: the containers run on, and a re
   `claude-sandbox` command (`claude-sandbox tmux restore --list` is a good one) after pulling
   and before a reboot or a tmux restart. If it happened, recover with `--list` and
   `--all --from <stamp>` of the last save before the boot.
+- **`tmux kill-server` with the unit active.** Expected to leave `last` on an empty save; see
+  [Stopping and restarting tmux](#stopping-and-restarting-tmux) for the recovery.
 - **Save hook missing or failing.** Saves get no sidecar (`--list` says `no record`), and a
   restore finds nothing recorded for a pane. Problems are in
   `~/.cache/claude-sandbox/tmux-save.log`.
@@ -434,36 +513,68 @@ README's [tmux window names](../README.md#tmux-window-names) has the details.
 
 ## Host checks still owed
 
-These behaviours the design relies on have not been observed on the host yet. Run them on a
-quiet afternoon with throwaway sessions (and a scratch `CLAUDE_CONFIG_DIR` where noted), and
-record the results in `spec/tmux.feature`, in the comment of the scenario each concerns
-(CS-TMUX-061 for the record timing; CS-TMUX-071 for the shutdown, detach and exit-code checks;
-CS-TMUX-067 for tpgid):
+These behaviours the design relies on have not been observed on the host yet. Record each
+result in `spec/tmux.feature`, in the comment of the scenario it concerns (named per item).
+Use throwaway sessions and, where noted, a scratch `CLAUDE_CONFIG_DIR` (never the real one).
 
-- [ ] **`claude --resume` record timing.** With a scratch `CLAUDE_CONFIG_DIR`, run
-  `claude --resume <id>` and watch `<config dir>/sessions/`: does the `<pid>.json` record
-  appear before the interactive screen, and when does it name `<id>`? (A restore's "up".)
-- [ ] **docker events at daemon shutdown.** With a throwaway sandbox running,
+- [ ] **`claude --resume` record timing** (CS-TMUX-061). With a scratch `CLAUDE_CONFIG_DIR`,
+  run `claude --resume <id>` in one terminal and `watch -n0.2 ls -l <config dir>/sessions/` in
+  another. *Pass:* a `<pid>.json` appears before (or with) the first interactive screen, and soon
+  names `<id>`. *Fail:* no record until you answer a prompt — a restore then counts as "up" only
+  after its 5 s fallback, so each pane costs up to 5 s plus the gap; nothing else changes.
+- [ ] **docker events at daemon shutdown** (CS-TMUX-071). **`sudo systemctl stop docker` stops
+  every container on the host:** live sandboxes are `--rm`, so they are removed, and ralph loops
+  end. Exit every real session first (or skip this item). With one throwaway sandbox running, run
   `docker events --filter type=container` in another terminal while you run `docker stop`, then
-  `docker kill`, then `sudo systemctl stop docker`: does a daemon shutdown emit `kill` or `stop`
-  for the containers it stops?
-- [ ] **`systemctl is-system-running` during a shutdown.** A user unit whose `ExecStop` appends
-  `systemctl is-system-running` to a file; reboot; does it read `stopping`?
-- [ ] **docker client exit status on a detach,** for `docker start -ai` and `docker attach`
-  (`ctrl-q ctrl-q`).
-- [ ] **claude's exit codes** for `/exit`, Ctrl-D, a double Ctrl-C and SIGTERM.
-- [ ] **tpgid at a prompt.** In a pane at a prompt, from another pane:
-  `p=$(tmux display -p -t <pane> '#{pane_pid}'); sed 's/.*) //' /proc/$p/stat | awk '{print $6}'`
-  prints `$p`; with `sleep 30` running in that pane it prints something else.
-- [ ] **darwin:** `ps -o tpgid= -p <pane pid>` gives the same answers on macOS.
-- [ ] **tmux 3.5a formats.** `tmux display -p '#{automatic-rename}'` prints `1` (or `on`) in a
-  window tmux names itself; `tmux rename-window -t <scratch window> '#(echo expanded)'` names
-  it `expanded` (why claude-sandbox removes `#`); and the status element above shows
-  `@claude-sandbox-notice` next to continuum's hook (`tmux set -g @claude-sandbox-notice test`,
-  then `tmux set -gu @claude-sandbox-notice`).
-- [ ] **resurrect save and restore of a labelled window.** Launch a sandbox in a scratch
-  window, save, run the kill-server drill: the window comes back with the same name, and after
-  its restore `tmux show-options -w` shows `@claude-sandbox-label` again.
+  (relaunched) `docker kill`, then `sudo systemctl stop docker`. *Pass:* each shows a `kill` or
+  `stop` event before the `die`. *Fail* for the daemon shutdown: F1b then relies on the
+  `stopping` check below and on the save hook's pending rows.
+- [ ] **`systemctl is-system-running` during a shutdown** (CS-TMUX-071). Create
+  `~/.config/systemd/user/state-probe.service` with `[Service]` `Type=oneshot`,
+  `RemainAfterExit=yes`, `ExecStart=/bin/true`,
+  `ExecStop=/bin/sh -c 'systemctl is-system-running >> %h/state-probe.log'` and `[Install]`
+  `WantedBy=default.target`; `systemctl --user daemon-reload && systemctl --user enable --now
+  state-probe.service`; reboot; read `~/state-probe.log`, then `disable` and remove the unit.
+  *Pass:* it says `stopping`. *Fail:* the launcher's shutdown check never fires; F1b relies on
+  docker's events alone.
+- [ ] **docker client exit status on a detach** (CS-TMUX-071). Known from the docker/cli source
+  only: `docker start -ai` exits 0 on the detach keys, `docker attach` exits 1. The launcher hides
+  the status, so try it on a throwaway container by hand:
+  `docker create -it --name probe debian:bookworm-slim bash`, then
+  `docker start -ai --detach-keys=ctrl-q,ctrl-q probe`, detach, `echo $?`; then
+  `docker attach --detach-keys=ctrl-q,ctrl-q probe`, detach, `echo $?`; `docker rm -f probe`.
+  *Pass:* 0, then 1. *Fail:* a real detach can read as an inconclusive end and leave its pane
+  pending (harmless: the next restore attaches; `--drop` clears it).
+- [ ] **claude's exit codes** (CS-TMUX-071) for `/exit`, Ctrl-D, a double Ctrl-C and SIGTERM
+  (`kill <pid>` from another terminal): run host `claude` in a scratch directory, end it each
+  way, `echo $?` each time. Nothing passes or fails today — under the current rule any end
+  without outside evidence unsets the mark; the numbers are needed only if a crash should also
+  leave a pane pending (operator decision 64): a crash code must differ from all four.
+- [ ] **tpgid at a prompt** (CS-TMUX-067). In a pane at a prompt, from another pane:
+  `p=$(tmux display -p -t <pane> '#{pane_pid}'); sed 's/.*) //' /proc/$p/stat | awk '{print $6}'`.
+  *Pass:* it prints `$p`; with `sleep 30` running in that pane it prints another number. *Fail:*
+  every pane reads as busy and is only marked, never typed into.
+- [ ] **darwin** (CS-TMUX-067): `ps -o tpgid= -p <pane pid>` gives the same two answers on macOS.
+  *Fail:* the same as above, on macOS.
+- [ ] **tmux 3.5a formats** (CS-TMUX-020..026). `tmux display -p '#{automatic-rename}'` in a
+  window tmux names itself. *Pass:* `1` or `on`; *fail:* windows are never labelled.
+  `tmux rename-window -t <scratch window> '#(echo expanded)'`. *Pass:* the window is named
+  `expanded` (the reason claude-sandbox removes `#`); *fail:* harmless. With the status element
+  added, `tmux set -g @claude-sandbox-notice test`, look, then `tmux set -gu
+  @claude-sandbox-notice`. *Pass:* `test` shows next to continuum's part of the line.
+- [ ] **resurrect save and restore of a labelled window** (CS-TMUX-022). Launch a sandbox in a
+  scratch window, save, run the restart drill. *Pass:* the window comes back with the same name,
+  and after its restore `tmux show-options -w` shows `@claude-sandbox-label` again. *Fail:* the
+  window keeps its restored name but is not refreshed by later `/rename`s.
+- [ ] **The unit and a server started outside it** (this guide). Only with nothing open you
+  need, in a throwaway tmux server: with the unit inactive and your own server running,
+  `systemctl --user start tmux.service`. *Expected:* your server is killed. *If not:* the
+  warning in [Verify the wiring](#verify-the-wiring) can be softened.
+- [ ] **`tmux kill-server` with the unit active** (this guide). After a good save, with nothing
+  open you need: `tmux kill-server`, then `ls -l <dir>/last` and `wc -c` of its target.
+  *Expected:* `last` points at a new, empty save, and `--list` shows it as `no record`; repair
+  with Procedure B. *If not:* the warning in
+  [Stopping and restarting tmux](#stopping-and-restarting-tmux) can be softened.
 
 ## The old stopgap scripts
 

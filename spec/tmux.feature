@@ -408,7 +408,8 @@ Feature: tmux integration (CS-TMUX)
   # wrote as the one argument, BEFORE it compares that file with the one `last`
   # points at (an equal file is then deleted and `last` left alone). The operator
   # wires it with one tmux.conf line:
-  #   set -g @resurrect-hook-post-save-layout 'claude-sandbox tmux save'
+  #   set -g @resurrect-hook-post-save-layout '/path/to/claude-sandbox/bin/claude-sandbox tmux save'
+  # (by the shim's absolute path: it runs in the tmux server's environment, at boot a systemd unit's)
   # (resurrect reads the option at save time, so its place in tmux.conf does not
   # matter). The hook records, for each sandbox pane in that save, which conversation it
   # holds: the pane's mark (F1) plus the conversation id and name from the host
@@ -1054,15 +1055,18 @@ Feature: tmux integration (CS-TMUX)
       leading ":" removed, every "\ " turned back into a space, symlinks resolved); an ACTIVE row's
       field 8 must also be its project or cwdRoot; a dir with single spaces is compared like any
       other
-    And the saved dir is never LOSSY: resurrect's save runs an unquoted "echo $dir", which turns a
-      tab, a newline or a run of whitespace into one space and drops whitespace at either end, and
-      its restore starts the pane at that collapsed path; so a pane whose dir was lossy is compared
-      against the collapsed form like any other — usually a path that does not exist, so the pane is
+    And the saved dir is never LOSSY: resurrect reads tmux's pane list tab-delimited, line by line,
+      so a tab or a newline in a path cuts the field short there, and its save then runs an unquoted
+      "echo $dir", which turns a run of spaces into one and drops spaces at either end; its restore
+      starts the pane at the path it saved. So a pane whose dir held such whitespace is compared
+      against that saved form like any other — usually a path that does not exist, so the pane is
       not there and is left to its typed restore
-    And only a LOSSY pane path (the pane's current path holding such whitespace, e.g. reached through
-      a symlink) is not compared, so coordinates and new-pane membership decide alone; the code keeps
-      the same check on the saved side as a guard that resurrect's save never reaches
-    And a mismatch is logged and the pane left to its typed restore, which then reads last
+    And only a LOSSY pane path (the pane's current path holding a tab, a newline, a run of whitespace
+      or whitespace at either end, e.g. reached through a symlink) is not compared, so coordinates
+      and new-pane membership decide alone; the code keeps the same check on the saved side as a
+      guard that resurrect's save never reaches
+    And a mismatch is logged and the pane left to its typed restore, which reads this server's
+      unconsumed pin (at most 10 minutes old; --rearm consumes it only when it ends) before last
     And an armed pane gets the row as a PENDING mark with one bounded "tmux set-option -p", right after
       one bounded "tmux display-message -p -t <pane>
       '#{pane_current_command}\t#{pane_in_mode}\t#{pane_synchronized}\t#{pane_pid}\t#{@claude-sandbox}'"
@@ -1170,8 +1174,8 @@ Feature: tmux integration (CS-TMUX)
       it), no client is looking at it, the pane's own process leads its terminal's foreground process
       group (Linux: field 8, tpgid, of /proc/<pane_pid>/stat after the last ")", equal to pane_pid;
       darwin: one bounded "ps -o tpgid= -p <pane_pid>"; anything unreadable, another OS, or no
-      controlling terminal = cannot tell), and its saved directory was compared (not empty, not a
-      lossy one CS-TMUX-066 cannot compare); otherwise it is marked only, with the reason, "type
+      controlling terminal = cannot tell), and its saved directory was compared (not empty, and the
+      pane's current path not a lossy one CS-TMUX-066 cannot compare); otherwise it is marked only, with the reason, "type
       claude-sandbox tmux restore in it" and how to --drop it
     And "no client is looking at it" is read again after the mark, right before the keys, with one
       bounded "tmux list-panes -a -F '#{pane_id}\t#{pane_active}\t#{window_active}\t#{session_attached}'"

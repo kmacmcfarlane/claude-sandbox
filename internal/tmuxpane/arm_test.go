@@ -185,7 +185,7 @@ var _ = Describe("tmux restore --all: arming a save into existing panes (CS-TMUX
 		Entry("synchronize-panes", pn{cmd: "zsh", sync: "1"}, "zsh", "synchronize-panes"),
 		Entry("a client looks at it", pn{cmd: "zsh", wactive: "1"}, "zsh", "a client is looking at it"),
 		Entry("the default shell is unknown", pn{cmd: "zsh"}, "", "default shell is unknown"),
-		Entry("a lossy saved dir", pn{cmd: "zsh", path: "/tmp/two  spaces"}, "zsh", "cannot be compared"),
+		Entry("a lossy pane path", pn{cmd: "zsh", path: "/tmp/two  spaces"}, "zsh", "cannot be compared"),
 	)
 
 	It("CS-TMUX-069: an empty saved dir cannot be compared either", func() {
