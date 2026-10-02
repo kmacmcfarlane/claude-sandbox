@@ -2196,10 +2196,9 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       warning
     # A non-regular back-link is unreadable, not "mismatched": there is no
     # recorded path to name in the repair warning.
-    # Not covered: the "git rev-parse" that runs first reads files in the same
-    # directory (<GitDir>/commondir, the worktree's .git file) with git's own
-    # blocking open, so a FIFO there still blocks the launch inside git;
-    # bounding the launch-path git calls is a separate change.
+    # The "git rev-parse" that runs first reads files in the same directory
+    # (<GitDir>/commondir, the worktree's .git file) with git's own blocking
+    # open; that call is bounded (CS-LNCH-176).
 
   Scenario: CS-LNCH-174 The shadow sources are read non-blocking, regular files only
     # <config dir>/CLAUDE.md lives under the read-write config-dir bind;
@@ -2223,3 +2222,98 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     Then the noun picker's worktree listing is empty, at once
     Given a shadow sweep root (CS-LNCH-084/166) is a FIFO
     Then the sweep fails at once naming it and removes nothing
+
+  Scenario: CS-LNCH-176 Every launch-path git call is bounded
+    # git reads .git/config, HEAD, a linked worktree's .git file and
+    # <GitDir>/commondir, info/exclude and every .gitignore with blocking
+    # opens, and every one of them is session-writable (the project tree, its
+    # .git, a linked worktree's read-write common dir), so a FIFO there hung
+    # the next launch inside git. Every git subprocess the launcher runs goes
+    # through execx.Git: execx.Bounded's loop (Runner.Start, DieWithParent —
+    # the helper the tmux mark and save hook already used) under
+    # execx.GitTimeout, 5 s, where the process group gets SIGTERM at the bound
+    # and SIGKILL only GitTermGrace (500 ms) later, since git removes its lock
+    # files on SIGTERM and not on SIGKILL (tmux calls keep the immediate
+    # SIGKILL). Each call is a
+    # local metadata lookup answering in milliseconds, 5 s leaves room for a
+    # cold cache, a large index or a network filesystem, and a launch whose
+    # every git call hangs still ends in well under a minute. A timeout never
+    # fails a launch: each call falls back to its existing failure outcome and
+    # adds one "WARNING: <git command> did not finish within 5s (a FIFO or
+    # other blocking file in its .git or a .gitignore can do this); <what the
+    # launcher does instead>." line on stderr. A call that merely fails keeps
+    # its old, silent outcome.
+    Given "git -C <project> rev-parse --show-toplevel" (launch.GitRoot) does
+      not answer within the bound
+    And no worktree was requested
+    Then it is killed, the warning ends "treating <project> as not a git
+      repository", and the launch goes on as outside a git work tree: the
+      noun picker lists no existing worktrees
+    Given that call times out and a worktree WAS requested (--worktree,
+      ralph's default, CLAUDE_SANDBOX_WORKTREE or the cascade worktree key)
+    Then a new container (or a join, which would run a fresh worktree)
+      refuses with exit 2 and one "Error: a worktree was requested, but <git
+      command> did not finish within 5s (…); not launching in the shared
+      checkout instead. Remove the blocking file, or pass --no-worktree to
+      launch there." line — no CS-LNCH-046 stand-down banner, no warning, no
+      docker create: isolation was asked for, an unattended ralph must not
+      run in the shared checkout, and before this bound the launch hung
+    And an attach, which uses no worktree, goes on, printing the CS-LNCH-176
+      warning ending "attaching anyway: an attach starts no worktree"
+    And a genuine "not a git repository" (git answers and fails) still stands
+      the worktree down with the CS-LNCH-046 banner
+    Given the linked-worktree "git rev-parse --git-dir --git-common-dir
+      --show-toplevel" (launch.DetectLinkedWorktree) does not answer
+    Then it is killed, the warning ends "launching as a plain project,
+      without the linked-worktree check", and the project launches plain, as
+      for any other failure of that call (CS-LNCH-070): no main-checkout
+      cascade, no common-dir mount
+    And the layout's git calls (CS-LAY-024) and the version stamp's
+      "git describe" (CS-IMG-076) are bounded the same way
+    And a restore attach's GitRoot (CS-TMUX-056) and its restoreCascade's
+      linked-worktree probe are bounded, a timeout read as "" / not linked
+      silently, as any failure there
+
+  Scenario: CS-LNCH-177 Launch-path git never runs a program the repository config names
+    # The host launcher's git reads the project's .git/config, which a session
+    # can write, and some keys make git run a program on the HOST. Every
+    # launch-path git call (execx.Git) starts with execx.GitSafeArgs:
+    #   -c core.fsmonitor=false     the fsmonitor hook runs on any index read:
+    #                               ls-files, check-ignore without --no-index,
+    #                               diff-index (verified on git 2.39)
+    #   -c core.hooksPath=/dev/null the post-index-change hook runs on an index
+    #                               refresh, even with --no-optional-locks
+    #                               (verified); no hook is found under /dev/null
+    #   --no-optional-locks         nothing rewrites the index
+    # Filter drivers (filter.<name>.clean/process, assigned by a session-
+    # writable .gitattributes) run whenever git re-hashes a worktree file.
+    # "describe --dirty" did that through an index refresh — for the checkout
+    # AND, through a child git per submodule, for every submodule, whose
+    # drivers live in .git/modules/<sub>/config (reproduced: a submodule's
+    # clean filter ran on the host). So the version stamp (CS-IMG-005) never
+    # refreshes: "describe --tags --always" reads only refs, and dirtiness is
+    # "diff-index --quiet --ignore-submodules=all HEAD --", which starts no
+    # child git. diff-index still re-hashes a RACILY clean entry (one no older
+    # than the index file, which a session can arrange by back-dating the
+    # index; verified), through the checkout's clean filter, so the stamp
+    # first lists the checkout's drivers (one bounded "git config -z
+    # --name-only --get-regexp ^filter\.", which runs nothing) and passes
+    # "-c filter.<name>.{clean,smudge,process}= -c filter.<name>.required=false"
+    # for each to the diff-index — an empty command runs nothing (verified).
+    # Not applicable to these subcommands, so not overridden: core.pager and
+    # pager.* (stdout is a pipe, never a terminal), core.editor, credential
+    # helpers, core.sshCommand and other transport keys (no network),
+    # gpg.program (nothing is verified), diff textconv/external (--quiet makes
+    # no patch). rev-parse, check-ignore, describe and init run no hooks; init
+    # in .claude-sandbox/ reads no repository config.
+    Given the project's .git/config sets core.fsmonitor to a program
+    Then no launch-path git call runs it (GitRoot, the linked-worktree probe,
+      the layout's rev-parse, ls-files, check-ignore probes and sidecar init)
+    Given this repository's .git/config sets a filter driver's clean or
+      process program, a submodule's .git/modules/<sub>/config sets one too,
+      .git/hooks/post-index-change exists, and every tracked file is racily
+      clean or touched
+    Then the version stamp's git calls run none of them
+    Given a filter driver name that cannot be passed on a -c (it holds "=" or
+      a newline)
+    Then the describe is skipped: the stamp is "unknown", with one WARNING

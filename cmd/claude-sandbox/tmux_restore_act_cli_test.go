@@ -272,6 +272,28 @@ var _ = Describe("tmux restore, one pane (CS-TMUX-052..063)", func() {
 			Expect(f.fake.CommandLines()).NotTo(ContainElement(HavePrefix("docker create")))
 		})
 
+		It("CS-LNCH-176, CS-TMUX-056: a hung git (restoreCascade's linked-worktree probe, the mark's GitRoot) is bounded and silent; the attach goes on", func() {
+			f.fake.GitBound = 50 * time.Millisecond
+			f.fake.OnHang("git ")
+			pane(withID().JSON())
+			inspectRunning("running")
+			f.fake.On("docker ps", psRowMark("claude-sandbox-x-proj-abc123-heron", f.proj, "claude", "heron", "", "37", "",
+				"2026-09-18 12:34:56 +0000 UTC", markID, cfgDir, cfgDir+"/sessions", "--add-dir")+"\n", nil)
+			streamEvents(f.fake, dockerEvent("die", "0"))
+			done := make(chan int, 1)
+			go func() { defer GinkgoRecover(); done <- f.run("tmux", "restore") }()
+			var code int
+			Eventually(done, 10*time.Second).Should(Receive(&code))
+			Expect(code).To(Equal(0), f.errw.String())
+			Expect(f.sessionLine()).To(Equal("docker attach --detach-keys=ctrl-q,ctrl-q " + markID))
+			Expect(f.fake.CommandLines()).To(ContainElement(ContainSubstring("rev-parse --git-dir --git-common-dir --show-toplevel")))
+			Expect(f.fake.CommandLines()).To(ContainElement(ContainSubstring("rev-parse --show-toplevel")))
+			Expect(f.fake.Killed).To(BeNumerically(">=", 2))
+			Expect(f.errw.String()).NotTo(ContainSubstring("did not finish within"), "both timeouts are silent here")
+			ms := marksSet()
+			Expect(ms[len(ms)-1].State).To(Equal(tmuxpane.StateActive))
+		})
+
 		It("CS-TMUX-056: a hand attach to a container discovered with its full id attaches by the id", func() {
 			delete(f.envmap, "TMUX")
 			f.fake.On("docker ps", psRowMark("cs-otter", f.proj, "claude", "otter", "", "37", "",

@@ -71,6 +71,18 @@ func (o *Options) errw() io.Writer {
 // .gitignore, and (when trackInHost is false) the sidecar git repo.
 func Setup(project string, trackInHost bool, opts Options) error {
 	sb := paths.SandboxDir(project)
+	// CS-LAY-025: a .claude-sandbox directory that is a symlink out of the
+	// project would put every write below — the skeleton, the CLAUDE.md seed,
+	// the sidecar .gitignore and repo — outside it. Checked FIRST, before any
+	// mkdir, in both trackInHost modes. The whole layout is skipped with one
+	// warning rather than failing the launch: nothing on the launch path
+	// reads what the layout creates (the cascade reads config.yaml/env
+	// through the link as before; ralph makes its own runtime dirs), so a
+	// refusal would only stop a deliberately linked directory from launching.
+	if _, _, err := resolveInProject(project, sb); err != nil {
+		fmt.Fprintf(opts.errw(), "WARNING: %v; skipping the layout setup (the temp/ and reports/ skeleton, the CLAUDE.md seed, the .gitignore entries and the sidecar git repo), which would write there.\n", err)
+		return nil
+	}
 	// The skeleton is temp/ and reports/ only. investigations/ is a claude-kit
 	// investigate/implement convention, not a sandbox path: never created here,
 	// and an existing one is user data that is left alone.
@@ -79,12 +91,47 @@ func Setup(project string, trackInHost bool, opts Options) error {
 			return err
 		}
 	}
-	hostIsGit := isGitWorkTree(opts.Runner, project)
+	sidecarGitExists := dirExists(filepath.Join(sb, ".git"))
+	hostGI := filepath.Join(project, ".gitignore")
+	sideGI := filepath.Join(sb, ".gitignore")
+
+	// CS-LAY-024: every git call here is bounded (execx.GitTimeout). A probe
+	// that times out is an UNKNOWN answer, never a "no": one warning, and
+	// the host .gitignore update and the sidecar git init — the steps that
+	// act on the answers — are skipped; the sidecar .gitignore (CS-LAY-004)
+	// is still written. gitUnknown is that path; hostTracked is the count
+	// known so far (0 when not probed).
+	hostTracked := 0
+	gitUnknown := func(gerr error) error {
+		instead := "skipping the .gitignore update and the git ignore checks"
+		if !trackInHost && !sidecarGitExists && hostTracked == 0 {
+			instead += ", and so the sidecar git init"
+		}
+		fmt.Fprintln(opts.errw(), execx.GitTimeoutWarning(gerr, instead))
+		if !trackInHost && hostTracked > 0 {
+			warnHostTracked(opts.errw(), hostTracked, false, sidecarGitExists)
+		}
+		if !trackInHost {
+			return ensureLines(project, sideGI, "temp/", "env", "ralph/")
+		}
+		return nil
+	}
+
+	hostIsGit, gerr := isGitWorkTree(opts.Runner, project)
+	if gerr != nil {
+		// Whether the host tracks files here is unknown too, so the
+		// CLAUDE.md seed (which waits on that answer) waits for a launch
+		// on which git answers.
+		return gitUnknown(gerr)
+	}
 	// CS-LAY-020: files the host already tracks under .claude-sandbox/ while
 	// trackInHost is false. Probed only in that mode; a failed probe is 0.
-	hostTracked := 0
 	if !trackInHost && hostIsGit {
-		hostTracked = HostTrackedCount(opts.Runner, project)
+		n, gerr := hostTrackedCount(opts.Runner, project)
+		if gerr != nil {
+			return gitUnknown(gerr)
+		}
+		hostTracked = n
 	}
 
 	// CS-LAY-002: seed once, never overwrite. Not in the CS-LAY-020 conflict
@@ -98,9 +145,6 @@ func Setup(project string, trackInHost bool, opts Options) error {
 			return err
 		}
 	}
-
-	hostGI := filepath.Join(project, ".gitignore")
-	sideGI := filepath.Join(sb, ".gitignore")
 
 	// CS-LAY-023: the sidecar .gitignore is written in this mode (CS-LAY-004);
 	// one that exists but is not a readable regular file fails the setup
@@ -120,17 +164,23 @@ func Setup(project string, trackInHost bool, opts Options) error {
 	// are the bounded-git-calls follow-up, not this check.
 	if hostIsGit {
 		if p, err := unreadableIgnoreFile(hostGI, sideGI); p != "" {
-			fmt.Fprintf(opts.errw(), "WARNING: cannot read %s (%v); skipping the .gitignore update and the git ignore checks, which would read it.\n", p, unwrapPathErr(err))
+			// The sidecar init (CS-LAY-005/006) needs dirIgnored's answer, so
+			// it is skipped too, and the warning says so when it would have
+			// run (9eab review).
+			also := ""
+			if !trackInHost && !sidecarGitExists && hostTracked == 0 {
+				also = ", and so the sidecar git init"
+			}
+			fmt.Fprintf(opts.errw(), "WARNING: cannot read %s (%v); skipping the .gitignore update and the git ignore checks, which would read it%s.\n", p, unwrapPathErr(err), also)
 			if !trackInHost && hostTracked > 0 {
-				warnHostTracked(opts.errw(), hostTracked, false, dirExists(filepath.Join(sb, ".git")))
+				warnHostTracked(opts.errw(), hostTracked, false, sidecarGitExists)
 			}
 			if !trackInHost {
 				// CS-LAY-004, as on the ordinary path.
-				if err := ensureLines(sideGI, "temp/", "env", "ralph/"); err != nil {
+				if err := ensureLines(project, sideGI, "temp/", "env", "ralph/"); err != nil {
 					return err
 				}
 			}
-			// The sidecar init (CS-LAY-005/006) needs dirIgnored's answer.
 			return nil
 		}
 	}
@@ -146,14 +196,18 @@ func Setup(project string, trackInHost bool, opts Options) error {
 			// only the children (".claude-sandbox/*") is not a conflict: the
 			// negations work beneath it (CS-LAY-021). Warn, never switch modes, and still
 			// propose the worktrees line alone.
-			if conflict := hostTrackConflict(opts.Runner, project, sb); conflict != "" {
+			conflict, gerr := hostTrackConflict(opts.Runner, project, sb)
+			if gerr != nil {
+				return gitUnknown(gerr)
+			}
+			if conflict != "" {
 				fmt.Fprintf(opts.errw(), "WARNING: trackInHost is true but %s; skipping the host-tracked .gitignore entries, which would be dead there.\n", conflict)
 				fmt.Fprintln(opts.errw(), "  Either set trackInHost: false in .claude-sandbox/config.yaml (and delete any .claude-sandbox/env, temp/, ralph/, !config.yaml or !Dockerfile lines already in .gitignore — they are dead),")
 				fmt.Fprintln(opts.errw(), "  or drop the ignore rule (`git check-ignore -v --no-index "+dirProbe+"` names it) and .claude-sandbox/.git to track the directory in the host.")
-				gitignoreAdd(hostGI, opts, withWorktreesLine(hostGI)...)
+				gitignoreAdd(project, hostGI, opts, withWorktreesLine(hostGI)...)
 				return nil
 			}
-			gitignoreAdd(hostGI, opts, withWorktreesLine(hostGI,
+			gitignoreAdd(project, hostGI, opts, withWorktreesLine(hostGI,
 				".claude-sandbox/env", ".claude-sandbox/temp/", ".claude-sandbox/ralph/",
 				"!.claude-sandbox/config.yaml", "!.claude-sandbox/Dockerfile")...)
 		}
@@ -166,14 +220,18 @@ func Setup(project string, trackInHost bool, opts Options) error {
 	// modes, still propose the worktrees line, and skip the sidecar init.
 	if hostIsGit {
 		if hostTracked > 0 {
-			warnHostTracked(opts.errw(), hostTracked, dirIgnored(opts.Runner, project), dirExists(filepath.Join(sb, ".git")))
-			gitignoreAdd(hostGI, opts, withWorktreesLine(hostGI)...)
+			ignored, gerr := dirIgnored(opts.Runner, project)
+			if gerr != nil {
+				return gitUnknown(gerr)
+			}
+			warnHostTracked(opts.errw(), hostTracked, ignored, sidecarGitExists)
+			gitignoreAdd(project, hostGI, opts, withWorktreesLine(hostGI)...)
 		} else {
-			gitignoreAdd(hostGI, opts, withWorktreesLine(hostGI, "/.claude-sandbox/")...)
+			gitignoreAdd(project, hostGI, opts, withWorktreesLine(hostGI, "/.claude-sandbox/")...)
 		}
 	}
 	// CS-LAY-004: sidecar's own .gitignore — append-only, no prompt.
-	if err := ensureLines(filepath.Join(sb, ".gitignore"), "temp/", "env", "ralph/"); err != nil {
+	if err := ensureLines(project, sideGI, "temp/", "env", "ralph/"); err != nil {
 		return err
 	}
 	// CS-LAY-005..008: sidecar git init.
@@ -185,8 +243,25 @@ func Setup(project string, trackInHost bool, opts Options) error {
 		// history; the warning above already names the remedies.
 		return nil
 	}
-	if !hostIsGit || dirIgnored(opts.Runner, project) {
-		if err := opts.Runner.Run(execx.Cmd{Name: "git", Args: []string{"-C", sb, "init", "-q"}}); err == nil {
+	ignored := !hostIsGit
+	if hostIsGit {
+		var gerr error
+		if ignored, gerr = dirIgnored(opts.Runner, project); gerr != nil {
+			// CS-LAY-024: the host .gitignore step is already done; only
+			// the init waits on this answer.
+			fmt.Fprintln(opts.errw(), execx.GitTimeoutWarning(gerr, "skipping the sidecar git init"))
+			return nil
+		}
+	}
+	if ignored {
+		// CS-LAY-024: bounded too; a timed-out init may leave a partial
+		// .git, which the next launch would take for a sidecar repo.
+		_, err := execx.Git(opts.Runner, execx.Cmd{Name: "git", Args: []string{"-C", sb, "init", "-q"}})
+		switch {
+		case errors.Is(err, execx.ErrTimedOut):
+			fmt.Fprintln(opts.errw(), execx.GitTimeoutWarning(err,
+				"no sidecar git repo; remove any partial "+filepath.Join(sb, ".git")+" and run 'git -C "+sb+" init' to create it"))
+		case err == nil:
 			fmt.Fprintf(opts.out(), "Initialized sidecar git repo at %s\n", sb)
 		}
 	} else {
@@ -239,27 +314,37 @@ func withWorktreesLine(gi string, lines ...string) []string {
 	return append(lines, worktreesLine)
 }
 
-func isGitWorkTree(r execx.Runner, dir string) bool {
-	err := r.Run(execx.Cmd{Name: "git", Args: []string{"-C", dir, "rev-parse", "--is-inside-work-tree"}, Stdout: io.Discard, Stderr: io.Discard})
-	return err == nil
+// isGitWorkTree asks git whether dir is inside a work tree; any failure is
+// "no". The error is non-nil only when git did not answer within
+// execx.GitTimeout (CS-LAY-024): the answer is unknown.
+func isGitWorkTree(r execx.Runner, dir string) (bool, error) {
+	_, err := execx.Git(r, execx.Cmd{Name: "git", Args: []string{"-C", dir, "rev-parse", "--is-inside-work-tree"}})
+	if errors.Is(err, execx.ErrTimedOut) {
+		return false, err
+	}
+	return err == nil, nil
 }
 
 // hostTrackConflict reports why host-tracked (trackInHost: true) .gitignore
 // entries would be dead — CS-LAY-018: the host repo excludes the
 // .claude-sandbox directory itself, a sidecar .git exists inside it, or both.
 // Returns "" when neither condition holds.
-func hostTrackConflict(r execx.Runner, project, sb string) string {
-	ignored := dirExcluded(r, project)
+// The error is non-nil only when the probe timed out (CS-LAY-024).
+func hostTrackConflict(r execx.Runner, project, sb string) (string, error) {
+	ignored, err := dirExcluded(r, project)
+	if err != nil {
+		return "", err
+	}
 	sidecar := dirExists(filepath.Join(sb, ".git"))
 	switch {
 	case ignored && sidecar:
-		return "the host repo already ignores .claude-sandbox/ and .claude-sandbox/.git exists"
+		return "the host repo already ignores .claude-sandbox/ and .claude-sandbox/.git exists", nil
 	case ignored:
-		return "the host repo already ignores .claude-sandbox/"
+		return "the host repo already ignores .claude-sandbox/", nil
 	case sidecar:
-		return ".claude-sandbox/.git exists"
+		return ".claude-sandbox/.git exists", nil
 	}
-	return ""
+	return "", nil
 }
 
 // HostTrackedCount returns how many files the host repo tracks under
@@ -267,10 +352,23 @@ func hostTrackConflict(r execx.Runner, project, sb string) string {
 // project outside any git work tree), so behaviour is exactly as before: a
 // probe failure never counts as "tracked". init shares it to default its
 // greenfield trackInHost prompt to true in that state (CS-INIT-031).
+//
+// The call is bounded (CS-LAY-024); a timeout is 0 here, the old failure
+// semantic, while Setup reads it through hostTrackedCount as unknown.
 func HostTrackedCount(r execx.Runner, project string) int {
-	out, err := r.Output(execx.Cmd{Name: "git", Args: []string{"-C", project, "ls-files", "-z", "--", ".claude-sandbox"}, Stderr: io.Discard})
+	n, _ := hostTrackedCount(r, project)
+	return n
+}
+
+// hostTrackedCount is HostTrackedCount with the timeout reported: the error
+// is non-nil only when git did not answer within execx.GitTimeout.
+func hostTrackedCount(r execx.Runner, project string) (int, error) {
+	out, err := execx.Git(r, execx.Cmd{Name: "git", Args: []string{"-C", project, "ls-files", "-z", "--", ".claude-sandbox"}})
+	if errors.Is(err, execx.ErrTimedOut) {
+		return 0, err
+	}
 	if err != nil {
-		return 0
+		return 0, nil
 	}
 	n := 0
 	for _, f := range strings.Split(out, "\x00") {
@@ -278,7 +376,7 @@ func HostTrackedCount(r execx.Runner, project string) int {
 			n++
 		}
 	}
-	return n
+	return n, nil
 }
 
 // dirProbe is the directory path asked by dirExcluded — no trailing slash:
@@ -291,9 +389,13 @@ const dirProbe = ".claude-sandbox"
 // otherwise reports a directory holding tracked files as NOT ignored even
 // beneath a "/.claude-sandbox/" rule. A rule excluding only the children
 // (".claude-sandbox/*", "/.claude-sandbox/**") does not match the directory.
-func dirExcluded(r execx.Runner, project string) bool {
-	err := r.Run(execx.Cmd{Name: "git", Args: []string{"-C", project, "check-ignore", "-q", "--no-index", "--", dirProbe}, Stdout: io.Discard, Stderr: io.Discard})
-	return err == nil
+// The error is non-nil only when the probe timed out (CS-LAY-024).
+func dirExcluded(r execx.Runner, project string) (bool, error) {
+	_, err := execx.Git(r, execx.Cmd{Name: "git", Args: []string{"-C", project, "check-ignore", "-q", "--no-index", "--", dirProbe}})
+	if errors.Is(err, execx.ErrTimedOut) {
+		return false, err
+	}
+	return err == nil, nil
 }
 
 // ignoreProbes are two unlike paths under .claude-sandbox/ that never exist
@@ -312,20 +414,27 @@ var ignoreProbes = []string{ignoreProbe, ignoreProbe + ".md"}
 // trackInHost prompt defaults to true only when new files under
 // .claude-sandbox/ are NOT hidden (CS-INIT-031). dirExcluded implies it, so
 // it also covers the whole-dir half of CS-LAY-018.
+// A timed-out probe (CS-LAY-024) is false here, the old failure semantic.
 func DirIgnored(r execx.Runner, project string) bool {
-	return dirIgnored(r, project)
+	ignored, _ := dirIgnored(r, project)
+	return ignored
 }
 
 // dirIgnored reports whether the host repo ignores new files under
-// .claude-sandbox/: true only when every ignoreProbes path is ignored.
-func dirIgnored(r execx.Runner, project string) bool {
+// .claude-sandbox/: true only when every ignoreProbes path is ignored. The
+// error is non-nil only when a probe timed out (CS-LAY-024); no later probe
+// runs then.
+func dirIgnored(r execx.Runner, project string) (bool, error) {
 	for _, p := range ignoreProbes {
-		err := r.Run(execx.Cmd{Name: "git", Args: []string{"-C", project, "check-ignore", "-q", "--", p}, Stdout: io.Discard, Stderr: io.Discard})
+		_, err := execx.Git(r, execx.Cmd{Name: "git", Args: []string{"-C", project, "check-ignore", "-q", "--", p}})
+		if errors.Is(err, execx.ErrTimedOut) {
+			return false, err
+		}
 		if err != nil {
-			return false
+			return false, nil
 		}
 	}
-	return true
+	return true, nil
 }
 
 func dirExists(p string) bool {
@@ -362,7 +471,14 @@ func warnHostTracked(w io.Writer, n int, ruleExists, sidecar bool) {
 // first (CS-LAY-010..014). Resolution order: Options.Gitignore flag,
 // CS_GITIGNORE_ASSUME env var, interactive prompt (default yes), no-tty skip.
 // Returns true when the lines were added.
-func gitignoreAdd(gi string, opts Options, lines ...string) bool {
+func gitignoreAdd(project, gi string, opts Options, lines ...string) bool {
+	// CS-LAY-025: a symlink leading out of the project tree is refused before
+	// any prompt: a session could point it at another file the user can
+	// write, and the default-yes prompt would append the lines there.
+	if _, _, err := resolveInProject(project, gi); err != nil {
+		fmt.Fprintf(opts.errw(), "WARNING: %v; skipping the .gitignore update (the launcher writes .gitignore lines only inside the project).\n", err)
+		return false
+	}
 	existing := map[string]bool{}
 	// CS-LAY-023: the project tree is session-writable, so the read never
 	// blocks (a FIFO, device or socket there) and a file that exists but
@@ -409,7 +525,7 @@ func gitignoreAdd(gi string, opts Options, lines ...string) bool {
 		fmt.Fprintln(opts.errw(), "Skipped .gitignore update.")
 		return false
 	}
-	if err := ensureLines(gi, missing...); err != nil {
+	if err := ensureLines(project, gi, missing...); err != nil {
 		fmt.Fprintf(opts.errw(), "failed to update %s: %v\n", gi, err)
 		return false
 	}
@@ -418,8 +534,13 @@ func gitignoreAdd(gi string, opts Options, lines ...string) bool {
 }
 
 // ensureLines appends each line not already present verbatim, keeping the
-// file newline-terminated (CS-LAY-011).
-func ensureLines(file string, lines ...string) error {
+// file newline-terminated (CS-LAY-011). file lies inside project, and is
+// written only through project (CS-LAY-025): a symlink at it may lead
+// anywhere inside the project tree, never out of it.
+func ensureLines(project, file string, lines ...string) error {
+	if _, _, err := resolveInProject(project, file); err != nil {
+		return fmt.Errorf("%v; refusing to write through it", err)
+	}
 	// CS-LAY-023: a missing file is empty; one that exists but is not a
 	// readable regular file (a FIFO, device, socket, directory) is an error,
 	// never waited on and never written.
@@ -447,7 +568,66 @@ func ensureLines(file string, lines ...string) error {
 	if !changed && len(raw) > 0 {
 		return nil
 	}
-	return writeRegularFile(file, []byte(b.String()))
+	return writeRegularFile(project, file, []byte(b.String()))
+}
+
+// resolveInProject resolves file — every symlink on the way, absolute or
+// relative, and a dangling final link to the path it would create — and
+// returns the physical project root and file's path relative to it
+// (CS-LAY-025). A target outside the project, or a path that cannot be
+// resolved (a symlink loop, a missing directory on the way), is an error
+// naming it: the launcher writes .gitignore lines only inside the project.
+func resolveInProject(project, file string) (root, rel string, err error) {
+	root = filepath.Clean(project)
+	if r, err := filepath.EvalSymlinks(project); err == nil {
+		root = r
+	}
+	target, err := filepath.EvalSymlinks(file)
+	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			return "", "", fmt.Errorf("%s cannot be resolved inside the project %s (%v)", file, project, unwrapPathErr(err))
+		}
+		// Missing: the file itself, or the end of a (chain of) dangling
+		// link(s). Follow the links by hand; the directory each lands in
+		// must exist and is resolved physically.
+		t := file
+		for i := 0; ; i++ {
+			if i == 40 {
+				return "", "", fmt.Errorf("%s cannot be resolved inside the project %s (too many levels of symbolic links)", file, project)
+			}
+			dir, derr := filepath.EvalSymlinks(filepath.Dir(t))
+			if derr != nil {
+				return "", "", fmt.Errorf("%s cannot be resolved inside the project %s (%v)", file, project, unwrapPathErr(derr))
+			}
+			t = filepath.Join(dir, filepath.Base(t))
+			fi, lerr := os.Lstat(t)
+			if lerr != nil || fi.Mode()&os.ModeSymlink == 0 {
+				break
+			}
+			l, rerr := os.Readlink(t)
+			if rerr != nil {
+				return "", "", fmt.Errorf("%s cannot be resolved inside the project %s (%v)", file, project, unwrapPathErr(rerr))
+			}
+			if !filepath.IsAbs(l) {
+				l = filepath.Join(filepath.Dir(t), l)
+			}
+			t = filepath.Clean(l)
+		}
+		target = t
+	}
+	if !within(target, root) {
+		return "", "", fmt.Errorf("%s is a symlink to %s, outside the project %s", file, target, project)
+	}
+	rel, err = filepath.Rel(root, target)
+	if err != nil || rel == "." {
+		return "", "", fmt.Errorf("%s cannot be resolved inside the project %s", file, project)
+	}
+	return root, rel, nil
+}
+
+// within reports whether path is dir or lies inside it.
+func within(path, dir string) bool {
+	return path == dir || strings.HasPrefix(path, dir+"/")
 }
 
 // writeRegularFile replaces file's content like os.WriteFile (0644 when
@@ -455,8 +635,22 @@ func ensureLines(file string, lines ...string) error {
 // descriptor is a regular file (CS-LAY-023): a FIFO swapped in after the read
 // fails open(2) with ENXIO (no reader) or is refused here, never blocking.
 // O_TRUNC is applied only after the check, so nothing else is truncated.
-func writeRegularFile(file string, data []byte) error {
-	f, err := os.OpenFile(file, os.O_WRONLY|os.O_CREATE|syscall.O_NONBLOCK|syscall.O_NOCTTY, 0o644)
+// file must resolve inside dir (resolveInProject, CS-LAY-025) and is opened
+// as that resolved relative path through os.OpenRoot of dir's physical path:
+// a symlink to a file inside the project, absolute or relative, is followed,
+// and a link re-pointed out of the project after the resolution fails the
+// open (os.Root refuses any escape) instead of writing elsewhere.
+func writeRegularFile(dir, file string, data []byte) error {
+	rootDir, rel, err := resolveInProject(dir, file)
+	if err != nil {
+		return err
+	}
+	root, err := os.OpenRoot(rootDir)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	f, err := root.OpenFile(rel, os.O_WRONLY|os.O_CREATE|syscall.O_NONBLOCK|syscall.O_NOCTTY, 0o644)
 	if err != nil {
 		return err
 	}

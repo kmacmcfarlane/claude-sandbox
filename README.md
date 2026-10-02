@@ -983,8 +983,21 @@ the shadow copies, the global config the health check reads, and this repository
 Dockerfiles for the rebuild fingerprint — never wait on such a file either: each treats it
 as unreadable (a `.gitignore` one is skipped with a warning, and the `git check-ignore`
 checks that would read it are skipped too). The `git` commands a launch runs read files
-of their own (`.git`, `.git/info/exclude`, a worktree's git dir) and are not covered by
-this: a FIFO there can still hold the launch inside git.
+of their own (`.git`, `.git/info/exclude`, a worktree's git dir) with blocking opens, so
+every one is bounded: a git that has not answered within 5 s is killed (with anything it
+started) and the launch goes on with that call's ordinary failure outcome plus one
+`WARNING: <git command> did not finish within 5s …` line — not a git repository (a
+requested worktree stands down), a plain project instead of a linked worktree, the
+version stamp `unknown`, and for the layout's checks an unknown answer: no `.gitignore`
+update and no sidecar git init on that launch. A launch that asked for a worktree
+(`--worktree`, ralph's default, `CLAUDE_SANDBOX_WORKTREE`, `worktree: true`) is the exception:
+when git does not answer whether the project is a repository it refuses with exit 2
+instead of running in the shared checkout (`--no-worktree` launches there). These git
+commands also never run a program the repository's `.git/config` names: the launcher
+passes `-c core.fsmonitor=false -c core.hooksPath=/dev/null --no-optional-locks` to each,
+and the version stamp never refreshes the index (`git describe --tags --always`, then
+`git diff-index --quiet --ignore-submodules=all HEAD --` for the `-dirty` suffix, with the
+checkout's filter drivers blanked), so no filter program — a submodule's included — runs.
 
 Merge rules:
 
@@ -1234,6 +1247,15 @@ duplicated, and skipped when an existing rule such as `.claude/`, `.claude/*` or
 `/.claude/worktrees/` already covers it. Declining the launch-time prompt (or setting
 `CS_GITIGNORE_ASSUME=n`) skips this line along with the rest; on `init`, where the
 entries are written without a prompt, `--no-gitignore` does the same.
+
+The launcher writes `.gitignore` lines only inside the project. A `.gitignore` (host or
+sidecar) that is a symlink (absolute or relative) to a file inside the project is followed;
+one that leads out of it, directly or through a directory link, is refused — the host one with a `WARNING: … is a symlink to …, outside the project …`
+line and no prompt, the sidecar one by failing the setup naming it — so a session cannot
+point the file at, say, `~/.bashrc` and have the launcher append to that. If the
+`.claude-sandbox` directory itself is a symlink out of the project, the launcher skips the
+whole layout setup (skeleton, `CLAUDE.md` seed, `.gitignore` entries, sidecar repo) with one
+warning naming the link, and launches as usual: nothing it would create is needed to launch.
 
 ### `.claude-sandbox/env`
 
@@ -2092,7 +2114,7 @@ Images from before the `df-` tagging scheme (`claude-sandbox-<project>`) are dea
 
 ### Versioning
 
-The launcher stamps each tools-image build with `git describe --tags --always --dirty`, baked in as `/opt/claude-sandbox/version` and the `org.opencontainers.image.revision` label; the cap sets `$CLAUDE_SANDBOX_VERSION` from that label. Check it with:
+The launcher stamps each tools-image build with `git describe --tags --always`, plus `-dirty` when tracked files differ from `HEAD` (checked without refreshing git's index, so merely touching a file can also read as dirty, and changes inside submodules do not), baked in as `/opt/claude-sandbox/version` and the `org.opencontainers.image.revision` label; the cap sets `$CLAUDE_SANDBOX_VERSION` from that label. (Outside a git checkout, or when `git describe` has not answered within 5 s — it is then killed, with one warning — the stamp is `unknown`.) Check it with:
 
 ```bash
 claude-sandbox --version

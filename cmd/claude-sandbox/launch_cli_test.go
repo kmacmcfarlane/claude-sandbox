@@ -544,7 +544,7 @@ var _ = Describe("launcher CLI (end-to-end argv)", func() {
 	})
 
 	It("CS-LNCH-030: --version reports host and baked-image versions with a mismatch note", func() {
-		f.fake.On("describe --tags --always --dirty", "v2.0.0\n", nil)
+		f.fake.On("describe --tags --always", "v2.0.0\n", nil)
 		f.fake.On("image.revision", "v1.9.0\n", nil)
 		f.fake.On("{{.Created}}", time.Now().Format(time.RFC3339Nano)+"\n", nil)
 		Expect(f.run("--version")).To(Equal(0))
@@ -556,14 +556,14 @@ var _ = Describe("launcher CLI (end-to-end argv)", func() {
 	})
 
 	It("CS-LNCH-030: --version prints \"(not built yet)\" when the images do not exist", func() {
-		f.fake.On("describe --tags --always --dirty", "v2.0.0\n", nil)
+		f.fake.On("describe --tags --always", "v2.0.0\n", nil)
 		f.fake.On("docker image inspect claude-sandbox", "", execx.Fail(1))
 		Expect(f.run("--version")).To(Equal(0))
 		Expect(f.out.String()).To(ContainSubstring("(not built yet)"))
 	})
 
 	It("CS-LNCH-030: --version prints the Claude Code version pinned in the CLI image", func() {
-		f.fake.On("describe --tags --always --dirty", "v2.0.0\n", nil)
+		f.fake.On("describe --tags --always", "v2.0.0\n", nil)
 		f.fake.On("image.revision", "v2.0.0\n", nil)
 		f.fake.On("claude-sandbox.claude-version", "2.1.247\n", nil)
 		f.fake.On("{{.Created}}", time.Now().Format(time.RFC3339Nano)+"\n", nil)

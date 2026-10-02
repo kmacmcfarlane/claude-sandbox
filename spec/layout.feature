@@ -316,8 +316,11 @@ Feature: .claude-sandbox/ layout lifecycle (CS-LAY)
       regular file (a FIFO, device, socket or directory; or no permission)
     Then the setup prints one "WARNING: cannot read <file> (<error>);
       skipping the .gitignore update and the git ignore checks, which would
-      read it." line, asks nothing, writes nothing to the host .gitignore and
-      runs no git check-ignore
+      read it[, and so the sidecar git init]." line — the last clause when
+      trackInHost is false, no .claude-sandbox/.git exists and the host
+      tracks nothing there, i.e. when the init would otherwise have been
+      decided (9eab review) — asks nothing, writes nothing to the host
+      .gitignore and runs no git check-ignore
     And with trackInHost false the CS-LAY-020 warning still prints when the
       host tracks files under .claude-sandbox/ (in its plain form: whether a
       rule hides them is not asked), the sidecar .gitignore is still written
@@ -326,7 +329,89 @@ Feature: .claude-sandbox/ layout lifecycle (CS-LAY)
     Then the CS-LAY-002 seed is not written: it is created O_EXCL|O_NOFOLLOW,
       so an entry that appears after the look is kept, never opened
     # Was: a dangling symlink there was followed and its target created.
-    # Out of scope: git's other reads (.git/info/exclude, core.excludesFile,
-    # a .git file, a nested .gitignore elsewhere) and every other launch-path
-    # git call can still block on a FIFO; bounding the launch-path git calls
-    # is a separate change.
+    # git's other reads (.git/info/exclude, core.excludesFile, a .git file, a
+    # nested .gitignore elsewhere) are covered by bounding the git calls
+    # themselves (CS-LAY-024); this check still runs first, so the common case
+    # costs no wait.
+
+  Scenario: CS-LAY-024 The layout's git calls are bounded; a timeout is an unknown answer
+    # Every layout git call (rev-parse --is-inside-work-tree, ls-files,
+    # check-ignore with and without --no-index, the sidecar git init) goes
+    # through execx.Git under execx.GitTimeout (CS-LNCH-176). A probe that
+    # times out is UNKNOWN, never "no": reading it as "not a git work tree"
+    # or "not ignored" would init a sidecar repo, or propose lines, on a
+    # guess. It also closes the window between the CS-LAY-023 look and the
+    # probes, and the .gitignore files above a project in a repo subdir.
+    Given a layout git probe that comes before the host .gitignore step
+      (rev-parse, ls-files, the CS-LAY-018 --no-index probe, the CS-LAY-020
+      child probes) does not finish within the bound
+    Then it is killed, no later probe runs, and the setup prints one CS-LNCH-176
+      warning ending "skipping the .gitignore update and the git ignore
+      checks[, and so the sidecar git init]" (the clause on the CS-LAY-023
+      condition: trackInHost false, no .claude-sandbox/.git, no host-tracked
+      files known)
+    And it asks nothing, writes nothing to the host .gitignore and runs no
+      sidecar git init
+    And with trackInHost false the sidecar .gitignore is still written
+      (CS-LAY-004), and the CS-LAY-020 warning prints in its plain form when
+      the host-tracked count was already known to be above 0
+    And the CLAUDE.md seed (CS-LAY-002) is skipped when the timed-out probe
+      was "rev-parse" or "ls-files": whether the host tracks files there is
+      unknown; a later launch on which git answers seeds it
+    And the setup succeeds: the launch goes on
+    Given the check-ignore probe that decides the sidecar init (CS-LAY-005/006)
+      does not finish — it runs after the host .gitignore step, which is done
+    Then it is killed and one CS-LNCH-176 warning ends "skipping the sidecar
+      git init"
+    Given the sidecar "git -C .claude-sandbox init -q" does not finish
+    Then it is killed and one CS-LNCH-176 warning ends "no sidecar git repo;
+      remove any partial <sb>/.git and run 'git -C <sb> init' to create it"
+    And init's own uses of the probes (layout.HostTrackedCount,
+      layout.DirIgnored, CS-INIT-031) read a timeout as their old failure
+      answer, 0 and false
+
+  Scenario: CS-LAY-025 The .gitignore files are written only inside the project tree
+    # A session can replace <project>/.gitignore (or the sidecar one) with a
+    # symlink to another file the user can write — ~/.bashrc — and the
+    # launcher would append its lines there, behind the default-yes prompt
+    # (the sidecar one with no prompt at all). A link that stays inside the
+    # project is followed: the session could write its target directly
+    # anyway, and a checkout may keep .gitignore as a link to a shared file
+    # in the tree. A link leading out is refused, whoever made it: lines
+    # appended to a file outside the project are never what the launcher
+    # means to do.
+    Given the host .gitignore is a symlink whose target (resolved, or the
+      link text when dangling) lies outside the project directory
+    Then the setup prints one "WARNING: <file> is a symlink to <target>,
+      outside the project <project>; skipping the .gitignore update (the
+      launcher writes .gitignore lines only inside the project)." line, asks
+      nothing and leaves the target untouched; the launch goes on
+    Given the sidecar .claude-sandbox/.gitignore is such a symlink
+    Then the setup fails with an error naming it and its target, as a
+      non-regular sidecar .gitignore does (CS-LAY-023), and writes nothing
+    Given either is a symlink (absolute or relative, a dangling one included)
+      to a file inside the project
+    Then it is followed: the lines land in the target, as before
+    And the target is resolved before any prompt — every symlink on the way,
+      a dangling final link (or chain) to the path it would create — and a
+      target outside the project, through a directory link too ("up/newfile"
+      with "up -> .."), is refused as above; a path that cannot be resolved
+      (a loop, a missing directory) is refused the same way, naming why
+    And every .gitignore write opens that resolved project-relative path
+      through os.OpenRoot(<physical project>), which refuses any escape, so a
+      link re-pointed out after the check fails the write instead of landing
+      outside
+    Given the .claude-sandbox directory itself is a symlink whose target lies
+      outside the project (either trackInHost mode)
+    Then the setup checks it FIRST and skips the whole layout with one
+      "WARNING: <project>/.claude-sandbox is a symlink to <target>, outside the
+      project <project>; skipping the layout setup (the temp/ and reports/
+      skeleton, the CLAUDE.md seed, the .gitignore entries and the sidecar git
+      repo), which would write there." line: no directory, file, .gitignore
+      line or git call, inside or outside, and the launch goes on
+    # Skipped, not refused: nothing on the launch path reads what the layout
+    # makes (the cascade reads config.yaml and env through the link as
+    # before; ralph makes its own runtime dirs), so a refusal would only stop
+    # a deliberately linked directory from launching. A link to a directory
+    # inside the project is followed. init's own seeding of the scaffold files
+    # (not the launch path) is out of scope.

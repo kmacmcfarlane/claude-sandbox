@@ -45,7 +45,7 @@ var _ = Describe("linked worktree detection (CS-LNCH-070)", func() {
 		lw, warn := launch.DetectLinkedWorktree(fake, wt)
 		Expect(warn).To(BeEmpty())
 		Expect(lw).To(Equal(&launch.LinkedWorktree{Top: wt, GitDir: gitDir, CommonDir: common, Main: filepath.Join(base, "repo")}))
-		Expect(fake.CommandLines()).To(Equal([]string{"git -C " + wt + " " + revParse}))
+		Expect(fake.CommandLines()).To(Equal([]string{execx.GitSafePrefix + " -C " + wt + " " + revParse}))
 	})
 
 	It("CS-LNCH-070: a main checkout (git dir == common dir) is not linked", func() {

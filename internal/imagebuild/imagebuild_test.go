@@ -1212,9 +1212,21 @@ var _ = Describe("image build lifecycle", func() {
 	})
 
 	Describe("Version", func() {
-		It("CS-IMG-005: carries git describe --tags --always --dirty of the checkout", func() {
-			fake.On("git -C "+repo+" describe --tags --always --dirty", "v1.2.3-4-gabc123-dirty\n", nil)
+		It("CS-IMG-005: carries git describe --tags --always of the checkout, \"-dirty\" when diff-index finds a change", func() {
+			fake.On(execx.GitSafePrefix+" -C "+repo+" describe --tags --always", "v1.2.3-4-gabc123\n", nil)
+			fake.On("diff-index --quiet --ignore-submodules=all HEAD --", "", execx.Fail(1))
 			Expect(imagebuild.Version(fake, repo)).To(Equal("v1.2.3-4-gabc123-dirty"))
+			Expect(fake.CommandLines()).To(ContainElement(execx.GitSafePrefix + " -C " + repo + " diff-index --quiet --ignore-submodules=all HEAD --"))
+			Expect(fake.CommandLines()).NotTo(ContainElement(ContainSubstring("--dirty")), "CS-LNCH-177: no index refresh")
+
+			clean := &execx.Fake{}
+			clean.On("describe --tags --always", "v1.2.3\n", nil)
+			Expect(imagebuild.Version(clean, repo)).To(Equal("v1.2.3"), "diff-index exit 0: clean")
+
+			other := &execx.Fake{}
+			other.On("describe --tags --always", "v1.2.3\n", nil)
+			other.On("diff-index", "", execx.Fail(128))
+			Expect(imagebuild.Version(other, repo)).To(Equal("v1.2.3"), "any other diff-index failure leaves the describe as is")
 		})
 
 		It("CS-IMG-005: falls back to \"unknown\" outside a git repo", func() {
@@ -1225,6 +1237,59 @@ var _ = Describe("image build lifecycle", func() {
 		It("CS-IMG-005: falls back to \"unknown\" on empty git output", func() {
 			fake.On("git", "  \n", nil)
 			Expect(imagebuild.Version(fake, repo)).To(Equal("unknown"))
+		})
+
+		It("CS-LNCH-177: the dirty check blanks every filter driver the repository config names", func() {
+			fake.On("config -z --name-only --get-regexp", "filter.lfs.clean\x00filter.lfs.process\x00filter.my.drv.smudge\x00", nil)
+			fake.On("describe --tags", "v1\n", nil)
+			v, warn := imagebuild.Version(fake, repo)
+			Expect(v).To(Equal("v1"))
+			Expect(warn).To(BeEmpty())
+			Expect(fake.CommandLines()).To(ContainElement(execx.GitSafePrefix +
+				" -c filter.lfs.clean= -c filter.lfs.smudge= -c filter.lfs.process= -c filter.lfs.required=false" +
+				" -c filter.my.drv.clean= -c filter.my.drv.smudge= -c filter.my.drv.process= -c filter.my.drv.required=false" +
+				" -C " + repo + " diff-index --quiet --ignore-submodules=all HEAD --"))
+			Expect(fake.CommandLines()).To(ContainElement(execx.GitSafePrefix + " -C " + repo + " describe --tags --always"))
+		})
+
+		It("CS-LNCH-177: a driver name a -c cannot carry skips the describe: \"unknown\", with a warning", func() {
+			fake.On("config -z --name-only --get-regexp", "filter.a=b.clean\x00", nil)
+			v, warn := imagebuild.Version(fake, repo)
+			Expect(v).To(Equal("unknown"))
+			Expect(warn).To(ContainSubstring("names a filter driver that cannot be overridden"))
+			Expect(fake.CommandLines()).NotTo(ContainElement(ContainSubstring("describe")))
+			Expect(fake.CommandLines()).NotTo(ContainElement(ContainSubstring("diff-index")))
+		})
+
+		It("CS-IMG-076: a git describe that never answers is killed; the stamp is \"unknown\" with one warning", func() {
+			fake.GitBound = 50 * time.Millisecond
+			fake.OnHang("describe --tags --always")
+			done := make(chan struct{})
+			var v, warn string
+			go func() {
+				defer GinkgoRecover()
+				defer close(done)
+				v, warn = imagebuild.Version(fake, repo)
+			}()
+			Eventually(done, 2*time.Second).Should(BeClosed())
+			Expect(v).To(Equal("unknown"))
+			Expect(warn).To(HavePrefix("WARNING: git -C " + repo + " describe --tags --always did not finish within 50ms"))
+			Expect(warn).To(HaveSuffix(`; using the version stamp "unknown".`))
+			Expect(fake.Killed).To(Equal(1))
+
+			// A hung dirty check is the same: "unknown", not a clean stamp.
+			h := &execx.Fake{GitBound: 50 * time.Millisecond}
+			h.On("describe --tags --always", "v1\n", nil)
+			h.OnHang("diff-index")
+			v, warn = imagebuild.Version(h, repo)
+			Expect(v).To(Equal("unknown"))
+			Expect(warn).To(ContainSubstring("diff-index --quiet --ignore-submodules=all HEAD -- did not finish within 50ms"))
+
+			// A plain failure stays silent (CS-IMG-005).
+			g := &execx.Fake{}
+			g.On("git", "", execx.Fail(128))
+			_, warn = imagebuild.Version(g, repo)
+			Expect(warn).To(BeEmpty())
 		})
 	})
 

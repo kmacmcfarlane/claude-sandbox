@@ -17,6 +17,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/kmacmcfarlane/claude-sandbox/internal/cascade"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/imagebuild"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/launch"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/paths"
@@ -53,7 +54,7 @@ var _ = Describe("linked git worktree (CS-LNCH-070..075, CS-CASC-031..033)", fun
 
 	It("CS-LNCH-070, CS-CASC-031, CS-CASC-032: the main checkout's config and env apply, and the report lists its level", func() {
 		Expect(l.run()).To(Equal(0), l.errw.String())
-		Expect(l.fake.CommandLines()).To(ContainElement("git -C " + l.proj + " " + linkedRevParse))
+		Expect(l.fake.CommandLines()).To(ContainElement(execx.GitSafePrefix + " -C " + l.proj + " " + linkedRevParse))
 		Expect(l.launchLine()).To(MatchRegexp(` claude --dangerously-skip-permissions$`), "dangerous: true from the main checkout")
 		args := l.launched().Args
 		Expect(envFileContents(args)).To(Equal([]string{"FROM_MAIN=1\n"}))

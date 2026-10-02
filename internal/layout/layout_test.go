@@ -166,7 +166,7 @@ var _ = Describe("layout lifecycle", func() {
 		It("CS-LAY-005: sidecar git repo is initialized when the host ignores the directory", func() {
 			// Default fake: check-ignore succeeds => /.claude-sandbox/ is ignored.
 			Expect(setup(false, ptr(true))).To(Succeed())
-			Expect(fake.CommandLines()).To(ContainElement("git -C " + sb + " init -q"))
+			Expect(fake.CommandLines()).To(ContainElement(execx.GitSafePrefix + " -C " + sb + " init -q"))
 			Expect(out.String()).To(ContainSubstring("Initialized sidecar git repo at " + sb))
 		})
 
@@ -184,7 +184,7 @@ var _ = Describe("layout lifecycle", func() {
 			Expect(setup(false, nil)).To(Succeed())
 
 			Expect(exists(hostGI)).To(BeFalse(), "host .gitignore must not be touched")
-			Expect(fake.CommandLines()).To(ContainElement("git -C " + sb + " init -q"))
+			Expect(fake.CommandLines()).To(ContainElement(execx.GitSafePrefix + " -C " + sb + " init -q"))
 		})
 
 		It("CS-LAY-008: an existing sidecar repo is left alone", func() {
@@ -423,7 +423,7 @@ var _ = Describe("layout lifecycle", func() {
 			fake.On("check-ignore", "", execx.Fail(1)) // the coherent state: not ignored
 			Expect(setup(false, ptr(true))).To(Succeed())
 
-			Expect(fake.CommandLines()).To(ContainElement("git -C " + proj + " ls-files -z -- .claude-sandbox"))
+			Expect(fake.CommandLines()).To(ContainElement(execx.GitSafePrefix + " -C " + proj + " ls-files -z -- .claude-sandbox"))
 			content := read(hostGI)
 			Expect(countLine(content, "/.claude-sandbox/")).To(BeZero())
 			expectWarned(errOut.String(), "2 files")
@@ -475,8 +475,8 @@ var _ = Describe("layout lifecycle", func() {
 			expectRemedies(e)
 
 			By("the child probe is asked, and no sidecar init follows the rule")
-			Expect(fake.CommandLines()).To(ContainElement("git -C " + proj + " check-ignore -q -- .claude-sandbox/ignore-probe"))
-			Expect(fake.CommandLines()).To(ContainElement("git -C " + proj + " check-ignore -q -- .claude-sandbox/ignore-probe.md"))
+			Expect(fake.CommandLines()).To(ContainElement(execx.GitSafePrefix + " -C " + proj + " check-ignore -q -- .claude-sandbox/ignore-probe"))
+			Expect(fake.CommandLines()).To(ContainElement(execx.GitSafePrefix + " -C " + proj + " check-ignore -q -- .claude-sandbox/ignore-probe.md"))
 			Expect(fake.CommandLines()).NotTo(ContainElement(ContainSubstring(" init -q")))
 			Expect(countLine(read(hostGI), "/.claude-sandbox/")).To(Equal(1), "the existing rule is left alone")
 		})
@@ -529,7 +529,7 @@ var _ = Describe("layout lifecycle", func() {
 			Expect(setup(false, ptr(true))).To(Succeed())
 			Expect(errOut.String()).NotTo(ContainSubstring("WARNING"))
 			Expect(countLine(read(hostGI), "/.claude-sandbox/")).To(Equal(1))
-			Expect(fake.CommandLines()).To(ContainElement("git -C " + sb + " init -q"))
+			Expect(fake.CommandLines()).To(ContainElement(execx.GitSafePrefix + " -C " + sb + " init -q"))
 			Expect(exists(filepath.Join(sb, "CLAUDE.md"))).To(BeTrue())
 		})
 
@@ -545,7 +545,7 @@ var _ = Describe("layout lifecycle", func() {
 			tracked(".claude-sandbox/work/a.md")
 			Expect(setup(false, nil)).To(Succeed())
 			Expect(fake.CommandLines()).NotTo(ContainElement(ContainSubstring("ls-files")))
-			Expect(fake.CommandLines()).To(ContainElement("git -C " + sb + " init -q"))
+			Expect(fake.CommandLines()).To(ContainElement(execx.GitSafePrefix + " -C " + sb + " init -q"))
 
 			fake2 := &execx.Fake{}
 			fake2.On("check-ignore", "", execx.Fail(1))
@@ -556,7 +556,7 @@ var _ = Describe("layout lifecycle", func() {
 		})
 	})
 	Describe("probe robustness", func() {
-		const dirProbe = "git -C %s check-ignore -q --no-index -- .claude-sandbox"
+		const dirProbe = execx.GitSafePrefix + " -C %s check-ignore -q --no-index -- .claude-sandbox"
 		const bare = ".claude-sandbox/ignore-probe"
 		const withExt = ".claude-sandbox/ignore-probe.md"
 		trueLines := []string{
@@ -647,7 +647,7 @@ var _ = Describe("layout lifecycle", func() {
 			fake.On("ls-files", "", nil)
 			Expect(setup(false, ptr(true))).To(Succeed())
 			Expect(childProbes()).To(Equal([]string{bare, withExt}))
-			Expect(fake.CommandLines()).To(ContainElement("git -C " + sb + " init -q"))
+			Expect(fake.CommandLines()).To(ContainElement(execx.GitSafePrefix + " -C " + sb + " init -q"))
 		})
 	})
 
