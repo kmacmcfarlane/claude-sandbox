@@ -209,11 +209,12 @@ Once, after setting up, when the checks above show your server is not the unit's
      stop and report: repeating steps 3-5 loops. Make the unit and your shell use one socket
      first (for example `systemctl --user set-environment TMUX_TMPDIR=...` or a drop-in
      for the unit).
-4. From the same terminal: `systemctl --user start tmux.service`, then `tmux attach`. Before
-   it, run `claude-sandbox tmux restore --list`: if `last` is not step 2's save (a stop saved
-   the unit's server), repoint it at that save as
-   [Procedure B](#restore-a-whole-layout-from-an-earlier-save) does. continuum then restores
-   it, and each sandbox pane reattaches.
+4. From the same terminal, first run `claude-sandbox tmux restore --list`: if `last` is
+   neither step 2's save nor your re-save from step 3 (a stop saved the unit's server),
+   repoint it at the one you want as
+   [Procedure B](#restore-a-whole-layout-from-an-earlier-save) does. Then
+   `systemctl --user start tmux.service` and `tmux attach`. continuum restores that save, and
+   each sandbox pane reattaches.
 5. Run the checks above again: `is-active` says `active` and the two pids match.
 
 Why it matters (expected from systemd's rules for a `Type=forking` unit, not yet observed — see
@@ -559,7 +560,8 @@ Use throwaway sessions and, where noted, a scratch `CLAUDE_CONFIG_DIR` (never th
   `ExecStop=/bin/sh -c 'systemctl is-system-running >> %h/state-probe.log'` and `[Install]`
   `WantedBy=default.target`; `systemctl --user daemon-reload && systemctl --user enable --now
   state-probe.service`; reboot; read `~/state-probe.log` (without linger each logout also
-  writes a line, so read the one from the reboot, the last before the boot), then `disable` and remove the unit.
+  writes a line, so read the one from the reboot, the last before the boot), then `disable`
+  and remove the unit.
   *Pass:* it says `stopping`. *Fail:* the launcher's shutdown check never fires; F1b relies on
   docker's events alone.
 - [ ] **docker client exit status on a detach** (CS-TMUX-071). Known from the docker/cli source
