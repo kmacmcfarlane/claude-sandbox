@@ -1053,10 +1053,16 @@ Feature: tmux integration (CS-TMUX)
     And the pane's current path, symlinks resolved, must equal the pinned state file's field 8 (the
       leading ":" removed, every "\ " turned back into a space, symlinks resolved); an ACTIVE row's
       field 8 must also be its project or cwdRoot; a dir with single spaces is compared like any
-      other, while a LOSSY one — the pane's path or the saved dir holding a tab, a newline, a run of
-      whitespace or whitespace at either end, which resurrect's "echo $dir" collapses — is not
-      compared, so coordinates and new-pane membership decide alone; a mismatch is logged and the
-      pane left to its typed restore, which then reads last
+      other
+    And the saved dir is never LOSSY: resurrect's save runs an unquoted "echo $dir", which turns a
+      tab, a newline or a run of whitespace into one space and drops whitespace at either end, and
+      its restore starts the pane at that collapsed path; so a pane whose dir was lossy is compared
+      against the collapsed form like any other — usually a path that does not exist, so the pane is
+      not there and is left to its typed restore
+    And only a LOSSY pane path (the pane's current path holding such whitespace, e.g. reached through
+      a symlink) is not compared, so coordinates and new-pane membership decide alone; the code keeps
+      the same check on the saved side as a guard that resurrect's save never reaches
+    And a mismatch is logged and the pane left to its typed restore, which then reads last
     And an armed pane gets the row as a PENDING mark with one bounded "tmux set-option -p", right after
       one bounded "tmux display-message -p -t <pane>
       '#{pane_current_command}\t#{pane_in_mode}\t#{pane_synchronized}\t#{pane_pid}\t#{@claude-sandbox}'"
@@ -1068,7 +1074,8 @@ Feature: tmux integration (CS-TMUX)
     # Residual race (review round 2): a typed --resurrected restore that starts AND ends with a final
     # outcome (clearing its own mark) between the list and the re-check is not seen, and the row's
     # pending mark is written back; the next restore in that pane decides it final again.
-    And it never shows a message (no display-message: at boot no client is attached)
+    And it never shows a message to a client (at boot no client is attached; its "display-message -p"
+      calls only read)
 
   Scenario: CS-TMUX-067 --rearm retypes only pending rows whose saved full command was empty
     Given a pane --rearm armed (CS-TMUX-066)

@@ -477,7 +477,7 @@ changes outside tmux (`TMUX`/`TMUX_PANE` unset), in a launcher run inside a sand
 `headless` or for `--detach`, and a failing tmux never changes the launch: each tmux call is
 killed after 1 s, so a hung tmux server costs at most a few seconds, never the launch. The mark
 is settled on every ordinary exit; a launcher killed outright (or a Ctrl-C in the instant before
-the session starts) can leave a stale one, which the save hook will check against what the pane
+the session starts) can leave a stale one, which the save hook checks against what the pane
 actually runs.
 
 ```bash
@@ -490,12 +490,12 @@ pid class, a start time, the config dir, the raw `CLAUDE_CONFIG_DIR` (`configDir
 unset), the peer-registry dir, the worktree (`""` for the shared checkout; a `--join` whose
 worktree name claude generates records `"worktreeGenerated": true` alongside `"worktree": ""`, name unknown until the
 save hook fills it), a `--model` given
-on the command line, and two flag lists. A restore will replay the session's identity plus
+on the command line, and two flag lists. A restore replays the session's identity plus
 **`replay`**: the claude flags given at launch that `--resume` does not restore and that do not
 widen what the session may do (`--add-dir`, `--append-system-prompt[-file]`, `--agent`,
 `--effort`, `--disallowedTools`, `--tools`, `--strict-mcp-config`, `--bare`, `--restricted`,
 `--safe-mode`), with their values. **`unreplayed`** only *names* everything else given at
-launch that a restore will not pass — host-access and dangerous flags, the matching
+launch that a restore does not pass — host-access and dangerous flags, the matching
 `CLAUDE_SANDBOX_*` switches set in the environment, other claude flags — so a restore can say
 what it left out; values are never recorded. The `replay` values themselves (an
 `--append-system-prompt` text, an `--add-dir` path) are stored verbatim in the pane option and,
@@ -565,16 +565,16 @@ CS-TMUX-020..026, CS-TMUX-041..044.
 
 ### tmux save hook
 
-`claude-sandbox tmux save <state-file>` is a tmux-resurrect **post-save-layout hook**. Wire it
-with one line in `~/.tmux.conf` (resurrect reads it at save time, so anywhere in the file):
+`claude-sandbox tmux save <state-file>` is a tmux-resurrect **post-save-layout hook**, wired
+with the first of [the four `~/.tmux.conf` lines](#restoring-unattended-the-resurrect-hooks):
 
 ```tmux
-set -g @resurrect-hook-post-save-layout 'claude-sandbox tmux save'
+set -g @resurrect-hook-post-save-layout '/path/to/claude-sandbox/bin/claude-sandbox tmux save'
 ```
 
 resurrect runs it after every save (continuum's autosave included, every minute), from the
-tmux **server's** environment: check `tmux run-shell 'command -v claude-sandbox'` prints a path,
-and use the shim's absolute path in the line if it prints nothing. For `tmux save` the shim
+tmux **server's** environment (at boot a systemd unit with no login shell), so the line names
+the shim by its absolute path. For `tmux save` the shim
 never builds: when the binary is missing or older than the sources (after a pull), the save hook
 does nothing until your next ordinary `claude-sandbox` launch rebuilds it. For each pane of that save
 whose mark says it runs a sandbox, the hook takes the conversation id and name from the host
@@ -789,9 +789,11 @@ and 5 s for the whole run, so they never hold up resurrect. Like `tmux save`, th
 builds for them: after a pull they do nothing until the next ordinary launch rebuilds the binary
 (`--resurrected`, typed into a shell, builds like any launch). Without `--rearm`, the typed
 restores still read the pin, then `last`; without `--pin`, they read `last` and `--rearm` does
-nothing. See [docs/tmux-session-restore.md](docs/tmux-session-restore.md) for the checks after
-wiring them and an optional status-line element showing the notice. Spec: `spec/tmux.feature`
-CS-TMUX-064..068.
+nothing. [docs/tmux-session-restore.md](docs/tmux-session-restore.md) is the operator's guide:
+the whole `~/.tmux.conf` block (with `@continuum-boot 'on'`), the checks after wiring it, the
+kill-server, reboot and sparse-save drills, the whole-layout procedures, what to do before a
+reboot, the degraded paths, an optional status-line element showing the notice, and the host
+checks still owed. Spec: `spec/tmux.feature` CS-TMUX-064..068.
 
 ## Headless mode (Paseo and other SDK clients)
 
@@ -1714,6 +1716,7 @@ If no `.claude-sandbox/Dockerfile` is found anywhere up to `/`, the launcher war
 | `CLAUDE_SANDBOX_OOM_SCORE_ADJ` | (unset: `oomScoreAdj`, else 500) | The containers' `--oom-score-adj`, -1000..1000; overrides a config `oomScoreAdj` key (see [When the host runs out of memory](#when-the-host-runs-out-of-memory)) |
 | `CLAUDE_SANDBOX_BASE_ONLY` | (unset) | Set to `1` or `true` to skip child Dockerfile and use base image only |
 | `CLAUDE_SANDBOX_NO_UPDATE_CHECK` | (unset) | Set to `1` or `true` to skip Claude Code version check at launch |
+| `CLAUDE_SANDBOX_BUILD_LOCK_WAIT` | `600` | Seconds a shim waits for another shim's launcher build (`flock` on `bin/dist/.build.lock`) before it warns and builds without the lock; a whole number, anything else is ignored. Read by `bin/claude-sandbox`, not the launcher |
 
 Inside the container, `CLAUDE_SANDBOX_PROJECT_DIR` is always set to the project root on the host path — the one fact a session working in `.claude/worktrees/<name>` cannot otherwise get (`.claude-sandbox/` lives there, not in the worktree). `CLAUDE_SANDBOX_PID_CLASS` is the session's [PID class](#session-registry-and-pid-classes). `CLAUDE_SANDBOX_INSTANCE` (the instance noun; unset for ralph), `CLAUDE_SANDBOX_CONTAINER` (the container name) and `CLAUDE_SANDBOX_MODE` (`claude`, `ralph` or `headless`) identify the container, and a joined session also has `CLAUDE_SANDBOX_JOINED=1`; the [notification hook](#notification-hooks) uses them. None of them is part of the config fingerprint, so they never register as drift.
 
