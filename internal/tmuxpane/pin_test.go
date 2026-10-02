@@ -435,14 +435,37 @@ var _ = Describe("tmux restore: the resurrect hooks (CS-TMUX-064..068)", func() 
 			Expect(logged).To(ContainElement(ContainSubstring("main:1.0: the pane is not in its saved directory")))
 		})
 
-		It("CS-TMUX-066: a lossy dir (a run of whitespace, collapsed by resurrect's save) is not compared", func() {
+		It("CS-TMUX-066: a lossy dir is saved collapsed and compared in that form; only a lossy pane path is not compared", func() {
+			// The pane's real dir is "a  b"; resurrect's unquoted `echo $dir`
+			// saved it as "a b" (escaped "a\ b"), never lossy.
 			lossy := filepath.Join(proj, "a  b")
 			Expect(os.Mkdir(lossy, 0o700)).To(Succeed())
 			lines := fmt.Sprintf("pane\tmain\t1\t1\t:*\t0\tt\t:%s\t1\tzsh\t:\n", strings.Replace(filepath.Join(proj, "a b"), " ", `\ `, 1))
 			save(st, &srv, rows[1:2], lines)
+
+			// Its restore started the pane at the collapsed path, which does not
+			// exist, so it is somewhere else: compared, not armed.
+			fake = &execx.Fake{}
+			fake.On(listPat, paneLine("%11", 1, GinkgoT().TempDir(), ""), nil)
+			res := rearm()
+			Expect(res.Marked).To(BeZero(), "the collapsed saved dir is compared like any other")
+			Expect(logged).To(ContainElement(ContainSubstring("main:1.0: the pane is not in its saved directory")))
+
+			// When the collapsed path exists and the pane sits there, it matches.
+			collapsed := filepath.Join(proj, "a b")
+			Expect(os.Mkdir(collapsed, 0o700)).To(Succeed())
+			Expect(os.Rename(strings.TrimSuffix(pin, ".json")+".consumed.json", pin)).To(Succeed()) // a fresh restore
+			fake = &execx.Fake{}
+			fake.On(listPat, paneLine("%11", 1, collapsed, ""), nil)
+			res = rearm()
+			Expect(res.Marked).To(Equal(1), "compared like any other, and equal")
+
+			// A pane whose current path is lossy (reached through a symlink, say)
+			// is not compared: coordinates and new-pane membership decide.
+			Expect(os.Rename(strings.TrimSuffix(pin, ".json")+".consumed.json", pin)).To(Succeed()) // a fresh restore
 			fake = &execx.Fake{}
 			fake.On(listPat, paneLine("%11", 1, lossy, ""), nil)
-			res := rearm()
+			res = rearm()
 			Expect(res.Marked).To(Equal(1))
 		})
 
