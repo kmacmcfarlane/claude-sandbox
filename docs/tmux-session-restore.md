@@ -131,7 +131,9 @@ tmux prints and clears it. To see it the moment you attach after a boot, add the
 your status line **before** continuum's `run-shell` line. If your config sets `status-right`
 itself, put it at the end of that value, so every `tmux source-file` sets the whole line again.
 If it never does, start from tmux's current value: read it with `tmux show -gv status-right` and
-paste that in place of `<your status-right>` (a config that never sets it gets tmux's default):
+paste that in place of `<your status-right>` (a config that never sets it gets tmux's default),
+leaving out continuum's `#(…continuum_save.sh)` element if it shows, since continuum adds it
+again:
 
 ```
 set -g status-right '<your status-right>#{?@claude-sandbox-notice, #[reverse] #{@claude-sandbox-notice} #[default],}'
@@ -192,15 +194,26 @@ Once, after setting up, when the checks above show your server is not the unit's
 3. From a terminal **outside tmux** (a plain terminal window, or an ssh session not in tmux):
    - If `is-active` said `inactive`: `tmux kill-server`. The unit is not active, so this is the
      plain kill it looks like.
-   - If it said `active` but the pids differ: **do not** `tmux kill-server`. That is the trap in
-     [Stopping and restarting tmux](#stopping-and-restarting-tmux): with the unit active,
-     systemd runs its `ExecStop` after the server is gone and the save it makes is empty. Run
-     `systemctl --user stop tmux.service` instead, and continue from step 4. (The stop ends the
-     unit's own server, not necessarily yours; if your server is still running afterwards, check
-     `tmux display -p '#{pid}'` and end it with `tmux kill-server` only once the unit is
-     inactive.)
-4. From the same terminal: `systemctl --user start tmux.service`, then `tmux attach`. continuum
-   restores the save from step 2, and each sandbox pane reattaches.
+   - If it said anything but `active` (`failed`, `activating`, ...): `systemctl --user stop
+     tmux.service` first, then `tmux kill-server` for your own server.
+   - If it said `active` but the pids differ: the unit already runs a server, and a plain
+     `tmux kill-server` here is the trap in
+     [Stopping and restarting tmux](#stopping-and-restarting-tmux) whenever the server it ends
+     is the unit's (systemd then runs `ExecStop` and its save is empty). The likeliest cause of
+     differing pids is two sockets: the unit runs in systemd's environment, without your
+     shell's `TMUX_TMPDIR`, `-L` or `-S`, so it is a different server from yours. Run
+     `systemctl --user stop tmux.service`. Its `ExecStop` saves the UNIT's server and moves
+     `last` there. If your own server is still running afterwards, save again in it (`prefix +
+     C-s`, which points `last` back at your layout), check `--list`, and only then
+     `tmux kill-server` it. Then continue from step 4. If the pids still differ after step 5,
+     stop and report: repeating steps 3-5 loops. Make the unit and your shell use one socket
+     first (for example `systemctl --user set-environment TMUX_TMPDIR=...` or a drop-in
+     for the unit).
+4. From the same terminal: `systemctl --user start tmux.service`, then `tmux attach`. Before
+   it, run `claude-sandbox tmux restore --list`: if `last` is not step 2's save (a stop saved
+   the unit's server), repoint it at that save as
+   [Procedure B](#restore-a-whole-layout-from-an-earlier-save) does. continuum then restores
+   it, and each sandbox pane reattaches.
 5. Run the checks above again: `is-active` says `active` and the two pids match.
 
 Why it matters (expected from systemd's rules for a `Type=forking` unit, not yet observed — see
@@ -400,8 +413,9 @@ pane. In both, the keys go in only when the pane is provably idle at its own she
 The saved directory is checked differently:
 
 - **`--all`** types only when the saved directory could be compared with where the pane is and
-  matched. A pane whose saved directory is empty, or whose current path holds a tab, a newline
-  a run of whitespace, or whitespace at either end (which resurrect's save cannot record), is only marked.
+  matched. A pane whose saved directory is empty, or whose current path holds any whitespace
+  other than a plain space, a run of whitespace, or whitespace at either end (which
+  resurrect's save cannot record), is only marked.
 - **`--rearm`** never touches a pane that is somewhere other than its saved directory. When the
   directory cannot be compared (an empty saved directory, or such a current path) it arms and
   types on the other checks alone: the pane was just created by this restore at that place.
@@ -544,8 +558,8 @@ Use throwaway sessions and, where noted, a scratch `CLAUDE_CONFIG_DIR` (never th
   `RemainAfterExit=yes`, `ExecStart=/bin/true`,
   `ExecStop=/bin/sh -c 'systemctl is-system-running >> %h/state-probe.log'` and `[Install]`
   `WantedBy=default.target`; `systemctl --user daemon-reload && systemctl --user enable --now
-  state-probe.service`; reboot; read `~/state-probe.log` (without linger each logout also writes a line, so read the
-  one from the reboot, the last before the boot), then `disable` and remove the unit.
+  state-probe.service`; reboot; read `~/state-probe.log` (without linger each logout also
+  writes a line, so read the one from the reboot, the last before the boot), then `disable` and remove the unit.
   *Pass:* it says `stopping`. *Fail:* the launcher's shutdown check never fires; F1b relies on
   docker's events alone.
 - [ ] **docker client exit status on a detach** (CS-TMUX-071). Known from the docker/cli source
@@ -581,8 +595,9 @@ Use throwaway sessions and, where noted, a scratch `CLAUDE_CONFIG_DIR` (never th
   need: with the unit inactive and your own server running,
   `systemctl --user start tmux.service`. This cannot be done in a throwaway tmux server: the
   unit acts on the default socket, which is your own server, and its `ExecStop` save is a save
-  of that live server and moves `last` to it (recover with `claude-sandbox tmux restore --list`
-  and the save before it, Procedure B). *Expected:* your server is killed. *If not:* the
+  of that live server (a good save: the live layout plus the session `new-session -d` adds) and
+  moves `last` to it, which is fine; use Procedure B only if you want the earlier save.
+  *Expected:* your server is killed. *If not:* the
   warning in [Verify the wiring](#verify-the-wiring) can be softened.
 - [ ] **`tmux kill-server` with the unit active** (this guide). After a good save, with nothing
   open you need: `tmux kill-server`, then `ls -l <dir>/last` and `wc -c` of its target.
