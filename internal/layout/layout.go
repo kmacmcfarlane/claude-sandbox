@@ -207,10 +207,16 @@ func Setup(project string, trackInHost bool, opts Options) error {
 				gitignoreAdd(project, hostGI, opts, withWorktreesLine(hostGI)...)
 				return nil
 			}
-			gitignoreAdd(project, hostGI, opts, withWorktreesLine(hostGI,
+			proposed := gitignoreAdd(project, hostGI, opts, withWorktreesLine(hostGI,
 				".claude-sandbox/env", ".claude-sandbox/temp/", ".claude-sandbox/ralph/",
 				"!.claude-sandbox/config.yaml", "!.claude-sandbox/Dockerfile")...)
-			noteChildrenHidden(project, opts)
+			// CS-LAY-026: only while the host-tracked entries are being
+			// decided — proposed (whatever the answer) or init, which passes
+			// Options.Gitignore (the launch path never does) — so an ordinary
+			// launch with nothing to decide stays quiet.
+			if hostTrackedEntryIn(proposed) || opts.Gitignore != nil {
+				noteChildrenHidden(project, opts)
+			}
 		}
 		return nil
 	}
@@ -438,11 +444,23 @@ func dirIgnored(r execx.Runner, project string) (bool, error) {
 	return true, nil
 }
 
+// hostTrackedEntryIn reports whether lines holds any entry other than the
+// worktrees line, i.e. a CS-LAY-009 host-tracked entry.
+func hostTrackedEntryIn(lines []string) bool {
+	for _, l := range lines {
+		if l != worktreesLine {
+			return true
+		}
+	}
+	return false
+}
+
 // noteChildrenHidden prints the one CS-LAY-026 note: trackInHost is true, the
-// directory itself is not excluded (CS-LAY-018 passed), but a children-only
-// rule hides new files there (both CS-LAY-022 probes ignored), so beyond the
-// two re-included files everything under .claude-sandbox/ stays out of the
-// host repo. The probes run here only — on this path nothing asked them
+// directory itself is not excluded (CS-LAY-018 passed), but a rule hides new
+// files there (both CS-LAY-022 probes ignored). It claims only what the
+// probes prove: which named paths a user's own "!" lines, an inner
+// .claude-sandbox/.gitignore or already-tracked files leave visible is not
+// probed. The probes run here only — nothing on this path asked them
 // before — after the host .gitignore step, so a timeout (unknown) changes
 // nothing already done and prints no note.
 func noteChildrenHidden(project string, opts Options) {
@@ -450,7 +468,7 @@ func noteChildrenHidden(project string, opts Options) {
 	if err != nil || !hidden {
 		return
 	}
-	fmt.Fprintf(opts.errw(), "Note: trackInHost is true but a host ignore rule hides new files under .claude-sandbox/: only config.yaml and Dockerfile are re-included, so CLAUDE.md, agent/, scripts/, work/ and the rest stay hidden from the host repo (`git check-ignore -v --no-index %s` names the rule).\n", ignoreProbe)
+	fmt.Fprintln(opts.errw(), "Note: trackInHost is true but a host ignore rule hides new files under .claude-sandbox/ (only paths your rules re-include are tracked); `git check-ignore -v --no-index .claude-sandbox/<path>` names the rule.")
 }
 
 func dirExists(p string) bool {
@@ -486,14 +504,15 @@ func warnHostTracked(w io.Writer, n int, ruleExists, sidecar bool) {
 // gitignoreAdd appends missing lines to a .gitignore-style file, prompting
 // first (CS-LAY-010..014). Resolution order: Options.Gitignore flag,
 // CS_GITIGNORE_ASSUME env var, interactive prompt (default yes), no-tty skip.
-// Returns true when the lines were added.
-func gitignoreAdd(project, gi string, opts Options, lines ...string) bool {
+// Returns the lines it proposed (missing from the file), whatever the answer;
+// nil when none was missing or the file was refused before any proposal.
+func gitignoreAdd(project, gi string, opts Options, lines ...string) []string {
 	// CS-LAY-025: a symlink leading out of the project tree is refused before
 	// any prompt: a session could point it at another file the user can
 	// write, and the default-yes prompt would append the lines there.
 	if _, _, err := resolveInProject(project, gi); err != nil {
 		fmt.Fprintf(opts.errw(), "WARNING: %v; skipping the .gitignore update (the launcher writes .gitignore lines only inside the project).\n", err)
-		return false
+		return nil
 	}
 	existing := map[string]bool{}
 	// CS-LAY-023: the project tree is session-writable, so the read never
@@ -508,7 +527,7 @@ func gitignoreAdd(project, gi string, opts Options, lines ...string) bool {
 		}
 	case !errors.Is(err, fs.ErrNotExist):
 		fmt.Fprintf(opts.errw(), "WARNING: cannot read %s (%v); skipping the .gitignore update.\n", gi, unwrapPathErr(err))
-		return false
+		return nil
 	}
 	var missing []string
 	for _, l := range lines {
@@ -517,7 +536,7 @@ func gitignoreAdd(project, gi string, opts Options, lines ...string) bool {
 		}
 	}
 	if len(missing) == 0 {
-		return true
+		return nil
 	}
 
 	fmt.Fprintf(opts.errw(), "These entries are missing from %s:\n", gi)
@@ -535,18 +554,18 @@ func gitignoreAdd(project, gi string, opts Options, lines ...string) bool {
 		add = opts.Prompter.Confirm("", "Add them?", true, 30*time.Second)
 	default:
 		fmt.Fprintln(opts.errw(), "(no tty; skipping .gitignore update)")
-		return false
+		return missing
 	}
 	if !add {
 		fmt.Fprintln(opts.errw(), "Skipped .gitignore update.")
-		return false
+		return missing
 	}
 	if err := ensureLines(project, gi, missing...); err != nil {
 		fmt.Fprintf(opts.errw(), "failed to update %s: %v\n", gi, err)
-		return false
+		return missing
 	}
 	fmt.Fprintf(opts.errw(), "Updated %s\n", gi)
-	return true
+	return missing
 }
 
 // ensureLines appends each line not already present verbatim, keeping the

@@ -613,7 +613,13 @@ var _ = Describe("layout lifecycle", func() {
 			Expect(countLine(read(hostGI), ".claude-sandbox/env")).To(BeZero())
 		})
 
-		const hiddenNote = "Note: trackInHost is true but a host ignore rule hides new files under .claude-sandbox/: only config.yaml and Dockerfile are re-included, so CLAUDE.md, agent/, scripts/, work/ and the rest stay hidden from the host repo (`git check-ignore -v --no-index .claude-sandbox/ignore-probe` names the rule).\n"
+		const hiddenNote = "Note: trackInHost is true but a host ignore rule hides new files under .claude-sandbox/ (only paths your rules re-include are tracked); `git check-ignore -v --no-index .claude-sandbox/<path>` names the rule.\n"
+		// expectNeutral: the note claims only what the two probes proved.
+		expectNeutral := func(errText string) {
+			for _, claim := range []string{"config.yaml and Dockerfile", "CLAUDE.md", "agent/", "scripts/", "work/"} {
+				Expect(errText).NotTo(ContainSubstring(claim), claim)
+			}
+		}
 
 		It("CS-LAY-026: a children-only rule gets one note after the host-tracked entries", func() {
 			write(hostGI, ".claude-sandbox/*\n")
@@ -622,6 +628,7 @@ var _ = Describe("layout lifecycle", func() {
 
 			Expect(strings.Count(errOut.String(), "Note: trackInHost is true")).To(Equal(1), "one note")
 			Expect(errOut.String()).To(HaveSuffix(hiddenNote), "after the host .gitignore step")
+			expectNeutral(errOut.String())
 			Expect(out.String()).NotTo(ContainSubstring("Note:"), "stderr only")
 			Expect(errOut.String()).NotTo(ContainSubstring("WARNING"))
 			Expect(childProbes()).To(Equal([]string{bare, withExt}), "at most two extra git calls")
@@ -658,6 +665,34 @@ var _ = Describe("layout lifecycle", func() {
 					Expect(childProbes()).To(Equal([]string{bare}), "the second probe is not asked")
 				}
 			}
+		})
+
+		It("CS-LAY-026: a declined proposal still gets the note, which claims nothing about the unwritten ! lines", func() {
+			write(hostGI, ".claude-sandbox/*\n")
+			ignores(false, map[string]bool{bare: true, withExt: true})
+			Expect(setup(true, ptr(false))).To(Succeed())
+			Expect(errOut.String()).To(ContainSubstring("Skipped .gitignore update."))
+			Expect(read(hostGI)).To(Equal(".claude-sandbox/*\n"), "no ! line written")
+			Expect(strings.Count(errOut.String(), "Note: trackInHost is true")).To(Equal(1))
+			Expect(errOut.String()).To(HaveSuffix(hiddenNote))
+			expectNeutral(errOut.String())
+		})
+
+		It("CS-LAY-026: an ordinary launch with nothing to decide prints no note and runs no child probe; init still does", func() {
+			all := ".claude-sandbox/*\n" + strings.Join(trueLines, "\n") + "\n.claude/worktrees/\n"
+			write(hostGI, all)
+			ignores(false, map[string]bool{bare: true, withExt: true})
+			By("a launch (Options.Gitignore nil) finds every entry present")
+			Expect(layout.Setup(proj, true, layout.Options{
+				Runner: fake, Prompter: sp, Out: &out, Err: &errOut,
+			})).To(Succeed())
+			Expect(errOut.String()).To(BeEmpty())
+			Expect(childProbes()).To(BeEmpty())
+			Expect(read(hostGI)).To(Equal(all))
+
+			By("init (Options.Gitignore set) prints it even with nothing missing")
+			Expect(setup(true, ptr(true))).To(Succeed())
+			Expect(errOut.String()).To(Equal(hiddenNote))
 		})
 
 		It("CS-LAY-026: never with trackInHost false", func() {
