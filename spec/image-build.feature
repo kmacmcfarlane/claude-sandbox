@@ -185,7 +185,12 @@ Feature: Image build lifecycle (CS-IMG)
   Scenario: CS-IMG-023 Version resolution falls back to "latest" when npm is unreachable
     Given "npm view @anthropic-ai/claude-code version" fails or prints nothing
     Then the CLI image is built with CLAUDE_CODE_VERSION=latest
+    And one warning says the latest version could not be resolved from npm
     And no update notice is shown
+    When npm answers something that is not exactly X.Y.Z (a pre-release such as "2.2.0-beta.1")
+    Then the CLI image is built with CLAUDE_CODE_VERSION=latest as well
+    And the warning says npm's latest is not a release, naming the answer with every character
+      outside printable ASCII replaced and cut to 40 characters
 
   # ---- Claude Code update check ----
   # The check never blocks a launch. It used to ask the npm registry on every
@@ -200,6 +205,9 @@ Feature: Image build lifecycle (CS-IMG)
     Given the CLI image is fresh (not built this launch)
     Then the pinned version is read from the CLI image's claude-sandbox.claude-version label
     And it is compared to the registry version, read through the version cache (CS-IMG-044)
+    And when the label or version file holds a pre-release (an image pinned to "latest" whose
+      version file reads "2.2.0-beta.1 (Claude Code)"), the pin stays that pre-release: it ranks
+      below its own release and above every earlier one, so 2.2.0 is an update and 2.1.x is not
     # A label inspect, not a "docker run": no container is spawned to read a file.
 
   Scenario: CS-IMG-007 Update check is skippable

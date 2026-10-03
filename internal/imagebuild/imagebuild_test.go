@@ -296,6 +296,24 @@ var _ = Describe("image build lifecycle", func() {
 			Expect(errw.String()).To(ContainSubstring("latest"))
 		})
 
+		It("CS-IMG-023: a pre-release npm answer also falls back to \"latest\", with a warning naming it, cleaned", func() {
+			fake.On("npm view", "2.2.0-beta.1\x1b[31m\n", nil)
+			rebuilt, err := imagebuild.EnsureCLI(o)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rebuilt).To(BeTrue())
+			Expect(buildLines(fake)).To(ConsistOf(cliBuild("latest")))
+			Expect(errw.String()).To(Equal("WARNING: npm's latest Claude Code version is not a release (2.2.0-beta.1?[31m); installing \"latest\".\n"))
+			Expect(errw.String()).NotTo(ContainSubstring("could not resolve"))
+		})
+
+		It("CS-IMG-023: a long non-release npm answer is cut to 40 characters in the warning", func() {
+			fake.On("npm view", strings.Repeat("x", 60)+"\n", nil)
+			_, err := imagebuild.EnsureCLI(o)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(buildLines(fake)).To(ConsistOf(cliBuild("latest")))
+			Expect(errw.String()).To(ContainSubstring("(" + strings.Repeat("x", 40) + "...)"))
+		})
+
 		It("CS-IMG-020: the base Dockerfile does not install the CLI; Dockerfile.cli does", func() {
 			for _, name := range []string{"Dockerfile", "Dockerfile.tools"} {
 				Expect(repoFile(name)).NotTo(ContainSubstring("install.sh"), name)
@@ -1393,6 +1411,28 @@ var _ = Describe("image build lifecycle", func() {
 			Expect(detached()).To(BeEmpty())
 		})
 
+		It("CS-IMG-006: a pre-release in the version file stays a pre-release: its own release is an update", func() {
+			stubVersions("latest", "2.2.0")
+			fake.On("--entrypoint cat claude-sandbox-cli /opt/claude-sandbox/claude-version", "2.2.0-beta.1 (Claude Code)\n", nil)
+			Expect(imagebuild.UpdateCheck(o, false)).To(BeFalse())
+			Expect(detached()).To(HaveLen(1))
+			Expect(detached()[0].Args).To(Equal([]string{"cli-prefetch", "--dir", cache, "2.2.0"}))
+			Expect(out.String()).To(ContainSubstring("2.2.0-beta.1 → 2.2.0"))
+		})
+
+		It("CS-IMG-006: a pre-release pin is never moved down to an earlier release", func() {
+			for _, latest := range []string{"2.1.300", "2.1.0"} {
+				fake.Calls = nil
+				out.Reset()
+				os.RemoveAll(cache)
+				stubVersions("latest", latest)
+				fake.On("--entrypoint cat claude-sandbox-cli /opt/claude-sandbox/claude-version", "2.2.0-beta.1 (Claude Code)\n", nil)
+				Expect(imagebuild.UpdateCheck(o, false)).To(BeFalse())
+				Expect(detached()).To(BeEmpty(), latest)
+				Expect(out.String()).To(BeEmpty(), latest)
+			}
+		})
+
 		It("CS-IMG-006: skips the check entirely when the CLI image was just built", func() {
 			stubVersions("1.2.3", "1.2.4")
 			Expect(imagebuild.UpdateCheck(o, true)).To(BeFalse())
@@ -1502,6 +1542,19 @@ var _ = Describe("image build lifecycle", func() {
 			Expect(os.IsNotExist(err)).To(BeTrue(), "an unreleased 2.2.0 must never reach the cache")
 			Expect(detached()).To(BeEmpty())
 			Expect(out.String()).NotTo(ContainSubstring("2.2.0"))
+			Expect(errw.String()).To(BeEmpty(), "silent, like any failed lookup")
+		})
+
+		It("CS-IMG-044: --update with a pre-release npm answer builds nothing and caches nothing", func() {
+			stubVersions("1.2.3", "2.2.0-beta.1")
+			o.AutoUpdate = true
+			Expect(imagebuild.UpdateCheck(o, false)).To(BeFalse())
+			Expect(npmCalls()).To(Equal(1))
+			Expect(buildLines(fake)).To(BeEmpty())
+			_, err := os.Stat(filepath.Join(cache, imagebuild.VersionCacheFile))
+			Expect(os.IsNotExist(err)).To(BeTrue())
+			Expect(out.String()).To(BeEmpty())
+			Expect(errw.String()).To(BeEmpty())
 		})
 
 		It("CS-IMG-044: an exact X.Y.Z answer padded with whitespace is trusted and cached", func() {
@@ -1747,6 +1800,13 @@ var _ = Describe("image build lifecycle", func() {
 				Expect(docker("tag")).To(BeEmpty())
 				Expect(status()["ok"]).To(BeTrue())
 			}
+		})
+
+		It("CS-IMG-045: builds a release over a pre-release of that same version", func() {
+			images["claude-sandbox-cli"].claudeVersion = "1.2.4-beta.1"
+			Expect(imagebuild.Prefetch(o, "1.2.4")).To(Succeed())
+			Expect(buildLines(fake)).To(ConsistOf(prefetchBuild("1.2.4")))
+			Expect(docker("tag")).To(ConsistOf("docker tag claude-sandbox-cli:prefetch claude-sandbox-cli"))
 		})
 
 		It("CS-IMG-045: never moves the tag back when a later version landed during the build", func() {

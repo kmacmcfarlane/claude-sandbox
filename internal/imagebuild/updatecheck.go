@@ -185,12 +185,13 @@ func UpdateCheck(o Options, cliBuilt bool) bool {
 	if o.NoUpdateCheck || cliBuilt {
 		return false
 	}
-	pinned := pinnedClaudeVersion(o)
-	if pinned == "" {
+	pin := pinnedClaudeVersion(o)
+	if !pin.known() {
 		return false
 	}
+	pinned := pin.String()
 	if o.AutoUpdate {
-		return foregroundUpdate(o, pinned)
+		return foregroundUpdate(o, pin)
 	}
 
 	// CS-IMG-047: the last background build failed for a version the image
@@ -200,7 +201,7 @@ func UpdateCheck(o Options, cliBuilt bool) bool {
 	var st prefetchStatus
 	failed := false
 	if o.CacheDir != "" && readJSON(o.cacheFile(PrefetchStatusFile), &st) == nil {
-		failed = !st.OK && newer(st.Version, pinned)
+		failed = !st.OK && pin.olderThan(st.Version)
 	}
 	logPath := PrefetchLogPath(o.CacheDir)
 	if failed {
@@ -209,7 +210,7 @@ func UpdateCheck(o Options, cliBuilt bool) bool {
 	}
 
 	latest, cacheErr := cachedLatestVersion(o, false)
-	if !newer(latest, pinned) {
+	if !pin.olderThan(latest) {
 		// Same version, unreadable answer, or a registry behind the image:
 		// nothing to build, and never a downgrade.
 		if cacheErr != nil {
@@ -253,15 +254,15 @@ func UpdateCheck(o Options, cliBuilt bool) bool {
 // install layer busts on its own; no --no-cache needed, and the base and
 // children are never touched. A success is recorded like a background one,
 // so a stale failure record cannot outlive it (CS-IMG-047).
-func foregroundUpdate(o Options, pinned string) bool {
+func foregroundUpdate(o Options, pin cliPin) bool {
 	latest, cacheErr := cachedLatestVersion(o, true)
 	if cacheErr != nil {
 		fmt.Fprintf(o.Err, "WARNING: could not write the Claude Code version cache (%v).\n", cacheErr)
 	}
-	if !newer(latest, pinned) {
+	if !pin.olderThan(latest) {
 		return false
 	}
-	fmt.Fprintf(o.Out, "\nClaude Code update available: %s → %s\n", pinned, latest)
+	fmt.Fprintf(o.Out, "\nClaude Code update available: %s → %s\n", pin, latest)
 	err := buildCLI(o, latest, false)
 	fmt.Fprintln(o.Out)
 	if err == nil && o.CacheDir != "" {
@@ -372,14 +373,14 @@ func Prefetch(o Options, version string) error {
 	_ = os.Truncate(PrefetchLogPath(o.CacheDir), 0)
 	logf(o.Out, "started (pid %d).", os.Getpid())
 
-	if pinned := pinnedClaudeVersion(o); pinned != "" && !newer(version, pinned) {
-		logf(o.Out, "%s is already at %s; nothing to build.", CLIImageName, pinned)
+	if pin := pinnedClaudeVersion(o); pin.known() && !pin.olderThan(version) {
+		logf(o.Out, "%s is already at %s; nothing to build.", CLIImageName, pin)
 		return recordPrefetch(o, version, true)
 	}
 	buildErr := buildCLITagged(o, PrefetchTag, version, false)
 	if buildErr == nil {
-		if pinned := pinnedClaudeVersion(o); pinned != "" && !newer(version, pinned) {
-			logf(o.Out, "%s moved to %s during the build; leaving it there.", CLIImageName, pinned)
+		if pin := pinnedClaudeVersion(o); pin.known() && !pin.olderThan(version) {
+			logf(o.Out, "%s moved to %s during the build; leaving it there.", CLIImageName, pin)
 			untagPrefetch(o)
 			return recordPrefetch(o, version, true)
 		}

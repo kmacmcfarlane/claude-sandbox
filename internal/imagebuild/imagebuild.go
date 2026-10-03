@@ -407,10 +407,56 @@ func EnsureTools(o Options) (rebuilt bool, err error) {
 	return true, err
 }
 
-// semverRe finds an X.Y.Z inside the pinned image's label or version file
-// (pinnedClaudeVersion). The registry's answer is never matched with it: see
-// latestClaudeVersion.
-var semverRe = regexp.MustCompile(`[0-9]+\.[0-9]+\.[0-9]+`)
+// pinRe finds the version inside the pinned image's label or version file
+// (pinnedClaudeVersion): X.Y.Z plus an optional pre-release suffix, so a
+// "2.2.0-beta.1 (Claude Code)" is never read as the release 2.2.0. The
+// registry's answer is never matched with it: see latestClaudeVersion.
+var pinRe = regexp.MustCompile(`([0-9]+\.[0-9]+\.[0-9]+)(-[0-9A-Za-z.-]+)?`)
+
+// maxPreRelease caps the pre-release suffix a pin keeps for display.
+const maxPreRelease = 40
+
+// cliPin is the Claude Code version a CLI image holds (CS-IMG-006). Version
+// is X.Y.Z, "" when unknown; Pre is a pre-release suffix such as "-beta.1"
+// (only [0-9A-Za-z.-], capped), "" for a release.
+type cliPin struct {
+	Version string
+	Pre     string
+}
+
+func (p cliPin) known() bool { return p.Version != "" }
+
+// String is the pin as shown: "2.1.300" or "2.2.0-beta.1".
+func (p cliPin) String() string { return p.Version + p.Pre }
+
+// olderThan reports whether the exact release v is newer than the pin. A
+// pre-release ranks below its own release and above every earlier one
+// (semver precedence), so the image leaves a "2.2.0-beta.1" pin for 2.2.0
+// itself and is still never moved down to 2.1.x. An unknown pin is never
+// older: nothing is built over an image that cannot be read.
+func (p cliPin) olderThan(v string) bool {
+	if !p.known() {
+		return false
+	}
+	if p.Pre != "" {
+		if _, ok := parseVersion(v); ok && v == p.Version {
+			return true
+		}
+	}
+	return newer(v, p.Version)
+}
+
+func parsePin(text string) cliPin {
+	m := pinRe.FindStringSubmatch(text)
+	if m == nil {
+		return cliPin{}
+	}
+	pre := m[2]
+	if len(pre) > maxPreRelease {
+		pre = pre[:maxPreRelease]
+	}
+	return cliPin{Version: m[1], Pre: pre}
+}
 
 // latestClaudeVersion asks the npm registry for the current release. Empty
 // when the registry is unreachable or answers with something that is not
@@ -418,25 +464,58 @@ var semverRe = regexp.MustCompile(`[0-9]+\.[0-9]+\.[0-9]+`)
 // pre-release such as "2.2.0-beta.1" is rejected whole, never truncated to an
 // unreleased "2.2.0" that would then be cached, compared and prefetched.
 func latestClaudeVersion(o Options) string {
+	v, _ := registryLatest(o)
+	return v
+}
+
+// registryLatest is latestClaudeVersion plus, when npm answered something
+// that is not a release, that answer cleaned for a message (other is "" when
+// npm failed or printed nothing).
+func registryLatest(o Options) (v, other string) {
 	out, err := o.Runner.Output(execx.Cmd{Name: "npm", Args: []string{"view", "@anthropic-ai/claude-code", "version"}, Stderr: io.Discard})
 	if err != nil {
-		return ""
+		return "", ""
 	}
-	if v := strings.TrimSpace(out); exactVersionRe.MatchString(v) {
-		return v
+	t := strings.TrimSpace(out)
+	if exactVersionRe.MatchString(t) {
+		return t, ""
 	}
-	return ""
+	return "", cleanForMessage(t, maxPreRelease)
+}
+
+// cleanForMessage makes registry text safe to print: every rune outside
+// printable ASCII becomes '?', and it is cut to max runes with "...".
+func cleanForMessage(s string, max int) string {
+	var b strings.Builder
+	n := 0
+	for _, r := range s {
+		if n == max {
+			b.WriteString("...")
+			break
+		}
+		if r < 0x20 || r > 0x7e {
+			r = '?'
+		}
+		b.WriteRune(r)
+		n++
+	}
+	return b.String()
 }
 
 // resolveClaudeVersion is the pin handed to Dockerfile.cli: the registry's
 // latest, or "latest" — the installer's own keyword — when the registry cannot
-// be reached (CS-IMG-023). Every build path routes through here so the CLI
-// image is always pinned the same way.
+// be reached or its latest is not a release (CS-IMG-023). Every build path
+// routes through here so the CLI image is always pinned the same way.
 func resolveClaudeVersion(o Options) string {
-	if v := latestClaudeVersion(o); v != "" {
+	v, other := registryLatest(o)
+	switch {
+	case v != "":
 		return v
+	case other != "":
+		fmt.Fprintf(o.Err, "WARNING: npm's latest Claude Code version is not a release (%s); installing \"latest\".\n", other)
+	default:
+		fmt.Fprintln(o.Err, "WARNING: could not resolve the latest Claude Code version from npm; installing \"latest\".")
 	}
-	fmt.Fprintln(o.Err, "WARNING: could not resolve the latest Claude Code version from npm; installing \"latest\".")
 	return "latest"
 }
 
@@ -492,21 +571,22 @@ func EnsureCLI(o Options) (rebuilt bool, err error) {
 // pinnedClaudeVersion reads the version the CLI image was built for: the
 // label first (CS-IMG-006); when the image was pinned to "latest" the label
 // says nothing useful, so fall back to the version file the installer left.
-func pinnedClaudeVersion(o Options) string {
+// A pre-release there is kept as one (cliPin.Pre), never cut to its release.
+func pinnedClaudeVersion(o Options) cliPin {
 	label, _ := o.Runner.Output(execx.Cmd{
 		Name:   "docker",
 		Args:   []string{"image", "inspect", "-f", `{{ index .Config.Labels "` + CLIVersionLabel + `" }}`, CLIImageName},
 		Stderr: io.Discard,
 	})
-	if v := semverRe.FindString(label); v != "" {
-		return v
+	if p := parsePin(label); p.known() {
+		return p
 	}
 	file, _ := o.Runner.Output(execx.Cmd{
 		Name:   "docker",
 		Args:   []string{"run", "--rm", "--entrypoint", "cat", CLIImageName, CLIVersionFile},
 		Stderr: io.Discard,
 	})
-	return semverRe.FindString(file)
+	return parsePin(file)
 }
 
 // versionRe is what the cap accepts as a version stamp: git describe output
@@ -927,7 +1007,7 @@ func PrintVersion(o Options) {
 		fmt.Fprintln(o.Out, "  claude:       (not built yet)")
 		return
 	}
-	v := pinnedClaudeVersion(o)
+	v := pinnedClaudeVersion(o).String()
 	if v == "" {
 		v = "unknown"
 	}

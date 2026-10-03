@@ -71,10 +71,10 @@ type Env struct {
 	// lock, log and outcome file, CS-IMG-045..047); the cache-budget result
 	// a launch consumes and the detached checker writes (CS-IMG-041..043);
 	// the default --dir of the hidden cache-budget-check and cli-prefetch
-	// subcommands; the tmux hooks' logs, tmux-save.log and tmux-restore.log
-	// (CS-TMUX-030); the restore hook's cache and the sparse-restore notice
-	// it writes, claims and prints (CS-TMUX-050); and the restore start lock
-	// (tmuxpane.StartLockFile). Tests point it at a scratch directory:
+	// subcommands; the tmux hooks' logs, tmux-save.log (CS-TMUX-030) and
+	// tmux-restore.log (CS-TMUX-068); the sparse-restore notice, which
+	// --pin writes (CS-TMUX-064) and typed restores claim and print
+	// (CS-TMUX-050); and the restore start lock (tmuxpane.StartLockFile). Tests point it at a scratch directory:
 	// cacheDir() panics under go test when it is unset.
 	CacheDir string
 	// StateDir is the launcher's state root (CS-DIR-001, CS-DIR-007); ""
