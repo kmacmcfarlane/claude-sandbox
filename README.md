@@ -437,14 +437,18 @@ A bridged launch prints one line saying so (`Peer registry: shared (…)`), like
 banner — the key can arrive from a workspace-level config a session never asked for.
 
 **The bridge replaces, it does not union.** A bind mount hides whatever the destination held, so
-a bridged session no longer reads the real `<config dir>/sessions` at all: every session you want
-to see must be opted in and **relaunched**. This is also why a plain host `claude` (run outside
-any sandbox) can never join it: the host reads and writes only the real `<config dir>/sessions`,
-never `peers/sessions` where bridged records live, and it binds its inbox socket under its own
-runtime dir (typically `/run/user/<uid>/cc-socks`), a path no container mounts — so a host
-session and a bridged sandbox cannot see each other in either direction. Turning the key on will
-therefore make `/peers` look *emptier* until the sessions you care about have been restarted with
-it.
+a bridged session no longer reads the real `<config dir>/sessions` at all, and an already-running
+*unbridged* session writes its record there and advertises a socket path only its own container
+has: it does not appear in a bridged session's `/peers`, and it cannot see the bridged ones. Every
+session you want to see must be opted in and **relaunched** with the key on. Turning the key on
+will therefore make `/peers` look *emptier* until the sessions you care about have been
+restarted with it.
+
+A plain host `claude` (run outside any sandbox) can never join the bridge either: the host reads
+and writes only the real `<config dir>/sessions`, never `peers/sessions` where bridged records
+live, and it binds its inbox socket under its own runtime dir (typically `/run/user/<uid>/cc-socks`),
+a path no container mounts — so a host session and a bridged sandbox cannot see each other in
+either direction.
 
 An *unbridged* sandbox shares the real registry with the host, so the host may list it — whether
 the host can also message it is unverified (Claude Code's reply-target check may refuse a socket
