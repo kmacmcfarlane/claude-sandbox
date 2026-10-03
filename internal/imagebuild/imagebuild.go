@@ -407,17 +407,25 @@ func EnsureTools(o Options) (rebuilt bool, err error) {
 	return true, err
 }
 
+// semverRe finds an X.Y.Z inside the pinned image's label or version file
+// (pinnedClaudeVersion). The registry's answer is never matched with it: see
+// latestClaudeVersion.
 var semverRe = regexp.MustCompile(`[0-9]+\.[0-9]+\.[0-9]+`)
 
 // latestClaudeVersion asks the npm registry for the current release. Empty
-// when the registry is unreachable or answers with something that is not a
-// version.
+// when the registry is unreachable or answers with something that is not
+// exactly X.Y.Z once surrounding whitespace is trimmed (CS-IMG-044): a
+// pre-release such as "2.2.0-beta.1" is rejected whole, never truncated to an
+// unreleased "2.2.0" that would then be cached, compared and prefetched.
 func latestClaudeVersion(o Options) string {
 	out, err := o.Runner.Output(execx.Cmd{Name: "npm", Args: []string{"view", "@anthropic-ai/claude-code", "version"}, Stderr: io.Discard})
 	if err != nil {
 		return ""
 	}
-	return semverRe.FindString(out)
+	if v := strings.TrimSpace(out); exactVersionRe.MatchString(v) {
+		return v
+	}
+	return ""
 }
 
 // resolveClaudeVersion is the pin handed to Dockerfile.cli: the registry's

@@ -340,10 +340,13 @@ func startPrefetch(o Options, version string) error {
 // launch (CS-IMG-021), under the prefetch lock without waiting for it
 // (CS-IMG-046), and records the outcome for the next launch (CS-IMG-047).
 //
-// It never moves claude-sandbox-cli backwards: it skips unless version is
-// newer than the image's pin, builds under PrefetchTag, and checks again
-// before "docker tag" moves claude-sandbox-cli — a foreground --update to a
-// later version may have finished during the minutes the build took.
+// It does not move claude-sandbox-cli backwards over an update it can see:
+// it skips unless version is newer than the image's pin, builds under
+// PrefetchTag, and checks again before "docker tag" moves claude-sandbox-cli
+// — a foreground --update to a later version may have finished during the
+// minutes the build took. The re-read and the tag are not atomic: an
+// --update that retags in the milliseconds between them is overwritten, and
+// the next launch's update check builds it again.
 func Prefetch(o Options, version string) error {
 	if !exactVersionRe.MatchString(version) {
 		return fmt.Errorf("%s: want a version X.Y.Z, got %q", PrefetchSubcommand, version)

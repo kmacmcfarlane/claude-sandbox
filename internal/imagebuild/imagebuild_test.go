@@ -1494,6 +1494,26 @@ var _ = Describe("image build lifecycle", func() {
 			Expect(detached()).To(BeEmpty())
 		})
 
+		It("CS-IMG-044: a pre-release npm answer is not truncated to X.Y.Z, not cached and starts nothing", func() {
+			stubVersions("1.2.3", "2.2.0-beta.1")
+			Expect(imagebuild.UpdateCheck(o, false)).To(BeFalse())
+			Expect(npmCalls()).To(Equal(1))
+			_, err := os.Stat(filepath.Join(cache, imagebuild.VersionCacheFile))
+			Expect(os.IsNotExist(err)).To(BeTrue(), "an unreleased 2.2.0 must never reach the cache")
+			Expect(detached()).To(BeEmpty())
+			Expect(out.String()).NotTo(ContainSubstring("2.2.0"))
+		})
+
+		It("CS-IMG-044: an exact X.Y.Z answer padded with whitespace is trusted and cached", func() {
+			stubVersions("1.2.3", "  1.2.4\t")
+			Expect(imagebuild.UpdateCheck(o, false)).To(BeFalse())
+			v, checked := readCache()
+			Expect(v).To(Equal("1.2.4"))
+			Expect(checked).To(BeTemporally("==", now))
+			Expect(detached()).To(HaveLen(1))
+			Expect(detached()[0].Args).To(Equal([]string{"cli-prefetch", "--dir", cache, "1.2.4"}))
+		})
+
 		It("CS-IMG-045: a newer version starts one detached cli-prefetch of it and prints one line", func() {
 			stubVersions("1.2.3", "1.2.4")
 			Expect(os.MkdirAll(cache, 0o755)).To(Succeed())

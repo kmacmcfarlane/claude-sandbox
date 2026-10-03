@@ -233,6 +233,10 @@ Feature: Image build lifecycle (CS-IMG)
     Then "npm view @anthropic-ai/claude-code version" runs and a version it prints is written
       to the cache with the time of the check
     And a failed or empty lookup is not cached, so the next launch asks again
+    And the registry's answer counts only when it is exactly X.Y.Z after trimming surrounding
+      whitespace: a pre-release such as "2.2.0-beta.1" (or any other text) is treated as a
+      failed lookup — not cached, never compared, no background build — rather than cut down to
+      an unreleased "2.2.0"
     # One small JSON file under the sandbox-only tree next to launch.lock. The
     # cache holds the registry's answer only; the pinned version is always read
     # from the image label, so a CLI image rebuilt in between is seen at once.
@@ -252,6 +256,10 @@ Feature: Image build lifecycle (CS-IMG)
     And it skips the build unless <v> is newer than the version claude-sandbox-cli is pinned to
     And after the build it reads that pin again, and moves claude-sandbox-cli onto the new image
       ("docker tag") only if <v> is still newer; either way the temporary tag is removed
+    # The re-read and "docker tag" are two docker calls, not one atomic step: a
+    # foreground --update that retags claude-sandbox-cli in the milliseconds
+    # between them is overwritten by the older prefetch. Accepted; the next
+    # launch's update check sees the older pin and builds the newer one again.
     And UpdateCheck reports no rebuild, and this launch builds nothing itself
     And the next launch picks the new image up through the cap's own staleness: the cap
       fingerprint covers the CLI image ID (CS-IMG-033), so the cap rebuilds and nothing else

@@ -64,9 +64,18 @@ type Env struct {
 	// MountInfo reads /proc/self/mountinfo for the nested TMPDIR check
 	// (CS-LNCH-162); nil means the real file. Test fixtures set a fake.
 	MountInfo func() (string, error)
-	// CacheDir is where the detached cache-budget checker writes its result
-	// and the next launch reads it (CS-IMG-041..043); "" means
-	// $HOME/.cache/claude-sandbox. Tests point it at a scratch directory.
+	// CacheDir is the launcher's cache root (CS-DIR); "" means
+	// $HOME/.cache/claude-sandbox. Every cacheDir() user reads it: the
+	// update check's imagebuild.Options.CacheDir (the registry version cache
+	// claude-version.json, CS-IMG-044, and the background CLI prefetch's
+	// lock, log and outcome file, CS-IMG-045..047); the cache-budget result
+	// a launch consumes and the detached checker writes (CS-IMG-041..043);
+	// the default --dir of the hidden cache-budget-check and cli-prefetch
+	// subcommands; the tmux hooks' logs, tmux-save.log and tmux-restore.log
+	// (CS-TMUX-030); the restore hook's cache and the sparse-restore notice
+	// it writes, claims and prints (CS-TMUX-050); and the restore start lock
+	// (tmuxpane.StartLockFile). Tests point it at a scratch directory:
+	// cacheDir() panics under go test when it is unset.
 	CacheDir string
 	// StateDir is the launcher's state root (CS-DIR-001, CS-DIR-007); ""
 	// means hostdirs.StateRoot: $XDG_STATE_HOME/claude-sandbox when that is
