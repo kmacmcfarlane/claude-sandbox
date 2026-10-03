@@ -296,6 +296,42 @@ Feature: .claude-sandbox/ layout lifecycle (CS-LAY)
     # rule can only be written deliberately against this probe; the CS-LAY-018
     # directory probe is unaffected by it.
 
+  @new
+  Scenario: CS-LAY-026 One note when trackInHost true and a host rule hides new files under .claude-sandbox/
+    # Under a rule that covers only the children (".claude-sandbox/*")
+    # CS-LAY-021 proposes the CS-LAY-009 entries, but new files there stay
+    # hidden from the host repo apart from whatever the rules re-include, with
+    # no message (d8eb review, 2026-09-19). The note claims only what the two
+    # CS-LAY-022 child probes prove — that new files there are hidden — and
+    # names no file as re-included or hidden: the "!" lines may not be written
+    # (declined, no tty, --no-gitignore, a refused .gitignore), an inner
+    # .claude-sandbox/.gitignore holding "*" takes precedence over the root's
+    # "!" lines (verified with git), and a user's own "!" lines or files
+    # already tracked leave other paths visible. The probes, which nothing on
+    # this path ran before, are at most two extra git calls; they run after
+    # the host .gitignore step, so a timeout (CS-LAY-024: unknown) changes
+    # nothing already done and prints no note. Shown only while the entries
+    # are being decided, so it does not repeat on every launch.
+    Given the project is a git work tree, the effective trackInHost is true and CS-LAY-018 does not fire
+      (the --no-index directory probe reports the directory not ignored and no .claude-sandbox/.git exists)
+    And the setup proposes at least one CS-LAY-009 entry (whatever the answer: added, declined, or
+      skipped for no tty), or runs from init (which passes Options.Gitignore; the launch path never does)
+    And both CS-LAY-022 child probes are ignored
+    When SetupLayout runs
+    Then after the host .gitignore step stderr carries exactly one line "Note: trackInHost is true but
+      a host ignore rule hides new files under .claude-sandbox/ (only paths your rules re-include are
+      tracked); `git check-ignore -v --no-index .claude-sandbox/<path>` names the rule."
+    And the CS-LAY-009 entries are proposed exactly as in CS-LAY-021
+    Given a launch on which every CS-LAY-009 entry is already present (nothing to decide)
+    Then no child probe runs and no note is printed
+    Given either child probe is not ignored (no rule, or one aimed at some names only)
+    Then no note is printed, and the second probe is not asked when the first is not ignored
+    Given a child probe does not finish within the bound (CS-LAY-024)
+    Then it is killed and no note and no warning is printed: the answer is unknown
+    Given CS-LAY-018 fires (the directory itself is excluded, or a sidecar .git exists)
+    Then only its warning is printed and no child probe runs
+    And the note is never printed with trackInHost false, and goes to stderr only (headless stdout stays clean)
+
   Scenario: CS-LAY-023 A FIFO, device or socket at a .gitignore or the seeded CLAUDE.md never blocks the setup
     # The layout setup runs on the launch path and the project tree is mounted
     # read-write, so a session can put a FIFO where a .gitignore belongs. The
