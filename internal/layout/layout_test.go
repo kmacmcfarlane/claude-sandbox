@@ -613,6 +613,60 @@ var _ = Describe("layout lifecycle", func() {
 			Expect(countLine(read(hostGI), ".claude-sandbox/env")).To(BeZero())
 		})
 
+		const hiddenNote = "Note: trackInHost is true but a host ignore rule hides new files under .claude-sandbox/: only config.yaml and Dockerfile are re-included, so CLAUDE.md, agent/, scripts/, work/ and the rest stay hidden from the host repo (`git check-ignore -v --no-index .claude-sandbox/ignore-probe` names the rule).\n"
+
+		It("CS-LAY-026: a children-only rule gets one note after the host-tracked entries", func() {
+			write(hostGI, ".claude-sandbox/*\n")
+			ignores(false, map[string]bool{bare: true, withExt: true})
+			Expect(setup(true, ptr(true))).To(Succeed())
+
+			Expect(strings.Count(errOut.String(), "Note: trackInHost is true")).To(Equal(1), "one note")
+			Expect(errOut.String()).To(HaveSuffix(hiddenNote), "after the host .gitignore step")
+			Expect(out.String()).NotTo(ContainSubstring("Note:"), "stderr only")
+			Expect(errOut.String()).NotTo(ContainSubstring("WARNING"))
+			Expect(childProbes()).To(Equal([]string{bare, withExt}), "at most two extra git calls")
+			for _, l := range trueLines {
+				Expect(countLine(read(hostGI), l)).To(Equal(1), l)
+			}
+		})
+
+		It("CS-LAY-026: a whole-dir rule prints CS-LAY-018's warning only, and no child probe runs", func() {
+			ignores(true, map[string]bool{bare: true, withExt: true})
+			Expect(setup(true, ptr(true))).To(Succeed())
+			Expect(errOut.String()).To(ContainSubstring("WARNING: trackInHost is true but the host repo already ignores .claude-sandbox/"))
+			Expect(errOut.String()).NotTo(ContainSubstring("Note:"))
+			Expect(childProbes()).To(BeEmpty())
+		})
+
+		It("CS-LAY-026: a sidecar .git prints CS-LAY-018's warning only", func() {
+			ignores(false, map[string]bool{bare: true, withExt: true})
+			Expect(os.MkdirAll(filepath.Join(sb, ".git"), 0o755)).To(Succeed())
+			Expect(setup(true, ptr(true))).To(Succeed())
+			Expect(errOut.String()).To(ContainSubstring("WARNING: trackInHost is true but .claude-sandbox/.git exists"))
+			Expect(errOut.String()).NotTo(ContainSubstring("Note:"))
+		})
+
+		It("CS-LAY-026: no rule, or one hiding only some names, prints nothing", func() {
+			for _, children := range []map[string]bool{{}, {bare: true}, {withExt: true}} {
+				fake = &execx.Fake{}
+				ignores(false, children)
+				errOut.Reset()
+				Expect(setup(true, ptr(true))).To(Succeed())
+				Expect(errOut.String()).NotTo(ContainSubstring("Note:"), fmt.Sprint(children))
+				Expect(errOut.String()).NotTo(ContainSubstring("WARNING"), fmt.Sprint(children))
+				if !children[bare] {
+					Expect(childProbes()).To(Equal([]string{bare}), "the second probe is not asked")
+				}
+			}
+		})
+
+		It("CS-LAY-026: never with trackInHost false", func() {
+			ignores(false, map[string]bool{bare: true, withExt: true})
+			fake.On("ls-files", "", nil)
+			Expect(setup(false, ptr(true))).To(Succeed())
+			Expect(errOut.String()).NotTo(ContainSubstring("Note: trackInHost is true"))
+		})
+
 		It("CS-LAY-022: a whitelist-style ignore that hides only the dot-less probe does not count", func() {
 			// "*", "!*/", "!*.*": ignore-probe is hidden, ignore-probe.md is not.
 			ignores(false, map[string]bool{bare: true})

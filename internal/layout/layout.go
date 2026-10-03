@@ -210,6 +210,7 @@ func Setup(project string, trackInHost bool, opts Options) error {
 			gitignoreAdd(project, hostGI, opts, withWorktreesLine(hostGI,
 				".claude-sandbox/env", ".claude-sandbox/temp/", ".claude-sandbox/ralph/",
 				"!.claude-sandbox/config.yaml", "!.claude-sandbox/Dockerfile")...)
+			noteChildrenHidden(project, opts)
 		}
 		return nil
 	}
@@ -435,6 +436,21 @@ func dirIgnored(r execx.Runner, project string) (bool, error) {
 		}
 	}
 	return true, nil
+}
+
+// noteChildrenHidden prints the one CS-LAY-026 note: trackInHost is true, the
+// directory itself is not excluded (CS-LAY-018 passed), but a children-only
+// rule hides new files there (both CS-LAY-022 probes ignored), so beyond the
+// two re-included files everything under .claude-sandbox/ stays out of the
+// host repo. The probes run here only — on this path nothing asked them
+// before — after the host .gitignore step, so a timeout (unknown) changes
+// nothing already done and prints no note.
+func noteChildrenHidden(project string, opts Options) {
+	hidden, err := dirIgnored(opts.Runner, project)
+	if err != nil || !hidden {
+		return
+	}
+	fmt.Fprintf(opts.errw(), "Note: trackInHost is true but a host ignore rule hides new files under .claude-sandbox/: only config.yaml and Dockerfile are re-included, so CLAUDE.md, agent/, scripts/, work/ and the rest stay hidden from the host repo (`git check-ignore -v --no-index %s` names the rule).\n", ignoreProbe)
 }
 
 func dirExists(p string) bool {
