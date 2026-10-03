@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -187,6 +188,7 @@ var _ = Describe("shim build lock (spec/tmux.feature)", func() {
 		count   string
 		ran     string
 		outs    string
+		argv    string
 	)
 
 	tools := []string{"bash", "sh", "readlink", "dirname", "find", "mkdir", "sleep", "chmod", "id", "cat", "mv", "rm"}
@@ -219,6 +221,7 @@ var _ = Describe("shim build lock (spec/tmux.feature)", func() {
 		count = filepath.Join(scratch, "builds")
 		ran = filepath.Join(scratch, "ran")
 		outs = filepath.Join(scratch, "outs")
+		argv = filepath.Join(scratch, "argv")
 	})
 
 	// built is the body of the "binary" the fakes write: it records one line
@@ -238,15 +241,20 @@ var _ = Describe("shim build lock (spec/tmux.feature)", func() {
 	writeOut := func() string {
 		return "echo \"$out\" >> '" + outs + "'\ncat > \"$out\" <<'BIN'\n" + built() + "BIN\nchmod +x \"$out\"\n"
 	}
+	// recordArgv is the fakes' common head: one line per argument, so a test
+	// can check the flags the shim passed.
+	recordArgv := func() string {
+		return "printf '%s\\n' \"$@\" >> '" + argv + "'\n"
+	}
 	// fakeGo writes a `go` that takes 1 s and then writes the -o target.
 	fakeGo := func() {
-		script := "#!/bin/sh\necho build >> '" + count + "'\necho " + buildNoise + "\nsleep 1\nout=\nwhile [ $# -gt 0 ]; do [ \"$1\" = -o ] && out=$2; shift; done\n" + writeOut()
+		script := "#!/bin/sh\n" + recordArgv() + "echo build >> '" + count + "'\necho " + buildNoise + "\nsleep 1\nout=\nwhile [ $# -gt 0 ]; do [ \"$1\" = -o ] && out=$2; shift; done\n" + writeOut()
 		Expect(os.WriteFile(filepath.Join(pathDir, "go"), []byte(script), 0o755)).To(Succeed())
 	}
 	// fakeDocker writes a `docker` that maps "-v <repo>:/src" and writes the
 	// -o target (relative to the container's /src) the same way.
 	fakeDocker := func() {
-		script := "#!/bin/sh\necho build >> '" + count + "'\necho " + buildNoise + "\nsleep 1\nsrc=\no=\nwhile [ $# -gt 0 ]; do [ \"$1\" = -v ] && src=${2%:/src}; [ \"$1\" = -o ] && o=$2; shift; done\n" +
+		script := "#!/bin/sh\n" + recordArgv() + "echo build >> '" + count + "'\necho " + buildNoise + "\nsleep 1\nsrc=\no=\nwhile [ $# -gt 0 ]; do [ \"$1\" = -v ] && src=${2%:/src}; [ \"$1\" = -o ] && o=$2; shift; done\n" +
 			"out=\"$src/$o\"\n" + writeOut()
 		Expect(os.WriteFile(filepath.Join(pathDir, "docker"), []byte(script), 0o755)).To(Succeed())
 	}
@@ -359,6 +367,31 @@ var _ = Describe("shim build lock (spec/tmux.feature)", func() {
 			Expect(waiting).To(BeNumerically(">=", 1))
 			Expect(lines(ran)).To(Equal([]string{"ok", "ok", "ok"}), "every launch execs the binary, and fd 9 never reaches it")
 			renamedIn()
+		})
+	}
+
+	for _, kind := range []string{"host go", "docker golang"} {
+		kind := kind
+		It("CS-TMUX-073: the build ("+kind+") passes -buildvcs=false, so go never runs git in the checkout", func() {
+			if kind == "host go" {
+				fakeGo()
+			} else {
+				fakeDocker()
+			}
+			launched(run(nil, "--new"))
+			args := lines(argv)
+			// The go command line: "go" plus the fake go's argv for the host
+			// go, the words after the image for docker golang.
+			goArgs := append([]string{"go"}, args...)
+			if kind == "docker golang" {
+				i := slices.Index(args, "golang:1.25-bookworm")
+				Expect(i).To(BeNumerically(">=", 0), "docker runs the golang image")
+				goArgs = args[i+1:]
+			}
+			Expect(goArgs[:2]).To(Equal([]string{"go", "build"}))
+			b := slices.Index(goArgs, "-buildvcs=false")
+			Expect(b).To(BeNumerically(">", 1), "go build gets -buildvcs=false (VCS stamping runs git, which reads the session-writable .git/config)")
+			Expect(b).To(BeNumerically("<", slices.Index(goArgs, "./cmd/claude-sandbox")), "a flag, before the package")
 		})
 	}
 

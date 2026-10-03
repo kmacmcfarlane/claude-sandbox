@@ -71,6 +71,10 @@ Feature: tmux integration (CS-TMUX)
       bin/dist/claude-sandbox, so that path is always a whole binary: a shim, a hook fast path or an
       unlocked build never execs a file another build is still writing (ETXTBSY, or a half-written
       binary that is already newer than the sources); a failed build removes its temporary file
+    And both builds, the host go and docker golang, pass -buildvcs=false, so go never runs git in the
+      checkout to stamp VCS info: that git reads the session-writable .git/config (core.fsmonitor,
+      filter.*.clean/process, core.hooksPath), which would run a program on the host at every stale
+      build; nothing reads the stamp
     When a waiter has waited 600 s (CLAUDE_SANDBOX_BUILD_LOCK_WAIT, a whole number of seconds, overrides it)
     Then it prints one WARNING naming the lock file on stderr and builds without the lock
     When the holder's build fails
