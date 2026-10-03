@@ -675,7 +675,7 @@ var _ = Describe("launcher CLI (end-to-end argv)", func() {
 			Expect(detached()).To(BeEmpty())
 		})
 
-		It("CS-IMG-045: cli-prefetch builds ONLY the CLI image and records the outcome under HOME", func() {
+		It("CS-IMG-045: cli-prefetch builds ONLY the CLI image, retags it, and records the outcome in its --dir", func() {
 			f.fake.Calls = nil
 			Expect(f.run("cli-prefetch", "--dir", cacheDir(), "1.2.4")).To(Equal(0), f.errw.String())
 			var builds []string
