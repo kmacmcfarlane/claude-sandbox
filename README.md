@@ -438,8 +438,9 @@ banner — the key can arrive from a workspace-level config a session never aske
 
 **The bridge replaces, it does not union.** A bind mount hides whatever the destination held, so
 a bridged session no longer reads the real `<config dir>/sessions` at all, and an already-running
-*unbridged* session writes its record there and advertises a socket path only its own container
-has: it does not appear in a bridged session's `/peers`, and it cannot see the bridged ones. Every
+*unbridged* session writes its record in its own `<config dir>/sessions`, the directory the
+overmount hides from bridged containers: it does not appear in a bridged session's `/peers`, and
+it cannot see the bridged ones, whose records live in `peers/sessions`. Every
 session you want to see must be opted in and **relaunched** with the key on. Turning the key on
 will therefore make `/peers` look *emptier* until the sessions you care about have been
 restarted with it.
