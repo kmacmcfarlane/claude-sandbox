@@ -172,7 +172,8 @@ var _ = Describe("shim argv0 (spec/tmux.feature)", func() {
 })
 
 // Spec: spec/tmux.feature (CS-TMUX-073) — the shim's builds serialise on a
-// flock in bin/dist/.build.lock. The shim runs for real (bash) in a scratch
+// flock in bin/dist/.build.lock; (CS-TMUX-074) — every build, locked or not,
+// passes -buildvcs=false. The shim runs for real (bash) in a scratch
 // repo, with a PATH holding only symlinks to the tools it needs plus a fake
 // `go` (or `docker`) that sleeps, counts its builds, records its -o target and
 // writes a script there in place, as `go build -o` does when it copies across
@@ -372,7 +373,7 @@ var _ = Describe("shim build lock (spec/tmux.feature)", func() {
 
 	for _, kind := range []string{"host go", "docker golang"} {
 		kind := kind
-		It("CS-TMUX-073: the build ("+kind+") passes -buildvcs=false, so go never runs git in the checkout", func() {
+		It("CS-TMUX-074: the build ("+kind+") passes -buildvcs=false, so go never runs git in the checkout", func() {
 			if kind == "host go" {
 				fakeGo()
 			} else {

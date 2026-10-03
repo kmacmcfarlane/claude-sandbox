@@ -76,13 +76,15 @@ esac
 # being written cannot be exec'd (ETXTBSY) or is exec'd half-written; anything
 # that finds it executable and newer than the sources meanwhile would run it:
 # another shim's up-to-date check, a hook fast path, an unlocked build.
-# Both builds pass -buildvcs=false (spec/tmux.feature CS-TMUX-073). Go's
+# Both builds pass -buildvcs=false (spec/tmux.feature CS-TMUX-074). Go's
 # default (-buildvcs=auto) stamps VCS info by running `git status --porcelain`
 # and `git log -1` in the checkout, and that git reads the checkout's
 # .git/config, which a session can write: core.fsmonitor, a filter's
-# clean/process command or core.hooksPath would then run a program on the
-# HOST at every stale build, unattended ones included (boot restore, SDK
-# spawns). Nothing reads the stamp (no debug.ReadBuildInfo vcs.* use).
+# clean/process command or core.hooksPath. For the host go build that would
+# run a program on the HOST at every stale build, unattended ones included
+# (boot restore, SDK spawns). For the docker golang build the git runs inside
+# the throwaway golang container, not on the host, but the flag goes there
+# too. Nothing reads the stamp (no debug.ReadBuildInfo vcs.* use).
 build() {
     mkdir -p "$BIN_DIR"
     local tmp_name=".claude-sandbox.build.$$" rc=0
