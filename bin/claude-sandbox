@@ -76,6 +76,13 @@ esac
 # being written cannot be exec'd (ETXTBSY) or is exec'd half-written; anything
 # that finds it executable and newer than the sources meanwhile would run it:
 # another shim's up-to-date check, a hook fast path, an unlocked build.
+# Both builds pass -buildvcs=false (spec/tmux.feature CS-TMUX-073). Go's
+# default (-buildvcs=auto) stamps VCS info by running `git status --porcelain`
+# and `git log -1` in the checkout, and that git reads the checkout's
+# .git/config, which a session can write: core.fsmonitor, a filter's
+# clean/process command or core.hooksPath would then run a program on the
+# HOST at every stale build, unattended ones included (boot restore, SDK
+# spawns). Nothing reads the stamp (no debug.ReadBuildInfo vcs.* use).
 build() {
     mkdir -p "$BIN_DIR"
     local tmp_name=".claude-sandbox.build.$$" rc=0
@@ -83,7 +90,7 @@ build() {
     rm -f "$tmp"
     if command -v go >/dev/null 2>&1; then
         echo "Building claude-sandbox binary (host go)..." >&2
-        (cd "$REPO_ROOT" && CGO_ENABLED=0 go build -o "$tmp" ./cmd/claude-sandbox) >&2 9>&- || rc=$?
+        (cd "$REPO_ROOT" && CGO_ENABLED=0 go build -buildvcs=false -o "$tmp" ./cmd/claude-sandbox) >&2 9>&- || rc=$?
     else
         echo "Building claude-sandbox binary (docker $GO_IMAGE)..." >&2
         # Persist the build AND module caches under bin/dist/ (gitignored), so a
@@ -97,7 +104,7 @@ build() {
             -e GOCACHE=/src/bin/dist/gocache \
             -e GOMODCACHE=/src/bin/dist/gomodcache \
             -v "$REPO_ROOT:/src" -w /src \
-            "$GO_IMAGE" go build -o "bin/dist/$tmp_name" ./cmd/claude-sandbox >&2 9>&- || rc=$?
+            "$GO_IMAGE" go build -buildvcs=false -o "bin/dist/$tmp_name" ./cmd/claude-sandbox >&2 9>&- || rc=$?
     fi
     if [ "$rc" -ne 0 ]; then
         rm -f "$tmp"
