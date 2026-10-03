@@ -71,10 +71,6 @@ Feature: tmux integration (CS-TMUX)
       bin/dist/claude-sandbox, so that path is always a whole binary: a shim, a hook fast path or an
       unlocked build never execs a file another build is still writing (ETXTBSY, or a half-written
       binary that is already newer than the sources); a failed build removes its temporary file
-    And both builds, the host go and docker golang, pass -buildvcs=false, so go never runs git in the
-      checkout to stamp VCS info: that git reads the session-writable .git/config (core.fsmonitor,
-      filter.*.clean/process, core.hooksPath), which would run a program on the host at every stale
-      build; nothing reads the stamp
     When a waiter has waited 600 s (CLAUDE_SANDBOX_BUILD_LOCK_WAIT, a whole number of seconds, overrides it)
     Then it prints one WARNING naming the lock file on stderr and builds without the lock
     When the holder's build fails
@@ -85,6 +81,24 @@ Feature: tmux integration (CS-TMUX)
     When the binary is up to date
     Then the shim takes no lock, creates no lock file and execs the binary at once
     And the hook fast paths (CS-TMUX-003, "tmux save") never reach the lock: they never build and never wait
+
+  # go's default -buildvcs=auto stamps VCS info by running `git status
+  # --porcelain` and `git log -1` in the checkout, and that git reads the
+  # checkout's .git/config, which a session can write. For the host go build
+  # that is a program run on the HOST at every stale build (unattended ones
+  # included: boot restore, SDK spawns). For the docker golang build the git
+  # runs inside the throwaway golang container, not on the host, but the
+  # flag is passed there too: nothing reads the stamp, and one rule for both
+  # builds leaves nothing to reason about. Independent of the lock: it holds
+  # for locked and unlocked builds alike, with or without flock.
+
+  Scenario: CS-TMUX-074 the shim's builds never stamp VCS info
+    Given bin/dist/claude-sandbox is missing or a build source is newer than it
+    When the shim builds it, with the host go or with docker golang, locked or not
+    Then go build gets -buildvcs=false, before the package, so go never runs git in the checkout
+    And so a session-written .git/config (core.fsmonitor, filter.*.clean/process, core.hooksPath)
+      never runs a program on the host through the host go build, nor inside the docker golang
+      build's container; nothing reads the stamp
 
   # ---- F1: the pane mark ----
   #
