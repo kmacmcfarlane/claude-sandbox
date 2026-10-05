@@ -388,7 +388,12 @@ func joinExistingSession(env *Env, projectDir string, f *launchFlags, cfg *casca
 
 	noteEarlierOOM(env, d.Target)
 
-	wantHash, wantInputs := wouldBeFingerprint(env, projectDir, f, cfg, envFiles, linked, &d.Target)
+	// CS-SESS-092: the env files are read ONCE, for the drift check and for
+	// the terminal identity of the join or the attach note. Still after the
+	// session decision and without the refusal check (CS-LNCH-129).
+	snap, snapErr := cascade.ReadEnvFiles(envFiles)
+
+	wantHash, wantInputs := wouldBeFingerprint(env, projectDir, f, cfg, envFiles, snap, snapErr, linked, &d.Target)
 	proceed, newContainer, err := confirmDrift(env, d.Target, wantHash, wantInputs, f)
 	if err != nil {
 		return false, err
@@ -403,11 +408,49 @@ func joinExistingSession(env *Env, projectDir string, f *launchFlags, cfg *casca
 	if d.Action == actionAttach {
 		warnModelMismatch(env, d.Target, model)
 		noteWorktree(env, d.Target, wt)
+		terminalNote(env, d.Target, snap, snapErr)
 		_, _, _, home := hostIdentity(env.Getenv)
 		return true, attachTo(env, d.Target, cfg.DetachKeys, attachMark(d.Target, home, wt.Root), nil)
 	}
 	_, _, hostUser, _ := hostIdentity(env.Getenv)
-	return true, joinInto(env, d.Target, projectDir, hostUser, model, cfg.DetachKeys, resolveDangerous(env, f, cfg), f, wt)
+	// CS-SESS-092: an unreadable snapshot leaves the container's identity
+	// alone (nil), the safe direction toward an explicit env file; the drift
+	// check's warning above already named the file.
+	var term *launch.TerminalResult
+	if snapErr == nil {
+		t := launch.ResolveTerminal(env.lookupEnv, snap, env.lookupEnv)
+		term = &t
+	}
+	return true, joinInto(env, d.Target, projectDir, hostUser, model, cfg.DetachKeys, resolveDangerous(env, f, cfg), f, wt, term)
+}
+
+// terminalNote prints one stderr Note before an attach when the container's
+// claude was started with a terminal identity other than the one a launch
+// from here would give it (CS-SESS-091): Claude Code reads it once at start,
+// and docker attach is a raw TTY splice that cannot change it. The
+// comparison value is computed as if creating now (launch.ResolveTerminal
+// over this launcher's environment and snap). Silent for a container that
+// predates the label, for an equal value, and when snapErr is set (it
+// cannot tell). Shared by the hand attach and the tmux restore attach
+// (CS-TMUX-056); never a prompt, never an exit-status change.
+func terminalNote(env *Env, s sessions.Session, snap []cascade.EnvFile, snapErr error) {
+	if s.Terminal == "" || snapErr != nil {
+		return
+	}
+	term := launch.ResolveTerminal(env.lookupEnv, snap, env.lookupEnv)
+	want := term.Label(false)
+	if want == s.Terminal {
+		return
+	}
+	if file := term.PinnedBy(); file != "" {
+		// An env file assigns the value, so a join would take the file's value
+		// too: name the file, not --join.
+		fmt.Fprintf(env.Err, "Note: session '%s' was started with %s; %s now gives %s. Claude Code reads this once at start; relaunch (exit, then claude-sandbox --resume) to apply it.\n",
+			sessionLabel(s), launch.DescribeTerminal(s.Terminal), file, launch.DescribeTerminal(want))
+		return
+	}
+	fmt.Fprintf(env.Err, "Note: session '%s' was started in a terminal with %s; this terminal has %s. Claude Code reads this once at start, so mouse-wheel and rendering handling may not fit this terminal. For this terminal's handling: --join (a new claude), or exit and relaunch with --resume.\n",
+		sessionLabel(s), launch.DescribeTerminal(s.Terminal), launch.DescribeTerminal(want))
 }
 
 // wouldBeFingerprint computes the config hash a launch would produce right now,
@@ -418,7 +461,16 @@ func joinExistingSession(env *Env, projectDir string, f *launchFlags, cfg *casca
 // (CS-LNCH-074). target is the container being attached to or joined: its
 // own peers root is reused (CS-DIR-017), so a session on the legacy root shows
 // no drift once launches have switched; nil uses the new root.
-func wouldBeFingerprint(env *Env, projectDir string, f *launchFlags, cfg *cascade.Config, envFiles []string, linked *launch.LinkedWorktree, target *sessions.Session) (string, []launch.InputDigest) {
+//
+// snap is the env files read ONCE by the caller, shared with the terminal
+// identity (CS-SESS-092); snapErr is that read's error, reported here as the
+// one warning of an unreadable env file, adding that the session keeps the
+// container's terminal identity (the join and the attach note stand down).
+func wouldBeFingerprint(env *Env, projectDir string, f *launchFlags, cfg *cascade.Config, envFiles []string, snap []cascade.EnvFile, snapErr error, linked *launch.LinkedWorktree, target *sessions.Session) (string, []launch.InputDigest) {
+	if snapErr != nil {
+		fmt.Fprintf(env.Err, "WARNING: cannot compute the current configuration for the drift check: reading env file: %v; the session keeps the container's terminal identity.\n", snapErr)
+		return "", nil
+	}
 	mainCheckout := ""
 	if linked != nil {
 		mainCheckout = linked.Main
@@ -480,7 +532,7 @@ func wouldBeFingerprint(env *Env, projectDir string, f *launchFlags, cfg *cascad
 		CLIModel: f.Model, Passthrough: f.Passthrough,
 		CLISSH: f.SSH, CLIGit: f.Git, CLIDockerSocket: f.DockerSocket, CLIAWS: f.AWS,
 		CLIPackageCaches: f.PackageCaches,
-		Cfg:              cfg, EnvFiles: envFiles,
+		Cfg:              cfg, EnvFiles: envFiles, Env: snap,
 		ImageName: image, ImageID: id,
 		Linked: linked,
 		// The launch passes it too: a nested check that decided differently
@@ -560,7 +612,11 @@ func attachTo(env *Env, s sessions.Session, configuredKeys string, mark *paneMar
 
 // joinInto starts another claude inside a running container (CS-SESS-032), as
 // a session child the launcher waits on.
-func joinInto(env *Env, s sessions.Session, projectDir, hostUser, model, configuredKeys string, dangerous bool, f *launchFlags, wt worktreeChoice) error {
+//
+// term is the joining terminal's identity (CS-SESS-090/092), nil when the env
+// files could not be read: then no identity variable is touched and the
+// container's value stands.
+func joinInto(env *Env, s sessions.Session, projectDir, hostUser, model, configuredKeys string, dangerous bool, f *launchFlags, wt worktreeChoice, term *launch.TerminalResult) error {
 	detachKeys := launch.ResolveDetachKeys(configuredKeys)
 	fmt.Fprintf(env.Out, "Starting a new session inside %s.\n", sessionLabel(s))
 	fmt.Fprintln(env.Out, "Note: this session ends if that container's primary session exits, and it cannot be reattached.")
@@ -580,8 +636,29 @@ func joinInto(env *Env, s sessions.Session, projectDir, hostUser, model, configu
 	// that this claude is not the container's primary, so its ping does not
 	// offer an --attach that would land on a different session.
 	args := []string{"exec", "-it", "--detach-keys=" + detachKeys, "-u", hostUser,
-		"-e", "CLAUDE_SANDBOX_JOINED=1", "-w", projectDir, s.Name,
-		"/opt/claude-sandbox/bin/claude-sandbox", "pidslot", "--", "claude"}
+		"-e", "CLAUDE_SANDBOX_JOINED=1"}
+	// CS-SESS-090: docker exec starts the new claude with the CONTAINER's
+	// environment, i.e. the creator's terminal identity. Each name is set to
+	// this terminal's value (-e NAME=<value>), or removed by /usr/bin/env -u
+	// in front of the command — not "-e NAME=", which is not "unset" for
+	// every reader. The prefix runs before pidslot, which still execs tini, so
+	// the pid class landing is unchanged (CS-PID-005).
+	var unset []string
+	if term != nil {
+		var set []string
+		set, unset = term.JoinEnv()
+		for _, e := range set {
+			args = append(args, "-e", e)
+		}
+	}
+	args = append(args, "-w", projectDir, s.Name)
+	if len(unset) > 0 {
+		args = append(args, "/usr/bin/env")
+		for _, n := range unset {
+			args = append(args, "-u", n)
+		}
+	}
+	args = append(args, "/opt/claude-sandbox/bin/claude-sandbox", "pidslot", "--", "claude")
 	// CS-SESS-064: the resolved setting, not just the CLI flag.
 	if dangerous {
 		args = append(args, "--dangerously-skip-permissions")

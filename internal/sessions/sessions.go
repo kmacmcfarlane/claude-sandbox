@@ -53,6 +53,10 @@ const (
 	// LabelPeerRoot is the peers root the container's bridge applied, or
 	// "none" (CS-DIR-012), read by the drift check (CS-DIR-017).
 	LabelPeerRoot = launch.LabelPeerRoot
+	// LabelTerminal is the terminal identity the container's claude sees,
+	// "none", or "" on a container that predates it (CS-LNCH-181), read by
+	// the attach note (CS-SESS-091).
+	LabelTerminal = launch.LabelTerminal
 )
 
 // ModeRalph marks a ralph loop container.
@@ -117,6 +121,9 @@ type Session struct {
 	// PeerRoot is the claude-sandbox.peerroot label (CS-DIR-012): the peers
 	// root the bridge applied, "none", or "" on a container that predates it.
 	PeerRoot string `json:"-"`
+	// Terminal is the claude-sandbox.terminal label (CS-LNCH-181): "none",
+	// "NAME=value", or "" on a container that predates it or an older row.
+	Terminal string `json:"-"`
 	// Mounts are the container's bind sources ({{.Mounts}} under --no-trunc,
 	// split on ","), read for the peers-root pin (CS-DIR-011). nil on an
 	// older row.
@@ -204,6 +211,7 @@ var psFormat = strings.Join([]string{
 	`{{.Label "` + LabelLaunchFlags + `"}}`,
 	`{{.Label "` + LabelResume + `"}}`,   // CS-SESS-065
 	`{{.Label "` + LabelPeerRoot + `"}}`, // CS-DIR-012
+	`{{.Label "` + LabelTerminal + `"}}`, // CS-SESS-091
 	// CS-DIR-011: every bind source, comma-joined; last, so nothing after
 	// it depends on how a source is spelled.
 	"{{.Mounts}}",
@@ -336,7 +344,13 @@ func listAll(r execx.Runner, filter string, count bool) ([]Session, []Session, e
 		}
 		if len(f) > 22 {
 			s.PeerRoot = strings.TrimSpace(f[21])
-			s.Mounts = launch.SplitMounts(f[22])
+			// Mounts is always the LAST field, so a row of the format before
+			// the terminal label (23 fields) keeps its bind sources and the
+			// peers-root pin, and simply has no terminal label (CS-SESS-091).
+			s.Mounts = launch.SplitMounts(f[len(f)-1])
+		}
+		if len(f) > 23 {
+			s.Terminal = strings.TrimSpace(f[22])
 		}
 		// An exited container is never a session: every sandbox container
 		// is --rm, so docker is removing it. Only DiscoverForLaunch returns

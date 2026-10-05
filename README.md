@@ -391,6 +391,17 @@ The hash covers the merged config cascade, env file contents, the resolved Docke
 
 Skip the check with `--allow-config-drift`.
 
+### Terminal identity (JetBrains terminals)
+
+Claude Code reads `TERMINAL_EMULATOR` once at start. In GoLand's (and every JetBrains IDE's) terminal it is `JetBrains-JediTerm`, and Claude Code then drops the plain Up/Down arrows that terminal sends along with its mouse-wheel reports. Without it those arrows reach the prompt, so scrolling the fullscreen TUI with the wheel also moves the input field.
+
+- **Forwarded:** every launch that creates a session for a person — a new interactive launch, `--branch`, `--detach` and a `tmux restore` resume — passes `-e TERMINAL_EMULATOR=<value>` from the launcher's environment. Nothing else is forwarded: not `TERM` (docker's `xterm` stays), not `TMUX`/`TMUX_PANE`.
+- **Not forwarded:** headless and ralph runs have no TUI and pass none.
+- **Env files win by assignment.** A `TERMINAL_EMULATOR=<value>` line in a cascade env file pins the value and the launcher adds no `-e`. A bare `TERMINAL_EMULATOR` line (the old workaround) is no longer needed; it still works, passing the same value. When several files define it, the last line docker would act on decides.
+- **Join** gives the new claude the joining terminal's identity: `-e TERMINAL_EMULATOR=<value>`, or `/usr/bin/env -u TERMINAL_EMULATOR` when the joining terminal has none (the container may hold the creator's).
+- **Attach cannot change it.** Each container records what its claude saw in the `claude-sandbox.terminal` label (`none` when unset). An attach from a terminal that would get a different value prints one `Note:` before attaching, naming `--join` (a new claude with this terminal's handling) or exiting and relaunching with `--resume`; when an env file assigns the value, the note names that file instead. The label and the variable are not part of the config hash, so attaching from another terminal is never drift.
+- **tmux panes** carry the tmux server's environment, not the attached client's. A server started at boot (e.g. `tmux.service`) has no `TERMINAL_EMULATOR`, so launches from its panes forward nothing. Reading tmux's session environment instead is an open follow-up.
+
 ### Messaging between sessions
 
 Claude Code's `/peers` (`ListAgents`) and `SendMessage` reach sessions in other sandboxes

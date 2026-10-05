@@ -21,7 +21,7 @@ var _ = Describe("discovery for the peers-root pin (CS-DIR-011/012)", func() {
 		}
 		return strings.Join([]string{name, status, "/p", "claude", "", "v1", "", "", "", "3", "",
 			state, "2026-09-30 12:00:00 +0000 UTC", "", "", "",
-			"", "", "", "", "", peerRoot, mounts}, sep)
+			"", "", "", "", "", peerRoot, "none", mounts}, sep)
 	}
 
 	It("CS-DIR-011: rows carry the peerroot label and the split bind sources; an exited --rm row is returned as removing", func() {
@@ -60,5 +60,36 @@ var _ = Describe("discovery for the peers-root pin (CS-DIR-011/012)", func() {
 		Expect(found).To(HaveLen(1))
 		Expect(found[0].PeerRoot).To(BeEmpty())
 		Expect(found[0].Mounts).To(BeNil())
+	})
+})
+
+var _ = Describe("discovery of the terminal label (CS-SESS-091)", func() {
+	head := func(name string) []string {
+		return []string{name, "Up 1 hour", "/p", "claude", "otter", "v1", "", "", "", "3", "",
+			"running", "2026-09-30 12:00:00 +0000 UTC", "", "", "",
+			"", "", "", "", "", "none"}
+	}
+
+	It("CS-SESS-091: the label is a ps field just before {{.Mounts}}, which stays last; a 24-field row yields both", func() {
+		fake := &execx.Fake{}
+		fake.On("docker ps", strings.Join(append(head("a"), "TERMINAL_EMULATOR=JetBrains-JediTerm", "/h/.cache/claude-sandbox/peers"), sep)+"\n", nil)
+		found, err := sessions.DiscoverAllUncounted(fake)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(found).To(HaveLen(1))
+		Expect(found[0].Terminal).To(Equal("TERMINAL_EMULATOR=JetBrains-JediTerm"))
+		Expect(found[0].Mounts).To(Equal([]string{"/h/.cache/claude-sandbox/peers"}))
+		line := strings.Join(fake.Calls[0].Args, " ")
+		Expect(line).To(ContainSubstring(`{{.Label "claude-sandbox.terminal"}}` + sep + "{{.Mounts}} "))
+	})
+
+	It("CS-SESS-091: a 23-field row (the format before the label) keeps its Mounts and the legacy pin, with no terminal label", func() {
+		fake := &execx.Fake{}
+		fake.On("docker ps", strings.Join(append(head("old"), "/h/.cache/claude-sandbox/peers"), sep)+"\n", nil)
+		found, _, err := sessions.DiscoverForLaunch(fake)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(found).To(HaveLen(1))
+		Expect(found[0].Terminal).To(BeEmpty())
+		Expect(found[0].Mounts).To(Equal([]string{"/h/.cache/claude-sandbox/peers"}))
+		Expect(found[0].PeerRoot).To(Equal("none"))
 	})
 })

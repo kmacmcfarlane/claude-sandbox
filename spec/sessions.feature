@@ -906,3 +906,70 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
     When "docker top" fails or times out
     Then the check fails closed (CS-SESS-067), the reason naming
       "docker top <container>"
+
+  # Terminal identity on join and attach (CS-LNCH-178..181).
+
+  @new
+  Scenario: CS-SESS-090 A join gives the new claude the joining terminal's identity
+    # docker exec starts the new process with the CONTAINER's environment, i.e.
+    # the creator's TERMINAL_EMULATOR. Each exec is a new claude reading its own
+    # environment, so a join can be exact.
+    Given no cascade env file decides TERMINAL_EMULATOR by assignment
+    When the joining launcher's environment sets it to <value>
+    Then the docker exec carries "-e TERMINAL_EMULATOR=<value>"
+    When the joining launcher's environment does not set it, or sets it empty
+    Then the exec command is prefixed with "/usr/bin/env -u TERMINAL_EMULATOR"
+      ahead of "/opt/claude-sandbox/bin/claude-sandbox pidslot -- claude" — not
+      "-e TERMINAL_EMULATOR=", which is not "unset" for every reader; pidslot
+      still execs tini, so the pid class landing is unchanged (CS-PID-005)
+
+  @new
+  Scenario: CS-SESS-091 Attach notes a terminal identity it cannot change
+    # docker attach is a raw TTY splice: the running claude read its
+    # environment at start and cached what it decided. The note is all that
+    # can be done.
+    Given the chosen container's claude-sandbox.terminal label (a ps field just
+      before {{.Mounts}}, which stays the last field; a row of the older
+      format keeps its Mounts and has no label)
+    When an attach (--attach, the tier-1/tier-2 [a], or a tmux restore's attach,
+      CS-TMUX-056) computes the identity a launch from here would give now
+      (CS-LNCH-178/179 over this launcher's environment and the env files read
+      ONCE, shared with the drift check)
+    And the two differ
+    Then one stderr Note is printed before docker attach (in a restore, after
+      the restore's own line), naming both values
+    And when no env file decides the identity by assignment it names the
+      remedies: --join (a new claude) or exit and relaunch with --resume
+    And when an env file assigns it, the note names that file and what it now
+      gives, and only the relaunch — a join would take the file's value too
+    And it prints nothing for an absent or empty label (a container from before
+      CS-LNCH-181), an equal value, or env files that cannot be read (it cannot
+      tell), and nothing for a restore attach whose session was built from the
+      restore's Inspect probe because discovery missed the id (that session
+      carries no label)
+    And it is never a prompt and never changes the exit status
+
+  @new
+  Scenario: CS-SESS-092 A join reads the env files once and follows an explicit assignment
+    When a join or attach is chosen
+    Then the env files of the cascade resolved NOW are read once (not the
+      container's create-time files, which cannot be recovered; a change since
+      create is the drift check's to report, and with --allow-config-drift the
+      join follows the files on disk), still after the session decision and
+      without the refusal check (CS-LNCH-129)
+    And that one snapshot feeds the drift check (wouldBeFingerprint, as
+      Inputs.Env) and the terminal identity
+    Given the walk's last effective line ASSIGNS TERMINAL_EMULATOR (CS-LNCH-179)
+    Then the join sets the file's value with "-e TERMINAL_EMULATOR=<value>", or
+      "/usr/bin/env -u TERMINAL_EMULATOR" when it is empty — never leaving it to
+      the container, which may hold the creator's bare-line value
+    Given the last effective line is bare, or no line takes effect
+    Then CS-SESS-090 applies
+    Given the env files cannot be read (a FIFO, permissions, a vanished file)
+    Then the join touches no identity variable (neither -e nor env -u), so the
+      container's value stands, and the attach prints no terminal note
+    And exactly one WARNING is printed, the drift check's own:
+      "WARNING: cannot compute the current configuration for the drift check:
+      reading env file: <err>; the session keeps the container's terminal
+      identity."
+    And the join or attach still runs (subject to the drift decision)

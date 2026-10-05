@@ -172,7 +172,8 @@ var _ = Describe("sessions (CS-SESS)", func() {
 			Expect(f.run()).To(Equal(0))
 			line := f.sessionLine()
 			Expect(line).To(ContainSubstring("docker exec -it --detach-keys=ctrl-q,ctrl-q -u "))
-			Expect(line).To(ContainSubstring(" -w " + f.proj + " cs-a /opt/claude-sandbox/bin/claude-sandbox pidslot -- claude"))
+			// CS-SESS-090: TERMINAL_EMULATOR is unset here, so env -u runs first.
+			Expect(line).To(ContainSubstring(" -w " + f.proj + " cs-a /usr/bin/env -u TERMINAL_EMULATOR /opt/claude-sandbox/bin/claude-sandbox pidslot -- claude"))
 			Expect(f.out.String()).To(ContainSubstring("cannot be reattached"))
 		})
 
@@ -659,7 +660,7 @@ func currentHash(f *cliFixture) string {
 	cfg, err := cascade.Load(configFiles)
 	Expect(err).NotTo(HaveOccurred())
 
-	hash, _ := wouldBeFingerprint(f.env, f.proj, fl, cfg, envFiles, nil, nil)
+	hash, _ := wouldBeFingerprint(f.env, f.proj, fl, cfg, envFiles, nil, nil, nil, nil)
 	Expect(hash).NotTo(BeEmpty())
 	return hash
 }

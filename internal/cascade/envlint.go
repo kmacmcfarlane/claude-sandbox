@@ -202,6 +202,53 @@ func EnvFilesDefine(files []EnvFile, key string, lookup LookupEnv) bool {
 	return false
 }
 
+// EnvSource says which kind of env-file line decided a key's value in
+// EnvFilesValue's walk (CS-LNCH-179).
+type EnvSource int
+
+const (
+	// EnvSourceNone: no line takes effect — nothing defines the key, or every
+	// line that does is bare while the docker client's environment lacks it.
+	EnvSourceNone EnvSource = iota
+	// EnvSourceAssign: the last effective line assigns the value (KEY=v).
+	EnvSourceAssign
+	// EnvSourceBare: the last effective line is a bare KEY, and the value
+	// comes from the docker client's environment (lookup).
+	EnvSourceBare
+)
+
+// EnvFilesValue walks the snapshotted files in cascade order, and the lines
+// within each, as docker create's stacked --env-file parsing does
+// (CS-LNCH-179): an assigning line sets the value; a bare line sets it to
+// lookup's value when lookup has the key, and is dropped otherwise, so an
+// earlier assignment stands; the last effective line wins. It reports that
+// value, whether it counts as set (an empty value counts as unset), which
+// kind of line won, and the file holding that line ("" for EnvSourceNone).
+// The reader is the shared docker-faithful one (BOM, indentation, CRLF), and
+// it reads the snapshot, never the path (CS-LNCH-132).
+func EnvFilesValue(files []EnvFile, key string, lookup LookupEnv) (value string, set bool, src EnvSource, file string) {
+	if !validEnvKey(key) {
+		return "", false, EnvSourceNone, ""
+	}
+	for _, f := range files {
+		for _, a := range parseEnvAssignments(f.Content) {
+			if a.Key != key {
+				continue
+			}
+			if a.HasValue {
+				value, src, file = a.Value, EnvSourceAssign, f.Path
+				continue
+			}
+			if lookup != nil {
+				if v, ok := lookup(key); ok {
+					value, src, file = v, EnvSourceBare, f.Path
+				}
+			}
+		}
+	}
+	return value, value != "", src, file
+}
+
 // LintEnvFiles lints every file in the cascade and prints the findings.
 // Warn-only: unreadable files and findings alike never block the launch.
 func LintEnvFiles(w io.Writer, files []string) {
