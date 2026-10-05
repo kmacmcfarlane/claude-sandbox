@@ -30,7 +30,7 @@ func mountsRow(name, project, class, state, peerRoot string, mounts ...string) s
 	return strings.Join([]string{
 		name, status, project, "claude", "", "v1", "", "", "", class, "",
 		state, "2026-09-30 12:00:00 +0000 UTC", "", "", "",
-		"", "", "", "", "", peerRoot, strings.Join(mounts, ","),
+		"", "", "", "", "", peerRoot, "none", strings.Join(mounts, ","),
 	}, psSep)
 }
 
@@ -208,7 +208,7 @@ var _ = Describe("peers root move: drain-then-switch (CS-DIR-010..019)", func() 
 			Expect(err).NotTo(HaveOccurred())
 			cfg, err := cascade.Load(configFiles)
 			Expect(err).NotTo(HaveOccurred())
-			hash, _ := wouldBeFingerprint(f.env, f.proj, fl, cfg, envFiles, nil, target)
+			hash, _ := wouldBeFingerprint(f.env, f.proj, fl, cfg, envFiles, nil, nil, nil, target)
 			Expect(hash).NotTo(BeEmpty())
 			return hash
 		}

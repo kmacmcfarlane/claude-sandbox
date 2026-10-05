@@ -277,3 +277,40 @@ var _ = Describe("EnvFilesDefine", func() {
 		Expect(cascade.EnvFilesDefine(snap(f), "A B", nil)).To(BeFalse())
 	})
 })
+
+// Spec: spec/launch.feature (CS-LNCH-179) — EnvFilesValue is docker's own
+// stacked --env-file result for one key, and which kind of line decided it.
+var _ = Describe("EnvFilesValue", func() {
+	ef := func(path, content string) cascade.EnvFile {
+		return cascade.EnvFile{Path: path, Content: []byte(content)}
+	}
+	lookup := func(m map[string]string) cascade.LookupEnv {
+		return func(k string) (string, bool) { v, ok := m[k]; return v, ok }
+	}
+
+	It("CS-LNCH-179: the last effective line wins, a bare line only when the client has the key", func() {
+		files := []cascade.EnvFile{ef("/f1", "K=X\n"), ef("/f2", "K\n")}
+		v, set, src, file := cascade.EnvFilesValue(files, "K", lookup(map[string]string{"K": "Y"}))
+		Expect([]any{v, set, src, file}).To(Equal([]any{"Y", true, cascade.EnvSourceBare, "/f2"}))
+
+		v, set, src, file = cascade.EnvFilesValue(files, "K", lookup(map[string]string{}))
+		Expect([]any{v, set, src, file}).To(Equal([]any{"X", true, cascade.EnvSourceAssign, "/f1"}))
+
+		v, _, src, file = cascade.EnvFilesValue([]cascade.EnvFile{ef("/f1", "K\n"), ef("/f2", "K=X\n")}, "K", lookup(map[string]string{"K": "Y"}))
+		Expect([]any{v, src, file}).To(Equal([]any{"X", cascade.EnvSourceAssign, "/f2"}))
+
+		v, _, src, file = cascade.EnvFilesValue([]cascade.EnvFile{ef("/f1", "K=X\n"), ef("/f2", "K=Z\n")}, "K", nil)
+		Expect([]any{v, src, file}).To(Equal([]any{"Z", cascade.EnvSourceAssign, "/f2"}))
+	})
+
+	It("CS-LNCH-179: an empty value counts as unset; no line is EnvSourceNone; BOM, indentation and CRLF do not hide the key", func() {
+		v, set, src, _ := cascade.EnvFilesValue([]cascade.EnvFile{ef("/f1", "K=\n")}, "K", nil)
+		Expect([]any{v, set, src}).To(Equal([]any{"", false, cascade.EnvSourceAssign}))
+
+		_, set, src, file := cascade.EnvFilesValue([]cascade.EnvFile{ef("/f1", "OTHER=1\n"), ef("/f2", "K\n")}, "K", lookup(map[string]string{}))
+		Expect([]any{set, src, file}).To(Equal([]any{false, cascade.EnvSourceNone, ""}))
+
+		v, set, src, _ = cascade.EnvFilesValue([]cascade.EnvFile{ef("/f1", "\xEF\xBB\xBF  K=JetBrains-JediTerm\r\n")}, "K", nil)
+		Expect([]any{v, set, src}).To(Equal([]any{"JetBrains-JediTerm", true, cascade.EnvSourceAssign}))
+	})
+})

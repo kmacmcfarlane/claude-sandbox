@@ -330,6 +330,8 @@ type Plan struct {
 	// Resume is the claude-sandbox.resume label's value, "" when unset
 	// (CS-LNCH-110).
 	Resume string
+	// Terminal is the claude-sandbox.terminal label's value (CS-LNCH-181).
+	Terminal string
 
 	// ConfigHash identifies the effective configuration this container was
 	// launched with; ConfigInputs records the contributing files so drift can
@@ -754,6 +756,19 @@ func Build(in Inputs) (*Plan, error) {
 		p.Labels = append(p.Labels, LabelResume+"="+in.Resume)
 	}
 	p.Resume = in.Resume
+
+	// CS-LNCH-178..181: the terminal identity. After the fingerprint, and
+	// neither EnvFlags nor labels are hashed, so a launch from another
+	// terminal is never drift. The value goes as -e NAME=<value> (a terminal
+	// brand string, not a credential; the label carries it anyway), so the
+	// one resolver can later take S from a source the docker client cannot
+	// see. Headless and ralph pass none: no TUI, and headless's env stays
+	// exactly HeadlessEnv (CS-LNCH-063); their label is the env-file walk.
+	passive := in.Headless || in.RalphMode
+	term := ResolveTerminal(in.lookupEnvValue, in.Env, in.lookupEnvValue)
+	p.EnvFlags = append(p.EnvFlags, term.CreateEnv(passive)...)
+	p.Terminal = term.Label(passive)
+	p.Labels = append(p.Labels, LabelTerminal+"="+p.Terminal)
 
 	return p, nil
 }

@@ -1196,11 +1196,17 @@ func restoreAttach(env *Env, p *actProbes, m tmuxpane.Mark, d tmuxpane.Decision,
 		}
 	}
 	keys := ""
+	// CS-SESS-091: the env files are read ONCE (under renv), for the drift
+	// check and the terminal note. When the cascade cannot be resolved
+	// nothing is read and no note prints.
+	var snap []cascade.EnvFile
+	snapErr := errors.New("the project's cascade could not be resolved")
 	cfg, envFiles, linked, err := restoreCascade(renv, m.Project)
 	if err == nil {
 		keys = cfg.DetachKeys
+		snap, snapErr = cascade.ReadEnvFiles(envFiles)
 		if s.ConfigHash != "" {
-			if want, _ := wouldBeFingerprint(renv, m.Project, &launchFlags{}, cfg, envFiles, linked, &s); want != "" && want != s.ConfigHash {
+			if want, _ := wouldBeFingerprint(renv, m.Project, &launchFlags{}, cfg, envFiles, snap, snapErr, linked, &s); want != "" && want != s.ConfigHash {
 				fmt.Fprintf(env.Err, "Note: '%s' was started with a different configuration; attaching does not apply the changes (claude-sandbox --attach=%s lists them).\n",
 					sessionLabel(s), s.Instance)
 			}
@@ -1212,6 +1218,9 @@ func restoreAttach(env *Env, p *actProbes, m tmuxpane.Mark, d tmuxpane.Decision,
 	mark.prior = &prior
 	mark.restoreAttach = true
 	restoreSay(env, "%s", d.Line)
+	// The session built above when discovery misses the id (its name from
+	// the restore's Inspect probe) carries no terminal label: no note.
+	terminalNote(renv, s, snap, snapErr)
 	return attachTo(renv, s, keys, mark, p.release)
 }
 

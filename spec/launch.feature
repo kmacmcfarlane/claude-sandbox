@@ -2317,3 +2317,92 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     Given a filter driver name that cannot be passed on a -c (it holds "=" or
       a newline)
     Then the describe is skipped: the stamp is "unknown", with one WARNING
+
+  # Terminal identity (CS-LNCH-178..181, CS-SESS-090..092). Claude Code reads
+  # TERMINAL_EMULATOR once at start: with "JetBrains-JediTerm" (GoLand's and
+  # every JetBrains IDE's terminal) it drops the plain Up/Down arrows JediTerm
+  # sends with its mouse-wheel reports (within 75 ms of a wheel event, Claude
+  # Code 2.1.285); without it those arrows reach the prompt, so a wheel scroll
+  # in the fullscreen TUI also moves the input field. docker create passes none
+  # of the launcher's environment, so the variable never reached a sandbox.
+  # One resolver (launch.ResolveTerminal) decides create, the label, a join and
+  # the attach comparison, so they cannot disagree about which terminal they
+  # mean. Its source value S is the launcher's own environment (empty = unset);
+  # it is a seam: reading tmux's session environment instead (open decision)
+  # would change only S. Widening the list beyond TERMINAL_EMULATOR is an open
+  # decision too: TERM_PROGRAM and kin are tmux's own inside tmux, and
+  # COLORTERM changes colour depth.
+
+  @new
+  Scenario: CS-LNCH-178 A launch that creates a TTY session passes the terminal identity explicitly
+    Given the launcher's environment sets TERMINAL_EMULATOR to <value>
+    And no cascade env file decides it by assignment (CS-LNCH-179)
+    When a new interactive container is created (plain, --new, --branch, the
+      tier-1 [b] fork, --detach, or a tmux restore's resume, whose environment
+      is the pane's at restore time — nothing is replayed from the save)
+    Then docker create carries "-e TERMINAL_EMULATOR=<value>"
+    # A terminal brand string, not a credential: the CS-LNCH-102 bare-name rule
+    # is for secrets, and the label carries the value anyway. An explicit value
+    # lets a later source the docker client cannot see feed the same argv.
+    When the launcher's environment does not set it, or sets it empty
+    Then no -e TERMINAL_EMULATOR is added
+    And the list of forwarded names (launch.TerminalEnv) is exactly
+      TERMINAL_EMULATOR: never TERM (docker -t sets xterm; a host TERM needs
+      terminfo the image may lack), TMUX or TMUX_PANE (host socket paths), and
+      never a prefix
+
+  @new
+  Scenario: CS-LNCH-179 The env files decide by their last effective line
+    # cascade.EnvFilesValue walks the snapshotted files (CS-LNCH-132) in
+    # cascade order and their lines as docker's stacked --env-file parsing
+    # does, with the shared docker-faithful reader (BOM, indentation, CRLF): an
+    # assigning line sets the value; a bare line sets it to the launcher's value
+    # when the launcher has one, else docker drops it and an earlier assignment
+    # stands; the last effective line wins.
+    Given the walk's last effective line ASSIGNS TERMINAL_EMULATOR (an explicit
+      file choice, an empty value included)
+    Then the launcher adds no -e for it, and the container gets docker's result
+      over the files
+    Given the last effective line is bare, or no line takes effect
+    Then CS-LNCH-178 applies: "-e TERMINAL_EMULATOR=<S>" when S is set, else
+      nothing — except "-e TERMINAL_EMULATOR=" when S is unset while a bare line
+      would pass the docker client's value (possible only once S comes from
+      elsewhere than the launcher's environment)
+    And a bare TERMINAL_EMULATOR line (the old workaround) still works: the
+      container gets the launcher's value, as before
+    # The cases:
+    # | files                 | launcher env | create -e              | label                  |
+    # | f1 =X, f2 bare        | Y            | TERMINAL_EMULATOR=Y    | TERMINAL_EMULATOR=Y    |
+    # | f1 =X, f2 bare        | unset        | none                   | TERMINAL_EMULATOR=X    |
+    # | f1 bare, f2 =X        | Y            | none                   | TERMINAL_EMULATOR=X    |
+    # | f1 =X, f2 =Z          | any          | none                   | TERMINAL_EMULATOR=Z    |
+    # | f1 = (empty)          | Y            | none                   | none                   |
+    # | no line               | Y / unset    | TERMINAL_EMULATOR=Y / none | TERMINAL_EMULATOR=Y / none |
+
+  @new
+  Scenario: CS-LNCH-180 Headless and ralph pass no terminal identity of their own
+    # No TUI: headless has no TTY and its env stays exactly HeadlessEnv
+    # (CS-LNCH-063); ralph runs claude -p. Forwarding would only add claude's
+    # JetBrains IDE handling to unattended runs.
+    When a headless or ralph container is created
+    Then docker create carries no -e TERMINAL_EMULATOR, and HeadlessEnv is
+      unchanged
+    And the create argv gains only the claude-sandbox.terminal label, whose
+      value is the env-file walk alone (CS-LNCH-179), never S: the value when
+      it is set, else "none"
+    And headless stdout stays claude's (the label rides --label)
+
+  @new
+  Scenario: CS-LNCH-181 The claude-sandbox.terminal label records what the container's claude sees, unhashed
+    When any container is created
+    Then it carries claude-sandbox.terminal = "TERMINAL_EMULATOR=<value>" or
+      "none" (the claude-sandbox.peerroot=none convention): the walk's value
+      under an assignment (CS-LNCH-179), else S; headless and ralph per
+      CS-LNCH-180
+    And the value is cleaned for the label and messages: registry.Printable,
+      "=", ";" and the ps field separator removed, capped at 64 runes (the
+      container itself gets the raw value)
+    And neither the -e nor the label is in the config hash, so two launches
+      differing only in the terminal identity hash equal: an attach or join from
+      another terminal never reports drift
+    And an absent or empty label marks a container from before this scenario

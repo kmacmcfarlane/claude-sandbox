@@ -303,6 +303,51 @@ var _ = Describe("tmux restore, one pane (CS-TMUX-052..063)", func() {
 			Expect(f.sessionLine()).To(Equal("docker attach --detach-keys=ctrl-q,ctrl-q " + markID))
 		})
 
+		Describe("CS-SESS-091: the terminal note before a restore attach", func() {
+			// termRow is psRowMark carried through the terminal label and Mounts.
+			termRow := func(terminal string) string {
+				return psRowMark("claude-sandbox-x-proj-abc123-heron", f.proj, "claude", "heron", "", "37", "",
+					"2026-09-18 12:34:56 +0000 UTC", markID, cfgDir, cfgDir+"/sessions", "") +
+					psSep + "" + psSep + "none" + psSep + terminal + psSep + ""
+			}
+			attachWith := func(terminal string) (errAtAttach string) {
+				pane(withID().JSON())
+				inspectRunning("running")
+				f.fake.On("docker ps", termRow(terminal)+"\n", nil)
+				streamEvents(f.fake, dockerEvent("die", "0"))
+				f.fake.OnFunc("docker attach", func(execx.Cmd) (string, error) { errAtAttach = f.errw.String(); return "", nil })
+				Expect(f.run("tmux", "restore")).To(Equal(0), f.errw.String())
+				Expect(f.sessionLine()).To(Equal("docker attach --detach-keys=ctrl-q,ctrl-q " + markID))
+				return errAtAttach
+			}
+
+			It("CS-SESS-091: a mismatch prints the note before docker attach", func() {
+				got := attachWith("TERMINAL_EMULATOR=JetBrains-JediTerm")
+				Expect(got).To(ContainSubstring("Note: session 'heron' was started in a terminal with TERMINAL_EMULATOR=JetBrains-JediTerm; this terminal has TERMINAL_EMULATOR unset."))
+				Expect(got).To(ContainSubstring("--join"))
+			})
+
+			It("CS-SESS-091: an equal identity prints nothing", func() {
+				f.envmap["TERMINAL_EMULATOR"] = "JetBrains-JediTerm"
+				Expect(attachWith("TERMINAL_EMULATOR=JetBrains-JediTerm")).NotTo(ContainSubstring("was started in a terminal"))
+			})
+
+			It("CS-SESS-091: an unreadable env file prints no note, and the attach goes on", func() {
+				plantLaunchFIFO(filepath.Join(f.proj, ".claude-sandbox", "env"))
+				Expect(attachWith("TERMINAL_EMULATOR=JetBrains-JediTerm")).NotTo(ContainSubstring("was started"))
+			})
+
+			It("CS-SESS-091: the session built when discovery misses the id (named by the restore's Inspect probe) carries no label: no note", func() {
+				pane(withID().JSON())
+				inspectRunning("running")
+				f.fake.On("docker ps", "", nil)
+				streamEvents(f.fake, dockerEvent("die", "0"))
+				Expect(f.run("tmux", "restore")).To(Equal(0), f.errw.String())
+				Expect(f.sessionLine()).To(Equal("docker attach --detach-keys=ctrl-q,ctrl-q " + markID))
+				Expect(f.errw.String()).NotTo(ContainSubstring("was started in a terminal"))
+			})
+		})
+
 		It("CS-TMUX-056: paused stays pending", func() {
 			pane(withID().JSON())
 			inspectRunning("paused")
@@ -415,6 +460,17 @@ var _ = Describe("tmux restore, one pane (CS-TMUX-052..063)", func() {
 			Expect(g.out.String()).To(ContainSubstring("note: its CLAUDE_CONFIG_DIR was not recorded"))
 			Expect(strings.Join(g.launched().Args, " ")).To(ContainSubstring("-e CLAUDE_CONFIG_DIR=" + cfgDir))
 			Expect(setenv).NotTo(HaveKey("CLAUDE_CONFIG_DIR"), "left as the shell has it")
+		})
+
+		It("CS-LNCH-178: the resume's create takes the terminal identity from the pane's environment, never from the save", func() {
+			pane(row(nil).JSON())
+			f.envmap["TERMINAL_EMULATOR"] = "JetBrains-JediTerm"
+			streamEvents2()
+			f.fake.On("docker start -ai", "", nil)
+			f.run("tmux", "restore")
+			args := f.launched().Args
+			Expect(argPairsCLI(args, "-e")).To(ContainElement("TERMINAL_EMULATOR=JetBrains-JediTerm"))
+			Expect(labelsOf(args)["claude-sandbox.terminal"]).To(Equal("TERMINAL_EMULATOR=JetBrains-JediTerm"))
 		})
 
 		It("CS-TMUX-062: a resume that ends before it was resumed puts the pending row back and says so", func() {
