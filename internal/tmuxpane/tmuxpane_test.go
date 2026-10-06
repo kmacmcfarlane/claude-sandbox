@@ -125,11 +125,13 @@ var _ = Describe("tmuxpane", func() {
 			for _, args := range [][]string{
 				{"--resume", convID}, {"--resume=" + convID}, {"-r", convID}, {"-r" + convID},
 				{"--verbose", "--permission-mode", "plan", "--resume", strings.ToUpper(convID)},
+				{"--resume", "/home/u/.claude/projects/p/" + convID + ".jsonl"},
+				{"--resume=" + convID + ".JSONL"}, {"-r", "rel/" + convID + ".jsonl"},
 			} {
 				Expect(tmuxpane.ResumeID(args)).To(Equal(convID), "%v", args)
 			}
 			for _, args := range [][]string{
-				{"--resume"}, {"--resume", "not-a-uuid"}, {"fix", "--resume", convID},
+				{"--resume"}, {"--resume", "not-a-uuid"}, {"--resume", "/p/not-a-uuid.jsonl"}, {"fix", "--resume", convID},
 				{"--", "--resume", convID}, {"--frobnicate", "x", "--resume", convID},
 			} {
 				Expect(tmuxpane.ResumeID(args)).To(BeEmpty(), "%v", args)
