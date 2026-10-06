@@ -746,16 +746,19 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
 
   # ---- the resume guard: one conversation, one session ----
   #
-  # Claude Code guards a conversation only against a holder in its own pid
-  # namespace, so two sandboxes (or a sandbox and the host) could open one
-  # transcript at once and interleave writes into it. A restore that resumes
+  # Claude Code does not stop a second interactive session from opening a
+  # conversation another one has open — neither "--resume <id>" nor
+  # "--continue" checks for an interactive holder (2.1.290), in any pid
+  # namespace — so two sandboxes, a join, or a sandbox and the host could open
+  # one transcript at once and interleave writes into it. A restore that resumes
   # conversations unattended (plan sandbox-reboot-restore F4) makes that easy
   # to do by accident. So a launch carrying the resume label (CS-LNCH-110)
   # checks, inside the launch lock and before its docker create, that the
   # conversation is not already open anywhere it can see, and refuses with
   # exit 4 when it is. A launch without the label (no --resume <uuid>, a
-  # --fork-session, the picker, headless, ralph) never runs the check, so it
-  # behaves exactly as before. The way out is always named: attach to the
+  # --fork-session, the picker, headless, ralph) never runs THIS check; an
+  # unforked --continue names no id, and is checked by the directory it would
+  # continue in instead (the continue guard, CS-LNCH-182, CS-SESS-093..096). The way out is always named: attach to the
   # holder, or fork with --fork-session. There is no override flag.
 
   @new
@@ -877,7 +880,8 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
     Then the launch does not take CS-SESS-048's "launch unserialized" fallback:
       it creates nothing and exits 2 with
       "Error: could not take the launch lock (<why>); not resuming <id> unserialized."
-    And a launch without the label never reads a registry directory or /proc
+    And a launch without the label that is not a guarded continue
+      (CS-LNCH-182) never reads a registry directory or /proc
 
   @new
   Scenario: CS-SESS-089 A registry record is confirmed alive before it holds a conversation
@@ -911,6 +915,152 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
     When "docker top" fails or times out
     Then the check fails closed (CS-SESS-067), the reason naming
       "docker top <container>"
+
+  # ---- the continue guard: --continue names no id ----
+  #
+  # "--continue" picks the newest conversation in the directory inside the
+  # container, after the launcher has gone, and Claude Code (2.1.290) skips only
+  # conversations held by live background sessions. The launcher never reads
+  # transcripts, so it cannot know which conversation that will be; it refuses
+  # (exit 4) while ANY live session has a conversation open in the directory
+  # claude would continue in. That over-refuses when the holder has an older
+  # conversation open than the newest (the price of never reading
+  # transcripts), and the message names three one-step ways out. Every live
+  # holder counts, whatever its kind or entrypoint (operator answer 87 a, "F0"):
+  # an Agent-SDK, Paseo, --bg or daemon session in the same directory and
+  # config dir refuses too, so no filter can let a second writer through.
+
+  @new
+  Scenario: CS-SESS-093 A --continue launch is refused while a sandbox has a conversation open in its directory
+    Given a launch that is a guarded continue (CS-LNCH-182)
+    And its target directories T are:
+      | entry                                                             | match              |
+      | the launcher's physical cwd (the container workdir, CS-LNCH-048) | that directory     |
+      | <git root>/.claude/worktrees/<name>, for the launch's worktree (the name final under the lock) and for every -w/--worktree name in the passthrough (the walker's collected list, CS-LNCH-183) | that directory and everything below it |
+    # Below means filepath.Rel gives "." or a path whose first component is
+    # not ".." — "..foo" is inside. Each test is tried on the lexical forms,
+    # then on the symlink-resolved forms where both resolve. Whether claude in
+    # a fresh worktree continues the worktree's history or the launch
+    # directory's is not verified (plan 00 T3), so both are in T.
+    And another sandbox holds a conversation there, by either rule:
+      | rule | the other container                                                  |
+      | a'   | is of this project, running, paused or a "created" reservation, carries claude-sandbox.continue or claude-sandbox.resume, and has no registry record at its pid class started at or after its creation yet: it is opening a conversation here |
+      | b'   | is running or paused and has a registry record at its pid class (joins at class + 256·n included), started at or after its creation, not in the launcher's own pid domain, whose cwd is in T, confirmed alive by CS-SESS-089 |
+    And the holder's config dir is the launch's, or cannot be told apart from it:
+      | claude-sandbox.registry | claude-sandbox.configdir | the holder's config dir |
+      | empty or absent          | any                      | unknown: the holder counts |
+      | set                      | set                      | that value               |
+      | set                      | empty                    | <home>/.claude           |
+    # A holder whose config dir differs writes another transcript store, so it
+    # cannot hold a conversation this --continue would pick. It is left out
+    # only when the two paths differ lexically AND both resolve AND the
+    # resolved forms differ.
+    When the launch reaches the launch lock
+    Then it creates nothing, starts nothing, and exits 4; for a holder by rule
+      b' on an interactive launch (--new, the tier-1 [n]) the message is:
+      """
+      Error: --continue would reopen the newest conversation in <cwd>,
+             and '<noun>' (<container>) has conversation <id> open there;
+             a second session on one conversation would interleave writes into one transcript.
+             Attach to it:  cd <project> && claude-sandbox --attach=<noun>
+             Or fork it:    add --fork-session after -- (a new conversation id)
+             Or pick one:   use --resume instead of --continue (claude's picker; <id> is the one already open)
+      """
+    And <cwd> is the holder record's cwd, and <id> its sessionId (a canonical
+      UUID, from the hardened reader)
+    And every printed value that comes from a registry record or an error
+      text (<cwd>, <reason>) is printed cleaned (registry.Printable: control
+      characters become spaces, format characters are dropped, whitespace
+      collapses), because any sandbox can write its record: an ESC or BEL in a
+      cwd never reaches the terminal. Matching uses the raw value
+    And the holder is '<noun>' (<container>), or <container> without a noun,
+      and the "Attach to it" line is printed only for a mode-claude holder
+      with a noun (CS-SESS-065)
+    And the last lines depend on the path, since only a terminal can use a
+      picker; --detach and headless suggest a placeholder, never the open id:
+      | path     | lines after the third                                              |
+      | --detach | the Attach line as above; "Or fork it:    add --fork-session after -- (a new conversation id)"; "Or name one:   pass --resume=<conversation-id> after -- for the conversation you want (<id> is the one already open; a picker would wait in a session nobody is attached to)" |
+      | headless | no Attach line; "Or fork it:    pass --fork-session"; "Or name one:   pass --resume <conversation-id> for the conversation you want (<id> is the one already open)" |
+    And a holder by rule a' replaces the second line with
+      "and <holder> is starting a session there that opens a conversation;",
+      <cwd> is the launcher's cwd, a line "Retry once it is up." follows the
+      third, and the path's lines leave out "<id> is the one already open"
+    And a record at a class from before the container's creation, a record in
+      the launcher's own pid domain, a record whose cwd is not in T, and a
+      record ruled dead by CS-SESS-089 hold nothing
+    And a record's kind and entrypoint are not consulted
+    And a sandbox's record at a watched class (after its creation, not in the
+      launcher's own pid domain) with no cwd cannot be placed, so it fails
+      closed as a malformed record does (CS-SESS-094): if a later Claude Code
+      dropped or renamed the field, every holder would otherwise vanish
+
+  @new
+  Scenario: CS-SESS-094 A claude on the host counts too; the check fails closed, runs under the lock, and once before the image build
+    Given a launch that is a guarded continue, on Linux
+    Then the records in <launch config dir>/sessions (only there) are read, and
+      one holds when its pidDomain is the launcher's own (CS-SESS-068's
+      shape), its cwd is in T and its process is live by CS-SESS-068's /proc
+      rules; the holder is "a claude process on this host (pid <pid>)",
+      without an Attach line
+    And what cannot be read fails closed exactly as CS-SESS-067 lists
+      (discovery failed; a running sandbox's registry dir exists but cannot be
+      read; a malformed record at a watched class, after the retries for a
+      partial write; a record there with no cwd (CS-SESS-093); more than
+      10000 entries; docker top failed or timed out; an unreadable
+      /proc/self/ns/pid), with exit 4 and:
+      """
+      Error: cannot tell whether a conversation in <cwd> is already open elsewhere
+             (<reason>), so --continue is not run.
+             Fix that and retry.
+      """
+      followed by the path's fork and pick-or-name lines (CS-SESS-093)
+    And a malformed host record, or one with no cwd, is skipped (CS-SESS-068)
+    And the check runs inside the launch lock, after discovery (which removes
+      stale reservations, CS-SESS-052) and before docker create, on every
+      create attempt, so of two --continue launches racing in one directory the
+      second sees the first's reservation (rule a') and exits 4
+    When the launch lock cannot be taken
+    Then it creates nothing and exits 2 with
+      "Error: could not take the launch lock (<why>); not continuing in <cwd> unserialized."
+      (a launch that also resumes an id gets CS-SESS-069's message)
+    And before any image work, right after the session decision, the launch
+      runs one advisory check over one "docker ps" (DiscoverAllUncounted) and
+      the early instance noun's worktree: it applies rules b' and h' only, and
+      refuses (exit 4, the same messages) only on a live registry record; a
+      label, a reservation or a "cannot tell" never refuses there, and is left
+      to the check under the lock
+    And a launch that is not a guarded continue (and carries no resume label)
+      never reads a registry directory or /proc
+
+  @new
+  Scenario: CS-SESS-095 A join whose passthrough continues is checked before the exec
+    # Operator answer 86 a: the newest conversation in a container's cwd is
+    # usually its primary's, so a join with --continue is the likeliest
+    # collision, and it is a double writer in ONE pid namespace, which Claude
+    # Code does not stop either.
+    Given --join, or the tier-1 [j], whose passthrough is a guarded continue
+    Then before the docker exec it runs the continue check over one
+      "docker ps" (DiscoverAllUncounted), with T = the exec's -w directory
+      (the joiner's project dir) plus the named worktree dir of the join's
+      --worktree=NAME and of every -w/--worktree name in the passthrough
+    And a bare --worktree join still checks the -w directory
+    And rules a', b' and h' apply, with CS-SESS-093's config-dir rule; a
+      reservation older than 60 s (CS-SESS-052's orphan) is not counted by
+      rule a', since a join takes no launch lock and removes nothing
+    And a holder refuses with exit 4 and the interactive message of
+      CS-SESS-093; "cannot tell" refuses with CS-SESS-094's
+    And no docker exec runs after a refusal
+    And a join whose passthrough is not a guarded continue runs no check
+    And a join's --resume <id> stays unguarded (answer 22)
+
+  @new
+  Scenario: CS-SESS-096 The tier-1 prompt notes that --continue may be refused
+    Given running sessions for the project, and a launch whose passthrough is
+      a guarded continue
+    When the tier-1 decision prompt is shown
+    Then one line is printed under the report and before the menu:
+      "Note: --continue reopens the newest conversation in this directory, which a session above may have open; [n] and [j] are refused while one does — [b] forks it instead."
+    And no registry is read for it: the checks of CS-SESS-093..095 decide
 
   # Terminal identity on join and attach (CS-LNCH-178..181).
 

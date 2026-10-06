@@ -24,7 +24,9 @@ var _ = Describe("CS-LNCH-183: WalkClaudeArgs", func() {
 
 	DescribeTable("CS-LNCH-183: walker rows",
 		func(args []string, want CA) {
-			Expect(tmuxpane.WalkClaudeArgs(args)).To(Equal(want), "%q", args)
+			got := tmuxpane.WalkClaudeArgs(args)
+			got.Worktrees = nil // its own table below
+			Expect(got).To(Equal(want), "%q", args)
 		},
 		// Rule 1: positionals never stop the walk; only a bare "--" does.
 		Entry("a resume after a prompt word", []string{"fix it", "--resume", convID},
@@ -103,6 +105,26 @@ var _ = Describe("CS-LNCH-183: WalkClaudeArgs", func() {
 		// The 2.1.290 table: flags added since 2.1.284 take their value.
 		Entry("--thinking -- --continue", sp("--thinking -- --continue"), CA{Continue: true}),
 		Entry("--prefill --fork-session is a prefill", sp("--prefill --fork-session"), CA{}),
+	)
+
+	// CS-LNCH-183, CS-SESS-093: every named worktree is collected wherever it
+	// stood, so the continue guard's target directories cannot lose one to
+	// the single value's resume-id rule or to flag-table drift.
+	DescribeTable("CS-LNCH-183: Worktrees collects every named -w",
+		func(args []string, want []string) {
+			Expect(tmuxpane.WalkClaudeArgs(args).Worktrees).To(Equal(want), "%q", args)
+		},
+		Entry("none", sp("--continue"), []string(nil)),
+		Entry("bare -w names none", sp("-w --continue"), []string(nil)),
+		Entry("-w a -w b", sp("-w a -w b"), []string{"a", "b"}),
+		Entry("-w a --newbool -w b: the drift shape keeps both", sp("-w a --newbool -w b"), []string{"a", "b"}),
+		Entry("uncertain tail", sp("--unk -- -w b"), []string{"b"}),
+		Entry("a flag's value", sp("--name -w x"), []string{"x"}),
+		Entry("--worktree=NAME as a flag's value", sp("--name --worktree=x"), []string{"x"}),
+		Entry("a glued -wNAME as a flag's value", sp("--append-system-prompt -wy"), []string{"y"}),
+		Entry("glued, = and cluster forms", sp("-wa --worktree=b -pwc"), []string{"a", "b", "c"}),
+		Entry("duplicates once", sp("-w a -w a"), []string{"a"}),
+		Entry("after a stopping --", sp("-- -w a"), []string(nil)),
 	)
 
 	It("CS-LNCH-183: GuardedContinue is a continue that does not certainly fork", func() {

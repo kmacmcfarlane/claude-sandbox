@@ -280,6 +280,10 @@ func decideSessions(env *Env, projectDir string, f *launchFlags) (sessionDecisio
 			len(candidates))
 	}
 
+	if tmuxpane.GuardedContinue(f.Passthrough) {
+		// CS-SESS-096: the authoritative checks run later; no registry read.
+		fmt.Fprintln(env.Err, continueNote)
+	}
 	fmt.Fprintln(env.Err, "  [n] new session in a new container   (isolated; attachable if your terminal drops)")
 	fmt.Fprintln(env.Err, "  [b] branch the newest conversation into a new container   (fork it; both continue independently)")
 	fmt.Fprintln(env.Err, "  [j] new session in an existing container   (dies with that container's primary; not attachable later)")
@@ -617,6 +621,12 @@ func attachTo(env *Env, s sessions.Session, configuredKeys string, mark *paneMar
 // files could not be read: then no identity variable is touched and the
 // container's value stands.
 func joinInto(env *Env, s sessions.Session, projectDir, hostUser, model, configuredKeys string, dangerous bool, f *launchFlags, wt worktreeChoice, term *launch.TerminalResult) error {
+	if tmuxpane.GuardedContinue(f.Passthrough) {
+		// CS-SESS-095: before the docker exec, which nothing undoes.
+		if err := guardJoinContinue(env, projectDir, wt, f.Passthrough); err != nil {
+			return err
+		}
+	}
 	detachKeys := launch.ResolveDetachKeys(configuredKeys)
 	fmt.Fprintf(env.Out, "Starting a new session inside %s.\n", sessionLabel(s))
 	fmt.Fprintln(env.Out, "Note: this session ends if that container's primary session exits, and it cannot be reattached.")

@@ -68,12 +68,16 @@ const unlockedWarning = "Warning: could not take the launch lock (%s); launching
 // acquireLaunchLock takes the host launch lock and returns its release. A lock
 // that cannot be taken warns and degrades to an unserialized launch rather
 // than blocking one (the discovery-failure precedent) — except for a launch
-// resuming a conversation (resume != ""), whose guard means nothing without
-// the lock: it refuses with exit 2 instead (CS-SESS-069).
-func acquireLaunchLock(env *Env, home, resume string) (func(), error) {
+// resuming a conversation (resume != "") or continuing one (continueIn, the
+// directory, != ""), whose guard means nothing without the lock: it refuses
+// with exit 2 instead (CS-SESS-069, CS-SESS-094).
+func acquireLaunchLock(env *Env, home, resume, continueIn string) (func(), error) {
 	unlocked := func(why any) (func(), error) {
 		if resume != "" {
 			return nil, exitErr(2, "Error: could not take the launch lock (%v); not resuming %s unserialized.", why, resume)
+		}
+		if continueIn != "" {
+			return nil, exitErr(2, "Error: could not take the launch lock (%v); not continuing in %s unserialized.", why, continueIn)
 		}
 		fmt.Fprintf(env.Err, unlockedWarning, why)
 		return func() {}, nil
@@ -106,7 +110,11 @@ func (env *Env) now() time.Time {
 // shadowRoot is where its shadow directory is made (Env.shadowRoot,
 // CS-LNCH-161; "" = the temp root).
 func reserveContainer(env *Env, in launch.Inputs, wt worktreeChoice, ralph bool, shadowRoot string) (plan *launch.Plan, err error) {
-	release, err := acquireLaunchLock(env, in.Home, in.Resume)
+	continueIn := ""
+	if in.Continue {
+		continueIn = in.ProjectDir
+	}
+	release, err := acquireLaunchLock(env, in.Home, in.Resume, continueIn)
 	if err != nil {
 		return nil, err
 	}
@@ -169,6 +177,13 @@ func reserveContainer(env *Env, in launch.Inputs, wt worktreeChoice, ralph bool,
 			in.Instance = instance
 		}
 		in.Worktree = wt.nameFor(instance, ralph)
+		if in.Continue {
+			// CS-SESS-093/094: under the lock, before the create, on every
+			// attempt, once the worktree name is final.
+			if err := guardContinue(env, in, wt.Root, found, derr); err != nil {
+				return nil, err
+			}
+		}
 		in.PIDClass = pidClassFrom(found)
 		// CS-DIR-010..015: the peers root, from the same discovery and under
 		// the same lock, so every launcher on the host agrees on it.

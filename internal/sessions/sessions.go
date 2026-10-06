@@ -57,6 +57,10 @@ const (
 	// "none", or "" on a container that predates it (CS-LNCH-181), read by
 	// the attach note (CS-SESS-091).
 	LabelTerminal = launch.LabelTerminal
+	// LabelContinue marks a container created to continue the newest
+	// conversation unforked (CS-LNCH-182), read by the continue guard
+	// (CS-SESS-093 rule a').
+	LabelContinue = launch.LabelContinue
 )
 
 // ModeRalph marks a ralph loop container.
@@ -124,6 +128,9 @@ type Session struct {
 	// Terminal is the claude-sandbox.terminal label (CS-LNCH-181): "none",
 	// "NAME=value", or "" on a container that predates it or an older row.
 	Terminal string `json:"-"`
+	// Continue is the claude-sandbox.continue label (CS-LNCH-182): true when
+	// "1"; false when unset or on an older row.
+	Continue bool `json:"-"`
 	// Mounts are the container's bind sources ({{.Mounts}} under --no-trunc,
 	// split on ","), read for the peers-root pin (CS-DIR-011). nil on an
 	// older row.
@@ -212,6 +219,7 @@ var psFormat = strings.Join([]string{
 	`{{.Label "` + LabelResume + `"}}`,   // CS-SESS-065
 	`{{.Label "` + LabelPeerRoot + `"}}`, // CS-DIR-012
 	`{{.Label "` + LabelTerminal + `"}}`, // CS-SESS-091
+	`{{.Label "` + LabelContinue + `"}}`, // CS-LNCH-182
 	// CS-DIR-011: every bind source, comma-joined; last, so nothing after
 	// it depends on how a source is spelled.
 	"{{.Mounts}}",
@@ -351,6 +359,11 @@ func listAll(r execx.Runner, filter string, count bool) ([]Session, []Session, e
 		}
 		if len(f) > 23 {
 			s.Terminal = strings.TrimSpace(f[22])
+		}
+		if len(f) > 24 {
+			// CS-LNCH-182: before Mounts, so a 24-field row (the format
+			// before this label) keeps its terminal label and its mounts.
+			s.Continue = strings.TrimSpace(f[23]) == "1"
 		}
 		// An exited container is never a session: every sandbox container
 		// is --rm, so docker is removing it. Only DiscoverForLaunch returns

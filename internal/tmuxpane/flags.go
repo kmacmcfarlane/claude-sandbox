@@ -417,8 +417,9 @@ func GuardedResumeID(args []string) string {
 }
 
 // GuardedContinue reports whether a passthrough continues the newest
-// conversation without certainly forking it (CS-LNCH-183): the input the
-// continue guard (item 3ce1) will read. Nothing calls it yet.
+// conversation without certainly forking it (CS-LNCH-183): a guarded
+// continue, which carries the continue label and runs the continue guard
+// (CS-LNCH-182, CS-SESS-093..095).
 func GuardedContinue(args []string) bool {
 	w := WalkClaudeArgs(args)
 	return w.Continue && !w.Fork
@@ -448,6 +449,12 @@ type ClaudeArgs struct {
 	// WorktreeGiven says one was given.
 	Worktree      string
 	WorktreeGiven bool
+	// Worktrees is every non-empty -w / --worktree value seen before the
+	// stop, in order and without duplicates, wherever it stood (certain,
+	// uncertain, or a flag's value): the continue guard's target directories
+	// read this list, so a flag-table drift that misplaces one -w cannot hide
+	// a named worktree (CS-LNCH-183, CS-SESS-093).
+	Worktrees []string
 }
 
 // claudeFlag is one option a token stands for.
@@ -518,6 +525,7 @@ func interpretToken(tok string) (flags []claudeFlag, pending string, unknown boo
 
 func isContinueFlag(n string) bool { return n == "--continue" || n == "-c" }
 func isResumeFlag(n string) bool   { return n == "--resume" || n == "-r" }
+func isWorktreeFlag(n string) bool { return n == "--worktree" || n == "-w" }
 
 // WalkClaudeArgs reads a passthrough the way claude's own option parser
 // (commander's parseOptions in Claude Code 2.1.290) would, erring toward the
@@ -553,8 +561,14 @@ func WalkClaudeArgs(args []string) ClaudeArgs {
 	}
 	// worktree follows the resume id's rule: an uncertain -w never replaces
 	// or clears a value already set.
+	named := func(value string) {
+		if value != "" && !slices.Contains(w.Worktrees, value) {
+			w.Worktrees = append(w.Worktrees, value)
+		}
+	}
 	worktree := func(value string, uncertain bool) {
 		w.WorktreeGiven = true
+		named(value)
 		if !uncertain || w.Worktree == "" {
 			w.Worktree = value
 		}
@@ -589,11 +603,17 @@ func WalkClaudeArgs(args []string) ClaudeArgs {
 						w.Continue = true
 					case isResumeFlag(f.name) && !f.badEq:
 						resume(f.value, true)
+					case isWorktreeFlag(f.name) && !f.badEq:
+						named(f.value) // collected only (CS-SESS-093)
 					}
 				}
-				if isResumeFlag(pending) {
+				switch {
+				case isResumeFlag(pending):
 					v, _ := peek(i)
 					resume(v, true)
+				case isWorktreeFlag(pending):
+					v, _ := peek(i)
+					named(v)
 				}
 			}
 			pos, variadicOn = posCertain, valueOfVariadic
@@ -635,7 +655,7 @@ func WalkClaudeArgs(args []string) ClaudeArgs {
 				}
 			case f.name == "--print" || f.name == "-p":
 				w.Print = true
-			case f.name == "--worktree" || f.name == "-w":
+			case isWorktreeFlag(f.name):
 				worktree(f.value, uncertain)
 			}
 		}
@@ -657,7 +677,7 @@ func WalkClaudeArgs(args []string) ClaudeArgs {
 			switch {
 			case isResumeFlag(pending):
 				resume(v, uncertain)
-			case pending == "--worktree" || pending == "-w":
+			case isWorktreeFlag(pending):
 				worktree(v, uncertain)
 			}
 			if took {

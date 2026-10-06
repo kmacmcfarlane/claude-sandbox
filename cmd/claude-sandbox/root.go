@@ -1145,6 +1145,16 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 		fmt.Fprintln(env.Out, b)
 	}
 
+	// CS-LNCH-182, CS-SESS-094: a guarded continue gets an advisory check
+	// before any image work, refusing only on a live record; the check under
+	// the launch lock stays the authoritative one.
+	guardedContinue := continueGuarded(passthrough, f.Ralph)
+	if guardedContinue {
+		if err := preBuildContinue(env, projectDir, wt.Root, worktree, passthrough, headless, f.Detach); err != nil {
+			return err
+		}
+	}
+
 	// Images (CS-IMG). Order: base, tools image, CLI image, update check (CLI
 	// only), child, cap. Neither a Claude Code update nor a commit to a baked
 	// source touches the base or the child (CS-IMG-048); without --update a
@@ -1272,7 +1282,9 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 		// CS-LNCH-110: the conversation the resume guard protects; never for
 		// headless (item b090) or ralph (no passthrough reaches its claude).
 		Resume: resumeLabel(passthrough, headless, f.Ralph),
-		Out:    env.Out, Err: env.Err,
+		// CS-LNCH-182: the continue label and guard (headless included).
+		Continue: guardedContinue,
+		Out:      env.Out, Err: env.Err,
 	}
 	// CS-GCFG-001: the global-config health check, after the image work and
 	// before the lock and the create, so it never widens the window between

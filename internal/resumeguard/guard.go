@@ -3,11 +3,15 @@
 // one transcript (CS-SESS-065..069; plan sandbox-reboot-restore 05 F6, 06 § 4,
 // 07 § 4/§ 6/§ 7, 08 § 4).
 //
-// Claude Code guards a conversation only against a holder in its own pid
-// namespace, so nothing stops a second sandbox, or a sandbox and the host,
-// from resuming one id. The launcher runs this check inside the host launch
-// lock, before docker create, for a launch carrying the claude-sandbox.resume
-// label (CS-LNCH-110). It fails closed: what cannot be read counts as open.
+// Claude Code (2.1.290) does not stop a second interactive session from
+// opening a conversation another one has open — neither "--resume <id>" nor
+// "--continue" checks for an interactive holder, in any pid namespace — so
+// nothing stops a second sandbox, a join, or a sandbox and the host, from
+// opening one transcript. The launcher runs Run inside the host launch lock,
+// before docker create, for a launch carrying the claude-sandbox.resume label
+// (CS-LNCH-110), and RunContinue (continue.go) for a guarded continue
+// (CS-LNCH-182, CS-SESS-093..095), which names no id and is matched by
+// directory. Both fail closed: what cannot be read counts as open.
 package resumeguard
 
 import (
@@ -65,7 +69,8 @@ type Check struct {
 	// the host claude's registries.
 	Home      string
 	ConfigDir string
-	// ProcRoot is /proc; "" means the real one. GOOS is runtime.GOOS unless
+	// ProcRoot is /proc; "" means the real one, and panics under go test.
+	// GOOS is runtime.GOOS unless
 	// set. Sleep spaces retries; nil means time.Sleep.
 	ProcRoot string
 	// MachineIDPath is the file Claude Code reads for the machine id in
@@ -74,29 +79,35 @@ type Check struct {
 	MachineIDPath string
 	GOOS          string
 	Sleep         func(time.Duration)
+
+	// Continue is the continue check's target (RunContinue, CS-SESS-093):
+	// the directories claude would continue in. Unused by Run.
+	Continue *ContinueTarget
+	// RecordsOnly is the advisory pre-build continue check (CS-SESS-094):
+	// rules b' and h' only — no label and no reservation holds.
+	RecordsOnly bool
 }
 
 // Verdict is the check's answer. Open is true when the launch must not go
 // ahead: Holder names the sandbox holding the conversation, HostPID a claude
 // process on the host, or, when neither, Reason says what could not be read.
+// The continue check (RunContinue) also gives the held conversation and the
+// holder record's cwd (SessionID, Cwd), or, for a holder that is still
+// starting (rule a'), Starting.
 type Verdict struct {
-	Open    bool
-	Holder  *sessions.Session
-	HostPID int
-	Reason  string
+	Open      bool
+	Holder    *sessions.Session
+	HostPID   int
+	Reason    string
+	SessionID string
+	Cwd       string
+	Starting  bool
 }
 
 // Run evaluates the check. Every sandbox is looked at before a failure to
 // read one decides, so a holder is named whenever one is found.
 func (c Check) Run() Verdict {
-	if testing.Testing() {
-		if c.Home != "" && isRealHome(c.Home) {
-			panic("resumeguard: a test would read the real home's registry; set HOME to a scratch directory")
-		}
-		if c.ConfigDir != "" && isRealConfigDir(c.ConfigDir) {
-			panic("resumeguard: a test would read the real ~/.claude registry; point CLAUDE_CONFIG_DIR/HOME at a scratch directory")
-		}
-	}
+	c.testGuards()
 	if c.DiscoveryErr != nil {
 		return Verdict{Open: true, Reason: c.DiscoveryErr.Error()}
 	}
@@ -139,6 +150,20 @@ func (c Check) Run() Verdict {
 		return Verdict{Open: true, Reason: reason}
 	}
 	return c.hostCheck(domain, domainErr)
+}
+
+// testGuards panics under go test when the check would read the real home's
+// or the real ~/.claude's registry.
+func (c Check) testGuards() {
+	if !testing.Testing() {
+		return
+	}
+	if c.Home != "" && isRealHome(c.Home) {
+		panic("resumeguard: a test would read the real home's registry; set HOME to a scratch directory")
+	}
+	if c.ConfigDir != "" && isRealConfigDir(c.ConfigDir) {
+		panic("resumeguard: a test would read the real ~/.claude registry; point CLAUDE_CONFIG_DIR/HOME at a scratch directory")
+	}
 }
 
 // state is a session's docker state, with an older row's derived from its
@@ -217,14 +242,22 @@ func (c Check) holds(s sessions.Session, domain string) (holding, error) {
 // lists the container's host pids; a pid whose stat cannot be read or parsed
 // cannot be ruled out either. A failed docker top is an error: fail closed.
 func (c Check) alive(s sessions.Session, matches []registry.Record) (bool, error) {
+	_, ok, err := c.aliveRecord(s, matches)
+	return ok, err
+}
+
+// aliveRecord is alive, also returning a record that counts as alive (the
+// first that cannot be ruled out), so the continue check can name the
+// conversation it holds.
+func (c Check) aliveRecord(s sessions.Session, matches []registry.Record) (registry.Record, bool, error) {
 	for _, m := range matches {
 		if m.ProcStart == "" {
-			return true, nil
+			return m, true, nil
 		}
 	}
 	pids, err := c.top(s.Name)
 	if err != nil {
-		return false, fmt.Errorf("docker top %s: %v", s.Name, err)
+		return registry.Record{}, false, fmt.Errorf("docker top %s: %v", s.Name, err)
 	}
 	// Only a pid whose stat was read can rule the record out. Nothing listed,
 	// or no listed pid visible here (a nested launcher's /proc does not show
@@ -246,11 +279,14 @@ func (c Check) alive(s sessions.Session, matches []registry.Record) (bool, error
 		read++
 		for _, m := range matches {
 			if start == m.ProcStart {
-				return true, nil
+				return m, true, nil
 			}
 		}
 	}
-	return unknown || read == 0, nil
+	if unknown || read == 0 {
+		return matches[0], true, nil
+	}
+	return registry.Record{}, false, nil
 }
 
 // top runs "docker top <name> -o pid" through Runner.Start, killed with the
@@ -436,6 +472,9 @@ func JSTrim(s string) string {
 func (c Check) procRoot() string {
 	if c.ProcRoot != "" {
 		return c.ProcRoot
+	}
+	if testing.Testing() {
+		panic("resumeguard: ProcRoot unset under go test (would read the real /proc); set Check.ProcRoot / Env.ProcRoot to a scratch directory")
 	}
 	return "/proc"
 }
