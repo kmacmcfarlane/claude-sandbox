@@ -145,7 +145,7 @@ var BakedSources = []string{
 	"scaffold", "scaffold-ralph", "container-context.md", "mcp-servers.json",
 	"logstream", "entrypoint.sh", "PROMPT_RALPH.md", "mcp/discord-notify", "notification-hooks.json",
 	// Only these files of bin/: the rest is the host shim and its build output.
-	"bin/setup-lsp-plugins", "bin/notify-webhook",
+	"bin/notify-webhook",
 }
 
 // ModeBakedSources are the baked sources whose permission bits reach the
