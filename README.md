@@ -1745,7 +1745,7 @@ tells the agent to use the native commands.
 normal update tracking, find them and reinstall:
 
 ```bash
-jq -r '.plugins | to_entries[] | select(.value[] | .gitCommitSha == "") | .key' \
+jq -r '[.plugins | to_entries[] | select(.value[] | .gitCommitSha == "") | .key] | unique[]' \
   "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/installed_plugins.json"
 claude plugin uninstall <id> && claude plugin install <id>   # for each id printed
 ```

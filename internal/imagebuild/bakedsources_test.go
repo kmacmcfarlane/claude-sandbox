@@ -164,6 +164,10 @@ var _ = Describe("baked sources", func() {
 		const removal = "`setup-lsp-plugins` has been removed"
 		Expect(cc).To(ContainSubstring(removal))
 		Expect(strings.Count(cc, "setup-lsp-plugins")).To(Equal(1))
+		// The rest of the sentence, whatever the line wrapping.
+		flat := strings.Join(strings.Fields(cc), " ")
+		Expect(flat).To(ContainSubstring("run the `claude plugin install` commands above instead"))
+		Expect(flat).To(ContainSubstring("do not stop to ask for it"))
 		Expect(strings.Replace(cc, removal, "", 1)).NotTo(ContainSubstring("setup-lsp-plugins"))
 
 		lsp := repoFile("scaffold-ralph/agent/LSP_TOOLS.md")
