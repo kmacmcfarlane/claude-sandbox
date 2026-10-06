@@ -448,6 +448,7 @@ var _ = Describe("tmux restore, one pane (CS-TMUX-052..063)", func() {
 			Expect(setenv).To(HaveKeyWithValue("CLAUDE_CONFIG_DIR", BeNil()))
 
 			g := newCLIFixture()
+			g.env.Now = f.env.Now // the notice is stamped against the fixed clock, not today
 			g.envmap["TMUX"], g.envmap["TMUX_PANE"] = "x", "%7"
 			g.envmap["CLAUDE_CONFIG_DIR"] = cfgDir
 			g.env.ResurrectDir = dir
@@ -613,6 +614,7 @@ var _ = Describe("tmux restore, one pane (CS-TMUX-052..063)", func() {
 			Expect(unsets()).To(BeZero())
 
 			g := newCLIFixture()
+			g.env.Now = f.env.Now // the notice is stamped against the fixed clock, not today
 			g.envmap["TMUX"], g.envmap["TMUX_PANE"] = "x", "%7"
 			g.fake.On("tmux display-message", "main\t2\t0\t1\t2\t\n", nil)
 			Expect(g.run("tmux", "restore", "--drop")).To(Equal(0))
@@ -663,6 +665,7 @@ var _ = Describe("tmux restore, one pane (CS-TMUX-052..063)", func() {
 			Expect(filepath.Join(f.cache, tmuxpane.NoticeFile)).NotTo(BeAnExistingFile())
 
 			g := newCLIFixture()
+			g.env.Now = f.env.Now // the notice is stamped against the fixed clock, not today
 			g.env.IsTerminal = func(io.Writer) bool { return true }
 			notice(g)
 			streamEvents(g.fake, dockerEvent("die", "0"))
