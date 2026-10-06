@@ -275,9 +275,12 @@ Error: conversation 0b5e9c3a-… is already open in 'otter' (claude-sandbox-…-
   arguments name a UUID to resume. A plain launch, `--continue`, the `--resume` picker (no id),
   a name instead of an id, `--branch`, `headless` and `--ralph` are never checked and behave
   as before. When several `--resume`/`-r` are given, the last one counts, as in claude. The
-  scan of claude's arguments stops at `--` and at the first prompt word; an
-  unknown claude flag followed by a word stops it early, so a `--fork-session` after such a
-  flag is not seen and the launch is still checked.
+  launcher reads claude's arguments the way claude's own parser does: a prompt word does not
+  end them (`claude-sandbox "fix it" --resume <id>` is checked), short options combine
+  (`-pr <id>` is checked), and only a `--` that no flag takes as its value ends them. Where it
+  cannot be sure, it checks: a `--fork-session` right after an unknown flag, or as another
+  flag's value, does not count as a fork, and a `--resume` given as another flag's value still
+  counts (`--tools -r <id>` is checked although claude reads them as tool names).
 - **It runs inside the launch lock**, just before `docker create` (see
   [Launch reservation](#launch-reservation)), so of two launches racing to resume one
   conversation the second sees the first. A resuming launch that cannot take the lock does not
@@ -286,7 +289,7 @@ Error: conversation 0b5e9c3a-… is already open in 'otter' (claude-sandbox-…-
 
 Every such container carries the label `claude-sandbox.resume=<uuid>` (lower case), outside
 the config-drift hash. Spec: `spec/sessions.feature` CS-SESS-065..069 and CS-SESS-089, `spec/launch.feature`
-CS-LNCH-110.
+CS-LNCH-110 and CS-LNCH-183.
 
 ### Detaching
 

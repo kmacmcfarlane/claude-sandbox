@@ -73,9 +73,18 @@ var _ = Describe("the resume guard (CS-LNCH-110, CS-SESS-065..069)", func() {
 			Expect(resumed["claude-sandbox.inputs"]).To(Equal(plain["claude-sandbox.inputs"]))
 		})
 
+		It("CS-LNCH-183: a resume after a prompt word given without -- is labelled and guarded", func() {
+			reg := filepath.Join(f.home, "registry")
+			f.fake.On("docker ps", psRowResume("cs-proj-otter", f.proj, "claude", "otter", "7", "running", time.Now(), reg, guardID)+"\n", nil)
+			Expect(f.run("--new", "fix it", "--resume", guardID)).To(Equal(4), f.errw.String())
+			Expect(creates(f)).To(BeEmpty())
+		})
+
 		It("CS-LNCH-110: every spelling labels; a fork, the picker, a name, --branch, headless and ralph do not", func() {
 			for _, pt := range [][]string{
 				{"--resume=" + guardID}, {"-r", guardID}, {"-r" + guardID},
+				// CS-LNCH-183: after a prompt word, and in a short cluster.
+				{"fix", "--resume", guardID}, {"-pr", guardID},
 			} {
 				g := newCLIFixture()
 				Expect(g.run(append([]string{"--new", "--"}, pt...)...)).To(Equal(0), g.errw.String())
@@ -85,7 +94,6 @@ var _ = Describe("the resume guard (CS-LNCH-110, CS-SESS-065..069)", func() {
 				{"--new", "--", "--resume", guardID, "--fork-session"},
 				{"--new", "--", "--resume"},
 				{"--new", "--", "--resume", "my-session"},
-				{"--new", "--", "fix", "--resume", guardID},
 				{"--branch"},
 				{"headless", "--", "--resume", guardID},
 				{"--ralph"},
