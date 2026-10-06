@@ -877,31 +877,104 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       the args --branch prepends) name a conversation with one of
       "--resume <id>", "--resume=<id>", "-r <id>", "-r<id>"
     And <id> is a canonical UUID (8-4-4-4-12 hex digits)
-    And when several appear before the stop, the LAST one is <id>, as in
-      claude's own parser; the label is not set when that last one has no id or
-      one that is not a canonical UUID
+    And when several appear, the LAST one is <id>, as in claude's own parser;
+      the label is not set when that last one has no id or one that is not a
+      canonical UUID
     Then docker create receives the label "claude-sandbox.resume=<id>", the id
       in lower case
-    And the scan follows the pane mark's stop rules (CS-TMUX-013): it stops at a
-      bare "--" or at the first positional, never reads a known flag's value as
-      a positional, and stops at an unknown flag followed by a word
+    And the arguments are read by the shared walker (CS-LNCH-183), which
+      follows claude's own option parser: a prompt word does not stop it, short
+      clusters expand ("-pr <id>" resumes <id>), and only a bare "--" that no
+      flag consumes stops it. The pane mark keeps its own stop rules
+      (CS-TMUX-013/017)
     But no resume label is set when:
       | case                                        | why                                            |
-      | "--fork-session" appears before the stop    | a fork gets a new id; forking a live conversation is legitimate |
+      | "--fork-session" is certainly an option (CS-LNCH-183) | a fork gets a new id; forking a live conversation is legitimate |
       | "--resume" or "-r" has no id (the picker)   | nothing is known to guard                      |
       | the id is not a canonical UUID              | claude's own name search; nothing is known to guard |
-      | the resume flag comes after the stop        | it is a prompt word or claude's own "--" tail  |
+      | the resume flag comes after a stopping "--" | it is claude's own "--" tail                   |
       | the launch is headless (CS-LNCH-058)        | SDK double resume is item b090, parked         |
       | the launch is --ralph                       | ralph's claude takes no passthrough            |
-    And "--fork-session" after the stop (inside a prompt, after "--") neither
-      sets nor suppresses the label
-    And an unknown value-taking flag before "--fork-session" stops the scan
-      early, so the label stays on and the guard may refuse a legitimate fork:
-      that fails safe, and the refusal names --fork-session (CS-SESS-065)
+    And "--fork-session" inside a prompt word, after a stopping "--", as a
+      flag's value or right after an unknown flag neither sets nor suppresses
+      the label: the guard may then refuse a legitimate fork, which fails
+      safe, and the refusal names --fork-session (CS-SESS-065)
     And --branch's own "--resume --fork-session" / "--continue --fork-session"
       never carry the label
     And the label is outside the drift fingerprint: confighash and inputs are
       the same with and without it
+
+  Scenario: CS-LNCH-183 The guards read claude's arguments the way claude's own parser does
+    # The resume label (CS-LNCH-110) used the pane mark's scan, which stops at
+    # the first positional and read "-pr <id>" as -p with the value "r", so
+    # 'claude-sandbox "fix it" --resume <id>' and '-pr <id>' resumed
+    # unguarded. One walker, tmuxpane.WalkClaudeArgs, now reads the passthrough
+    # for every guard (the continue guard of item 3ce1 will read it too), following
+    # commander's parseOptions in Claude Code 2.1.290 and erring toward
+    # refusal wherever it cannot be sure (plan continue-resume-guard 01 § 2.2,
+    # 02 § 3, 03 §§ 1-2). Subcommand operands (mcp, agents, …) are not modelled:
+    # reading past them only over-detects, and claude then opens no
+    # conversation at all.
+    Given a passthrough
+    Then the walker reports: whether it continues (--continue, -c, a short
+      cluster reaching c), whether it gives a resume and the resumed id (a
+      canonical UUID, lower-cased, else ""), whether it forks
+      (--fork-session), whether it prints (-p, --print) and its -w/--worktree
+      value
+    And its rules are:
+      | rule | statement |
+      | stop | a positional word never stops the walk; only a bare "--" that no flag consumes does |
+      | value-consuming position | the token right after a known required-value flag, a known variadic flag (its FIRST value only) or a short cluster whose expansion ends in a required-value short (-n), each written without "=", is that flag's value |
+      | "--" | a value in a value-consuming position (the walk goes on); right after an unknown flag written without "=" it starts an uncertain tail running to the end, where no "--" stops; anywhere else (first, after a boolean or optional-value flag, after a variadic's later value, after a positional) it stops |
+      | uncertain | the token right after an unknown flag written without "=", and every token of an uncertain tail |
+      | continue / resume | count wherever they appear, a value-consuming position included |
+      | fork | counts only where "--fork-session" is certainly an option: never in a value-consuming position, right after an unknown flag or in an uncertain tail |
+      | worktree | the same rule for -w / --worktree: an uncertain one never replaces or clears a value already set |
+      | resume id | a resume in a certain position replaces the id (claude's last one wins; none or a non-UUID gives ""); one in a value-consuming or uncertain position never replaces or clears an id already set, and sets its UUID only while none is |
+      | short clusters | a whole token that exactly matches a known flag is that flag (so "-d2e", --debug-to-stderr, takes no value); otherwise "-XYZ" expands as commander expands it, each re-read rest tried whole first: a known boolean short (c, p, h, v) is set and the rest re-read; a value-taking short (r, d, w optional; n required) takes the rest of the cluster as its value, or, written last, the next token (always for -n; for the optional ones unless it is an option) |
+      | optional value | taken from the next token unless that token is an option (longer than one character and starting with "-") |
+      | "--x=v" | carries its value and consumes nothing; for a flag that takes no value claude rejects it, so it never forks |
+      | arity table | Claude Code 2.1.290's root command options, hidden ones included; refreshed on a Claude Code bump |
+    And these rows hold:
+      | arguments                                     | result                                        |
+      | "fix it" --resume <uuid>                      | resume <uuid>                                 |
+      | -pr <uuid>                                    | resume <uuid>, print                          |
+      | -pc                                           | continue, print                               |
+      | -rc                                           | a resume with no id (the name "c"), no continue |
+      | --append-system-prompt --continue             | continue (over-refusal)                       |
+      | --effort high --fork-session                  | fork                                          |
+      | --unknownflag --fork-session                  | no fork                                       |
+      | -- --continue                                 | nothing                                       |
+      | --system-prompt -- --continue                 | continue                                      |
+      | -pn -- --continue                             | continue, print                               |
+      | --verbose -- --continue                       | nothing (a real stop)                         |
+      | --unknownflag -- --continue --fork-session    | continue, no fork (uncertain tail)            |
+      | --resume <uuid> --name -r                     | <uuid>                                        |
+      | --name --resume <uuid>                        | <uuid> (uncertain, nothing set before)        |
+      | --resume <a> --resume <b>                     | <b>                                           |
+      | --resume <a> --resume                         | "" (the picker last)                          |
+      | --resume <a> --unknownflag -r <b>             | <a>                                           |
+      | --resume "words"                              | ""                                            |
+      | --add-dir --fork-session --continue           | continue, no fork                             |
+      | --add-dir -- --continue                       | continue                                      |
+      | --tools -r <uuid>                             | <uuid>: an intended over-refusal (claude reads -r and the id as tool names) |
+      | --resume <a> --mcp-config -r                  | <a>                                           |
+      | --add-dir d1 d2 --fork-session                | fork                                          |
+      | --add-dir d1 -- --continue                    | nothing (a real stop)                         |
+    And the resume label is the walker's id unless it forks (GuardedResumeID)
+    And the continue guard's input is "continues and does not fork"
+      (GuardedContinue); nothing reads it until that guard lands
+    And the pane mark's ResumeID and the restore's ScanPassthrough keep their
+      own stop rules (CS-TMUX-013/017): a miss there only means the save hook
+      resolves the conversation from the registry
+    And the walker fails open only through table drift (residual R3), in two
+      shapes: the table lists a flag as boolean or optional, a later Claude
+      Code makes it take a required value, and "--fork-session" or a later
+      resume follows it; or a later Claude Code makes a listed value-taking
+      flag value-less ("--resume <a> --name -r <b>"), or adds a value-less
+      flag the table lacks ("--resume <a> --newbool -r <b>"), so the later
+      resume reads as uncertain and the guard checks <a> while claude resumes
+      <b>. A refresh of the table on a Claude Code bump closes both
 
   Scenario: CS-LNCH-029 Container runtime environment
     Then docker create receives: -it --rm --init,
