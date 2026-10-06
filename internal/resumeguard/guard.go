@@ -24,6 +24,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode"
 
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/launch"
@@ -414,7 +415,22 @@ func (c Check) machineID() string {
 	if err != nil {
 		return ""
 	}
-	return strings.TrimSpace(string(b))
+	return JSTrim(string(b))
+}
+
+// JSTrim is String.prototype.trim: invalid UTF-8 first becomes U+FFFD (as
+// the utf8 decode does), then the ECMAScript WhiteSpace and LineTerminator
+// code points are trimmed from both ends — a BOM goes, U+0085 stays, which
+// strings.TrimSpace gets the other way round.
+func JSTrim(s string) string {
+	s = strings.ToValidUTF8(s, "\uFFFD")
+	return strings.TrimFunc(s, func(r rune) bool {
+		switch r {
+		case '\t', '\v', '\f', ' ', '\u00a0', '\ufeff', '\n', '\r', '\u2028', '\u2029':
+			return true
+		}
+		return unicode.Is(unicode.Zs, r)
+	})
 }
 
 func (c Check) procRoot() string {
@@ -478,7 +494,7 @@ func (c Check) hostCheck(domain string, domainErr error) Verdict {
 }
 
 // hostDomain is the launcher's own pid domain as Claude Code records it
-// (2.1.290 Sis): "linux:<machine-id>:<readlink /proc/self/ns/pid>", the id
+// (Claude Code 2.1.290 reads only /etc/machine-id): "linux:<machine-id>:<readlink /proc/self/ns/pid>", the id
 // being /etc/machine-id trimmed (no other file is tried; absent or unreadable
 // = empty, as in a container), so "linux::pid:[<inode>]" without one; ""
 // off Linux, where the host check is skipped.

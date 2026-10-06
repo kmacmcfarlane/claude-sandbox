@@ -384,6 +384,18 @@ var _ = Describe("resume guard", func() {
 		Expect(func() { c.Run() }).To(Panic())
 	})
 
+	It("CS-SESS-065: a linux:<machine-id>:<ns> record in an unbridged container's registry is host claude's and skipped by rule b", func() {
+		Expect(os.MkdirAll(f.home, 0o755)).To(Succeed())
+		mid := filepath.Join(f.home, "machine-id")
+		Expect(os.WriteFile(mid, []byte("0123abcd\n"), 0o644)).To(Succeed())
+		host := filepath.Join(f.config, "sessions")
+		f.write(host, 7+256, record(7+256, convID, after, "linux:0123abcd:"+hostNS, "777"))
+		c := f.check(sandbox("cs-a", "running", "7", host, ""))
+		c.MachineIDPath = mid
+		Expect(c.Run().Open).To(BeFalse())
+		Expect(f.tops()).To(BeZero())
+	})
+
 	Describe("CS-SESS-068: a claude running on the host", func() {
 		host := "linux::" + hostNS
 		var dir string
@@ -407,6 +419,52 @@ var _ = Describe("resume guard", func() {
 			Expect(c.Run().Open).To(BeTrue())
 			f.write(dir, 7+256, record(7+256, convID, after, "linux:0123abcd\n:"+hostNS, "777"))
 			Expect(c.Run().Open).To(BeFalse())
+		})
+
+		It("CS-SESS-068: the machine-id trim is JavaScript's trim()", func() {
+			for in, want := range map[string]string{
+				"abc\n":                            "abc",
+				"\ufeffabc\ufeff":                  "abc",
+				"\u0085abc":                        "\u0085abc",
+				"\u00a0 \t\v\f\u2028abc\u2029\r\n": "abc",
+				"\u3000abc\u2003":                  "abc",
+				"ab\xffc\n":                        "ab\ufffdc",
+				"\xff":                             "\ufffd",
+				"":                                 "",
+				"a b":                              "a b",
+			} {
+				Expect(resumeguard.JSTrim(in)).To(Equal(want), fmt.Sprintf("%q", in))
+			}
+		})
+
+		It("CS-SESS-068: an unreadable, empty or leading-space machine-id file reads as JavaScript would", func() {
+			f.procStat(263, "777")
+			rec := func(mid string) { f.write(dir, 7+256, record(7+256, convID, after, "linux:"+mid+":"+hostNS, "777")) }
+			with := func(path string) resumeguard.Check { c := f.check(); c.MachineIDPath = path; return c }
+
+			// A directory (unreadable as a file) and an empty file: empty id.
+			rec("")
+			Expect(with(f.home).Run().Open).To(BeTrue())
+			empty := filepath.Join(f.home, "empty-id")
+			Expect(os.WriteFile(empty, nil, 0o644)).To(Succeed())
+			Expect(with(empty).Run().Open).To(BeTrue())
+			// Mode 000 (skipped when permissions do not bind, as for root).
+			locked := filepath.Join(f.home, "locked-id")
+			Expect(os.WriteFile(locked, []byte("zzz"), 0o000)).To(Succeed())
+			if _, err := os.ReadFile(locked); err != nil {
+				Expect(with(locked).Run().Open).To(BeTrue())
+			}
+			// Leading whitespace is trimmed too.
+			lead := filepath.Join(f.home, "lead-id")
+			Expect(os.WriteFile(lead, []byte("  \t0123abcd\n"), 0o644)).To(Succeed())
+			rec("0123abcd")
+			Expect(with(lead).Run().Open).To(BeTrue())
+		})
+
+		It("CS-SESS-068: with MachineIDPath unset the check panics under go test, never reading /etc", func() {
+			c := f.check()
+			c.MachineIDPath = ""
+			Expect(func() { c.Run() }).To(Panic())
 		})
 
 		It("CS-SESS-068: procStart is field 22 of /proc/<pid>/stat, split after the last \")\"", func() {
