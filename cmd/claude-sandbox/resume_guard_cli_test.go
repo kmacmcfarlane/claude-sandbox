@@ -80,6 +80,30 @@ var _ = Describe("the resume guard (CS-LNCH-110, CS-SESS-065..069)", func() {
 			Expect(creates(f)).To(BeEmpty())
 		})
 
+		It("CS-LNCH-110: a resume of a transcript path labels and guards its base name's id, and keeps the continue label", func() {
+			path := "/abs/dir/" + strings.ToUpper(guardID) + ".jsonl"
+			Expect(f.run("--new", "--", "--resume", path, "--continue")).To(Equal(0), f.errw.String())
+			l := labelsOf(f.launched().Args)
+			Expect(l).To(HaveKeyWithValue("claude-sandbox.resume", guardID))
+			Expect(l).To(HaveKeyWithValue("claude-sandbox.continue", "1"))
+
+			g := newCLIFixture()
+			reg := filepath.Join(g.home, "registry")
+			g.fake.On("docker ps", psRowResume("cs-proj-otter", g.proj, "claude", "otter", "7", "running", time.Now(), reg, guardID)+"\n", nil)
+			Expect(g.run("--new", "--", "-r"+path)).To(Equal(4), g.errw.String())
+			Expect(creates(g)).To(BeEmpty())
+			Expect(g.errw.String()).To(ContainSubstring("Error: conversation " + guardID + " is already open in 'otter'"))
+
+			for _, pt := range [][]string{
+				{"--resume", path, "--fork-session"},
+				{"--resume", "/abs/dir/notes.jsonl"},
+			} {
+				h := newCLIFixture()
+				Expect(h.run(append([]string{"--new", "--"}, pt...)...)).To(Equal(0), h.errw.String())
+				Expect(labelsOf(h.launched().Args)).NotTo(HaveKey("claude-sandbox.resume"), "%v", pt)
+			}
+		})
+
 		It("CS-LNCH-110: every spelling labels; a fork, the picker, a name, --branch, headless and ralph do not", func() {
 			for _, pt := range [][]string{
 				{"--resume=" + guardID}, {"-r", guardID}, {"-r" + guardID},

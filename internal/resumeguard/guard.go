@@ -28,7 +28,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-	"unicode"
 
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/launch"
@@ -454,20 +453,9 @@ func (c Check) machineID() string {
 	return JSTrim(string(b))
 }
 
-// JSTrim is String.prototype.trim: invalid UTF-8 first becomes U+FFFD (as
-// the utf8 decode does), then the ECMAScript WhiteSpace and LineTerminator
-// code points are trimmed from both ends — a BOM goes, U+0085 stays, which
-// strings.TrimSpace gets the other way round.
-func JSTrim(s string) string {
-	s = strings.ToValidUTF8(s, "\uFFFD")
-	return strings.TrimFunc(s, func(r rune) bool {
-		switch r {
-		case '\t', '\v', '\f', ' ', '\u00a0', '\ufeff', '\n', '\r', '\u2028', '\u2029':
-			return true
-		}
-		return unicode.Is(unicode.Zs, r)
-	})
-}
+// JSTrim is String.prototype.trim (registry.JSTrim, shared with the resume
+// label's reading of a --resume value, CS-LNCH-110).
+func JSTrim(s string) string { return registry.JSTrim(s) }
 
 func (c Check) procRoot() string {
 	if c.ProcRoot != "" {

@@ -247,7 +247,8 @@ one has open — neither `--resume <id>` nor `--continue` checks (Claude Code 2.
 sandboxes, a join, or a sandbox and `claude` on the host could open one conversation and
 interleave writes into one transcript. The launcher checks before it starts claude. A launch
 that names the conversation it resumes
-(`claude-sandbox -- --resume <uuid>`, also `--resume=<uuid>`, `-r <uuid>`, `-r<uuid>`) therefore
+(`claude-sandbox -- --resume <uuid>`, also `--resume=<uuid>`, `-r <uuid>`, `-r<uuid>`, or a
+transcript file `--resume /path/to/<uuid>.jsonl`, which claude resumes as `<uuid>`) therefore
 checks first and **refuses with exit 4** when the conversation is already open:
 
 ```
@@ -277,8 +278,11 @@ Error: conversation 0b5e9c3a-… is already open in 'otter' (claude-sandbox-…-
 - **The ways out** are the two the message names: attach to the holder, or fork with
   `--fork-session` (a fork gets a new id, so it is never checked). There is no override flag.
 - **Only these launches are checked by id:** an interactive or `--detach` launch whose claude
-  arguments name a UUID to resume. A plain launch, the `--resume` picker (no id), a name
-  instead of an id, `--branch`, `headless` and `--ralph` are never checked by id and behave
+  arguments name a UUID to resume, bare or as the base name of a `.jsonl` transcript path (any
+  letter case, relative or absolute: claude's print mode loads every such path as a file, so
+  the check errs toward refusing). A plain launch, the `--resume` picker (no id), a name
+  instead of an id (claude's exact-title match: not checked), a `.jsonl` path whose base name
+  is not a UUID (no id is known without reading the file), `--branch`, `headless` and `--ralph` are never checked by id and behave
   as before; `--continue` is checked by directory (the next bullet). When several `--resume`/`-r` are given, the last one counts, as in claude, except
   that one the launcher cannot be sure is an option (right after an unknown flag, or given as
   another flag's value) never replaces or clears an id named earlier. The launcher reads

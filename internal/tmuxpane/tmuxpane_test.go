@@ -150,6 +150,9 @@ var _ = Describe("tmuxpane", func() {
 				// label stays on, which fails safe (the refusal names
 				// --fork-session).
 				{"--resume", convID, "--frobnicate", "--fork-session"},
+				// A transcript path labels its base name's id.
+				{"--resume", "/abs/dir/" + convID + ".jsonl"},
+				{"-r/abs/dir/" + strings.ToUpper(convID) + ".jsonl"},
 			} {
 				Expect(tmuxpane.GuardedResumeID(args)).To(Equal(convID), "%v", args)
 			}
@@ -161,6 +164,10 @@ var _ = Describe("tmuxpane", func() {
 				{"--resume", convID, "prompt", "--fork-session"},
 				{"--resume"}, {"--resume", "my-session-name"},
 				{"--", "--resume", convID},
+				// --fork-session exempts a transcript path as it does an id;
+				// a base name that is no UUID names nothing.
+				{"--resume", "/abs/dir/" + convID + ".jsonl", "--fork-session"},
+				{"--resume", "/abs/dir/notes.jsonl"},
 				// --branch's own forms never carry it.
 				{"--resume", "--fork-session"}, {"--continue", "--fork-session"},
 			} {
