@@ -130,6 +130,12 @@ type Inputs struct {
 	// tmuxpane.GuardedResumeID); "" for none, a fork, headless or ralph.
 	Resume string
 
+	// Continue is set for a guarded continue (CS-LNCH-182,
+	// tmuxpane.GuardedContinue): the passthrough continues the newest
+	// conversation without certainly forking it. It sets the
+	// claude-sandbox.continue label the continue guard reads (CS-SESS-093).
+	Continue bool
+
 	// LookupEnv tells set-but-empty from unset for the headless env allowlist
 	// (CS-LNCH-063). Nil falls back to Getenv, where "" reads as unset.
 	LookupEnv func(string) (string, bool)
@@ -198,6 +204,13 @@ const (
 // carrying it as holding that conversation until its registry record shows
 // it switched away. Outside the config hash, like every label.
 const LabelResume = "claude-sandbox.resume"
+
+// LabelContinue marks a container created to continue the newest conversation
+// in its directory without forking it (CS-LNCH-182), value "1". The continue
+// guard (CS-SESS-093 rule a') counts a container of the project carrying it
+// as opening a conversation there until its registry record exists. Outside
+// the config hash, like every label.
+const LabelContinue = "claude-sandbox.continue"
 
 // HeadlessEnv is the exact list of variables a headless launch forwards from
 // its own environment (CS-LNCH-063): what the Claude Agent SDK and Paseo set
@@ -330,6 +343,8 @@ type Plan struct {
 	// Resume is the claude-sandbox.resume label's value, "" when unset
 	// (CS-LNCH-110).
 	Resume string
+	// Continue: the container carries claude-sandbox.continue (CS-LNCH-182).
+	Continue bool
 	// Terminal is the claude-sandbox.terminal label's value (CS-LNCH-181).
 	Terminal string
 
@@ -756,6 +771,11 @@ func Build(in Inputs) (*Plan, error) {
 		p.Labels = append(p.Labels, LabelResume+"="+in.Resume)
 	}
 	p.Resume = in.Resume
+	// CS-LNCH-182: the continue guard's reservation marker, the same way.
+	if in.Continue {
+		p.Labels = append(p.Labels, LabelContinue+"=1")
+	}
+	p.Continue = in.Continue
 
 	// CS-LNCH-178..181: the terminal identity. After the fingerprint, and
 	// neither EnvFlags nor labels are hashed, so a launch from another

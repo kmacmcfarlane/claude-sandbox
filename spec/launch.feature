@@ -903,6 +903,12 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       never carry the label
     And the label is outside the drift fingerprint: confighash and inputs are
       the same with and without it
+    And "--continue" wins over "--resume <id>" in claude (Claude Code 2.1.290
+      tests continue first), so "--resume <id> --continue" keeps this label
+      (harmless and conservative) AND carries the continue label of
+      CS-LNCH-182, and both guards run
+    And the headless row above concerns the id label only: a headless
+      "--continue" is guarded (CS-LNCH-182)
 
   Scenario: CS-LNCH-183 The guards read claude's arguments the way claude's own parser does
     # The resume label (CS-LNCH-110) used the pane mark's scan, which stops at
@@ -920,7 +926,7 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       cluster reaching c), whether it gives a resume and the resumed id (a
       canonical UUID, lower-cased, else ""), whether it forks
       (--fork-session), whether it prints (-p, --print) and its -w/--worktree
-      value
+      value, and every -w/--worktree name it saw, wherever it stood
     And its rules are:
       | rule | statement |
       | stop | a positional word never stops the walk; only a bare "--" that no flag consumes does |
@@ -929,7 +935,7 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       | uncertain | the token right after an unknown flag written without "=", and every token of an uncertain tail |
       | continue / resume | count wherever they appear, a value-consuming position included |
       | fork | counts only where "--fork-session" is certainly an option: never in a value-consuming position, right after an unknown flag or in an uncertain tail |
-      | worktree | the same rule for -w / --worktree: an uncertain one never replaces or clears a value already set |
+      | worktree | the same rule for -w / --worktree: an uncertain one never replaces or clears a value already set; separately, every named -w / --worktree value is collected, certain, uncertain or in a value-consuming position alike (Worktrees), for the continue guard's target directories (CS-SESS-093) |
       | resume id | a resume in a certain position replaces the id (claude's last one wins; none or a non-UUID gives ""); one in a value-consuming or uncertain position never replaces or clears an id already set, and sets its UUID only while none is |
       | short clusters | a whole token that exactly matches a known flag is that flag (so "-d2e", --debug-to-stderr, takes no value); otherwise "-XYZ" expands as commander expands it, each re-read rest tried whole first: a known boolean short (c, p, h, v) is set and the rest re-read; a value-taking short (r, d, w optional; n required) takes the rest of the cluster as its value, or, written last, the next token (always for -n; for the optional ones unless it is an option) |
       | optional value | taken from the next token unless that token is an option (longer than one character and starting with "-") |
@@ -963,7 +969,7 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       | --add-dir d1 -- --continue                    | nothing (a real stop)                         |
     And the resume label is the walker's id unless it forks (GuardedResumeID)
     And the continue guard's input is "continues and does not fork"
-      (GuardedContinue); nothing reads it until that guard lands
+      (GuardedContinue, CS-LNCH-182)
     And the pane mark's ResumeID and the restore's ScanPassthrough keep their
       own stop rules (CS-TMUX-013/017): a miss there only means the save hook
       resolves the conversation from the registry
@@ -975,6 +981,55 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       flag the table lacks ("--resume <a> --newbool -r <b>"), so the later
       resume reads as uncertain and the guard checks <a> while claude resumes
       <b>. A refresh of the table on a Claude Code bump closes both
+    And the single worktree value follows the resume id's rule, so the same
+      drift applies to it ("-w a --newbool -w b" reads a while claude uses b);
+      the continue guard therefore reads the collected list (every named
+      worktree), never the single value, and is not exposed to that drift
+
+  Scenario: CS-LNCH-182 A launch that continues the newest conversation carries the continue label
+    # Claude Code's --continue picks the newest conversation in the directory
+    # inside the container, after the launcher has gone, and (2.1.290) skips
+    # only conversations held by live BACKGROUND sessions; one an interactive
+    # session holds, in any pid namespace, is picked anyway. The launcher never
+    # reads transcripts (CS-LNCH-002), so it cannot learn which conversation
+    # that is; the continue guard (CS-SESS-093..095) refuses while any live
+    # session has a conversation open in the directory, and this label lets a
+    # racing launch see one that is still starting (plan continue-resume-guard
+    # 00 § 4, 01-03).
+    Given the claude arguments after the launcher flags (the passthrough, with
+      the args --branch or the tier-1 [b] prepend)
+    When the shared walker (CS-LNCH-183) reports that they continue and do not
+      certainly fork (GuardedContinue)
+    Then the launch is a guarded continue, and docker create receives the label
+      "claude-sandbox.continue=1"
+    And these forms are a guarded continue:
+      | passthrough                                   | why                                      |
+      | --continue                                    | the flag                                 |
+      | -c                                            | its short form                           |
+      | -pc, -cp                                      | a short cluster reaching c               |
+      | "fix it" --continue                           | a prompt word does not stop the walk     |
+      | --verbose --continue                          | after another flag                       |
+      | --append-system-prompt --continue             | a flag's value: claude would not continue, an over-refusal by design |
+      | --add-dir --fork-session --continue           | the fork is --add-dir's value, so no fork |
+      | --resume <id> --continue                      | continue wins in claude; both labels     |
+    And these are not:
+      | passthrough or launch                         | why                                      |
+      | --continue --fork-session (either order)      | a fork gets a new id                     |
+      | -- --continue                                 | after a stopping "--"                    |
+      | -rc                                           | -r with the name "c"                     |
+      | --branch, tier-1 [b]                          | their prepended args fork                |
+      | --ralph                                       | ralph's claude takes no passthrough      |
+      | a tmux restore resume                         | it never carries --continue (its --resume <id> is CS-LNCH-110's) |
+    And a headless launch IS checked (operator answer 85 a): the Agent SDK's
+      "continue: true" becomes --continue
+    And interactive new launches (--new, the tier-1 [n], no candidates) and
+      --detach launches are checked; joins are checked by CS-SESS-095
+    And the label is outside the drift fingerprint: confighash and inputs are
+      the same with and without it
+    And discovery reads it as a ps field just before {{.Mounts}}, which stays
+      the last field, so rows of the earlier formats still parse
+    And a launch that is not a guarded continue carries no continue label and
+      never reads a registry directory for it
 
   Scenario: CS-LNCH-029 Container runtime environment
     Then docker create receives: -it --rm --init,

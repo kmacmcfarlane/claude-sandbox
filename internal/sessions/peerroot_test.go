@@ -79,7 +79,8 @@ var _ = Describe("discovery of the terminal label (CS-SESS-091)", func() {
 		Expect(found[0].Terminal).To(Equal("TERMINAL_EMULATOR=JetBrains-JediTerm"))
 		Expect(found[0].Mounts).To(Equal([]string{"/h/.cache/claude-sandbox/peers"}))
 		line := strings.Join(fake.Calls[0].Args, " ")
-		Expect(line).To(ContainSubstring(`{{.Label "claude-sandbox.terminal"}}` + sep + "{{.Mounts}} "))
+		// CS-LNCH-182's continue label sits between them now.
+		Expect(line).To(ContainSubstring(`{{.Label "claude-sandbox.terminal"}}` + sep + `{{.Label "claude-sandbox.continue"}}` + sep + "{{.Mounts}} "))
 	})
 
 	It("CS-SESS-091: a 23-field row (the format before the label) keeps its Mounts and the legacy pin, with no terminal label", func() {
@@ -91,5 +92,40 @@ var _ = Describe("discovery of the terminal label (CS-SESS-091)", func() {
 		Expect(found[0].Terminal).To(BeEmpty())
 		Expect(found[0].Mounts).To(Equal([]string{"/h/.cache/claude-sandbox/peers"}))
 		Expect(found[0].PeerRoot).To(Equal("none"))
+	})
+})
+
+var _ = Describe("discovery of the continue label (CS-LNCH-182)", func() {
+	head := func(name string) []string {
+		return []string{name, "Up 1 hour", "/p", "claude", "otter", "v1", "", "", "", "3", "",
+			"running", "2026-09-30 12:00:00 +0000 UTC", "", "", "",
+			"", "", "", "", "", "none", "none"}
+	}
+
+	It("CS-LNCH-182: the label is a ps field just before {{.Mounts}}; \"1\" sets it, anything else does not", func() {
+		fake := &execx.Fake{}
+		fake.On("docker ps", strings.Join([]string{
+			strings.Join(append(head("a"), "1", "/m1"), sep),
+			strings.Join(append(head("b"), "", "/m2"), sep),
+			strings.Join(append(head("c"), "yes", "/m3"), sep),
+		}, "\n")+"\n", nil)
+		found, err := sessions.DiscoverAllUncounted(fake)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(found).To(HaveLen(3))
+		Expect([]bool{found[0].Continue, found[1].Continue, found[2].Continue}).To(Equal([]bool{true, false, false}))
+		Expect(found[0].Terminal).To(Equal("none"))
+		Expect(found[0].Mounts).To(Equal([]string{"/m1"}))
+		line := strings.Join(fake.Calls[0].Args, " ")
+		Expect(line).To(ContainSubstring(`{{.Label "claude-sandbox.continue"}}` + sep + "{{.Mounts}} "))
+	})
+
+	It("CS-LNCH-182: a 24-field row (the format before the label) keeps its terminal label and Mounts, with no continue", func() {
+		fake := &execx.Fake{}
+		fake.On("docker ps", strings.Join(append(head("old"), "/m"), sep)+"\n", nil)
+		found, err := sessions.DiscoverAllUncounted(fake)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(found[0].Continue).To(BeFalse())
+		Expect(found[0].Terminal).To(Equal("none"))
+		Expect(found[0].Mounts).To(Equal([]string{"/m"}))
 	})
 })

@@ -148,10 +148,13 @@ claude-sandbox --resume <id>  # resume a specific session by id or name
 directory and never prompts, failing cleanly if there isn't one. It deliberately skips
 background, `--print` and Agent-SDK sessions.
 
-One caveat on a project you run several sessions in at once: `--continue` resolves to the
-same newest transcript in every container, so two sessions started that way share one
-conversation file. Add claude's `--fork-session` to branch a resumed conversation into a new
-session id instead — or use `claude-sandbox --branch`, which composes exactly that (see
+One caveat on a project you run several sessions in at once: `--continue` picks the newest
+conversation in the directory, and Claude Code does not skip one that another interactive
+session has open. So the launcher refuses `--continue` (exit 4) while any live session using
+the same Claude config dir — another sandbox, a join, or `claude` on the host — has a
+conversation open in that directory ([details](#resuming-a-conversation-that-is-already-open-exit-4)).
+Attach to it, add claude's `--fork-session` to branch a copy into a new session id, or pick
+one with `--resume`. `claude-sandbox --branch` composes the fork for you (see
 [Branching a conversation](#branching-a-conversation)).
 
 Resumed sessions keep their scratchpad: the launcher roots Claude Code's
@@ -239,9 +242,11 @@ The launcher composes claude's own `--resume`/`--continue`/`--fork-session` and 
 
 ### Resuming a conversation that is already open (exit 4)
 
-Claude Code only notices a conversation open twice when both sessions share a pid namespace,
-so two sandboxes — or a sandbox and a `claude` on the host — could resume one conversation and
-interleave writes into one transcript. A launch that names the conversation it resumes
+Claude Code does not stop a second interactive session from opening a conversation another
+one has open — neither `--resume <id>` nor `--continue` checks (Claude Code 2.1.290) — so two
+sandboxes, a join, or a sandbox and `claude` on the host could open one conversation and
+interleave writes into one transcript. The launcher checks before it starts claude. A launch
+that names the conversation it resumes
 (`claude-sandbox -- --resume <uuid>`, also `--resume=<uuid>`, `-r <uuid>`, `-r<uuid>`) therefore
 checks first and **refuses with exit 4** when the conversation is already open:
 
@@ -271,10 +276,10 @@ Error: conversation 0b5e9c3a-… is already open in 'otter' (claude-sandbox-…-
   a failure.
 - **The ways out** are the two the message names: attach to the holder, or fork with
   `--fork-session` (a fork gets a new id, so it is never checked). There is no override flag.
-- **Only these launches are checked:** an interactive or `--detach` launch whose claude
-  arguments name a UUID to resume. A plain launch, `--continue`, the `--resume` picker (no id),
-  a name instead of an id, `--branch`, `headless` and `--ralph` are never checked and behave
-  as before. When several `--resume`/`-r` are given, the last one counts, as in claude, except
+- **Only these launches are checked by id:** an interactive or `--detach` launch whose claude
+  arguments name a UUID to resume. A plain launch, the `--resume` picker (no id), a name
+  instead of an id, `--branch`, `headless` and `--ralph` are never checked by id and behave
+  as before; `--continue` is checked by directory (the next bullet). When several `--resume`/`-r` are given, the last one counts, as in claude, except
   that one the launcher cannot be sure is an option (right after an unknown flag, or given as
   another flag's value) never replaces or clears an id named earlier. The launcher reads
   claude's arguments the way claude's own parser does: a prompt word does not end them
@@ -290,10 +295,46 @@ Error: conversation 0b5e9c3a-… is already open in 'otter' (claude-sandbox-…-
   conversation the second sees the first. A resuming launch that cannot take the lock does not
   fall back to launching unserialized: it exits 2 with
   `could not take the launch lock (…); not resuming <id> unserialized.`
+- **`--continue` (and `-c`, `-pc`, …) is checked by directory.** It names no conversation:
+  claude picks the newest one in its directory inside the container, after the launcher has
+  gone, and skips only conversations held by live *background* sessions. The launcher never
+  reads transcripts, so it refuses (exit 4) while **any** live session has a conversation open
+  in the directory claude would continue in — not only the newest one, which is the price of
+  never reading transcripts:
 
-Every such container carries the label `claude-sandbox.resume=<uuid>` (lower case), outside
-the config-drift hash. Spec: `spec/sessions.feature` CS-SESS-065..069 and CS-SESS-089, `spec/launch.feature`
-CS-LNCH-110 and CS-LNCH-183.
+  ```
+  Error: --continue would reopen the newest conversation in /home/me/work/proj,
+         and 'email' (claude-sandbox-…-email) has conversation 53cd0872-… open there;
+         a second session on one conversation would interleave writes into one transcript.
+         Attach to it:  cd ~/work/proj && claude-sandbox --attach=email
+         Or fork it:    add --fork-session after -- (a new conversation id)
+         Or pick one:   use --resume instead of --continue (claude's picker; 53cd0872-… is the one already open)
+  ```
+
+  - "In the directory" means a live registry record whose `cwd` is the launch directory, or
+    lies in a named worktree claude would use (`--worktree=NAME`, worktree mode's own name, or
+    any `-w NAME` you pass to claude) — every such record counts, whatever kind of session wrote
+    it: an Agent-SDK or Paseo session, or a `--bg` one, in the same directory refuses too. A
+    sandbox or host `claude` counts only when it uses the same Claude config dir (a container
+    too old to say which counts).
+  - A sandbox of the project created to continue or resume, whose session is not up yet, also
+    counts (its `claude-sandbox.continue` or `claude-sandbox.resume` label), so of two
+    `--continue` launches racing in one directory the second is refused ("retry once it is up").
+  - The same fail-closed rules, `docker top` confirmation and launch lock apply as for
+    `--resume <id>`; without the lock it exits 2 with `not continuing in <dir> unserialized.`
+    A check before the image builds refuses early on a live record; the one under the lock
+    decides.
+  - It covers interactive, `--detach` and `headless` launches (an Agent SDK `continue: true`
+    becomes `--continue`), and `--join`/`[j]` before the `docker exec` — the likeliest case,
+    since the newest conversation in a container's directory is usually its primary's.
+    `--detach` and `headless` suggest `--resume <conversation-id>` instead of the picker, since
+    nobody can pick there. `--fork-session`, `--branch` and `[b]` are never checked. The
+    tier-1 prompt notes it when your arguments continue.
+
+Every such container carries the label `claude-sandbox.resume=<uuid>` (lower case), or
+`claude-sandbox.continue=1`, outside the config-drift hash. Spec: `spec/sessions.feature`
+CS-SESS-065..069, CS-SESS-089 and CS-SESS-093..096, `spec/launch.feature` CS-LNCH-110,
+CS-LNCH-182 and CS-LNCH-183.
 
 ### Detaching
 
@@ -373,7 +414,7 @@ claude-sandbox --no-session-check  # skip the prompt and launch
 
 `--no-session-check` skips the *decision*, not the instance-noun lookup — a new container still has to be named, and naming it without knowing which nouns are taken would reintroduce the collisions this exists to prevent.
 
-Bare `--attach` / `--join` work when there is exactly one candidate. Exit code 3 means specifically "a choice is needed and nobody can make it"; 2 remains a general error. Exit code 4 means the conversation a launch resumes is already open in another session ([Resuming a conversation that is already open](#resuming-a-conversation-that-is-already-open-exit-4)).
+Bare `--attach` / `--join` work when there is exactly one candidate. Exit code 3 means specifically "a choice is needed and nobody can make it"; 2 remains a general error. Exit code 4 means the conversation a launch resumes or continues is already open in another session ([Resuming a conversation that is already open](#resuming-a-conversation-that-is-already-open-exit-4)).
 
 `--ralph` never prompts — it reports running sessions and proceeds, leaving concurrency to the ralph PID lock.
 
@@ -2239,7 +2280,7 @@ internal/
                    the tmux save hook (registry match, state-file parser, sidecar, lifetimes index);
                    tmux restore (saves, --from, the sparse rule, the decision table, the start lock,
                    readiness, the sparse notice, the resurrect hooks --pin/--rearm)
-  resumeguard/     Resume guard: is a conversation already open (sandbox labels, hardened registry reads, host claude)
+  resumeguard/     Resume and continue guards: is a conversation already open, by id or by directory (sandbox labels, hardened registry reads, host claude)
   registry/        The one hardened reader of Claude Code's peer registry, shared by the save hook and the resume guard
   execx/, prompt/  Command-runner and prompt seams (injected in tests)
 spec/              Gherkin behavioral spec — scenario IDs referenced by the Ginkgo tests
