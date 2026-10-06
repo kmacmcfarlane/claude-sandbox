@@ -663,6 +663,7 @@ var _ = Describe("tmux restore, one pane (CS-TMUX-052..063)", func() {
 			Expect(filepath.Join(f.cache, tmuxpane.NoticeFile)).NotTo(BeAnExistingFile())
 
 			g := newCLIFixture()
+			g.env.Now = f.env.Now // the notice is stamped against the fixed clock, not today
 			g.env.IsTerminal = func(io.Writer) bool { return true }
 			notice(g)
 			streamEvents(g.fake, dockerEvent("die", "0"))
@@ -694,6 +695,8 @@ var _ = Describe("tmux restore, one pane (CS-TMUX-052..063)", func() {
 
 			for _, args := range [][]string{{"--detach"}, {"headless", "--"}} {
 				g := newCLIFixture()
+				g.env.Now = f.env.Now                                   // a fresh notice on the fixed clock
+				g.env.IsTerminal = func(io.Writer) bool { return true } // only --detach/headless stand in the way
 				notice(g)
 				g.fake.On("docker inspect", "running 2026-09-29T12:00:00Z\n", nil)
 				g.run(args...)

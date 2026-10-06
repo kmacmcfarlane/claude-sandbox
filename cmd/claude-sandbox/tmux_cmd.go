@@ -418,7 +418,7 @@ func restoreProbes(env *Env, self string, panes []tmuxpane.PaneInfo) *tmuxpane.R
 		}
 		v := resumeguard.Check{
 			ID: id, Sessions: sess, DiscoveryErr: derr, Runner: env.Runner,
-			Home: home, ConfigDir: cfg, ProcRoot: env.ProcRoot,
+			Home: home, ConfigDir: cfg, ProcRoot: env.ProcRoot, MachineIDPath: env.MachineIDPath,
 		}.Run()
 		g := tmuxpane.GuardResult{Open: v.Open, HostPID: v.HostPID, Reason: v.Reason, Orphans: orphans}
 		if h := v.Holder; h != nil {

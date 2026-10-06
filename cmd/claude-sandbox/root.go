@@ -95,6 +95,9 @@ type Env struct {
 	// ProcRoot is the /proc the resume guard reads for its host claude check
 	// (CS-SESS-068); "" means the real /proc.
 	ProcRoot string
+	// MachineIDPath is the machine-id file for the same check (CS-SESS-068);
+	// "" means /etc/machine-id, and panics under go test.
+	MachineIDPath string
 	// ResurrectDir is tmux-resurrect's save dir for `tmux restore`
 	// (CS-TMUX-045); "" resolves it as resurrect does. Tests point it at a
 	// scratch directory: resurrectDir() panics under go test when unset.
