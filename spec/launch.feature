@@ -876,12 +876,41 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     Given the claude arguments after the launcher flags (the passthrough, with
       the args --branch prepends) name a conversation with one of
       "--resume <id>", "--resume=<id>", "-r <id>", "-r<id>"
-    And <id> is a canonical UUID (8-4-4-4-12 hex digits)
+    And <id> is a canonical UUID (8-4-4-4-12 hex digits), or a transcript path
+      whose base name is "<uuid>.jsonl" (below)
     And when several appear, the LAST one is <id>, as in claude's own parser;
-      the label is not set when that last one has no id or one that is not a
-      canonical UUID
+      the label is not set when that last one has no id or one that is neither
+      a canonical UUID nor such a path
     Then docker create receives the label "claude-sandbox.resume=<id>", the id
       in lower case
+    And the value is read with surrounding white space trimmed (JavaScript's
+      trim): claude's print mode trims it before reading it
+    # Claude Code 2.1.290 also resumes from a transcript FILE (read from its
+    # bundle and checked by running "claude -p --resume <missing file>",
+    # which fails before any conversation starts): interactively, a value
+    # that is an absolute path ending in ".jsonl" (that exact lower-case
+    # extension) is loaded as a transcript and resumed under its base name's
+    # id when that base name, without ".jsonl", is a UUID, claude's own
+    # holder check running on that id; in print mode (-p) every trimmed
+    # value ending in ".jsonl" in any letter case, relative or absolute, is
+    # loaded as a file and resumed under the id its last message names.
+    # The guard reads one rule for both, chosen to over-refuse: the base
+    # name is the best evidence the launcher has without reading the file.
+    And a value ending in ".jsonl" (any letter case) labels the UUID its base
+      name names, lower-cased, exactly as that bare UUID would:
+      | value                                   | label                                   |
+      | /abs/dir/<uuid>.jsonl                   | <uuid>: what claude resumes             |
+      | /abs/dir/../other/<uuid>.jsonl          | <uuid>: ".." changes the directory, not the base name |
+      | dir/<uuid>.jsonl (relative)             | <uuid>: print mode loads it as a file; interactively claude reads it as a title search instead, so the label only over-refuses |
+      | /abs/dir/<UUID>.JSONL                   | <uuid>: print mode reads any case; interactively a title search (over-refusal) |
+      | /abs/dir/not-a-uuid.jsonl               | none: no id is known without reading the file (an accepted gap) |
+      | /abs/dir/<uuid>.json, /abs/dir/<uuid>   | none: not a transcript path; claude reads a title |
+    And "--fork-session" exempts a path the same way it exempts a bare id
+    And these are accepted gaps, unlabelled and unguarded: a resume by
+      conversation title (claude's exact-title match), a transcript whose
+      base name is not a UUID, and a print-mode transcript whose last message
+      names a different conversation than its base name (a renamed or copied
+      file)
     And the arguments are read by the shared walker (CS-LNCH-183), which
       follows claude's own option parser: a prompt word does not stop it, short
       clusters expand ("-pr <id>" resumes <id>), and only a bare "--" that no
@@ -891,7 +920,7 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       | case                                        | why                                            |
       | "--fork-session" is certainly an option (CS-LNCH-183) | a fork gets a new id; forking a live conversation is legitimate |
       | "--resume" or "-r" has no id (the picker)   | nothing is known to guard                      |
-      | the id is not a canonical UUID              | claude's own name search; nothing is known to guard |
+      | the id is not a canonical UUID nor a "<uuid>.jsonl" path | claude's own name search; nothing is known to guard |
       | the resume flag comes after a stopping "--" | it is claude's own "--" tail                   |
       | the launch is headless (CS-LNCH-058)        | SDK double resume is item b090, parked         |
       | the launch is --ralph                       | ralph's claude takes no passthrough            |
@@ -924,7 +953,8 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     Given a passthrough
     Then the walker reports: whether it continues (--continue, -c, a short
       cluster reaching c), whether it gives a resume and the resumed id (a
-      canonical UUID, lower-cased, else ""), whether it forks
+      canonical UUID, or the UUID base name of a ".jsonl" path, CS-LNCH-110,
+      lower-cased, else ""), whether it forks
       (--fork-session), whether it prints (-p, --print) and its -w/--worktree
       value, and every -w/--worktree name it saw, wherever it stood
     And its rules are:
@@ -967,6 +997,10 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       | --resume <a> --mcp-config -r                  | <a>                                           |
       | --add-dir d1 d2 --fork-session                | fork                                          |
       | --add-dir d1 -- --continue                    | nothing (a real stop)                         |
+      | --resume /abs/<uuid>.jsonl                    | resume <uuid>                                 |
+      | -r/abs/<uuid>.jsonl --continue                | resume <uuid>, continue (both labels)         |
+      | --resume /abs/<uuid>.jsonl --fork-session     | resume <uuid>, fork (no resume label)         |
+      | --resume <a> --resume /abs/name.jsonl         | "" (the last one names no id)                 |
     And the resume label is the walker's id unless it forks (GuardedResumeID)
     And the continue guard's input is "continues and does not fork"
       (GuardedContinue, CS-LNCH-182)

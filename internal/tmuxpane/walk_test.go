@@ -105,6 +105,40 @@ var _ = Describe("CS-LNCH-183: WalkClaudeArgs", func() {
 		// The 2.1.290 table: flags added since 2.1.284 take their value.
 		Entry("--thinking -- --continue", sp("--thinking -- --continue"), CA{Continue: true}),
 		Entry("--prefill --fork-session is a prefill", sp("--prefill --fork-session"), CA{}),
+		// CS-LNCH-110: a transcript path resumes its base name's id.
+		Entry("--resume /abs/<uuid>.jsonl", []string{"--resume", "/abs/" + convID + ".jsonl"},
+			CA{ResumeGiven: true, ResumeID: convID}),
+		Entry("-r/abs/<uuid>.jsonl --continue", []string{"-r/abs/" + convID + ".jsonl", "--continue"},
+			CA{ResumeGiven: true, ResumeID: convID, Continue: true}),
+		Entry("--resume=/abs/<uuid>.jsonl --fork-session", []string{"--resume=/abs/" + convID + ".jsonl", "--fork-session"},
+			CA{ResumeGiven: true, ResumeID: convID, Fork: true}),
+		Entry("--resume <a> --resume /abs/name.jsonl", []string{"--resume", a, "--resume", "/abs/name.jsonl"},
+			CA{ResumeGiven: true}),
+		Entry("--resume /abs/<a>.jsonl --unk -r <b>", []string{"--resume", "/abs/" + a + ".jsonl", "--unk", "-r", b},
+			CA{ResumeGiven: true, ResumeID: a}),
+	)
+
+	// CS-LNCH-110: what a --resume value names for the guard.
+	DescribeTable("CS-LNCH-110: ResumeValueID",
+		func(value, want string) {
+			Expect(tmuxpane.ResumeValueID(value)).To(Equal(want), "%q", value)
+		},
+		Entry("a bare UUID", a, a),
+		Entry("an upper-case UUID", strings.ToUpper(a), a),
+		Entry("a UUID with white space around (print mode trims)", " \t"+a+"\ufeff", a),
+		Entry("an absolute transcript path", "/home/u/.claude/projects/-p/"+a+".jsonl", a),
+		Entry("with ..", "/x/../y/"+a+".jsonl", a),
+		Entry("relative (print mode loads it; over-refusal interactively)", "dir/"+a+".jsonl", a),
+		Entry("a bare file name", a+".jsonl", a),
+		Entry("upper case", "/x/"+strings.ToUpper(a)+".JSONL", a),
+		Entry("trimmed", "  /x/"+a+".jsonl\n", a),
+		Entry("a base name that is not a UUID (an accepted gap)", "/x/notes.jsonl", ""),
+		Entry("a UUID-shaped directory, another base name", "/x/"+a+"/t.jsonl", ""),
+		Entry("only the extension", "/x/.jsonl", ""),
+		Entry(".json is not a transcript", "/x/"+a+".json", ""),
+		Entry("a path without an extension", "/x/"+a, ""),
+		Entry("a title", "my session", ""),
+		Entry("empty", "", ""),
 	)
 
 	// CS-LNCH-183, CS-SESS-093: every named worktree is collected wherever it

@@ -1,6 +1,7 @@
 package tmuxpane
 
 import (
+	"path"
 	"regexp"
 	"slices"
 	"strings"
@@ -425,6 +426,34 @@ func GuardedContinue(args []string) bool {
 	return w.Continue && !w.Fork
 }
 
+// ResumeValueID is the conversation a --resume / -r value names for the
+// resume guard (CS-LNCH-110), lower-cased, else "". The value is trimmed as
+// claude's print mode trims it (JavaScript's trim), then it is either a
+// canonical UUID or a transcript path: a value ending in ".jsonl" in any
+// letter case, relative or absolute, ".." or not, whose base name without
+// that extension is a canonical UUID. Claude Code 2.1.290 resumes an
+// absolute "<dir>/<uuid>.jsonl" interactively under that base name's id, and
+// in print mode loads any ".jsonl" value as a file; reading every such value
+// by its base name only over-refuses (an interactive relative or upper-case
+// one is a title search there). A path whose base name is not a UUID names
+// no id the launcher can know without reading the file: "", an accepted gap,
+// as is a resume by title.
+func ResumeValueID(value string) string {
+	v := registry.JSTrim(value)
+	if registry.IsUUID(v) {
+		return strings.ToLower(v)
+	}
+	const ext = ".jsonl"
+	base := path.Base(v)
+	if len(base) <= len(ext) || !strings.EqualFold(base[len(base)-len(ext):], ext) {
+		return ""
+	}
+	if stem := base[:len(base)-len(ext)]; registry.IsUUID(stem) {
+		return strings.ToLower(stem)
+	}
+	return ""
+}
+
 // ClaudeArgs is what claude's own option parser (commander, Claude Code
 // 2.1.290) would see in a passthrough, read so that every guard-relevant
 // mistake over-refuses (CS-LNCH-183).
@@ -434,10 +463,11 @@ type ClaudeArgs struct {
 	Continue bool
 	// ResumeGiven: any --resume / -r form before the stop.
 	ResumeGiven bool
-	// ResumeID is the resumed conversation when a canonical UUID (lower
-	// case), else "". A resume in a certain position replaces it (claude's
-	// last one wins, "" for none or a non-UUID); one in an uncertain position
-	// only sets it while it is still "".
+	// ResumeID is the resumed conversation, lower case (ResumeValueID: a
+	// canonical UUID or a "<uuid>.jsonl" transcript path, CS-LNCH-110), else
+	// "". A resume in a certain position replaces it (claude's last one wins,
+	// "" for none or a value naming no id); one in an uncertain position only
+	// sets it while it is still "".
 	ResumeID string
 	// Fork: --fork-session where it is certainly an option.
 	Fork bool
@@ -548,10 +578,7 @@ func WalkClaudeArgs(args []string) ClaudeArgs {
 	var w ClaudeArgs
 	resume := func(value string, uncertain bool) {
 		w.ResumeGiven = true
-		id := ""
-		if registry.IsUUID(value) {
-			id = strings.ToLower(value)
-		}
+		id := ResumeValueID(value)
 		switch {
 		case !uncertain:
 			w.ResumeID = id // claude's last resume wins
