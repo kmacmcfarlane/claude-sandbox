@@ -1718,6 +1718,43 @@ Tagging this way means every project resolving the same shared Dockerfile — a 
 
 See `scaffold/Dockerfile.example` in this repo for a commented template (`claude-sandbox init` seeds it into the project as `.claude-sandbox/Dockerfile.example`).
 
+### LSP plugins
+
+The base image ships no language servers; a child Dockerfile may add them. Register the
+matching Claude Code LSP plugin natively, with `/plugin install` or from a shell:
+
+```bash
+claude plugin marketplace add anthropics/claude-plugins-official   # once, if the marketplace is unknown
+claude plugin install gopls-lsp@claude-plugins-official
+claude plugin install typescript-lsp@claude-plugins-official
+claude plugin install pyright-lsp@claude-plugins-official
+```
+
+Restart Claude Code (or `/reload-plugins`), then verify with
+`claude plugin details gopls-lsp@claude-plugins-official` or `claude plugin list`. The install
+writes the config dir's `plugins/installed_plugins.json` and `settings.json`, the host's files.
+
+The in-container helper `setup-lsp-plugins` has been removed; run the `claude plugin install`
+commands instead. Seeded project docs (`.claude-sandbox/agent/LSP_TOOLS.md`) from earlier
+`init-ralph` runs may still name it; they are never overwritten, and the session's CLAUDE.md
+tells the agent to use the native commands.
+
+**Migration (only if you ran the old script).** It left placeholder records in
+`plugins/installed_plugins.json` (`"gitCommitSha": ""`) and `enabledPlugins` entries in
+`settings.json`. They keep working, but `install` and `update` never replace them. To get
+normal update tracking, find them and reinstall:
+
+```bash
+jq -r '.plugins | to_entries[] | select(.value[] | .gitCommitSha == "") | .key' \
+  "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/installed_plugins.json"
+claude plugin uninstall <id> && claude plugin install <id>   # for each id printed
+```
+
+Then delete the leftovers `<config dir>/.setup-lsp-plugins.lock` and any
+`<config dir>/*.setup-lsp-plugins.bak`. A `settings.json` key that names a plugin the marketplace
+does not contain (e.g. `pyright@claude-plugins-official`; the plugin is `pyright-lsp`) is dead and
+can be removed.
+
 ### Parent directory search
 
 The config, Dockerfile, and env files (under `.claude-sandbox/`) are all resolved by walking parent directories from the project root (like direnv) — the **physical** root, symlinks resolved, so the parents climbed are those of the real checkout, not of a symlink it was reached through (see [Multiple sessions](#multiple-sessions)). A linked git worktree walks its main checkout's parents too (see [Linked git worktrees](#linked-git-worktrees-paseo-worktrees-git-worktree-add-elsewhere)). `config.yaml` and `env` **cascade** — every file found from the root down to the project is merged/layered, more-local values winning (see [Config cascade](#config-cascade-monorepo--workspace-defaults)). The child `Dockerfile` is **nearest-wins** — the closest one up the tree is used wholesale.
@@ -2067,7 +2104,7 @@ Five images take part in a launch, and the container runs the last of them:
 | Image | Built from | Rebuilds when |
 |---|---|---|
 | `claude-sandbox` | `Dockerfile` — OS, toolchains, Docker CLI, Python venv. **No Claude Code and no sandbox files**: it `COPY`s nothing from the repo. | the content of `Dockerfile` changed |
-| `claude-sandbox-tools` | `Dockerfile.tools` — the sandbox binary (and its `ralph` link), `entrypoint.sh`, `setup-lsp-plugins`, `notify-webhook`, `logstream/`, `PROMPT_RALPH.md`, the bundled Discord MCP server, the managed-settings hooks and the version stamp | the content of `Dockerfile.tools` or of a baked source (`cmd/`, `internal/`, `go.mod`/`go.sum`, `assets.go`, the embedded `scaffold/`, `scaffold-ralph/`, `container-context.md` and `mcp-servers.json`, `logstream/`, `entrypoint.sh`, `PROMPT_RALPH.md`, `mcp/discord-notify/`, `notification-hooks.json`, `bin/setup-lsp-plugins`, `bin/notify-webhook` — every path `Dockerfile.tools` `COPY`s; `_test.go` files and build-context debris such as `__pycache__/` excluded) changed |
+| `claude-sandbox-tools` | `Dockerfile.tools` — the sandbox binary (and its `ralph` link), `entrypoint.sh`, `notify-webhook`, `logstream/`, `PROMPT_RALPH.md`, the bundled Discord MCP server, the managed-settings hooks and the version stamp | the content of `Dockerfile.tools` or of a baked source (`cmd/`, `internal/`, `go.mod`/`go.sum`, `assets.go`, the embedded `scaffold/`, `scaffold-ralph/`, `container-context.md` and `mcp-servers.json`, `logstream/`, `entrypoint.sh`, `PROMPT_RALPH.md`, `mcp/discord-notify/`, `notification-hooks.json`, `bin/notify-webhook` — every path `Dockerfile.tools` `COPY`s; `_test.go` files and build-context debris such as `__pycache__/` excluded) changed |
 | `claude-sandbox-cli` | `Dockerfile.cli` — installs Claude Code, pinned to a version | the content of `Dockerfile.cli` changed, or you accept a Claude Code update |
 | `claude-sandbox-df-…` | your child `.claude-sandbox/Dockerfile`, `FROM claude-sandbox` | the child Dockerfile's content changed, or the base image ID did |
 | `<base-or-child>:run` | a generated "cap": `FROM <base-or-child>` + `COPY --link` of `/opt/claude-sandbox/` and the managed-settings drop-in from `claude-sandbox-tools`, `ENV CLAUDE_SANDBOX_VERSION`, + `COPY --link` of the CLI from `claude-sandbox-cli` | any of the three parents' image IDs changed |
@@ -2221,7 +2258,6 @@ Dependencies are ordinary Go modules — nothing is vendored. The shim's `docker
 ```
 bin/
   claude-sandbox   Thin shim: builds the Go binary when stale, then execs it
-  setup-lsp-plugins  In-container helper: registers the gopls/typescript/pyright LSP plugins (shipped in the tools image)
   notify-webhook   Body of the baked Notification hook: posts which session is waiting (shipped in the tools image)
   dist/            Built binary + build cache (gitignored)
 cmd/claude-sandbox/  Go CLI entry (launcher; doubles as the in-container ralph runner via argv0)
@@ -2260,7 +2296,7 @@ logstream/
 mcp/
   discord-notify/       Discord notification MCP server — bundled into the tools image
 Dockerfile                          Base image: Debian + build-essential, Docker CLI/compose/buildx, Node.js 22 (no Claude Code, no sandbox files)
-Dockerfile.tools                    Sandbox tools image: Go binary, entrypoint, setup-lsp-plugins, notify-webhook, logstream, MCP bundle, hooks, version; copied onto the base/child by the run cap
+Dockerfile.tools                    Sandbox tools image: Go binary, entrypoint, notify-webhook, logstream, MCP bundle, hooks, version; copied onto the base/child by the run cap
 Dockerfile.cli                      Claude Code CLI image, pinned to a version; copied onto the base/child by the run cap
 entrypoint.sh                       Remaps container user UID/GID to match the host; grants Docker socket access; root part on a fixed PATH, idempotent on restart
 notification-hooks.json             Notification hooks, baked into the tools image as a managed-settings drop-in

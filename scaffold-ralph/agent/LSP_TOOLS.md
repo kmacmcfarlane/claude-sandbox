@@ -22,7 +22,11 @@ provides navigation-oriented operations:
 
 **Supported languages:** any language whose server is installed on PATH and
 registered with Claude Code. In the sandbox, install servers via the child
-Dockerfile and run `setup-lsp-plugins` to register them. If `LSP` returns
+Dockerfile and register the matching plugin natively, e.g.
+`claude plugin install gopls-lsp@claude-plugins-official` (likewise
+`typescript-lsp`, `pyright-lsp`; run
+`claude plugin marketplace add anthropics/claude-plugins-official` first if the
+marketplace is unknown). If `LSP` returns
 "No LSP server available for file type", the server for that language isn't
 installed — fall back to grep/read.
 

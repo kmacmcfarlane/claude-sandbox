@@ -25,7 +25,7 @@
 #   launcher copies them onto this image at launch, from the claude-sandbox-cli
 #   and claude-sandbox-tools images (a one-layer "cap" tagged <this-image>:run).
 #   A RUN step that invokes `claude`, `claude-sandbox` or `ralph` will fail.
-#   Anything needing them (plugin registration, `setup-lsp-plugins`) belongs at
+#   Anything needing them (plugin registration) belongs at
 #   runtime. This is also why a sandbox update never rebuilds this image.
 #   Do not install the CLI here either: the installer leaves state in
 #   /home/claude/.claude, which the entrypoint moves into ~/.claude, and the

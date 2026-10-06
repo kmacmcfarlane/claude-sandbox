@@ -29,13 +29,24 @@ rule, such as dev-flow research, follows that rule instead.
 ## LSP Setup
 
 The base image ships no language servers; a child Dockerfile may add them. If
-gopls, typescript-language-server or pyright is installed, run
-`setup-lsp-plugins` (in `/opt/claude-sandbox/bin`) to register and enable the
-matching `claude-plugins-official` LSP plugin. It writes the config dir's
-`plugins/installed_plugins.json` and `settings.json`, which are the host's
-files, so this is a one-time setup shared by every sandbox, and the
-`enabledPlugins` entries also reach host (non-sandbox) sessions (idempotent;
-restart Claude Code afterwards). Use `setup-lsp-plugins --check` to verify status.
+gopls, typescript-language-server or pyright is installed, install the matching
+`claude-plugins-official` LSP plugin natively, with `/plugin install` or from
+Bash:
+
+- `claude plugin install gopls-lsp@claude-plugins-official`
+- `claude plugin install typescript-lsp@claude-plugins-official`
+- `claude plugin install pyright-lsp@claude-plugins-official`
+
+If the marketplace is unknown, run
+`claude plugin marketplace add anthropics/claude-plugins-official` first. Restart
+Claude Code (or `/reload-plugins`) afterwards, and verify with
+`claude plugin details <plugin>@claude-plugins-official` or `claude plugin list`.
+The install writes the config dir's `plugins/installed_plugins.json` and
+`settings.json`, which are the host's files, so it is a one-time setup shared by
+every sandbox, and the `enabledPlugins` entries also reach host (non-sandbox)
+sessions. `setup-lsp-plugins` has been removed; if a project doc (for example an
+older `.claude-sandbox/agent/LSP_TOOLS.md`) tells you to run it, run the
+`claude plugin install` commands above instead — do not stop to ask for it.
 
 ## Container Details
 
