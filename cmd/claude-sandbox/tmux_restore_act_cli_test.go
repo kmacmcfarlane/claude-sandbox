@@ -448,7 +448,6 @@ var _ = Describe("tmux restore, one pane (CS-TMUX-052..063)", func() {
 			Expect(setenv).To(HaveKeyWithValue("CLAUDE_CONFIG_DIR", BeNil()))
 
 			g := newCLIFixture()
-			g.env.Now = f.env.Now // the notice is stamped against the fixed clock, not today
 			g.envmap["TMUX"], g.envmap["TMUX_PANE"] = "x", "%7"
 			g.envmap["CLAUDE_CONFIG_DIR"] = cfgDir
 			g.env.ResurrectDir = dir
@@ -614,7 +613,6 @@ var _ = Describe("tmux restore, one pane (CS-TMUX-052..063)", func() {
 			Expect(unsets()).To(BeZero())
 
 			g := newCLIFixture()
-			g.env.Now = f.env.Now // the notice is stamped against the fixed clock, not today
 			g.envmap["TMUX"], g.envmap["TMUX_PANE"] = "x", "%7"
 			g.fake.On("tmux display-message", "main\t2\t0\t1\t2\t\n", nil)
 			Expect(g.run("tmux", "restore", "--drop")).To(Equal(0))
@@ -697,6 +695,8 @@ var _ = Describe("tmux restore, one pane (CS-TMUX-052..063)", func() {
 
 			for _, args := range [][]string{{"--detach"}, {"headless", "--"}} {
 				g := newCLIFixture()
+				g.env.Now = f.env.Now                                   // a fresh notice on the fixed clock
+				g.env.IsTerminal = func(io.Writer) bool { return true } // only --detach/headless stand in the way
 				notice(g)
 				g.fake.On("docker inspect", "running 2026-09-29T12:00:00Z\n", nil)
 				g.run(args...)
