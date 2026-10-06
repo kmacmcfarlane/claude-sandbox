@@ -37,6 +37,7 @@ RUN --mount=type=cache,id=claude-sandbox-apt,target=/var/cache/apt,sharing=locke
     jq \
     less \
     openssh-client \
+    poppler-utils \
     python3 \
     python3-dev \
     python3-pip \
