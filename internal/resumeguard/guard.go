@@ -24,6 +24,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode"
 
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/launch"
@@ -67,8 +68,12 @@ type Check struct {
 	// ProcRoot is /proc; "" means the real one. GOOS is runtime.GOOS unless
 	// set. Sleep spaces retries; nil means time.Sleep.
 	ProcRoot string
-	GOOS     string
-	Sleep    func(time.Duration)
+	// MachineIDPath is the file Claude Code reads for the machine id in
+	// pidDomain (/etc/machine-id); "" means that one, and panics under go test
+	// so a test never reads the real /etc.
+	MachineIDPath string
+	GOOS          string
+	Sleep         func(time.Duration)
 }
 
 // Verdict is the check's answer. Open is true when the launch must not go
@@ -396,6 +401,38 @@ func (c Check) sleep(d time.Duration) {
 	time.Sleep(d)
 }
 
+// machineID is /etc/machine-id as Claude Code reads it: utf8, trimmed, ""
+// when absent or unreadable.
+func (c Check) machineID() string {
+	p := c.MachineIDPath
+	if p == "" {
+		if testing.Testing() {
+			panic("resumeguard: MachineIDPath unset under go test (would read the real /etc/machine-id)")
+		}
+		p = "/etc/machine-id"
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return ""
+	}
+	return JSTrim(string(b))
+}
+
+// JSTrim is String.prototype.trim: invalid UTF-8 first becomes U+FFFD (as
+// the utf8 decode does), then the ECMAScript WhiteSpace and LineTerminator
+// code points are trimmed from both ends — a BOM goes, U+0085 stays, which
+// strings.TrimSpace gets the other way round.
+func JSTrim(s string) string {
+	s = strings.ToValidUTF8(s, "\uFFFD")
+	return strings.TrimFunc(s, func(r rune) bool {
+		switch r {
+		case '\t', '\v', '\f', ' ', '\u00a0', '\ufeff', '\n', '\r', '\u2028', '\u2029':
+			return true
+		}
+		return unicode.Is(unicode.Zs, r)
+	})
+}
+
 func (c Check) procRoot() string {
 	if c.ProcRoot != "" {
 		return c.ProcRoot
@@ -456,8 +493,11 @@ func (c Check) hostCheck(domain string, domainErr error) Verdict {
 	return Verdict{}
 }
 
-// hostDomain is the launcher's own pid namespace as Claude Code records it,
-// "linux::pid:[<inode>]"; "" off Linux, where the host check is skipped.
+// hostDomain is the launcher's own pid domain as Claude Code records it
+// (Claude Code 2.1.290 reads only /etc/machine-id): "linux:<machine-id>:<readlink /proc/self/ns/pid>", the id
+// being /etc/machine-id trimmed (no other file is tried; absent or unreadable
+// = empty, as in a container), so "linux::pid:[<inode>]" without one; ""
+// off Linux, where the host check is skipped.
 func (c Check) hostDomain() (string, error) {
 	goos := c.GOOS
 	if goos == "" {
@@ -470,7 +510,7 @@ func (c Check) hostDomain() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return "linux::" + ns, nil
+	return "linux:" + c.machineID() + ":" + ns, nil
 }
 
 // procLive reports whether pid is still the process that wrote a record with

@@ -73,7 +73,9 @@ type Record struct {
 	StartedAt int64 `json:"startedAt"`
 	// ProcStart is field 22 of /proc/<pid>/stat (starttime) as decimal text.
 	ProcStart string `json:"procStart"`
-	// PIDDomain is "linux::pid:[<inode>]": the pid namespace the pid is in.
+	// PIDDomain is "linux:<machine-id>:pid:[<inode>]": the pid namespace the
+	// pid is in, behind the trimmed /etc/machine-id (empty in a container, which
+	// has none: "linux::pid:[<inode>]").
 	PIDDomain  string `json:"pidDomain"`
 	Name       string `json:"name"`
 	NameSource string `json:"nameSource"`

@@ -207,7 +207,10 @@ var _ = Describe("the resume guard (CS-LNCH-110, CS-SESS-065..069)", func() {
 		Expect(os.Symlink("pid:[42]", filepath.Join(proc, "self", "ns", "pid"))).To(Succeed())
 		writeFile(filepath.Join(proc, "4242", "stat"), "4242 (claude) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 777 1\n")
 		writeFile(filepath.Join(f.home, ".claude", "sessions", "4242.json"),
-			fmt.Sprintf(`{"pid":4242,"sessionId":%q,"startedAt":1,"procStart":"777","pidDomain":"linux::pid:[42]"}`, guardID))
+			fmt.Sprintf(`{"pid":4242,"sessionId":%q,"startedAt":1,"procStart":"777","pidDomain":"linux:abc123:pid:[42]"}`, guardID))
+		mid := filepath.Join(f.home, "machine-id")
+		writeFile(mid, "abc123\n")
+		f.env.MachineIDPath = mid
 		f.env.ProcRoot = proc
 		Expect(f.run("--new", "--", "--resume", guardID)).To(Equal(4))
 		Expect(creates(f)).To(BeEmpty())
