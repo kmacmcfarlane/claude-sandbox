@@ -780,8 +780,8 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
       creation) all name other ids has switched away: it does not hold <id>
     And a record at the class that started before the container was created
       is a leftover of an earlier container with the same class, and is ignored
-    And a record whose pidDomain is the launcher's own ("linux::" + readlink
-      /proc/self/ns/pid) belongs to a claude on the host, not to the container,
+    And a record whose pidDomain is the launcher's own ("linux:" + machine-id +
+      ":" + readlink /proc/self/ns/pid, CS-SESS-068) belongs to a claude on the host, not to the container,
       even when the container's registry dir is the host's <config dir>/sessions
       and its pid % 256 equals the class: only CS-SESS-068 judges it
     And a record that names <id> counts only once its process is confirmed
@@ -837,7 +837,7 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
     Then the records in ~/.claude/sessions and in <config dir>/sessions are also
       read, and one counts when all of these hold:
       | field     | condition                                                        |
-      | pidDomain | equals "linux::" + readlink /proc/self/ns/pid (the launcher's own namespace) |
+      | pidDomain | equals "linux:" + machine-id + ":" + readlink /proc/self/ns/pid (the launcher's own domain) |
       | sessionId | equals <id>                                                      |
       | pid       | /proc/<pid> exists and is live (below)                           |
     And liveness is read from /proc/<pid>/stat, split after the LAST ")" (a comm
@@ -860,6 +860,11 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
       (CS-SESS-067)
     And a /proc/self/ns/pid that cannot be read fails closed
     And on other systems the host check is skipped
+    And the machine-id is read exactly as Claude Code does (2.1.290): only
+      /etc/machine-id, as text, trimmed of surrounding whitespace (a trailing
+      newline included); absent or unreadable is empty, giving
+      "linux::pid:[<inode>]" as in a container, and no other file (not
+      /var/lib/dbus/machine-id) is tried
 
   @new
   Scenario: CS-SESS-069 The check runs under the launch lock, and a labelled launch never runs without it

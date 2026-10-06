@@ -264,7 +264,7 @@ func peerRootFrom(getenv func(string) string, home string, found, removing []ses
 func guardResume(env *Env, in launch.Inputs, found []sessions.Session, derr error) error {
 	v := resumeguard.Check{
 		ID: in.Resume, Sessions: found, DiscoveryErr: derr, Runner: env.Runner,
-		Home: in.Home, ConfigDir: in.ConfigDir(), ProcRoot: env.ProcRoot,
+		Home: in.Home, ConfigDir: in.ConfigDir(), ProcRoot: env.ProcRoot, MachineIDPath: env.MachineIDPath,
 	}.Run()
 	if !v.Open {
 		return nil

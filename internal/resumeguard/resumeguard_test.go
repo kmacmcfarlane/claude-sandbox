@@ -93,7 +93,8 @@ func (f *fixture) check(ss ...sessions.Session) resumeguard.Check {
 	return resumeguard.Check{
 		ID: convID, Sessions: ss, Home: f.home, ConfigDir: f.config,
 		ProcRoot: f.proc, GOOS: "linux", Runner: f.fake,
-		Sleep: func(time.Duration) { f.sleeps++ },
+		MachineIDPath: filepath.Join(f.home, "no-machine-id"),
+		Sleep:         func(time.Duration) { f.sleeps++ },
 	}
 }
 
@@ -387,6 +388,26 @@ var _ = Describe("resume guard", func() {
 		host := "linux::" + hostNS
 		var dir string
 		BeforeEach(func() { dir = filepath.Join(f.home, ".claude", "sessions") })
+
+		It("CS-SESS-068: the machine-id is /etc/machine-id trimmed, empty when absent, and part of the host domain", func() {
+			f.procStat(263, "777")
+			// No machine-id (a container-like host): linux::<ns> matches.
+			f.write(dir, 7+256, record(7+256, convID, after, host, "777"))
+			Expect(f.check().Run().Open).To(BeTrue())
+			Expect(os.Remove(filepath.Join(dir, fmt.Sprint(7+256)+".json"))).To(Succeed())
+
+			// With one (trailing newline): only linux:<mid>:<ns> matches.
+			mid := filepath.Join(f.home, "machine-id")
+			Expect(os.WriteFile(mid, []byte("0123abcd\n"), 0o644)).To(Succeed())
+			c := f.check()
+			c.MachineIDPath = mid
+			f.write(dir, 7+256, record(7+256, convID, after, host, "777"))
+			Expect(c.Run().Open).To(BeFalse(), "an empty-id record is not this host's")
+			f.write(dir, 7+256, record(7+256, convID, after, "linux:0123abcd:"+hostNS, "777"))
+			Expect(c.Run().Open).To(BeTrue())
+			f.write(dir, 7+256, record(7+256, convID, after, "linux:0123abcd\n:"+hostNS, "777"))
+			Expect(c.Run().Open).To(BeFalse())
+		})
 
 		It("CS-SESS-068: procStart is field 22 of /proc/<pid>/stat, split after the last \")\"", func() {
 			// A line from a live 2.1.284 session whose record said procStart "50424".

@@ -102,7 +102,8 @@ func newCLIFixture() *cliFixture {
 		LookupEnv: func(k string) (string, bool) { v, ok := f.envmap[k]; return v, ok },
 		Lock:      f.lock,
 		// Never the real temp root: a launch sweeps it (CS-LNCH-081).
-		TempRoot: f.tmp,
+		TempRoot:      f.tmp,
+		MachineIDPath: filepath.Join(f.tmp, "no-machine-id"),
 		// Nor the real mountinfo (CS-LNCH-162): no mounts, so an explicit
 		// nested TMPDIR is trusted unless a test says otherwise.
 		MountInfo: func() (string, error) { return "", nil },
