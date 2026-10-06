@@ -120,6 +120,8 @@ var _ = Describe("CS-LNCH-183: WalkClaudeArgs", func() {
 		Entry("-w a --newbool -w b: the drift shape keeps both", sp("-w a --newbool -w b"), []string{"a", "b"}),
 		Entry("uncertain tail", sp("--unk -- -w b"), []string{"b"}),
 		Entry("a flag's value", sp("--name -w x"), []string{"x"}),
+		Entry("--worktree=NAME as a flag's value", sp("--name --worktree=x"), []string{"x"}),
+		Entry("a glued -wNAME as a flag's value", sp("--append-system-prompt -wy"), []string{"y"}),
 		Entry("glued, = and cluster forms", sp("-wa --worktree=b -pwc"), []string{"a", "b", "c"}),
 		Entry("duplicates once", sp("-w a -w a"), []string{"a"}),
 		Entry("after a stopping --", sp("-- -w a"), []string(nil)),

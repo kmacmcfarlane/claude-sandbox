@@ -16,6 +16,7 @@ import (
 	"slices"
 
 	"github.com/kmacmcfarlane/claude-sandbox/internal/launch"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/registry"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/resumeguard"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/sessions"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/tmuxpane"
@@ -153,10 +154,13 @@ func configDirOf(env *Env, home string) string {
 // directory the launch would continue in, named when the verdict has no
 // holder record's cwd.
 func continueRefusal(v resumeguard.Verdict, dir, home string, path continuePath) error {
+	// CS-SESS-093: a record's cwd and an error text are sandbox-writable;
+	// print them cleaned, so no escape sequence reaches the terminal.
 	cwd := dir
 	if v.Cwd != "" {
-		cwd = v.Cwd
+		cwd = registry.Printable(v.Cwd)
 	}
+	reason := registry.Printable(v.Reason)
 	id := v.SessionID
 	const why = "       a second session on one conversation would interleave writes into one transcript.\n"
 
@@ -186,7 +190,7 @@ func continueRefusal(v resumeguard.Verdict, dir, home string, path continuePath)
 	default:
 		msg = fmt.Sprintf("Error: cannot tell whether a conversation in %s is already open elsewhere\n"+
 			"       (%s), so --continue is not run.\n"+
-			"       Fix that and retry.\n", cwd, v.Reason)
+			"       Fix that and retry.\n", cwd, reason)
 	}
 
 	open := ""

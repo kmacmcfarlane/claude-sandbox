@@ -90,6 +90,11 @@ func newCLIFixture() *cliFixture {
 		"CLAUDE_SANDBOX_REPO_ROOT": f.repo,
 		"CLAUDE_SANDBOX_BASE_ONLY": "1",
 	}
+	// Never the real /proc (the guards' host check reads it): a scratch tree
+	// with only this namespace's link; a test needing more sets its own.
+	proc := filepath.Join(base, "proc")
+	Expect(os.MkdirAll(filepath.Join(proc, "self", "ns"), 0o755)).To(Succeed())
+	Expect(os.Symlink("pid:[4026531836]", filepath.Join(proc, "self", "ns", "pid"))).To(Succeed())
 	f.lock = &fakeLock{fake: f.fake}
 	f.env = &Env{
 		Runner:   f.fake,
@@ -104,6 +109,7 @@ func newCLIFixture() *cliFixture {
 		// Never the real temp root: a launch sweeps it (CS-LNCH-081).
 		TempRoot:      f.tmp,
 		MachineIDPath: filepath.Join(f.tmp, "no-machine-id"),
+		ProcRoot:      proc,
 		// Nor the real mountinfo (CS-LNCH-162): no mounts, so an explicit
 		// nested TMPDIR is trusted unless a test says otherwise.
 		MountInfo: func() (string, error) { return "", nil },

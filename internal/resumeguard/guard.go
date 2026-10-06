@@ -69,7 +69,8 @@ type Check struct {
 	// the host claude's registries.
 	Home      string
 	ConfigDir string
-	// ProcRoot is /proc; "" means the real one. GOOS is runtime.GOOS unless
+	// ProcRoot is /proc; "" means the real one, and panics under go test.
+	// GOOS is runtime.GOOS unless
 	// set. Sleep spaces retries; nil means time.Sleep.
 	ProcRoot string
 	// MachineIDPath is the file Claude Code reads for the machine id in
@@ -471,6 +472,9 @@ func JSTrim(s string) string {
 func (c Check) procRoot() string {
 	if c.ProcRoot != "" {
 		return c.ProcRoot
+	}
+	if testing.Testing() {
+		panic("resumeguard: ProcRoot unset under go test (would read the real /proc); set Check.ProcRoot / Env.ProcRoot to a scratch directory")
 	}
 	return "/proc"
 }

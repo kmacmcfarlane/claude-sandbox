@@ -8,6 +8,7 @@ package main
 // internal/resumeguard/continue_test.go.
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -71,8 +72,10 @@ var _ = Describe("the continue guard (CS-LNCH-182, CS-SESS-093..096)", func() {
 	// no docker top (CS-SESS-089).
 	holder := func(g *cliFixture, cwd string) string {
 		r := filepath.Join(g.home, ".cache", "claude-sandbox", "peers", "sessions")
-		writeFile(filepath.Join(r, "263.json"), fmt.Sprintf(`{"pid":263,"sessionId":%q,"cwd":%q,"startedAt":%d}`,
-			heldID, cwd, time.Now().Add(time.Hour).UnixMilli()))
+		cwdJSON, err := json.Marshal(cwd) // a JSON string: control characters as \u escapes
+		Expect(err).NotTo(HaveOccurred())
+		writeFile(filepath.Join(r, "263.json"), fmt.Sprintf(`{"pid":263,"sessionId":%q,"cwd":%s,"startedAt":%d}`,
+			heldID, cwdJSON, time.Now().Add(time.Hour).UnixMilli()))
 		return contRow{name: "cs-proj-email", project: g.proj, instance: "email", class: "7", state: "running",
 			created: time.Now(), registry: r}.String() + "\n"
 	}
@@ -121,6 +124,7 @@ var _ = Describe("the continue guard (CS-LNCH-182, CS-SESS-093..096)", func() {
 				{"--new", "--", "-rc"},
 				{"--branch"},
 				{"--ralph"},
+				{"--ralph", "--", "--continue"},
 			} {
 				g := newCLIFixture()
 				Expect(g.run(args...)).To(Equal(0), "%v: %s", args, g.errw.String())
@@ -184,6 +188,34 @@ var _ = Describe("the continue guard (CS-LNCH-182, CS-SESS-093..096)", func() {
 			Expect(msg).NotTo(ContainSubstring("Attach to it"))
 			Expect(msg).NotTo(ContainSubstring("Or pick one"))
 			Expect(creates(g)).To(BeEmpty())
+		})
+
+		It("CS-SESS-093: a record's cwd carrying ESC and BEL is matched raw but printed without control characters", func() {
+			// filepath.Clean folds the trailing "/..", so the record still
+			// matches the launch directory.
+			evil := f.proj + "/\u001b]0;PWNED\u0007\u001b[2J/.."
+			f.fake.On("docker ps", holder(f, evil), nil)
+			Expect(f.run("--new", "--", "--continue")).To(Equal(4))
+			msg := f.errw.String()
+			Expect(msg).To(ContainSubstring("Error: --continue would reopen the newest conversation in "))
+			for _, r := range msg {
+				if r != '\n' {
+					Expect(r >= 0x20 && r != 0x7f).To(BeTrue(), "control character %U in %q", r, msg)
+				}
+			}
+			Expect(msg).To(ContainSubstring("]0;PWNED [2J/.."), "the rest of the cwd stays readable")
+		})
+
+		It("CS-SESS-094: a reason carrying control characters is printed cleaned", func() {
+			bad := filepath.Join(f.home, "reg\u001b[2Jdir")
+			writeFile(bad, "not a directory")
+			row := contRow{name: "cs-proj-email", project: f.proj, instance: "email", class: "7", state: "running",
+				created: time.Now(), registry: bad}.String() + "\n"
+			f.fake.On("docker ps", row, nil)
+			Expect(f.run("--new", "--", "--continue")).To(Equal(4))
+			msg := f.errw.String()
+			Expect(msg).To(ContainSubstring("Error: cannot tell whether a conversation in "))
+			Expect(msg).NotTo(ContainSubstring("\u001b"))
 		})
 
 		It("CS-SESS-093: a holder elsewhere does not refuse; --fork-session is the way out", func() {
@@ -344,6 +376,19 @@ var _ = Describe("the continue guard (CS-LNCH-182, CS-SESS-093..096)", func() {
 			g.fake.On("docker top", "PID  COMMAND\n1  claude\n", nil)
 			Expect(g.run("--join=email", "--", "--verbose")).To(Equal(0), g.errw.String())
 			Expect(g.sessionLine()).To(HavePrefix("docker exec"))
+		})
+
+		It("CS-SESS-095: a young continue reservation (under 60 s) of the project refuses a join", func() {
+			r := filepath.Join(f.home, "reg-empty")
+			rows := contRow{name: "cs-proj-email", project: f.proj, instance: "email", class: "7", state: "running",
+				created: time.Now(), registry: r, hash: currentHash(f)}.String() + "\n" +
+				contRow{name: "cs-proj-otter", project: f.proj, instance: "otter", class: "9", state: "created",
+					created: time.Now().Add(-10 * time.Second), registry: r, cont: true}.String() + "\n"
+			f.fake.On("docker ps", rows, nil)
+			f.fake.On("docker top", "PID  COMMAND\n1  claude\n", nil)
+			Expect(f.run("--join=email", "--", "--continue")).To(Equal(4), f.errw.String())
+			Expect(f.errw.String()).To(ContainSubstring("and 'otter' (cs-proj-otter) is starting a session there"))
+			Expect(f.fake.Session).To(BeNil())
 		})
 
 		It("CS-SESS-095: an orphaned continue reservation (older than 60 s) does not refuse a join", func() {

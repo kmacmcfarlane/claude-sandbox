@@ -968,6 +968,11 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
       """
     And <cwd> is the holder record's cwd, and <id> its sessionId (a canonical
       UUID, from the hardened reader)
+    And every printed value that comes from a registry record or an error
+      text (<cwd>, <reason>) is printed cleaned (registry.Printable: control
+      characters become spaces, format characters are dropped, whitespace
+      collapses), because any sandbox can write its record: an ESC or BEL in a
+      cwd never reaches the terminal. Matching uses the raw value
     And the holder is '<noun>' (<container>), or <container> without a noun,
       and the "Attach to it" line is printed only for a mode-claude holder
       with a noun (CS-SESS-065)
@@ -984,6 +989,10 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
       the launcher's own pid domain, a record whose cwd is not in T, and a
       record ruled dead by CS-SESS-089 hold nothing
     And a record's kind and entrypoint are not consulted
+    And a sandbox's record at a watched class (after its creation, not in the
+      launcher's own pid domain) with no cwd cannot be placed, so it fails
+      closed as a malformed record does (CS-SESS-094): if a later Claude Code
+      dropped or renamed the field, every holder would otherwise vanish
 
   @new
   Scenario: CS-SESS-094 A claude on the host counts too; the check fails closed, runs under the lock, and once before the image build
@@ -996,15 +1005,16 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
     And what cannot be read fails closed exactly as CS-SESS-067 lists
       (discovery failed; a running sandbox's registry dir exists but cannot be
       read; a malformed record at a watched class, after the retries for a
-      partial write; more than 10000 entries; docker top failed or timed out;
-      an unreadable /proc/self/ns/pid), with exit 4 and:
+      partial write; a record there with no cwd (CS-SESS-093); more than
+      10000 entries; docker top failed or timed out; an unreadable
+      /proc/self/ns/pid), with exit 4 and:
       """
       Error: cannot tell whether a conversation in <cwd> is already open elsewhere
              (<reason>), so --continue is not run.
              Fix that and retry.
       """
       followed by the path's fork and pick-or-name lines (CS-SESS-093)
-    And a malformed host record is skipped (CS-SESS-068)
+    And a malformed host record, or one with no cwd, is skipped (CS-SESS-068)
     And the check runs inside the launch lock, after discovery (which removes
       stale reservations, CS-SESS-052) and before docker create, on every
       create attempt, so of two --continue launches racing in one directory the

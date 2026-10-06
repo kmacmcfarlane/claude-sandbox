@@ -131,6 +131,21 @@ var _ = Describe("continue guard", func() {
 			Expect(v.Reason).To(ContainSubstring("docker top cs-a"))
 		})
 
+		It("CS-SESS-093: a sandbox record at a watched class with no cwd fails closed; a host one is skipped", func() {
+			f.write(reg, 7, fmt.Sprintf(`{"pid":7,"sessionId":%q,"startedAt":%d,"pidDomain":"linux::pid:[1]"}`, otherID, after.UnixMilli()))
+			v := cont(box("cs-a", "running", "7", "/elsewhere")).RunContinue()
+			Expect(v.Open).To(BeTrue())
+			Expect(v.Holder).To(BeNil())
+			Expect(v.Reason).To(ContainSubstring("7.json: no cwd"))
+			// A leftover from before the container, or another class, is not watched.
+			f.write(reg, 7, fmt.Sprintf(`{"pid":7,"sessionId":%q,"startedAt":%d}`, otherID, created.Add(-time.Hour).UnixMilli()))
+			Expect(cont(box("cs-a", "running", "7", "/elsewhere")).RunContinue().Open).To(BeFalse())
+
+			f.procStat(4242, "77")
+			f.write(filepath.Join(f.config, "sessions"), 4242, fmt.Sprintf(`{"pid":4242,"sessionId":%q,"startedAt":1,"procStart":"77","pidDomain":"linux::%s"}`, otherID, hostNS))
+			Expect(cont().RunContinue().Open).To(BeFalse(), "CS-SESS-068: a host record without cwd is skipped")
+		})
+
 		It("CS-SESS-093: a record's kind and entrypoint are not consulted (F0)", func() {
 			f.write(reg, 7, fmt.Sprintf(`{"pid":7,"sessionId":%q,"cwd":%q,"startedAt":%d,"kind":"bg","entrypoint":"sdk-ts","pidDomain":"linux::pid:[1]"}`,
 				otherID, proj, after.UnixMilli()))

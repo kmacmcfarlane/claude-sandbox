@@ -321,7 +321,10 @@ Error: conversation 0b5e9c3a-… is already open in 'otter' (claude-sandbox-…-
     counts (its `claude-sandbox.continue` or `claude-sandbox.resume` label), so of two
     `--continue` launches racing in one directory the second is refused ("retry once it is up").
   - The same fail-closed rules, `docker top` confirmation and launch lock apply as for
-    `--resume <id>`; without the lock it exits 2 with `not continuing in <dir> unserialized.`
+    `--resume <id>` — and a sandbox's record with no `cwd` also refuses ("cannot tell"), so
+    a future Claude Code that renamed the field could not make every holder vanish. A record's
+    `cwd` and any error text are printed with control characters removed (any sandbox can
+    write its record). Without the lock it exits 2 with `not continuing in <dir> unserialized.`
     A check before the image builds refuses early on a live record; the one under the lock
     decides.
   - It covers interactive, `--detach` and `headless` launches (an Agent SDK `continue: true`

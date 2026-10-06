@@ -176,6 +176,11 @@ func (c Check) holdsDir(s sessions.Session, domain string) (dirHolding, error) {
 		if domain != "" && r.PIDDomain == domain {
 			continue // the host's own claude: rule h' judges it
 		}
+		if r.Cwd == "" {
+			// CS-SESS-093: a record that cannot be placed fails closed, as a
+			// malformed one does; a renamed field must not hide every holder.
+			return h, fmt.Errorf("%d.json: no cwd", r.PID)
+		}
 		if c.Continue.Has(r.Cwd) {
 			h.matches = append(h.matches, r)
 		} else {
