@@ -240,6 +240,9 @@ Feature: tmux integration (CS-TMUX)
       "(<id>) in a worktree whose name is not recorded yet; no resume command is shown"
     And no note is printed for an active mark, a pending mark without an id, or a launch whose
       passthrough resumes that same id
+    And a passthrough "--resume <path>.jsonl" (any case of the extension) whose base name is that
+      id counts as resuming it (ResumeValueID, as the resume guard reads
+      it, CS-LNCH-110), so no note is printed; a path whose base name is not a UUID names no id
 
   Scenario: CS-TMUX-018 a start that failed puts the prior mark back
     Given a marked pane whose mark before the launch (read from the pane, or handed in by a restore)

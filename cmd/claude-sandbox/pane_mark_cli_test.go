@@ -403,6 +403,11 @@ var _ = Describe("tmux pane mark (CS-TMUX-010..019)", func() {
 			Expect(f.errw.String()).NotTo(ContainSubstring("waiting to restore"))
 		})
 
+		It("CS-TMUX-017: no note for a launch that resumes that conversation by transcript path", func() {
+			Expect(f.run("--resume", "/home/u/.claude/projects/p/"+markConv+".JSONL")).To(Equal(0), f.errw.String())
+			Expect(f.errw.String()).NotTo(ContainSubstring("waiting to restore"))
+		})
+
 		It("CS-TMUX-018: a docker start that could not run puts the prior mark back", func() {
 			f.fake.On("docker start -ai", "", errors.New("exec: docker: not found"))
 			Expect(f.run()).NotTo(Equal(0))

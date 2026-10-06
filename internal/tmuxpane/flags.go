@@ -353,9 +353,10 @@ func flagName(t string) (string, bool) {
 
 // ResumeID returns the conversation a passthrough resumes explicitly —
 // "--resume <id>", "--resume=<id>", "-r <id>", "-r<id>" with a canonical
-// UUID — scanning with ScanPassthrough's stop rules (plan 07 § 6, 08 § 4).
+// UUID or a ".jsonl" path whose base name is one (ResumeValueID,
+// CS-TMUX-017) — scanning with ScanPassthrough's stop rules (plan 07 § 6, 08 § 4).
 // claude's parser keeps the LAST of several, so the scan does too, up to the
-// stop; "" when that last one has no id or a non-UUID one. It feeds the pane
+// stop; "" when that last one has no id or names none (ResumeValueID). It feeds the pane
 // mark (CS-TMUX-011/017), where a missed id only means the save hook resolves
 // the conversation from the registry. The resume guard reads
 // GuardedResumeID, which follows claude's own parser (CS-LNCH-183).
@@ -391,10 +392,7 @@ func ResumeID(args []string) string {
 		}
 		i = next
 	}
-	if registry.IsUUID(last) {
-		return strings.ToLower(last)
-	}
-	return ""
+	return ResumeValueID(last)
 }
 
 // ForkSession reports whether a passthrough certainly asks claude to fork
