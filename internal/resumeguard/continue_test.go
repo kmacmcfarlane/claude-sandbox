@@ -137,6 +137,12 @@ var _ = Describe("continue guard", func() {
 			Expect(v.Open).To(BeTrue())
 			Expect(v.Holder).To(BeNil())
 			Expect(v.Reason).To(ContainSubstring("7.json: no cwd"))
+			// A record in the launcher's own pid domain (host claude's, in an
+			// unbridged sandbox's registry dir) is skipped before the cwd
+			// check: rule h' judges it, and h' skips a cwd-less host record.
+			f.write(reg, 7, fmt.Sprintf(`{"pid":7,"sessionId":%q,"startedAt":%d,"pidDomain":"linux::%s"}`, otherID, after.UnixMilli(), hostNS))
+			own := cont(box("cs-a", "running", "7", "/elsewhere")).RunContinue()
+			Expect(own.Open).To(BeFalse(), "own-domain record without cwd: no refusal, no cannot-tell (%q)", own.Reason)
 			// A leftover from before the container, or another class, is not watched.
 			f.write(reg, 7, fmt.Sprintf(`{"pid":7,"sessionId":%q,"startedAt":%d}`, otherID, created.Add(-time.Hour).UnixMilli()))
 			Expect(cont(box("cs-a", "running", "7", "/elsewhere")).RunContinue().Open).To(BeFalse())
