@@ -64,9 +64,15 @@ var sessionFamily = map[string]bool{
 // .option / new Option calls, hidden options included), so no scan mistakes
 // a value for a positional. A flag absent from here and from ReplayAllowlist
 // is a boolean when claudeBoolean lists it, else unknown. Refresh both tables
-// on a Claude Code bump (CS-LNCH-183): a flag that gains a required value
-// while still listed here as boolean or optional is WalkClaudeArgs's one way
-// to fail open (plan continue-resume-guard 01 § 2.2, R3).
+// on a Claude Code bump (CS-LNCH-183). Table drift is WalkClaudeArgs's only
+// way to fail open, in two shapes (plan continue-resume-guard 01 § 2.2, R3):
+//   - a flag listed as boolean or optional that a later Claude Code makes
+//     take a required value, followed by "--fork-session" (counted, not made)
+//     or a later resume (claude takes it as the value);
+//   - a listed flag that a later Claude Code makes value-less
+//     ("--resume <a> --name -r <b>"), or a new value-less flag the table
+//     lacks ("--resume <a> --newbool -r <b>"): the later resume reads as
+//     uncertain, so the guard checks <a> while claude resumes <b>.
 var claudeArity = map[string]arity{
 	"--add-dir": variadic, "--advisor": oneValue, "--agent": oneValue,
 	"--agent-color": oneValue, "--agent-id": oneValue, "--agent-name": oneValue,
@@ -437,7 +443,9 @@ type ClaudeArgs struct {
 	// Print: -p / --print / a cluster reaching p, read as an option.
 	Print bool
 	// Worktree is the last -w / --worktree value read as an option ("" when
-	// bare); WorktreeGiven says one was given.
+	// bare); one in an uncertain position (right after an unknown flag, in an
+	// uncertain tail) only sets it while it is still "", as for ResumeID.
+	// WorktreeGiven says one was given.
 	Worktree      string
 	WorktreeGiven bool
 }
@@ -543,6 +551,14 @@ func WalkClaudeArgs(args []string) ClaudeArgs {
 			w.ResumeID = id // uncertain: never replaces or clears one
 		}
 	}
+	// worktree follows the resume id's rule: an uncertain -w never replaces
+	// or clears a value already set.
+	worktree := func(value string, uncertain bool) {
+		w.WorktreeGiven = true
+		if !uncertain || w.Worktree == "" {
+			w.Worktree = value
+		}
+	}
 	// peek is the token after i when an optional value would take it.
 	peek := func(i int) (string, bool) {
 		if i+1 < len(args) && !optionLike(args[i+1]) {
@@ -620,7 +636,7 @@ func WalkClaudeArgs(args []string) ClaudeArgs {
 			case f.name == "--print" || f.name == "-p":
 				w.Print = true
 			case f.name == "--worktree" || f.name == "-w":
-				w.Worktree, w.WorktreeGiven = f.value, true
+				worktree(f.value, uncertain)
 			}
 		}
 		if unknown {
@@ -642,7 +658,7 @@ func WalkClaudeArgs(args []string) ClaudeArgs {
 			case isResumeFlag(pending):
 				resume(v, uncertain)
 			case pending == "--worktree" || pending == "-w":
-				w.Worktree, w.WorktreeGiven = v, true
+				worktree(v, uncertain)
 			}
 			if took {
 				i++

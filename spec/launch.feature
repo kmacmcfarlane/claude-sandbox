@@ -929,8 +929,9 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       | uncertain | the token right after an unknown flag written without "=", and every token of an uncertain tail |
       | continue / resume | count wherever they appear, a value-consuming position included |
       | fork | counts only where "--fork-session" is certainly an option: never in a value-consuming position, right after an unknown flag or in an uncertain tail |
+      | worktree | the same rule for -w / --worktree: an uncertain one never replaces or clears a value already set |
       | resume id | a resume in a certain position replaces the id (claude's last one wins; none or a non-UUID gives ""); one in a value-consuming or uncertain position never replaces or clears an id already set, and sets its UUID only while none is |
-      | short clusters | "-XYZ" expands as commander expands it: a known boolean short (c, p, h, v) is set and the rest re-read; a value-taking short (r, d, w optional; n required) takes the rest of the cluster as its value, or, written last, the next token (always for -n; for the optional ones unless it is an option) |
+      | short clusters | a whole token that exactly matches a known flag is that flag (so "-d2e", --debug-to-stderr, takes no value); otherwise "-XYZ" expands as commander expands it, each re-read rest tried whole first: a known boolean short (c, p, h, v) is set and the rest re-read; a value-taking short (r, d, w optional; n required) takes the rest of the cluster as its value, or, written last, the next token (always for -n; for the optional ones unless it is an option) |
       | optional value | taken from the next token unless that token is an option (longer than one character and starting with "-") |
       | "--x=v" | carries its value and consumes nothing; for a flag that takes no value claude rejects it, so it never forks |
       | arity table | Claude Code 2.1.290's root command options, hidden ones included; refreshed on a Claude Code bump |
@@ -966,10 +967,14 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     And the pane mark's ResumeID and the restore's ScanPassthrough keep their
       own stop rules (CS-TMUX-013/017): a miss there only means the save hook
       resolves the conversation from the registry
-    And the walker fails open in one case only (residual R3): the table lists
-      a flag as boolean or optional, a later Claude Code makes it take a
-      required value, and "--fork-session" or a later resume follows it; a
-      refresh of the table on a Claude Code bump closes it
+    And the walker fails open only through table drift (residual R3), in two
+      shapes: the table lists a flag as boolean or optional, a later Claude
+      Code makes it take a required value, and "--fork-session" or a later
+      resume follows it; or a later Claude Code makes a listed value-taking
+      flag value-less ("--resume <a> --name -r <b>"), or adds a value-less
+      flag the table lacks ("--resume <a> --newbool -r <b>"), so the later
+      resume reads as uncertain and the guard checks <a> while claude resumes
+      <b>. A refresh of the table on a Claude Code bump closes both
 
   Scenario: CS-LNCH-029 Container runtime environment
     Then docker create receives: -it --rm --init,
