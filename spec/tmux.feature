@@ -775,8 +775,7 @@ Feature: tmux integration (CS-TMUX)
       A, in the running server: "tmux set -g @continuum-save-interval 0", "ln -sf
       tmux_resurrect_<stamp>.txt <dir>/last", prefix + C-r, then "tmux source-file ~/.tmux.conf",
       which puts back whatever interval the config sets (the live value is never read or echoed: the
-      operator has already set it to 0, so it would restore 0, or after a kill-server the default 15);
-      and
+      operator has already set it to 0, so it would restore 0, or after a kill-server the default 15); and
       B, a fresh server: "systemctl --user stop tmux.service", the same ln -sf, "systemctl --user
       start tmux.service" (without the unit: interval 0, a few seconds, kill-server, ln -sf, tmux)
     And it says that a reboot never restores a chosen save (its shutdown save moves last again)
