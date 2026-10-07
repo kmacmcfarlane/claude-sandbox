@@ -170,7 +170,6 @@ var _ = Describe("tmux restore, read-only (CS-TMUX-045..051)", func() {
 			save(at(10), &tmuxpane.Sidecar{Server: srv(2), Panes: rowsOf(1)})
 			save(at(11), &tmuxpane.Sidecar{Server: srv(2), Panes: rowsOf(1)})
 			Expect(os.Symlink(tmuxpane.StateFileName(at(11)), filepath.Join(dir, "last"))).To(Succeed())
-			f.fake.On("tmux show -gqv @continuum-save-interval", "1\n", nil)
 			before := snapshot()
 			Expect(f.run("tmux", "restore", "--list")).To(Equal(0), f.errw.String())
 			out := f.out.String()
@@ -191,10 +190,10 @@ var _ = Describe("tmux restore, read-only (CS-TMUX-045..051)", func() {
 			Expect(out).To(ContainSubstring("claude-sandbox tmux restore --dry-run --from " + at(2)))
 			Expect(out).To(ContainSubstring("claude-sandbox tmux restore --dry-run --all --from " + at(2)))
 			Expect(out).To(ContainSubstring("ln -sf tmux_resurrect_" + at(2) + ".txt " + dir + "/last"))
-			Expect(out).To(ContainSubstring("tmux set -g @continuum-save-interval 1 "))
+			Expect(out).To(ContainSubstring("tmux source-file ~/.tmux.conf"))
 			Expect(out).To(ContainSubstring("systemctl --user stop tmux.service"))
 			Expect(out).To(ContainSubstring("A reboot never restores a chosen save"))
-			Expect(f.fake.CommandLines()).To(Equal([]string{"tmux show -gqv @continuum-save-interval"}))
+			Expect(f.fake.CommandLines()).To(BeEmpty())
 			noWrites(before)
 		})
 
@@ -206,7 +205,6 @@ var _ = Describe("tmux restore, read-only (CS-TMUX-045..051)", func() {
 			Expect(f.run("tmux", "restore", "--list", "--all")).To(Equal(0))
 			Expect(f.out.String()).To(ContainSubstring("(newest first, last 30 days):"))
 			Expect(f.out.String()).To(ContainSubstring("saves that do not record their tmux server:"))
-			Expect(f.out.String()).To(ContainSubstring("tmux set -gu @continuum-save-interval"), "no server answered: the -u form")
 		})
 	})
 

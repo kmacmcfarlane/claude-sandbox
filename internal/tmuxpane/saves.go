@@ -437,21 +437,17 @@ func (s *Saves) Runs(since time.Time, idx []Lifetime) []Run {
 
 // Procedures are the two whole-layout procedures --list prints (CS-TMUX-048;
 // plan 11 § 5 as corrected by 12 § 7), with the dir and stamp filled in.
-// interval is the autosave interval as set ("" when unset or not a number):
-// Procedure A puts it back, or unsets the option.
-func Procedures(dir, stamp, interval string) []string {
+// Procedure A ends by re-sourcing the config, which puts back the interval it
+// sets; the live value is never echoed (the operator has set it to 0 by then).
+func Procedures(dir, stamp string) []string {
 	last := shq(filepath.Join(dir, "last"))
 	ln := "ln -sf " + shq(StateFileName(stamp)) + " " + last
-	restore := "tmux set -gu @continuum-save-interval"
-	if interval != "" {
-		restore = "tmux set -g @continuum-save-interval " + interval
-	}
 	return []string{
 		"A, in this tmux server (recommended):",
 		"    tmux set -g @continuum-save-interval 0     # so no save moves last meanwhile",
 		"    " + ln,
 		"    # then prefix + C-r: resurrect creates the missing windows and panes",
-		"    " + restore + "   # the interval as it was",
+		"    tmux source-file ~/.tmux.conf              # puts back the interval your config sets",
 		"B, a fresh tmux server (with continuum's systemd unit):",
 		"    systemctl --user stop tmux.service         # its shutdown save moves last now",
 		"    " + ln,

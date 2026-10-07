@@ -390,7 +390,7 @@ chosen save; `<dir>` is your save directory (see [Files](#files)).
 tmux set -g @continuum-save-interval 0      # so no autosave moves last meanwhile
 ln -sf tmux_resurrect_<stamp>.txt <dir>/last
 # prefix + C-r: resurrect creates the missing windows and panes; --pin pins <stamp>
-tmux set -g @continuum-save-interval 1      # the value it had before (--list prints it)
+tmux source-file ~/.tmux.conf               # puts back the interval your config sets
 ```
 
 resurrect creates only panes that do not exist yet. A pane that already exists at a saved
