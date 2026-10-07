@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/globalcfg"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/hostdirs"
 )
 
@@ -30,11 +31,34 @@ const Option = "@claude-sandbox"
 const MarkVersion = 1
 
 // Mark states (plan 06 § 3). The launcher's own mark is always active; a
-// restore writes pending while it waits to act (F4).
+// restore writes pending while it waits to act (F4); a session that crashed
+// leaves crashed (CS-TMUX-075): a restore prints its hint and never
+// relaunches it. An older binary drops or clears a crashed row, never
+// launches it — which is why it is a state of its own, not pending with a
+// flag, and why "v" stays 1 (plan 16 § 2.3).
 const (
 	StateActive  = "active"
 	StatePending = "pending"
+	StateCrashed = "crashed"
 )
+
+// CleanExitCodes are the container exit codes that end a session cleanly
+// (CS-TMUX-075): 0, and 78 — pidslot refusing to start claude without the
+// global-config link (CS-GCFG-033), so claude never ran. Any other code of a
+// die is a crash. Claude Code's own codes for /exit, Ctrl-D, a double Ctrl-C
+// and SIGTERM are an owed host check (CS-TMUX-071's comment): a clean one
+// measured non-zero belongs here.
+var CleanExitCodes = []int{0, globalcfg.ExitLink}
+
+// CleanExit reports whether code is in CleanExitCodes.
+func CleanExit(code int) bool {
+	for _, c := range CleanExitCodes {
+		if c == code {
+			return true
+		}
+	}
+	return false
+}
 
 // Mark modes.
 const (
@@ -102,6 +126,14 @@ type Mark struct {
 	Conversation string `json:"conversation,omitempty"`
 	Name         string `json:"name,omitempty"`
 	NameSource   string `json:"nameSource,omitempty"`
+
+	// Written only with state crashed (CS-TMUX-075): when the session child
+	// returned (unix ms, the launcher's clock), the die's exit code, and
+	// whether the OOM killer ended it. Printed only as a date, a number and
+	// fixed words.
+	EndedAt   int64 `json:"endedAt,omitempty"`
+	ExitCode  int   `json:"exitCode,omitempty"`
+	OOMKilled bool  `json:"oomKilled,omitempty"`
 }
 
 // JSON renders the mark compactly.

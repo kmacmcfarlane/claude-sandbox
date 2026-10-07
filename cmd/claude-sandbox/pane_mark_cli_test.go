@@ -7,6 +7,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -338,11 +339,11 @@ var _ = Describe("tmux pane mark (CS-TMUX-010..019)", func() {
 		})
 	})
 
-	Describe("CS-TMUX-015: unmarked on a clean exit, a crash, an OOM kill, a detach or the launcher's own signal", func() {
+	Describe("CS-TMUX-015: unmarked on a clean exit, a detach, the launcher's own signal, or a crash or OOM kill whose conversation is not known", func() {
 		var p *paneSim
 		BeforeEach(func() { p = simulatePane(f.fake) })
 
-		It("CS-TMUX-015: a non-zero exit (a crash) with its die", func() {
+		It("CS-TMUX-015: a non-zero exit (a crash) with its die, no conversation known yet (CS-TMUX-075 row 4c)", func() {
 			streamEvents(f.fake, dockerEvent("die", "3"))
 			f.fake.On("docker start -ai", "", execx.Fail(3))
 			Expect(f.run()).To(Equal(3))
@@ -350,7 +351,7 @@ var _ = Describe("tmux pane mark (CS-TMUX-010..019)", func() {
 			Expect(p.get()).To(BeEmpty())
 		})
 
-		It("CS-TMUX-015: an OOM kill", func() {
+		It("CS-TMUX-015: an OOM kill with no conversation known (CS-TMUX-075 row 4c)", func() {
 			streamEvents(f.fake, dockerEvent("oom", ""), dockerEvent("die", "137"))
 			f.fake.On("docker start -ai", "", execx.Fail(137))
 			Expect(f.run()).To(Equal(137))
@@ -470,6 +471,131 @@ var _ = Describe("tmux pane mark (CS-TMUX-010..019)", func() {
 		})
 	})
 
+	Describe("CS-TMUX-075: which conversation a crashed mark names", func() {
+		var (
+			p     *paneSim
+			clock time.Time
+		)
+		BeforeEach(func() {
+			p = simulatePane(f.fake)
+			clock = now
+			f.env.Now = func() time.Time { return clock }
+			saved := oomreport.DieWait
+			oomreport.DieWait = 300 * time.Millisecond
+			DeferCleanup(func() { oomreport.DieWait = saved })
+		})
+		// crash scripts a session that never gets its conversation from the
+		// save hook (it ends within its first minute) and dies with code,
+		// after ran on the launcher's clock.
+		crash := func(code string, oom bool, ran time.Duration) {
+			ev := []string{dockerEvent("die", code)}
+			if oom {
+				ev = append([]string{dockerEvent("oom", "")}, ev...)
+			}
+			streamEvents(f.fake, ev...)
+			f.fake.OnFunc("docker start -ai", func(execx.Cmd) (string, error) {
+				clock = now.Add(ran)
+				n := 1
+				fmt.Sscan(code, &n)
+				return "", execx.Fail(n)
+			})
+		}
+		state := func() tmuxpane.Mark {
+			if p.get() == "" {
+				return tmuxpane.Mark{}
+			}
+			m, ok := tmuxpane.ParseMark(p.get())
+			Expect(ok).To(BeTrue())
+			return m
+		}
+
+		It("CS-TMUX-075 (b): a hand --resume <id> OOM-killed in its first seconds is crashed with that id: no gate for an OOM kill", func() {
+			crash("137", true, 20*time.Second)
+			f.run("--resume", strings.ToUpper(markConv))
+			m := state()
+			Expect(m.State).To(Equal(tmuxpane.StateCrashed))
+			Expect(m.Conversation).To(Equal(markConv))
+			Expect(m.OOMKilled).To(BeTrue())
+		})
+
+		It("CS-TMUX-075 (c): the same launch dying 1 within EarlyEnd unsets (\"No conversation found\" leaves no hint)", func() {
+			crash("1", false, 5*time.Second)
+			f.run("--resume", markConv)
+			Expect(p.get()).To(BeEmpty())
+		})
+
+		It("CS-TMUX-075: past EarlyEnd from the mark's since, a non-OOM crash takes the guarded resume id", func() {
+			crash("1", false, tmuxpane.EarlyEnd+time.Second)
+			f.run("--resume", markConv)
+			m := state()
+			Expect(m.State).To(Equal(tmuxpane.StateCrashed))
+			Expect(m.Conversation).To(Equal(markConv))
+			Expect(m.EndedAt).To(Equal(clock.UnixMilli()))
+		})
+
+		It("CS-TMUX-075 (d): a --resume <id> --fork-session OOM kill unsets: a fork has no id yet", func() {
+			crash("137", true, 20*time.Second)
+			f.run("--resume", markConv, "--fork-session")
+			Expect(p.get()).To(BeEmpty())
+		})
+
+		It("CS-TMUX-075: no conversation at all unsets", func() {
+			crash("137", true, 2*time.Minute)
+			f.run()
+			Expect(p.get()).To(BeEmpty())
+		})
+
+		It("CS-TMUX-075: a crashed ralph pane unsets", func() {
+			streamEvents(f.fake, dockerEvent("die", "1"))
+			f.fake.OnFunc("docker attach", func(execx.Cmd) (string, error) {
+				p.update(func(m *tmuxpane.Mark) { m.Conversation = markConv })
+				return "", execx.Fail(1)
+			})
+			next := tmuxpane.Mark{V: 1, State: tmuxpane.StateActive, Mode: tmuxpane.ModeRalph, Container: "cs-ralph", Project: f.proj}
+			_, err := runSession(f.env, execx.Cmd{Name: "docker", Args: []string{"attach", "cs-ralph"}}, "cs-ralph",
+				sessionOpts{kind: primarySession, mark: &paneMark{next: next}})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(p.get()).To(BeEmpty())
+		})
+
+		It("CS-TMUX-075 (carried low): a restore attach that crashes with die 1 at 10 s is crashed, carrying the prior's id", func() {
+			prior := tmuxpane.Mark{V: 1, State: tmuxpane.StatePending, Mode: "claude", Container: "cs-otter",
+				ContainerID: markID, Project: f.proj, Conversation: markConv, Name: "fix the build", NameSource: "user", Labelled: true}.JSON()
+			next := tmuxpane.Mark{V: 1, State: tmuxpane.StateActive, Mode: "claude", Container: "cs-otter", ContainerID: markID,
+				Project: f.proj, Since: now.Add(-10 * time.Second).UnixMilli()}
+			streamEvents(f.fake, dockerEvent("die", "1"))
+			f.fake.On("docker attach", "", execx.Fail(1))
+			f.fake.On("docker inspect --type container -f {{.State.Status}} {{.Created}} "+markID, "running 2026-09-24T00:00:00Z\n", nil)
+			_, err := runSession(f.env, execx.Cmd{Name: "docker", Args: []string{"attach", markID}}, "cs-otter",
+				sessionOpts{kind: primarySession, mark: &paneMark{next: next, prior: &prior, restoreAttach: true}})
+			Expect(err).NotTo(HaveOccurred())
+			m := state()
+			Expect(m.State).To(Equal(tmuxpane.StateCrashed), "tmux: %v", tmuxLines())
+			Expect(m.Conversation).To(Equal(markConv), "rule 2: the row the restore handed in, no gate")
+			Expect(m.Name).To(Equal("fix the build"))
+			Expect(m.NameSource).To(Equal("user"))
+			Expect(m.ContainerID).To(Equal(markID), "the session's own mark, crashed")
+			Expect(m.ExitCode).To(Equal(1))
+		})
+
+		It("CS-TMUX-075 (e): the re-read mark's own conversation wins over the prior's", func() {
+			const other = "9b5e9c3a-1f2d-4e5f-8a9b-0c1d2e3f4a5b"
+			prior := tmuxpane.Mark{V: 1, State: tmuxpane.StatePending, Mode: "claude", Container: "cs-otter",
+				ContainerID: markID, Project: f.proj, Conversation: markConv}.JSON()
+			next := tmuxpane.Mark{V: 1, State: tmuxpane.StateActive, Mode: "claude", Container: "cs-otter", ContainerID: markID, Project: f.proj}
+			streamEvents(f.fake, dockerEvent("die", "1"))
+			f.fake.OnFunc("docker attach", func(execx.Cmd) (string, error) {
+				p.update(func(m *tmuxpane.Mark) { m.Conversation = other }) // a /resume inside the session
+				return "", execx.Fail(1)
+			})
+			f.fake.On("docker inspect --type container -f {{.State.Status}} {{.Created}} "+markID, "running 2026-09-24T00:00:00Z\n", nil)
+			_, err := runSession(f.env, execx.Cmd{Name: "docker", Args: []string{"attach", markID}}, "cs-otter",
+				sessionOpts{kind: primarySession, mark: &paneMark{next: next, prior: &prior, restoreAttach: true}})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(state().Conversation).To(Equal(other))
+		})
+	})
+
 	Describe("CS-TMUX-071: a session stopped from outside leaves its pane pending", func() {
 		var (
 			p         *paneSim
@@ -584,10 +710,17 @@ var _ = Describe("tmux pane mark (CS-TMUX-010..019)", func() {
 			Expect(probes()).To(Equal(1))
 		})
 
-		It("CS-TMUX-071 row 4: a crash or an OOM kill unsets (the narrow default)", func() {
+		It("CS-TMUX-071 row 4b, CS-TMUX-075: an OOM kill with a known conversation leaves the pane crashed", func() {
 			streamEvents(f.fake, dockerEvent("oom", ""), dockerEvent("die", "137"))
 			f.run()
-			Expect(p.get()).To(BeEmpty())
+			m, ok := tmuxpane.ParseMark(p.get())
+			Expect(ok).To(BeTrue(), "tmux: %v", tmuxLines())
+			Expect(m.State).To(Equal(tmuxpane.StateCrashed))
+			Expect(m.Conversation).To(Equal(markConv))
+			Expect(m.ExitCode).To(Equal(137))
+			Expect(m.OOMKilled).To(BeTrue())
+			Expect(m.EndedAt).To(Equal(now.UnixMilli()))
+			Expect(probes()).To(Equal(1), "row 2 is asked before crashed")
 		})
 
 		It("CS-TMUX-071 row 6: a stream that ended with no die is inconclusive: pending, no probe", func() {
@@ -664,6 +797,84 @@ var _ = Describe("tmux pane mark (CS-TMUX-010..019)", func() {
 			f.env.Runner = &eventsRunner{Fake: f.fake, open: true}
 			Expect(f.run()).To(Equal(0))
 			Expect(p.get()).To(BeEmpty())
+		})
+
+		Describe("CS-TMUX-075: a crash leaves the pane crashed", func() {
+			crashedNow := func() tmuxpane.Mark {
+				m, ok := tmuxpane.ParseMark(p.get())
+				Expect(ok).To(BeTrue(), "a mark is left; tmux: %v", tmuxLines())
+				Expect(m.State).To(Equal(tmuxpane.StateCrashed))
+				Expect(m.Conversation).To(Equal(markConv))
+				Expect(m.Container).To(Equal(nameOf(f.launched().Args)))
+				return m
+			}
+
+			It("CS-TMUX-075 row 4b: a die with exit 1 is crashed, keeping the re-read mark's conversation, after the shutdown probe", func() {
+				streamEvents(f.fake, dockerEvent("die", "1"))
+				startCode = 1
+				Expect(f.run()).To(Equal(1))
+				m := crashedNow()
+				Expect(m.ExitCode).To(Equal(1))
+				Expect(m.OOMKilled).To(BeFalse())
+				Expect(m.EndedAt).To(Equal(now.UnixMilli()))
+				Expect(probes()).To(Equal(1))
+				Expect(tmuxLines()).NotTo(ContainElement(unset))
+				Expect(f.errw.String()).NotTo(ContainSubstring("crashed"), "no hint at crash time (answer 92 a)")
+			})
+
+			It("CS-TMUX-075 row 4a: a die with exit 0 or 78 unsets", func() {
+				for _, code := range []string{"0", "78"} {
+					f.fake.Calls = nil
+					p.set("")
+					streamEvents(f.fake, dockerEvent("die", code))
+					f.run()
+					Expect(p.get()).To(BeEmpty(), code)
+				}
+			})
+
+			It("CS-TMUX-075: a crash while the host is stopping, or after a kill event, stays pending", func() {
+				streamEvents(f.fake, dockerEvent("die", "137"))
+				stopping()
+				f.run()
+				pendingNow()
+
+				f.fake = &execx.Fake{}
+				f.env.Runner = f.fake
+				p = simulatePane(f.fake)
+				f.fake.OnFunc("docker start -ai", func(execx.Cmd) (string, error) {
+					p.update(func(m *tmuxpane.Mark) { m.Conversation = markConv })
+					time.Sleep(20 * time.Millisecond)
+					return "", nil
+				})
+				streamEvents(f.fake, dockerEvent("kill", ""), dockerEvent("die", "1"))
+				f.run()
+				pendingNow()
+				Expect(probes()).To(Equal(0))
+			})
+
+			It("CS-TMUX-075: a re-read showing another session's mark unsets", func() {
+				streamEvents(f.fake, dockerEvent("die", "1"))
+				other := tmuxpane.Mark{V: 1, State: tmuxpane.StateActive, Mode: "claude", Container: "cs-other"}.JSON()
+				p.onRead = func(cur string) string {
+					if strings.Contains(cur, `"state":"active"`) && strings.Contains(cur, markConv) {
+						return other
+					}
+					return cur
+				}
+				f.run()
+				Expect(p.get()).To(BeEmpty())
+			})
+
+			It("CS-TMUX-017, CS-TMUX-075: the next hand launch in a crashed pane prints the crash note with the resume command", func() {
+				streamEvents(f.fake, dockerEvent("oom", ""), dockerEvent("die", "137"))
+				f.run()
+				crashedNow()
+				f.errw.Reset()
+				f.run()
+				Expect(f.errw.String()).To(ContainSubstring("Note: '"))
+				Expect(f.errw.String()).To(ContainSubstring("(" + markConv + ") crashed in this pane (exit 137); resume it with: cd "))
+				Expect(f.errw.String()).To(ContainSubstring("--resume " + markConv))
+			})
 		})
 
 		Describe("attach", func() {
@@ -743,6 +954,14 @@ var _ = Describe("tmux pane mark (CS-TMUX-010..019)", func() {
 				f.run("--join=otter")
 				Expect(p.get()).To(BeEmpty())
 				Expect(f.fake.CommandLines()).To(ContainElement("docker inspect --type container -f {{.State.Status}} " + markID))
+			})
+
+			It("CS-TMUX-075: a crashed join unsets (its die carries a crash code)", func() {
+				joinExit(137)
+				f.env.Runner = &eventsRunner{Fake: f.fake, open: true,
+					later: []string{dockerEvent("oom", ""), dockerEvent("die", "137")}, delay: 200 * time.Millisecond}
+				f.run("--join=otter")
+				Expect(p.get()).To(BeEmpty())
 			})
 
 			It("CS-TMUX-071 row 5: a join that exits 0 unsets without an inspect", func() {

@@ -47,6 +47,9 @@ const (
 	// OutcomeAttach and OutcomeResume start a session.
 	OutcomeAttach Outcome = "attach"
 	OutcomeResume Outcome = "resume"
+	// OutcomeHint: a crashed row (row 19, CS-TMUX-077); the restore prints
+	// the hint, forgets the pane's crashed mark and starts nothing.
+	OutcomeHint Outcome = "hint"
 )
 
 // Decision is Decide's answer for one row.
@@ -81,6 +84,8 @@ func (d Decision) Would() string {
 		return "clear the pane's mark"
 	case OutcomePending:
 		return "keep the pane's mark pending (retry: claude-sandbox tmux restore)"
+	case OutcomeHint:
+		return "print the crash hint and forget the row; nothing is started"
 	}
 	return "nothing; the pane is left as it is"
 }
@@ -148,7 +153,10 @@ func RowName(m Mark) string {
 
 // Decide is the decision table (CS-TMUX-051; 10 § 4.1). row nil is "nothing
 // recorded" at coords. Rows 1 (refusals) and 6 (the sparse line) are the
-// caller's: neither decides a row.
+// caller's: neither decides a row. Row 19 (a crashed row, CS-TMUX-077) is
+// decided right after row 3 and calls no probe, so a caller may pass nil
+// Probes for rows 2, 3 and 19 — a nil that a later edit lets a crashed row
+// past panics, loudly.
 func Decide(row *Row, coords string, p Probes) Decision {
 	if row == nil {
 		return Decision{Row: 2, Outcome: OutcomeNone,
@@ -158,6 +166,11 @@ func Decide(row *Row, coords string, p Probes) Decision {
 	if field := ValidateRow(m); field != "" {
 		return Decision{Row: 3, Outcome: OutcomeClear,
 			Line: "cannot use the recorded row for " + coords + ": its " + field + " is not valid"}
+	}
+	if m.State == StateCrashed {
+		// Answer 64 c: a crashed session is never relaunched. ValidateRow
+		// required mode claude and a conversation.
+		return Decision{Row: 19, Outcome: OutcomeHint, Line: CrashHint(m), Manual: ResumeCommand(m)}
 	}
 	name := "'" + RowName(m) + "'"
 	manual := ResumeCommand(m)

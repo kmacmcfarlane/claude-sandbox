@@ -567,8 +567,12 @@ func Rearm(o HookOptions) RearmResult {
 		}
 		pid, _ := strconv.Atoi(f[3]) // 0 when unparsable: Foreground says unknown
 		sh := ShellPane{ID: p.id, Command: f[0], PID: pid, InMode: f[1] == "1", Synchronized: f[2] == "1"}
+		// A crashed row is armed as crashed, every field kept (CS-TMUX-078):
+		// its --resurrected prints the hint and starts nothing.
 		pend := row.Mark
-		pend.State = StatePending
+		if pend.State != StateCrashed {
+			pend.State = StatePending
+		}
 		if _, ok := bounded(o.Runner, dl.left(), "tmux", "set-option", "-p", "-t", p.id, Option, pend.JSON()); !ok {
 			if late() {
 				break
@@ -578,11 +582,12 @@ func Rearm(o HookOptions) RearmResult {
 			continue
 		}
 		res.Marked++
-		// CS-TMUX-067: retype only a row that was pending AND whose pane sat
-		// at a bare shell when saved: resurrect typed nothing into it, so
-		// the keys can neither double a typed restore nor land in another
-		// program resurrect restarted.
-		if row.Mark.State != StatePending || !sp.FullCommandSaved || sp.FullCommand != "" {
+		// CS-TMUX-067: retype only a row that was pending (or crashed,
+		// CS-TMUX-078: its launcher had exited, so it sat at its shell) AND
+		// whose pane sat at a bare shell when saved: resurrect typed nothing
+		// into it, so the keys can neither double a typed restore nor land in
+		// another program resurrect restarted.
+		if (row.Mark.State != StatePending && row.Mark.State != StateCrashed) || !sp.FullCommandSaved || sp.FullCommand != "" {
 			continue
 		}
 		// The typing guard --all uses (CS-TMUX-069): a pane resurrect just

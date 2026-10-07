@@ -53,6 +53,7 @@ import (
 	"github.com/kmacmcfarlane/claude-sandbox/internal/launch"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/paths"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/prompt"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/registry"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/resumeguard"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/sessions"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/tmuxpane"
@@ -484,8 +485,8 @@ func runRestoreDryRun(env *Env, from string) error {
 	probes := restoreProbes(env, paneID, nil)
 	out := env.Out
 	fmt.Fprintln(out, "Dry run: nothing is changed.")
-	if from == "" && tp.Marked && tp.Mark.State == tmuxpane.StatePending {
-		fmt.Fprintf(out, "Pane %s, from its own pending mark:\n", coords)
+	if from == "" && tp.Marked && ownRow(tp.Mark) {
+		fmt.Fprintf(out, "Pane %s, from its own %s mark:\n", coords, tp.Mark.State)
 		row := tmuxpane.Row{Session: tp.Session, Window: tp.Window, Pane: tp.Pane, Mark: tp.Mark}
 		printDecision(out, "  ", tmuxpane.Decide(&row, coords, probes))
 		return nil
@@ -497,6 +498,13 @@ func runRestoreDryRun(env *Env, from string) error {
 	stamp, err := resolveFrom(saves, from, tp.Server, idx)
 	if err != nil {
 		return err
+	}
+	if from != "" && tp.Marked && tp.Mark.State == tmuxpane.StateCrashed {
+		// CS-TMUX-049/077: an acting --from refuses here; the dry run says so
+		// and still shows the save row's decision.
+		for _, l := range crashedFromRefusal(tp.Mark, coords, stamp) {
+			fmt.Fprintf(out, "  note: %s\n", l)
+		}
 	}
 	fmt.Fprintf(out, "Pane %s, from save %s%s in %s:\n", coords, stamp, fromLabel(from), saves.Dir)
 	sc, err := saves.Sidecar(stamp)
@@ -531,14 +539,14 @@ func runRestoreDryRunAll(env *Env, from string) error {
 	panes, ok := tmuxpane.ListPanes(env.Runner)
 	probes := restoreProbes(env, "", panes)
 	fmt.Fprintln(out, "Dry run: nothing is changed.")
-	fmt.Fprintln(out, "Pending marks in the running tmux server:")
+	fmt.Fprintln(out, "Pending and crashed marks in the running tmux server:")
 	switch {
 	case !ok:
 		fmt.Fprintln(out, "  (no tmux server answered)")
 	default:
 		n := 0
 		for _, p := range panes {
-			if !p.Marked || p.Mark.State != tmuxpane.StatePending {
+			if !p.Marked || !ownRow(p.Mark) {
 				continue
 			}
 			n++
@@ -682,6 +690,9 @@ func runLine(r tmuxpane.Run) string {
 		if r.Pending > 0 {
 			st = append(st, fmt.Sprintf("%d pending", r.Pending))
 		}
+		if r.Crashed > 0 {
+			st = append(st, fmt.Sprintf("%d crashed", r.Crashed))
+		}
 		if len(st) > 0 {
 			c += " (" + strings.Join(st, ", ") + ")"
 		}
@@ -817,8 +828,10 @@ func armLine(r tmuxpane.ArmRow) string {
 type restoreHooks struct {
 	prior      string
 	onReserved func(plan *launch.Plan) (onChild func(), keepUnlessReady func() bool)
-	// early records that keepUnlessReady put the pending row back.
+	// early records that keepUnlessReady put the pending row back; crash,
+	// that it went back as crashed (CS-TMUX-062, answer 90 a).
 	early bool
+	crash *crashEnd
 }
 
 // The restore's docker wait (CS-TMUX-055 row 8): a bounded "docker version"
@@ -877,20 +890,21 @@ func runRestoreDrop(env *Env) error {
 	case !tp.Marked:
 		restoreSay(env, "nothing to drop: pane %s has no claude-sandbox mark", tp.Coords())
 		return nil
-	case tp.Mark.State != tmuxpane.StatePending:
+	case !ownRow(tp.Mark):
 		restoreSay(env, "nothing to drop: pane %s holds a running session, not a pending one", tp.Coords())
 		return nil
 	}
 	(tmuxpane.Pane{Runner: env.Runner, ID: paneID}).Unset()
+	state := tp.Mark.State // pending or crashed (CS-TMUX-063)
 	if tmuxpane.ValidateRow(tp.Mark) != "" {
-		restoreSay(env, "dropped the pending mark of pane %s (it could not be used)", tp.Coords())
+		restoreSay(env, "dropped the %s mark of pane %s (it could not be used)", state, tp.Coords())
 		return nil
 	}
 	conv := tp.Mark.Conversation
 	if conv == "" {
 		conv = "no conversation recorded"
 	}
-	restoreSay(env, "dropped the pending mark of pane %s: '%s' (%s); the shell is yours", tp.Coords(), tmuxpane.RowName(tp.Mark), conv)
+	restoreSay(env, "dropped the %s mark of pane %s: '%s' (%s); the shell is yours", state, tp.Coords(), registry.Printable(tmuxpane.RowName(tp.Mark)), conv)
 	return nil
 }
 
@@ -992,11 +1006,12 @@ func runRestoreAct(env *Env, from string, resurrected bool) error {
 		noticed = tmuxpane.PrintNotice(env.cacheDir(), env.now(), env.Err)
 	}
 
-	// CS-TMUX-052: the pane's own pending mark, else last's row at these
-	// coordinates; --from reads that save only. --resurrected reads this
-	// server's pin between the two (CS-TMUX-065). Read once, before any wait.
+	// CS-TMUX-052: the pane's own pending or crashed mark, else last's row
+	// at these coordinates; --from reads that save only. --resurrected reads
+	// this server's pin between the two (CS-TMUX-065). Read once, before any
+	// wait.
 	var row *tmuxpane.Row
-	if from == "" && tp.Marked && tp.Mark.State == tmuxpane.StatePending {
+	if from == "" && tp.Marked && ownRow(tp.Mark) {
 		row = &tmuxpane.Row{Session: tp.Session, Window: tp.Window, Pane: tp.Pane, Mark: tp.Mark}
 	} else {
 		saves, idx, err := openRestoreSaves(env)
@@ -1014,6 +1029,15 @@ func runRestoreAct(env *Env, from string, resurrected bool) error {
 			stamp = pinned.Stamp
 		} else if stamp, err = resolveFrom(saves, from, tp.Server, idx); err != nil {
 			return err
+		}
+		if from != "" && tp.Marked && tp.Mark.State == tmuxpane.StateCrashed {
+			// CS-TMUX-077: an older row at these coordinates is very often the
+			// same session before its crash; restoring it would relaunch it.
+			// Nothing is written, locked or probed.
+			for _, l := range crashedFromRefusal(tp.Mark, coords, stamp) {
+				restoreSay(env, "%s", l)
+			}
+			return exitErr(2, "")
 		}
 		sc, err := saves.Sidecar(stamp)
 		switch {
@@ -1052,6 +1076,21 @@ func runRestoreAct(env *Env, from string, resurrected bool) error {
 			pane.Unset()
 		}
 		restoreSay(env, "%s", d.Line)
+		return nil
+	}
+	if row.Mark.State == tmuxpane.StateCrashed {
+		// Row 19 (CS-TMUX-077), decided beside rows 2 and 3: before the
+		// pending set, the Ctrl-C context, the start lock and any probe, so
+		// a crashed row is never set pending and nothing is started. A nil
+		// Probes panics should a later edit let a crashed row past row 19.
+		d := tmuxpane.Decide(row, coords, nil)
+		restoreSay(env, "%s", d.Line)
+		if tp.Marked && tp.Mark.State == tmuxpane.StateCrashed && strings.EqualFold(tp.Mark.Conversation, row.Mark.Conversation) {
+			pane.Unset()
+		}
+		// CS-TMUX-079: a labelled window resurrect restored is this pane's
+		// again, so the next launch here owns it.
+		pane.ReclaimLabel(row.Mark)
 		return nil
 	}
 
@@ -1104,6 +1143,21 @@ func runRestoreAct(env *Env, from string, resurrected bool) error {
 	}
 	restoreSay(env, "%s", d.Line)
 	return nil
+}
+
+// ownRow reports whether a pane's own mark is a row a restore reads first
+// (CS-TMUX-052/065): pending, or crashed (CS-TMUX-077).
+func ownRow(m tmuxpane.Mark) bool {
+	return m.State == tmuxpane.StatePending || m.State == tmuxpane.StateCrashed
+}
+
+// crashedFromRefusal is what an acting --from prints over a pane's crashed
+// mark (CS-TMUX-077), and a dry run's note there (CS-TMUX-049): the mark's
+// hint (or, when it fails the checks, a line naming only the field), then
+// how to restore the save instead.
+func crashedFromRefusal(m tmuxpane.Mark, coords, stamp string) []string {
+	return []string{tmuxpane.CrashedPaneLine(m, coords, ""),
+		"this pane holds a crashed session; to restore save " + stamp + " here instead, run claude-sandbox tmux restore --drop first"}
 }
 
 // restorePending prints a pending outcome (CS-TMUX-055): the line, the retry
@@ -1249,7 +1303,7 @@ func restoreResume(env *Env, p *actProbes, m tmuxpane.Mark, d tmuxpane.Decision,
 	// The headless precedent (CS-LNCH-061): nothing prompts.
 	renv.Prompter = &prompt.Fixed{Out: env.Err}
 	id := strings.ToLower(m.Conversation)
-	name := tmuxpane.RowName(m)
+	name := registry.Printable(tmuxpane.RowName(m))
 	var w *tmuxpane.Watcher
 	started, capped := false, false
 	hooks := &restoreHooks{prior: prior}
@@ -1306,6 +1360,21 @@ func restoreResume(env *Env, p *actProbes, m tmuxpane.Mark, d tmuxpane.Decision,
 		// The session child could not be run, or the reservation never
 		// started (CS-TMUX-018): the pending row went back; docker said why.
 		restorePending(env, fmt.Sprintf("the resume of '%s' (%s) did not start (see above)", name, id), d.Manual)
+	case hooks.early && hooks.crash != nil:
+		cfg := m.ConfigDir
+		if cfg == "" {
+			cfg = "its config dir"
+		}
+		oom := ""
+		if hooks.crash.oom {
+			oom = ", killed by the OOM killer"
+		}
+		by := tmuxpane.ResumeCommand(m)
+		if by == "" {
+			by = "claude-sandbox --new -- --resume " + id
+		}
+		restoreSay(env, "the resume of '%s' (%s) ended before it was up (exit %d%s); not restarted again. "+
+			"The conversation may be missing from %s. Resume it by hand: %s", name, id, hooks.crash.code, oom, cfg, by)
 	case hooks.early:
 		cfg := m.ConfigDir
 		if cfg == "" {

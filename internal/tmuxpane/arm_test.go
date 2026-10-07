@@ -474,4 +474,49 @@ var _ = Describe("tmux restore --all: arming a save into existing panes (CS-TMUX
 		res = arm(list(pn{w: 1, cmd: "zsh", path: proj, wactive: "1"}), state(1), "zsh", row(1, mark(nil)))
 		Expect(res[0].Verdict).To(Equal(tmuxpane.ArmTyped), "focus that went away since the listing: typed")
 	})
+	Describe("CS-TMUX-077: crashed rows and crashed panes are never armed", func() {
+		crashed := func(mut func(*tmuxpane.Mark)) tmuxpane.Mark {
+			return mark(func(m *tmuxpane.Mark) {
+				m.State, m.ExitCode = tmuxpane.StateCrashed, 1
+				if mut != nil {
+					mut(m)
+				}
+			})
+		}
+
+		It("CS-TMUX-069 step 1b: a crashed row prints its hint whether its pane is missing, moved or this command's own; nothing is probed or written", func() {
+			elsewhere := GinkgoT().TempDir()
+			panes := list(pn{w: 1, cmd: "zsh", path: elsewhere}, pn{w: 2, cmd: "claude-sandbox", path: proj})
+			res := tmuxpane.Arm(tmuxpane.ArmOptions{Runner: fake, State: state(1, 2), Panes: panes, Shell: "zsh", Self: "%2", Probes: p,
+				Proc: tmuxpane.ProcOptions{Runner: fake, ProcRoot: proc, GOOS: "linux"},
+				Rows: []tmuxpane.Row{row(1, crashed(nil)), row(2, crashed(nil)), row(3, crashed(nil))}})
+			Expect(res).To(HaveLen(3))
+			for _, r := range res {
+				Expect(r.Verdict).To(Equal(tmuxpane.ArmFinal), r.Coords)
+				Expect(r.Why).To(HavePrefix("'fix the build' crashed in this pane (exit 1); not restarted. Resume it with: cd "+proj), r.Coords)
+				Expect(r.Decision.Row).To(Equal(19))
+			}
+			Expect(p.asked).To(BeEmpty())
+			Expect(writes()).To(BeEmpty())
+		})
+
+		It("CS-TMUX-069 step 2a: a pane holding a crashed mark is not armed with the save's row, even for the same session", func() {
+			mine := crashed(nil)
+			res := arm(list(pn{w: 1, cmd: "zsh", path: proj, mark: mine.JSON()}), state(1), "zsh", row(1, mark(nil)))
+			Expect(res[0].Verdict).To(Equal(tmuxpane.ArmFinal))
+			Expect(res[0].Why).To(Equal(tmuxpane.CrashHint(mine) + "; to put this save's row there instead, run claude-sandbox tmux restore --drop in that pane first"))
+			Expect(p.asked).To(BeEmpty())
+			Expect(writes()).To(BeEmpty())
+		})
+
+		It("CS-TMUX-069 step 2a: a crashed mark that fails the checks names only the coordinates and the field", func() {
+			bad := crashed(func(m *tmuxpane.Mark) { m.Project = proj + "/\u202Egnp.exe"; m.Name = "evil" })
+			res := arm(list(pn{w: 1, cmd: "zsh", path: proj, mark: bad.JSON()}), state(1), "zsh", row(1, mark(nil)))
+			Expect(res[0].Verdict).To(Equal(tmuxpane.ArmFinal))
+			Expect(res[0].Why).To(Equal("pane main:1.0 holds a crashed mark that cannot be used (its a control or bidi character is not valid); " +
+				"forget it with claude-sandbox tmux restore --drop in that pane"))
+			Expect(res[0].Why).NotTo(ContainSubstring("evil"))
+			Expect(writes()).To(BeEmpty())
+		})
+	})
 })

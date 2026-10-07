@@ -248,11 +248,22 @@ func armRow(o ArmOptions, row *Row, byCoord map[string]ArmPane, saved map[string
 	if field := ValidateRow(m); field != "" {
 		return skip(ArmUnusable, "its "+field+" cannot be used")
 	}
+	// 1b. A crashed row is never armed (CS-TMUX-077): its hint is its line,
+	// before any check that could hide it (missing, moved, busy, this pane).
+	if m.State == StateCrashed {
+		res.Decision = Decide(row, coords, nil)
+		return skip(ArmFinal, res.Decision.Line)
+	}
 	// 2. A pane at the coordinates, in its saved place.
 	key := coordKey(row.Session, row.Window, row.Pane)
 	p, ok := byCoord[key]
 	if !ok {
 		return skip(ArmMissing, "no pane at "+coords)
+	}
+	// 2a. A pane holding a crashed mark keeps it, whatever the row: arming
+	// the save's (older) row there would resume the crashed session.
+	if p.Marked && p.Mark.State == StateCrashed {
+		return skip(ArmFinal, CrashedPaneLine(p.Mark, coords, "; to put this save's row there instead, run claude-sandbox tmux restore --drop in that pane first"))
 	}
 	if first, dup := claimed[p.ID]; dup {
 		return skip(ArmBusy, "pane "+p.ID+" is also at "+first+", which an earlier row of this save armed")

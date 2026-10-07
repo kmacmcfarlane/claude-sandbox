@@ -6,7 +6,8 @@ package main
 // hook (F3) and `claude-sandbox tmux restore` (F4) can bring it back after a
 // tmux server restart or a reboot. runSession sets it before the session child
 // starts and, when the child returns, removes it — or keeps it pending when
-// the session was stopped from outside (F1b). It never changes the launch.
+// the session was stopped from outside (F1b), or crashed when it crashed
+// (CS-TMUX-075, answer 64 c). It never changes the launch.
 
 import (
 	"fmt"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/kmacmcfarlane/claude-sandbox/internal/launch"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/oomreport"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/registry"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/sessions"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/tmuxpane"
 )
@@ -36,8 +38,17 @@ type paneMark struct {
 	resuming string
 	// keepUnlessReady, set only by a restore resume (CS-TMUX-062), reports
 	// whether the session ended before it was resumed and within EarlyEnd:
-	// the prior mark (the restore's pending row) then goes back.
+	// the prior mark (the restore's pending row) then goes back — as
+	// crashed when the end was a crash (answer 90 a), which onEarlyCrash
+	// is then told.
 	keepUnlessReady func() bool
+	onEarlyCrash    func(crashEnd)
+	// guardedResume is the conversation this launch resumes, as the resume
+	// guard reads it ("" for a fork, which gets a new id): the new
+	// container's claude-sandbox.resume label, an attach's container's. A
+	// crash falls back to it when the mark names no conversation yet
+	// (CS-TMUX-075).
+	guardedResume string
 	// name is the conversation name the launch gives claude (--name), the
 	// window label's source (CS-TMUX-021); "" for none.
 	name string
@@ -55,6 +66,20 @@ type markedPane struct {
 	// owned is true when this launch named the pane's window and owns the
 	// label (CS-TMUX-020..023): only then does the end hand it back.
 	owned bool
+	// handed is the row a restore handed in as the prior (CS-TMUX-018), nil
+	// for a hand launch; guarded is paneMark.guardedResume. Both feed a
+	// crashed mark's conversation (CS-TMUX-075).
+	handed  *tmuxpane.Mark
+	guarded string
+	// crash is how a crashed end ended (markCrashed, markCrashedPrior).
+	crash crashEnd
+}
+
+// crashEnd is a crash's record in the mark (CS-TMUX-075).
+type crashEnd struct {
+	code int
+	oom  bool
+	at   time.Time
 }
 
 // beginMark marks the pane before the session child starts (CS-TMUX-010).
@@ -69,8 +94,12 @@ func beginMark(env *Env, o sessionOpts) *markedPane {
 		return nil
 	}
 	m := &markedPane{pane: tmuxpane.Pane{Runner: env.Runner, ID: id}, own: o.mark.next}
+	m.guarded = o.mark.guardedResume
 	if o.mark.prior != nil {
 		m.prior = *o.mark.prior
+		if h, ok := tmuxpane.ParseMark(m.prior); ok {
+			m.handed = &h
+		}
 	} else {
 		m.prior = m.pane.Read()
 		if note := tmuxpane.PendingNote(m.prior, o.mark.resuming); note != "" {
@@ -125,12 +154,19 @@ const (
 	// markPending keeps this session's mark, as pending: it was stopped
 	// from outside (CS-TMUX-071).
 	markPending
+	// markCrashed keeps this session's mark, as crashed: it died with a
+	// crash exit code (CS-TMUX-075). A restore prints its hint and never
+	// relaunches it.
+	markCrashed
+	// markCrashedPrior sets the prior (a restore resume's pending row) back
+	// as crashed: the resume crashed before it was up (CS-TMUX-062).
+	markCrashedPrior
 )
 
-// end settles the pane's mark (CS-TMUX-015/018/019/071). Only an unset mark
-// — the session really ended — hands the window label back (CS-TMUX-024): a
-// pane kept pending or given its prior back is waiting to be restored, and
-// keeps its name.
+// end settles the pane's mark (CS-TMUX-015/018/019/062/071/075). Only an
+// unset mark — the session really ended — hands the window label back
+// (CS-TMUX-024): a pane kept pending or crashed, or given its prior back, is
+// waiting to be restored or to show its hint, and keeps its name.
 func (m *markedPane) end(a markEnd) {
 	if m == nil {
 		return
@@ -144,6 +180,22 @@ func (m *markedPane) end(a markEnd) {
 	case markPending:
 		if raw, ok := m.pendingMark(); ok {
 			m.pane.Set(raw)
+			return
+		}
+	case markCrashed:
+		if raw, ok := m.crashedMark(); ok {
+			m.pane.Set(raw)
+			return
+		}
+	case markCrashedPrior:
+		if p := m.handed; p != nil && registry.IsUUID(p.Conversation) {
+			c := *p
+			m.crash.mark(&c)
+			m.pane.Set(c.JSON())
+			return
+		}
+		if m.prior != "" {
+			m.pane.Set(m.prior)
 			return
 		}
 	}
@@ -166,9 +218,20 @@ func (m *markedPane) end(a markEnd) {
 // writes the conversation into it while the session runs (CS-TMUX-035).
 // Another mark, none, or a failed read gives false: the pane is unset.
 func (m *markedPane) pendingMark() (string, bool) {
-	cur, ok := tmuxpane.ParseMark(m.pane.Read())
+	cur, ok := m.ownMark()
 	if !ok {
 		return "", false
+	}
+	cur.State = tmuxpane.StatePending
+	return cur.JSON(), true
+}
+
+// ownMark re-reads the pane's mark; ok only while it is still this
+// session's own (the same containerId, else the same container).
+func (m *markedPane) ownMark() (tmuxpane.Mark, bool) {
+	cur, ok := tmuxpane.ParseMark(m.pane.Read())
+	if !ok {
+		return cur, false
 	}
 	switch {
 	case m.own.ContainerID != "":
@@ -178,11 +241,45 @@ func (m *markedPane) pendingMark() (string, bool) {
 	default:
 		ok = false
 	}
+	return cur, ok
+}
+
+// crashedMark is the pane's current mark with state crashed and the crash's
+// fields, when it is still this session's own and a conversation is known
+// (CS-TMUX-075). The conversation is, in order: the re-read mark's own (the
+// save hook writes it within a minute); else the row a restore handed in
+// (a restore resume or a restore attach resumed exactly that id), with its
+// user-given name when the mark has none; else the launch's guarded resume
+// id — at once for an OOM kill, otherwise only once the session ran
+// EarlyEnd from the mark's since, since a hand --resume of a missing id
+// ("No conversation found") ends within seconds and must leave no hint.
+// Anything else gives false: the pane is unset.
+func (m *markedPane) crashedMark() (string, bool) {
+	cur, ok := m.ownMark()
 	if !ok {
 		return "", false
 	}
-	cur.State = tmuxpane.StatePending
+	switch {
+	case registry.IsUUID(cur.Conversation):
+	case m.handed != nil && registry.IsUUID(m.handed.Conversation):
+		cur.Conversation = m.handed.Conversation
+		if cur.Name == "" {
+			cur.Name, cur.NameSource = m.handed.Name, m.handed.NameSource
+		}
+	case registry.IsUUID(m.guarded) &&
+		(m.crash.oom || m.crash.at.UnixMilli()-m.own.Since >= tmuxpane.EarlyEnd.Milliseconds()):
+		cur.Conversation = m.guarded
+	default:
+		return "", false
+	}
+	m.crash.mark(&cur)
 	return cur.JSON(), true
+}
+
+// mark writes the crash into a mark (CS-TMUX-075).
+func (c crashEnd) mark(m *tmuxpane.Mark) {
+	m.State = tmuxpane.StateCrashed
+	m.EndedAt, m.ExitCode, m.OOMKilled = c.at.UnixMilli(), c.code, c.oom
 }
 
 // stoppedFromOutside is rows 1 and 2 of CS-TMUX-071: a kill or stop event
@@ -195,21 +292,59 @@ func (m *markedPane) stoppedFromOutside(env *Env, out oomreport.Outcome) bool {
 	return out.OutsideStop || tmuxpane.SystemStopping(env.Runner)
 }
 
-// pendingAfter decides the mark of a session that ended without a signal
-// from the launcher (CS-TMUX-071 rows 1, 2 and 4..9). The rows that give
-// pending without a probe are checked first, so the probe runs only when the
-// end would otherwise unset; the verdict is the table's in its order.
-func (m *markedPane) pendingAfter(env *Env, o sessionOpts, w *oomreport.Watch, code int, out oomreport.Outcome, container string) bool {
+// endAfter decides the mark of a session that ended without a signal from
+// the launcher (CS-TMUX-071 rows 1, 2 and 4..9, with row 4 split by
+// CS-TMUX-075). The rows that give pending without a probe are checked
+// first, so the probe runs only when the end would otherwise unset or be
+// crashed; the verdict is the table's in its order. markCrashed may still
+// fall back to an unset in end (no conversation known, another mark).
+func (m *markedPane) endAfter(env *Env, o sessionOpts, w *oomreport.Watch, code int, out oomreport.Outcome, verdict oomreport.Verdict, container string) markEnd {
 	if m == nil || m.decided {
-		return false
+		return markUnset
 	}
 	if out.OutsideStop {
-		return true // row 1
+		return markPending // row 1
 	}
 	if m.inconclusive(env, o, w, code, out, container) {
-		return true // rows 6 and 9
+		return markPending // rows 6 and 9
 	}
-	return tmuxpane.SystemStopping(env.Runner) // row 2, else rows 4, 5, 7, 8: unset
+	if tmuxpane.SystemStopping(env.Runner) {
+		return markPending // row 2
+	}
+	if m.crashed(env, o, out, verdict) {
+		return markCrashed // row 4b
+	}
+	return markUnset // rows 4a, 4c, 5, 7, 8
+}
+
+// crashed is CS-TMUX-075's row 4b, before the conversation is known: the
+// container died with a crash exit code, and the session is a claude-mode
+// primary (a crashed join or ralph run unsets). It records the crash.
+func (m *markedPane) crashed(env *Env, o sessionOpts, out oomreport.Outcome, verdict oomreport.Verdict) bool {
+	if !out.Died || tmuxpane.CleanExit(out.ExitCode) || o.kind == joinedSession || m.own.Mode != tmuxpane.ModeClaude {
+		return false
+	}
+	m.crash = crashEnd{code: out.ExitCode, oom: verdict == oomreport.Killed, at: env.now()}
+	return true
+}
+
+// earlyEnd settles a restore resume that ended before it was up
+// (CS-TMUX-062, answer 90 a): a die with a crash code, with no stop from
+// outside and the host not shutting down, sets the pending row back as
+// crashed; anything else puts it back as it was.
+func (m *markedPane) earlyEnd(env *Env, o sessionOpts, out oomreport.Outcome, verdict oomreport.Verdict) markEnd {
+	if m == nil || out.OutsideStop || !out.Died || tmuxpane.CleanExit(out.ExitCode) ||
+		m.handed == nil || m.handed.Mode != tmuxpane.ModeClaude || !registry.IsUUID(m.handed.Conversation) {
+		return markPutBack
+	}
+	if tmuxpane.SystemStopping(env.Runner) {
+		return markPutBack
+	}
+	m.crash = crashEnd{code: out.ExitCode, oom: verdict == oomreport.Killed, at: env.now()}
+	if o.mark.onEarlyCrash != nil {
+		o.mark.onEarlyCrash(m.crash)
+	}
+	return markCrashedPrior
 }
 
 // inconclusive is rows 4..9 of CS-TMUX-071: true for an end that gives no
@@ -296,13 +431,14 @@ func cwdRoot(project, gitRoot, worktree string) string {
 
 // newContainerMark is the mark of a container this launch created
 // (CS-TMUX-011). since was taken before the create.
-func newContainerMark(plan *launch.Plan, gitRoot string, rec tmuxpane.LaunchRecord, since time.Time, resuming string) *paneMark {
+// guarded is the launch's resume label value (CS-LNCH-110).
+func newContainerMark(plan *launch.Plan, gitRoot string, rec tmuxpane.LaunchRecord, since time.Time, resuming, guarded string) *paneMark {
 	cde := plan.ConfigDirEnv
 	mode := tmuxpane.ModeClaude
 	if plan.Mode == sessions.ModeRalph {
 		mode = tmuxpane.ModeRalph
 	}
-	return &paneMark{resuming: resuming, name: rec.Name, next: tmuxpane.Mark{
+	return &paneMark{resuming: resuming, guardedResume: guarded, name: rec.Name, next: tmuxpane.Mark{
 		V: tmuxpane.MarkVersion, State: tmuxpane.StateActive, Mode: mode,
 		Container: plan.ContainerName, ContainerID: plan.ContainerID,
 		Instance: plan.Instance, Project: plan.ProjectDir,
@@ -363,7 +499,9 @@ func attachMark(s sessions.Session, home, gitRoot string) *paneMark {
 		}
 		m.Unreplayed = unreplayed
 	}
-	return &paneMark{next: m}
+	// CS-TMUX-075: the container's resume label is the conversation a crash
+	// falls back to.
+	return &paneMark{next: m, guardedResume: s.Resume}
 }
 
 // joinMark is a join's mark: mode join, since the exec, and the join's own

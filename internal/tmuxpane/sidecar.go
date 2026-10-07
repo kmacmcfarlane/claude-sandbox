@@ -18,7 +18,6 @@ import (
 	"strings"
 	"syscall"
 	"time"
-	"unicode"
 
 	"github.com/kmacmcfarlane/claude-sandbox/internal/registry"
 )
@@ -324,7 +323,11 @@ func ValidateRow(m Mark) string {
 	switch {
 	case m.V != MarkVersion:
 		return "v"
-	case m.State != StateActive && m.State != StatePending:
+	case m.State != StateActive && m.State != StatePending && m.State != StateCrashed:
+		return "state"
+	case m.State == StateCrashed && (m.Mode != ModeClaude || !registry.IsUUID(m.Conversation)):
+		// CS-TMUX-075: only a claude session with a known conversation is
+		// ever left crashed; its hint needs the id.
 		return "state"
 	case m.Mode != ModeClaude && m.Mode != ModeJoin && m.Mode != ModeRalph:
 		return "mode"
@@ -348,12 +351,12 @@ func ValidateRow(m Mark) string {
 	// Unreplayed names reach ResumeNotes' line; Replay and the rest of
 	// what a line prints are printableMark's.
 	for _, v := range append([]string{m.Container, m.Instance, m.Project, m.CwdRoot, m.ConfigDir, m.Name}, m.Unreplayed...) {
-		if strings.IndexFunc(v, unicode.IsControl) >= 0 {
-			return "a control character"
+		if strings.IndexFunc(v, unprintable) >= 0 {
+			return "a control or bidi character"
 		}
 	}
 	if !printableMark(m) {
-		return "a control character"
+		return "a control or bidi character"
 	}
 	return ""
 }

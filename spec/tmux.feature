@@ -139,6 +139,9 @@ Feature: tmux integration (CS-TMUX)
     And "replay" and "unreplayed" follow CS-TMUX-013
     And the mark carries no conversation id, name or name source (the save hook fills them) and no
       window-label field
+    And "state" is "active" at launch; the end rules may leave "pending" (CS-TMUX-071) or "crashed"
+      (CS-TMUX-075), the latter with "endedAt" (unix ms), "exitCode" and "oomKilled" (omitted when
+      false), written only with that state; "v" stays 1
 
   Scenario: CS-TMUX-012 attach and join marks come from the container's labels
     Given a running container with the labels of CS-LNCH-109
@@ -191,18 +194,21 @@ Feature: tmux integration (CS-TMUX)
       or the launch is headless (even with TMUX set), or it is a --detach launch
     Then the launcher runs no tmux command at all — no mark and no window label (CS-TMUX-020)
 
-  Scenario: CS-TMUX-015 the mark is removed on a clean exit, a crash, an OOM kill or a detach
+  Scenario: CS-TMUX-015 the mark is removed on a clean exit or a detach; a crash is kept as crashed
     Given a marked pane
-    When the session child ends with a die of its container (any exit code: /exit, Ctrl-D, a crash,
-      an OOM kill) and no evidence of a stop from outside (CS-TMUX-071), or the client detached
+    When the session child ends with a die of its container with a clean exit code (0 or 78,
+      CS-TMUX-075) and no evidence of a stop from outside (CS-TMUX-071), or the client detached
       (CS-TMUX-071's positive evidence), or the launcher's own signal ended it (forwarded, or during
       the die wait) with no such evidence
     Then "tmux set-option -p -u -t <pane> @claude-sandbox" runs once, after the child returned
     And a join or an attach unmarks the same way
     And a session stopped from outside (a kill or stop event before the die, the host shutting down)
       or one whose end is inconclusive leaves the pane PENDING instead (CS-TMUX-071)
-    # The narrow default (plan 12 § 3.1, open question 1): a crash or an OOM kill unsets, as before
-    # F1b; only outside-stop evidence keeps the row. Removal covers these ordinary return paths only.
+    And a crash or an OOM kill of a "claude"-mode session whose conversation is known leaves the pane
+      CRASHED (CS-TMUX-075): a restore prints a resume hint there and never relaunches it; a crash
+      of a join, a ralph run or a session whose conversation is not known still unsets
+    # Operator answer 64 c (plan 16..18): a crashed pane comes back as a shell at its folder with one
+    # hint line. Removal covers these ordinary return paths only.
     # A launcher killed outright (SIGKILL, a crash) or interrupted between setting the mark and the
     # session child's signal handlers (a Ctrl-C in that instant) leaves a stale "active" mark behind;
     # the save hook (F3) therefore checks liveness (the pane runs claude-sandbox, the container
@@ -233,13 +239,19 @@ Feature: tmux integration (CS-TMUX)
       (CS-TMUX-058)
     And nothing prompts, and the new mark replaces the pending one
     And when any value the command would print (project, CLAUDE_CONFIG_DIR, worktree, model,
-      replay values, name, instance) holds a control character, no command is printed: the line is
+      replay values, name, instance) holds a control character (Cc) or one of the twelve
+      Bidi_Control characters (U+061C, U+200E, U+200F, U+202A..U+202E, U+2066..U+2069: they reorder
+      what is displayed, so a printed command could read differently from what it runs), no command
+      is printed: the line is
       "Note: this pane was waiting to restore a conversation (<id>), but its mark holds unprintable
       values; no resume command is shown", so no escape sequence from a mark reaches the terminal
     And for a mark whose worktree name is unknown ("worktreeGenerated") the line ends
       "(<id>) in a worktree whose name is not recorded yet; no resume command is shown"
-    And no note is printed for an active mark, a pending mark without an id, or a launch whose
-      passthrough resumes that same id
+    And over a CRASHED mark (CS-TMUX-075) naming another conversation the one line is
+      "Note: '<name>' (<id>) crashed in this pane (exit N); resume it with: <exact command>", with the
+      same unprintable and unknown-worktree forms
+    And no note is printed for an active mark, a pending or crashed mark without an id, or a launch
+      whose passthrough resumes that same id
     And a passthrough "--resume <path>.jsonl" (any case of the extension) whose base name is that
       id counts as resuming it (ResumeValueID, as the resume guard reads
       it, CS-LNCH-110), so no note is printed; a path whose base name is not a UUID names no id
@@ -358,8 +370,10 @@ Feature: tmux integration (CS-TMUX)
     And then "set-option -w -u -t %N @claude-sandbox-label" and
       "set-option -w -u -t %N @claude-sandbox-label-pane"
     And a window renamed by hand since keeps its name and its automatic-rename; only the options go
-    And a mark kept PENDING (CS-TMUX-071) or given its prior back (CS-TMUX-018/019/062) keeps the
-      label: the pane is waiting to be restored, and a shutdown save should record the name
+    And a mark kept PENDING (CS-TMUX-071), left CRASHED (CS-TMUX-075, and an early crash of a
+      restore resume, CS-TMUX-062) or given its prior back (CS-TMUX-018/019/062) keeps the label: the
+      pane is waiting to be restored or to show its hint, and a shutdown save should record the name;
+      a crashed end that falls back to an unset hands it back as any unset does
     And a launch that did not own the label makes no call at the end
     # "-u", not "on": the window was automatic before the launch (CS-TMUX-020), almost always by
     # inheriting the global; unsetting restores exactly that, is resurrect's own ":" model
@@ -478,6 +492,7 @@ Feature: tmux integration (CS-TMUX)
     And a "pending" mark (a restore waiting to act, F4, or a session stopped from outside, F1b) is
       recorded verbatim whatever the pane runs, never re-resolved against the registry and never
       checked with docker
+    And so is a "crashed" mark (CS-TMUX-075, CS-TMUX-076); a mark in any other state is dropped
 
   Scenario: CS-TMUX-033 which registry record holds the pane's conversation
     Given a kept active mark of mode "claude" or "join"
@@ -599,7 +614,9 @@ Feature: tmux integration (CS-TMUX)
       | 1 | a kill or stop event for the container arrived before its die                     | pending |
       | 2 | "systemctl is-system-running" prints "stopping" (the host is shutting down)        | pending |
       | 3 | the launcher's own signal ended the session (forwarded, CS-LNCH-091, or during the die wait, CS-LNCH-097) | unset |
-      | 4 | the container's die arrived (any exit code: a clean exit, a crash, an OOM kill)    | unset   |
+      | 4a | the container's die arrived with a clean exit code (CleanExitCodes: 0, 78)       | unset   |
+      | 4b | the container's die arrived with any other code (a crash, an OOM kill), the session is not a join, its mark's mode is "claude", and a conversation is known (CS-TMUX-075) | crashed |
+      | 4c | any other die (a join, a ralph run, no conversation known)                        | unset   |
       | 5 | a join whose docker exec exited 0 (the joined claude ended on its own)            | unset   |
       | 6 | no die, and the event stream ended, or the inspect failed, timed out or found the container neither running nor paused | pending |
       | 7 | a detach: no die while the stream stayed open and the container is running or paused, and either an attach ("docker attach", any exit code) or a new container's "docker start -ai" that exited 0 | unset |
@@ -623,7 +640,8 @@ Feature: tmux integration (CS-TMUX)
     And none of this runs for an unmarked session: outside tmux, in a sandbox, headless (the Paseo
       SIGTERM contract, CS-LNCH-091) and --detach make no probe, no inspect and no extra tmux call
     And the rows are checked so that a pending verdict from rows 6 and 9 needs no probe: the probe runs
-      only when the end would otherwise unset
+      only when the end would otherwise unset or be crashed (row 2 outranks 4b: a shutdown that kills
+      claude with a non-zero code stays pending)
     # Rows 6 and 9 are the "inconclusive" ends: a docker daemon going away drops the client's
     # connection and ends the event stream, so a missing die is never read as a detach without a live
     # stream and a running container. Row 8 settles the plan review's low on joins: a Ctrl-C in a
@@ -639,8 +657,10 @@ Feature: tmux integration (CS-TMUX)
     # in particular whether a daemon shutdown emits kill for the containers it stops; what
     # "systemctl is-system-running" prints during a real shutdown (a logging user unit across a
     # reboot); and claude's
-    # exit codes for /exit, Ctrl-D, a double Ctrl-C and SIGTERM (under this narrow default none of
-    # them changes a decision: any die without outside evidence unsets).
+    # exit codes for /exit, Ctrl-D, a double Ctrl-C and SIGTERM. Since CS-TMUX-075 they decide which
+    # ends print a crash hint at the next restore (never which are relaunched): a clean end that
+    # exits non-zero would leave a crashed mark and one stale hint line. Fail means: add the code to
+    # tmuxpane.CleanExitCodes. Assumed until measured: /exit and Ctrl-D exit 0.
 
   Scenario: CS-TMUX-072 the save hook records a just-stopped container's mark as pending
     Given a kept pane with an "active" mark whose pane_current_command is still "claude-sandbox" (its
@@ -689,9 +709,31 @@ Feature: tmux integration (CS-TMUX)
     And each row is checked before use: "project" absolute; "configDir" and "cwdRoot" absolute when
       present; "configDirEnv" empty or absolute; "worktree" empty or ^[A-Za-z0-9._-]+$; "model" empty
       or ^[A-Za-z0-9][A-Za-z0-9._:\[\]-]*$; "containerId" empty or 64 hex; "conversation" empty or a
-      UUID; the mark's "v" 1, "state" active or pending, "mode" claude, join or ralph; and no control
-      character in any value a line prints
+      UUID; the mark's "v" 1, "state" active, pending or crashed, "mode" claude, join or ralph; a
+      crashed row also needs mode "claude" and a UUID "conversation" (else the field named is
+      "state"); and no control character (Cc) and no Bidi_Control character (the twelve of
+      CS-TMUX-017) in any value a line prints ("a control or bidi character")
+    And other format, private-use or surrogate characters pass: a ZWNJ or a ZWJ emoji sequence in a
+      folder name, a soft hyphen or a BOM in a replay value, a Nerd Font glyph in a path cannot
+      reorder what is displayed, and rejecting them would clear rows that are valid today
     And a row that fails gets decision row 3 (CS-TMUX-051), naming the field
+    # HOST CHECK OWED (plan 18 § 1; read-only, not run in CI): count the existing sidecar rows that the
+    # Bidi_Control rule now clears. The resurrect dir is resolved as CS-TMUX-045 resolves it — the
+    # tmux option @resurrect-dir ($HOME, $HOSTNAME and ~ expanded) whenever it is absolute, existing
+    # or not; else ~/.tmux/resurrect when it exists, else ${XDG_DATA_HOME:-~/.local/share}/tmux/resurrect:
+    #   python3 -c 'import json,glob,os,re,socket,subprocess as s
+    #   h=os.path.expanduser("~"); d=""
+    #   try: d=s.run(["tmux","show-option","-gqv","@resurrect-dir"],capture_output=True,text=True,timeout=1).stdout.strip()
+    #   except Exception: pass
+    #   d=d.replace("$HOME",h).replace("$HOSTNAME",socket.gethostname()).replace("~",h)
+    #   if not os.path.isabs(d): d=os.path.join(h,".tmux/resurrect"); d=d if os.path.isdir(d) else os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.join(h,".local/share"),"tmux/resurrect")
+    #   B=set(map(chr,[0x61c,0x200e,0x200f,*range(0x202a,0x202f),*range(0x2066,0x206a)])); n=0
+    #   for f in glob.glob(os.path.join(d,"*.claude-sandbox.json")):
+    #     for p in json.load(open(f)).get("panes",[]):
+    #       if B & set(json.dumps(p["mark"],ensure_ascii=False)): n+=1; print(f,p["session"],p["window"],p["pane"])
+    #   print(d,n,"rows")'
+    # Expected 0. Not measured: the resurrect dir is not visible from the sandbox the change was
+    # built in; record the count here once run on the host.
 
   Scenario: CS-TMUX-047 the save hook records its tmux server and keeps a lifetimes index
     Given a save hook run (CS-TMUX-030)
@@ -720,7 +762,8 @@ Feature: tmux integration (CS-TMUX)
     And consecutive saves of one tmux server whose rows name the same sandbox sessions (container id,
       else name, with the conversation and the state) collapse into one line: the newest stamp and
       its local time, the number of saves and the oldest's time, "N sandbox panes (a active,
-      p pending)", "last" on the run holding last's target, and "sparse (had M)" when CS-TMUX-050
+      p pending, c crashed)" (a zero count left out), "last" on the run holding last's target, and
+      "sparse (had M)" when CS-TMUX-050
       flags it
     And the runs are grouped under one heading per tmux server ("tmux server started <time>"), and
       saves recorded before CS-TMUX-047 under a heading of their own, and saves with no usable sidecar
@@ -750,6 +793,8 @@ Feature: tmux integration (CS-TMUX)
       --list
     And a path, a name outside those forms, or a save that does not exist exits 2; the ownership checks
       of CS-TMUX-046 cover only the resurrect dir
+    And an ACTING "--from" in a pane that holds a crashed mark refuses (CS-TMUX-077): exit 2, nothing
+      written; "--dry-run --from" there prints the same note and the save row's decision
 
   Scenario: CS-TMUX-050 the sparse-save rule and its line
     Given a chosen save S with n rows (every mode, active or pending)
@@ -789,15 +834,19 @@ Feature: tmux integration (CS-TMUX)
     Given "claude-sandbox tmux restore --dry-run [--from <save>]" typed in a pane, or
       "--dry-run --all [--from <save>]" anywhere on the host
     Then a per-pane dry-run reads this pane's coordinates, the server and the pane's mark with one
-      bounded "tmux display-message -p -t $TMUX_PANE"; its row is the pane's own PENDING mark, else
-      last's row at those coordinates; with --from, that save's row only
-    And --all lists the pending marks of the running server first (one bounded list-panes; none when
-      it does not answer), then every row of the save
-    And each row is decided by the first match of this table, read-only:
+      bounded "tmux display-message -p -t $TMUX_PANE"; its row is the pane's own PENDING or CRASHED
+      mark, else last's row at those coordinates; with --from, that save's row only (after the
+      CS-TMUX-049 note when the pane holds a crashed mark)
+    And --all lists the pending and crashed marks of the running server first under "Pending and
+      crashed marks in the running tmux server:" (one bounded list-panes; none when it does not
+      answer), then every row of the save
+    And each row is decided by the first match of this table, read-only, in the order shown (row 19
+      is numbered after the landed rows so they keep their numbers):
       | #  | condition                                                                    | decision |
       | 1  | inside a sandbox, or a per-pane form without TMUX_PANE                       | exit 2   |
       | 2  | no row at this pane's coordinates                                            | nothing  |
       | 3  | the row fails CS-TMUX-046's checks                                           | clear    |
+      | 19 | the row is CRASHED (CS-TMUX-077): print the hint, start nothing, call no probe | hint     |
       | 4  | mode ralph: print the rerun command                                          | clear    |
       | 5  | mode join: joins are not restored (the manual resume command when known)     | clear    |
       | 7  | the project is not a directory                                               | pending  |
@@ -856,8 +905,9 @@ Feature: tmux integration (CS-TMUX)
       or with "--from", is F4d's, CS-TMUX-069)
     And the pane's coordinates, server and mark come from one bounded "tmux display-message -p -t
       $TMUX_PANE"; tmux not answering exits 2
-    And the row is the pane's own PENDING mark, else the row at the pane's coordinates in "last"'s
-      save; with "--from <save>" (CS-TMUX-049) that save's row only, even over a pending mark
+    And the row is the pane's own PENDING or CRASHED mark, else the row at the pane's coordinates in
+      "last"'s save; with "--from <save>" (CS-TMUX-049) that save's row only, even over a pending
+      mark — but over a CRASHED mark "--from" refuses (CS-TMUX-077)
     And the row is read once, before any wait; a save without a record, or one that cannot be read, is
       one line and exit 0; a sparse save prints CS-TMUX-050's line before anything acts
     And no row at the coordinates prints "nothing recorded for this pane (s:w.p) — the shell is yours"
@@ -872,6 +922,8 @@ Feature: tmux integration (CS-TMUX)
       the docker wait, the start lock or any docker call
     And so a restore cut short anywhere — Ctrl-C, a killed terminal, a failed launch — leaves the pane
       on the restore list, with CS-TMUX-017's note for the next hand launch in it
+    And a CRASHED row is decided (row 19, CS-TMUX-077) beside rows 2 and 3, before this set: it is
+      never set pending, and takes no start lock, installs no Ctrl-C context and runs no probe
 
   Scenario: CS-TMUX-054 final outcomes clear the mark
     Given the decision is row 4 (ralph), 5 (join), 9 on screen, 13 (no conversation), 14 (an unknown
@@ -980,23 +1032,40 @@ Feature: tmux integration (CS-TMUX)
     # 60 s cap; "resumed" stays a best effort, with EarlyEnd as its backstop. The gap values are
     # operator answer 66 a (accepted as built).
 
-  Scenario: CS-TMUX-062 a resume that ends before it was resumed keeps the pane pending
+  Scenario: CS-TMUX-062 a resume that ends before it was resumed keeps the pane pending, or crashed
     Given a resume whose session child returned before "resumed" was seen and within EarlyEnd of its
       start (a missing conversation, a claude that failed to start)
-    Then the pane's prior mark — the pending row — is put back instead of the session's own mark
-    And the restore prints "the resume of '<name>' (<id>) ended before it was up (exit N) — the
-      conversation may be missing from <configDir>, or claude failed to start (see above). The pane
-      stays pending: …"
+    Then the pane's prior mark — the pending row — is put back instead of the session's own mark, as
+      this table says:
+      | early end                                                                 | mark                       |
+      | a die whose code is clean (CleanExitCodes: 0, 78)                          | the pending row back       |
+      | any other die (137 with an oom event included), with no kill or stop event before it and the host not shutting down (CS-TMUX-071 rows 1, 2) | the pending row as CRASHED, with endedAt, exitCode, oomKilled |
+      | no die (inconclusive, or a stop from outside)                              | the pending row back       |
+    And for the pending row back the restore prints "the resume of '<name>' (<id>) ended before it was
+      up (exit N) — the conversation may be missing from <configDir>, or claude failed to start (see
+      above). The pane stays pending: …"
+    And for the crashed one it prints "the resume of '<name>' (<id>) ended before it was up (exit N[,
+      killed by the OOM killer]); not restarted again. The conversation may be missing from
+      <configDir>. Resume it by hand: <exact command>"
+    And either way the window label is kept (CS-TMUX-024): the pane waits for its restore or its hint
     And the end rules apply in this order: a start that never ran (CS-TMUX-018/019), then this early
       end, then CS-TMUX-071 — so an early end puts the row back even when CS-TMUX-071 would have
       kept the session's own mark pending
+    # Operator answer 90 a (plan 17 § 3): a non-clean early end is relaunched at every restore if it
+    # stays pending (a load-time OOM, "No conversation found"), which answer 64 c rules out. Exit 78 —
+    # pidslot refusing without the global-config link — stays pending: the operator fixes it on the
+    # host, and the retry is then right. A transient fault that ends a resume early loses its
+    # automatic retry; the operator gets the command instead.
     And an end after "resumed", or past EarlyEnd (a /exit an hour later), follows CS-TMUX-071
     And a hand launch never sets this rule
 
-  Scenario: CS-TMUX-063 --drop forgets this pane's pending mark
+  Scenario: CS-TMUX-063 --drop forgets this pane's pending or crashed mark
     Given "claude-sandbox tmux restore --drop" typed in a pane
     Then a PENDING mark is unset and named ("dropped the pending mark of pane s:w.p: '<name>' (<id>)",
       with no values of a row that fails CS-TMUX-046's checks)
+    And a CRASHED mark is unset the same way ("dropped the crashed mark of pane s:w.p: '<name>' (<id>);
+      the shell is yours", the name cleaned for display); a crashed mark stays until this, its hint
+      (CS-TMUX-077) or the pane going away — it never expires
     And an active mark (a running session) or no mark is left alone with one line
     And nothing else is read, locked or started; it exits 0
 
@@ -1044,9 +1113,10 @@ Feature: tmux integration (CS-TMUX)
   Scenario: CS-TMUX-065 --resurrected reads the pane's own mark, then this server's pin, then last
     Given "claude-sandbox tmux restore --resurrected" typed into a restored pane by resurrect (the
       processes entry) or by --rearm
-    Then its row is the pane's own PENDING mark, else the row at its coordinates in the save named by
-      the running server's pin (its pid, and its start time when the pin has one), else the row in
-      last's save
+    Then its row is the pane's own PENDING or CRASHED mark, else the row at its coordinates in the save
+      named by the running server's pin (its pid, and its start time when the pin has one), else the
+      row in last's save; over its own crashed mark it reads no pin and no save, prints the hint
+      (CS-TMUX-077) and waits for nothing
     And only the server's NEWEST pin is looked at, consumed or not: when it is consumed, older than 10
       minutes, dated more than a minute in the future, or does not read as one (CS-TMUX-046's checks;
       names that do not match its stamp; pane ids not of tmux's shape), there is no pin — an older pin
@@ -1088,7 +1158,9 @@ Feature: tmux integration (CS-TMUX)
       guard that resurrect's save never reaches
     And a mismatch is logged and the pane left to its typed restore, which reads this server's
       unconsumed pin (at most 10 minutes old; --rearm consumes it only when it ends) before last
-    And an armed pane gets the row as a PENDING mark with one bounded "tmux set-option -p", right after
+    And a CRASHED row is armed as CRASHED, every field kept (CS-TMUX-078); an active or pending row
+      as PENDING
+    And an armed pane gets the row as its mark with one bounded "tmux set-option -p", right after
       one bounded "tmux display-message -p -t <pane>
       '#{pane_current_command}\t#{pane_in_mode}\t#{pane_synchronized}\t#{pane_pid}\t#{@claude-sandbox}'"
       finds it still unmarked and not running claude-sandbox (the other fields feed CS-TMUX-067's
@@ -1102,9 +1174,10 @@ Feature: tmux integration (CS-TMUX)
     And it never shows a message to a client (at boot no client is attached; its "display-message -p"
       calls only read)
 
-  Scenario: CS-TMUX-067 --rearm retypes only pending rows whose saved full command was empty
+  Scenario: CS-TMUX-067 --rearm retypes only pending or crashed rows whose saved full command was empty
     Given a pane --rearm armed (CS-TMUX-066)
-    When the row was PENDING and the pane's line in the pinned state file has field 11 exactly ":" (it
+    When the row was PENDING or CRASHED (CS-TMUX-078) and the pane's line in the pinned state file has
+      field 11 exactly ":" (it
       sat at a bare shell when saved, so resurrect typed nothing into it)
     Then the restore is typed into it (answer 51 a), so a waiting session retries after a restart as
       an active one does — under CS-TMUX-069's typing guard, the same helpers --all uses: its current
@@ -1129,7 +1202,7 @@ Feature: tmux integration (CS-TMUX)
     # At boot no client is usually attached and a pane resurrect just created sits at its shell, so the
     # guard rarely changes anything here; it is kept uniform with --all (F4d review 2026-10-01: a
     # default-command or a shell rc that starts a program reads as the shell by name alone).
-    And an active row, a pending row whose saved full command was anything else (resurrect typed the
+    And an active row, a pending or crashed row whose saved full command was anything else (resurrect typed the
       processes entry, or another program), or a line with no field 11 is marked only, never typed into
     And a ralph or join row that is retyped only prints its line (answer 66 a: a ralph pane prints its
       command, never restarts the loop)
@@ -1183,6 +1256,8 @@ Feature: tmux integration (CS-TMUX)
     And for each row, in order, the first that applies decides, and nothing is touched before step 7:
       | # | condition                                                                        | outcome |
       | 1 | the row fails CS-TMUX-046's checks                                               | skipped, naming the field |
+      | 1b | the row is CRASHED (CS-TMUX-077)                                                | not armed; the hint as its line, whether or not a pane is there (moved, missing, this command's own pane alike) |
+      | 2a | the pane at the coordinates holds a CRASHED mark (of any session)               | not armed; the pane's own hint followed by "; to put this save's row there instead, run claude-sandbox tmux restore --drop in that pane first" — or, when that mark fails CS-TMUX-046's checks, "pane s:w.p holds a crashed mark that cannot be used (its <field> is not valid); forget it with claude-sandbox tmux restore --drop in that pane" |
       | 2 | no pane at the row's coordinates, or the state file has no line for them, or the pane's path is not the saved one (CS-TMUX-066's comparison: field 8 unescaped, symlinks resolved; an active row's must be its project or cwdRoot) | skipped as missing or moved; the whole-layout procedures follow the list |
       | 3 | the pane runs claude-sandbox, is the pane the command runs in, is dead, holds an active mark or one that does not parse, or a pending mark for another session (not the row's 64-hex containerId, else conversation, else container) | skipped as busy |
       | 4 | an active mark for the row's container id or conversation is in another pane running claude-sandbox | skipped as on screen |
@@ -1234,3 +1309,102 @@ Feature: tmux integration (CS-TMUX)
     # - a non-readline program the foreground check let through (none known) may treat neither key.
     # The re-check narrows, and cannot close, the window between it and the send-keys; two concurrent
     # --all runs rely on it alone.
+
+  # ---- A crashed pane comes back as a shell with a resume hint ----
+  #
+  # Operator answer 64 c: when a sandbox session crashes or is OOM-killed (not
+  # stopped from outside), restore brings its pane back as a shell at its
+  # folder with ONE hint line naming the resume command, and never relaunches
+  # it. Plan sandbox-reboot-restore 16 as amended by 17 and 18; operator
+  # answers 90 a (CS-TMUX-062's early crash), 92 a (no hint at crash time;
+  # the label kept and reclaimed at the hint; CleanExitCodes 0 and 78; crashed
+  # joins and ralph runs unset; --from refuses over a crashed mark; Cc plus
+  # Bidi_Control validation) with one exception: crashed rows do NOT expire.
+  # A crashed mark stays until its hint is shown, "--drop" forgets it, or the
+  # pane goes away.
+
+  Scenario: CS-TMUX-075 a crash leaves the pane's mark crashed
+    Given a marked pane whose session child returned with no signal from the launcher, and whose end
+      is not pending by CS-TMUX-071 rows 1, 2, 6 and 9 (the probe of row 2 still runs first)
+    When the container's die carries an exit code not in tmuxpane.CleanExitCodes (0; 78, pidslot
+      refusing to start claude without the global-config link, CS-GCFG-033), the session is not a
+      join and its mark's mode is "claude"
+    Then the pane's current mark is re-read with one bounded "tmux show-options" and, only when it is
+      still this session's own (the same containerId, else the same container), set back with
+      "state": "crashed", "endedAt" (unix ms when the child returned), "exitCode" (the die's code)
+      and "oomKilled" (true when the OOM report said the OOM killer ended the session), every other
+      field as re-read
+    And its "conversation" is, in order: the re-read mark's own (the save hook writes it within a
+      minute of the start); else, for a restore that handed in its row as the prior — a restore
+      resume or a restore attach — that row's conversation, with no time gate (and the row's name and
+      name source when the re-read mark has none); else the launch's guarded resume id (the new
+      container's claude-sandbox.resume label value, "" for a fork; an attach's container's resume
+      label), with no gate for an OOM kill and otherwise only when the session ran at least EarlyEnd
+      (60 s) measured from the mark's "since"
+    And with no conversation, or a re-read that failed or shows another session's mark, the pane is
+      unset as any unset is (the window label handed back, CS-TMUX-024)
+    And a crashed mark keeps the window label (CS-TMUX-024)
+    And no hint is printed at crash time: the next hand launch in the pane prints CS-TMUX-017's note,
+      and the next restore prints the hint (CS-TMUX-077)
+    And a restore resume that ends early is CS-TMUX-062's, judged before this
+    # The accepted residual (plan 18 § 2): a hand "--resume <good id>" that dies non-zero, not by OOM,
+    # within its first minute and before the save hook ran unsets — the launcher cannot tell it from
+    # "No conversation found" without reading transcripts. Old binaries never launch a crashed row: an
+    # old save hook drops it, an old ValidateRow clears it at row 3, an old --all calls it busy.
+
+  Scenario: CS-TMUX-076 the save hook carries crashed marks verbatim
+    Given a save hook run (CS-TMUX-030) over a pane holding a "crashed" mark
+    Then the row is recorded verbatim whatever the pane runs: never resolved against the registry,
+      never checked with docker, never written back, and no window-label refresh
+    And a crashed row whose conversation equals the conversation of a kept active or pending row of the
+      same save is left out of the sidecar with one tmux-save.log line (the operator already resumed
+      it elsewhere); the pane's own mark is left as it is
+    And crashed rows count toward the sparse rule's n (CS-TMUX-050) and the lifetimes index's rows
+    And a crashed row is never dropped for its age
+
+  Scenario: CS-TMUX-077 decision row 19: a crashed row prints one hint and starts nothing
+    Given a row in state "crashed" that passes CS-TMUX-046's checks
+    Then CS-TMUX-051's decision is row 19, outcome "hint", decided right after row 3 with no probe — no
+      docker call, no start lock, no wait — and "would: print the crash hint and forget the row;
+      nothing is started"
+    And the line is "'<name>' crashed in this pane on <YYYY-MM-DD HH:MM> (exit N[, killed by the OOM
+      killer]); not restarted. Resume it with: <exact command>[; it was also launched with <names>]":
+      the date (local time) left out when "endedAt" is 0, the OOM words only with "oomKilled", the
+      launch flags by name only (the row's "unreplayed"), the name cleaned for display, the command
+      tmuxpane.ResumeCommand's, shell-quoted
+    And a plain restore, "--resurrected" (its own crashed mark first: no pin, no save) and a restore
+      from a save print it with the "claude-sandbox: " prefix, decided beside rows 2 and 3, before
+      CS-TMUX-053's pending set, and unset the pane's own mark only when it is crashed and names the
+      same conversation (a row read from a save sets nothing); exit 0
+    And an acting "--from <save>" in a pane that holds a crashed mark prints that mark's hint, then
+      "this pane holds a crashed session; to restore save <stamp> here instead, run claude-sandbox
+      tmux restore --drop first", and exits 2, writing nothing; when that mark fails CS-TMUX-046's
+      checks, the line is "pane s:w.p holds a crashed mark that cannot be used (its <field> is not
+      valid); forget it with claude-sandbox tmux restore --drop in that pane" instead — no other value
+      of it is printed
+    And "--dry-run" reads the pane's own crashed mark first and prints row 19; "--all" never arms a
+      crashed row or a pane holding a crashed mark (CS-TMUX-069 steps 1b and 2a); "--drop" forgets
+      it (CS-TMUX-063); "--list" counts it (CS-TMUX-048)
+
+  Scenario: CS-TMUX-078 at boot --rearm arms a crashed row as crashed and types the restore into it
+    Given "--rearm" (CS-TMUX-066) with a pinned save holding a crashed row for a pane it created
+    Then the pane gets the row as its mark with "state": "crashed", every field kept
+    And the place check treats it like a pending row: its saved dir need not be its project (the
+      shell may have been cd'd elsewhere after the crash; the hint's "cd" takes it back)
+    And it is retyped as a pending row is (CS-TMUX-067): only when field 11 was saved and empty, under
+      the same typing guard; the keys are the fixed "claude-sandbox tmux restore --resurrected" — no
+      mark or sidecar data is ever typed
+    And "--resurrected" in that pane reads its own crashed mark first and prints the hint
+      (CS-TMUX-077); a pane the guard holds back keeps its crashed mark until a typed restore, a hand
+      launch's note or "--drop"
+
+  Scenario: CS-TMUX-079 the hint reclaims a labelled restored window, and never renames
+    Given a crashed row with "labelled" true whose hint a restore prints
+    Then one bounded window read runs, and only when automatic-rename is off, no
+      @claude-sandbox-label is set and the window's name equals the row's label (CS-TMUX-021: its
+      user-given name, else its project folder, cleaned), both window options are set to this pane
+      and the confirming read of CS-TMUX-023 runs
+    And the window is never renamed, and the options stay after the hint, so the next launch in the
+      pane finds the window its own (case B) and hands it back at its end
+    And an automatic window, a window that still carries the options (a live server), a different
+      name, or an unlabelled row makes no write

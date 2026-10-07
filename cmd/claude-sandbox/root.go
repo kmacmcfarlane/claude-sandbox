@@ -1304,7 +1304,7 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 	}
 	var mark *paneMark
 	if !headless {
-		mark = newContainerMark(plan, wt.Root, rec, since, tmuxpane.ResumeID(passthrough))
+		mark = newContainerMark(plan, wt.Root, rec, since, tmuxpane.ResumeID(passthrough), in.Resume)
 		if env.restore != nil {
 			// CS-TMUX-018/062: a restore hands in the pane's pending row, so
 			// a start that fails puts it back, and no note is printed.

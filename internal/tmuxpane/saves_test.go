@@ -159,10 +159,10 @@ var _ = Describe("tmux restore: saves (CS-TMUX-045..050)", func() {
 				"model":        func(m *tmuxpane.Mark) { m.Model = "-x" },
 				"containerId":  func(m *tmuxpane.Mark) { m.ContainerID = "abc" },
 				"conversation": func(m *tmuxpane.Mark) { m.Conversation = "not-a-uuid" },
-				"a control character": func(m *tmuxpane.Mark) {
+				"a control or bidi character": func(m *tmuxpane.Mark) {
 					m.Name = "fix\x1b[2Jit"
 				},
-				"a control character ": func(m *tmuxpane.Mark) {
+				"a control or bidi character ": func(m *tmuxpane.Mark) {
 					m.Unreplayed = []string{"--docker-socket", "\x1b]0;x\x07\x1b[2J"}
 				},
 			} {
@@ -173,6 +173,54 @@ var _ = Describe("tmux restore: saves (CS-TMUX-045..050)", func() {
 			empty := "" // configDirEnv "" (unset at launch) is fine
 			m := good
 			m.ConfigDirEnv, m.ConfigDir, m.CwdRoot, m.Worktree, m.Model, m.ContainerID, m.Conversation = &empty, "", "", "", "", "", ""
+			Expect(tmuxpane.ValidateRow(m)).To(BeEmpty())
+		})
+
+		It("CS-TMUX-046, CS-TMUX-017: Cc and the twelve Bidi_Control characters fail; other format, private-use characters pass", func() {
+			good := tmuxpane.Mark{V: 1, State: tmuxpane.StatePending, Mode: tmuxpane.ModeClaude, Container: "c", Project: "/p",
+				CwdRoot: "/p", Conversation: convID, Replay: []string{"--append-system-prompt", "x"}}
+			Expect(tmuxpane.ValidateRow(good)).To(BeEmpty())
+			for name, mut := range map[string]func(*tmuxpane.Mark){
+				"U+202E in project":            func(m *tmuxpane.Mark) { m.Project = "/p/\u202Etxt.exe" },
+				"U+2067 in a replay":           func(m *tmuxpane.Mark) { m.Replay = []string{"--append-system-prompt", "a\u2067b"} },
+				"U+200F in cwdRoot":            func(m *tmuxpane.Mark) { m.CwdRoot = "/p\u200F" },
+				"U+061C in configDirEnv":       func(m *tmuxpane.Mark) { v := "/c\u061C"; m.ConfigDirEnv = &v },
+				"U+202A in instance":           func(m *tmuxpane.Mark) { m.Instance = "\u202Aheron" },
+				"U+2066 in an unreplayed name": func(m *tmuxpane.Mark) { m.Unreplayed = []string{"--ssh\u2066"} },
+			} {
+				m := good
+				mut(&m)
+				Expect(tmuxpane.ValidateRow(m)).To(Equal("a control or bidi character"), name)
+				if !strings.Contains(name, "unreplayed") && !strings.Contains(name, "cwdRoot") { // values the note prints; the hint prints them all after ValidateRow
+					Expect(tmuxpane.PendingNote(m.JSON(), "")).To(ContainSubstring("no resume command is shown"), name)
+				}
+			}
+			for name, mut := range map[string]func(*tmuxpane.Mark){
+				"ZWNJ in project":                 func(m *tmuxpane.Mark) { m.Project = "/p/\u0645\u06cc\u200c\u062e\u0648\u0627\u0645" },
+				"a ZWJ emoji sequence in project": func(m *tmuxpane.Mark) { m.Project = "/p/\U0001F468\u200D\U0001F4BB" },
+				"a soft hyphen in a replay":       func(m *tmuxpane.Mark) { m.Replay = []string{"--append-system-prompt", "co\u00ADop"} },
+				"a Nerd Font glyph in cwdRoot":    func(m *tmuxpane.Mark) { m.CwdRoot = "/p/\uE0A0" },
+				"a BOM-prefixed replay value":     func(m *tmuxpane.Mark) { m.Replay = []string{"--append-system-prompt", "\uFEFFhello"} },
+			} {
+				m := good
+				mut(&m)
+				Expect(tmuxpane.ValidateRow(m)).To(BeEmpty(), name)
+				Expect(tmuxpane.PendingNote(m.JSON(), "")).To(ContainSubstring("resume it with: "), name)
+			}
+		})
+
+		It("CS-TMUX-046, CS-TMUX-075: a crashed row needs mode claude and a UUID conversation", func() {
+			good := tmuxpane.Mark{V: 1, State: tmuxpane.StateCrashed, Mode: tmuxpane.ModeClaude, Container: "c", Project: "/p",
+				Conversation: convID, EndedAt: 1, ExitCode: 137, OOMKilled: true}
+			Expect(tmuxpane.ValidateRow(good)).To(BeEmpty())
+			m := good
+			m.Mode = tmuxpane.ModeJoin
+			Expect(tmuxpane.ValidateRow(m)).To(Equal("state"))
+			m = good
+			m.Conversation = ""
+			Expect(tmuxpane.ValidateRow(m)).To(Equal("state"))
+			m = good
+			m.EndedAt = 0 // no expiry, and no date needed (answer 92 a's exception)
 			Expect(tmuxpane.ValidateRow(m)).To(BeEmpty())
 		})
 	})

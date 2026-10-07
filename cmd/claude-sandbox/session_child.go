@@ -85,12 +85,17 @@ func runSession(env *Env, c execx.Cmd, container string, o sessionOpts) (end ses
 	defer w.Stop()
 
 	// CS-TMUX-010: the pane mark is set before the child starts and settled
-	// once it returned: unset on a clean exit, a crash or a detach
-	// (CS-TMUX-015), pending after a stop from outside (CS-TMUX-071), and the
+	// once it returned: unset on a clean exit or a detach (CS-TMUX-015),
+	// pending after a stop from outside (CS-TMUX-071), crashed after a crash
+	// of a claude session whose conversation is known (CS-TMUX-075), and the
 	// prior mark back when the session never really started (CS-TMUX-018/019).
 	pane := beginMark(env, o)
 	putBack := false
-	pending := false
+	settle := markUnset
+	// out and verdict are the session's end as the die wait read it; the
+	// settle below reads them (CS-TMUX-062's early crash).
+	var out oomreport.Outcome
+	var verdict oomreport.Verdict
 	if o.onChild != nil {
 		o.onChild()
 	}
@@ -101,19 +106,19 @@ func runSession(env *Env, c execx.Cmd, container string, o sessionOpts) (end ses
 	// Deferred after res.Done, so it runs first: while the session's signal
 	// handlers are still installed, and a signal cannot cut it short. The
 	// rules apply in order (CS-TMUX-062): a start that never ran, then a
-	// restore resume that ended before it was resumed, then CS-TMUX-071.
+	// restore resume that ended before it was resumed, then CS-TMUX-071 with
+	// CS-TMUX-075's crashed row.
 	defer func() {
 		switch {
 		case putBack || err != nil || end.neverStarted:
 			pane.end(markPutBack)
 		case o.mark != nil && o.mark.keepUnlessReady != nil && o.mark.keepUnlessReady():
 			// The prior is the restore's pending row; the current mark of a
-			// session under a minute old has no conversation yet.
-			pane.end(markPutBack)
-		case pending:
-			pane.end(markPending)
+			// session under a minute old has no conversation yet. A crash
+			// sets it back as crashed (answer 90 a).
+			pane.end(pane.earlyEnd(env, o, out, verdict))
 		default:
-			pane.end(markUnset)
+			pane.end(settle)
 		}
 	}()
 	if err != nil {
@@ -131,7 +136,9 @@ func runSession(env *Env, c execx.Cmd, container string, o sessionOpts) (end ses
 		// report. The shadow directory is left to a later launch's sweep.
 		// A marked pane still looks for a stop from outside first: systemd
 		// signals the launchers of a shutting-down host (CS-TMUX-071).
-		pending = pane.stoppedFromOutside(env, w.Snapshot())
+		if pane.stoppedFromOutside(env, w.Snapshot()) {
+			settle = markPending
+		}
 		return end, nil
 	}
 
@@ -144,8 +151,6 @@ func runSession(env *Env, c execx.Cmd, container string, o sessionOpts) (end ses
 		}
 	}
 
-	var out oomreport.Outcome
-	var verdict oomreport.Verdict
 	var stopped bool
 	switch o.kind {
 	case primarySession, reservedSession:
@@ -161,7 +166,9 @@ func runSession(env *Env, c execx.Cmd, container string, o sessionOpts) (end ses
 		// CS-LNCH-097: a signal after the child exited asks for the exit
 		// now — with the child's status, silently. Like a forwarded signal,
 		// it unsets unless a stop from outside is in evidence.
-		pending = pane.stoppedFromOutside(env, out)
+		if pane.stoppedFromOutside(env, out) {
+			settle = markPending
+		}
 		return end, nil
 	}
 	if end.code == globalcfg.ExitLink {
@@ -185,7 +192,7 @@ func runSession(env *Env, c execx.Cmd, container string, o sessionOpts) (end ses
 		fmt.Fprint(env.Err, oomreport.SurvivedReport(out.OOMKills, lim))
 	}
 	// CS-TMUX-071: after the report, so a probe or an inspect never delays it.
-	pending = pane.pendingAfter(env, o, w, res.Code, out, container)
+	settle = pane.endAfter(env, o, w, res.Code, out, verdict, container)
 	if o.after != nil {
 		// Still under the session's handlers (deferred res.Done): a signal
 		// now lands on Late and is dropped, and the child's status stands.
