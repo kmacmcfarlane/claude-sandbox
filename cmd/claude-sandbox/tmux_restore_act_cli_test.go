@@ -534,6 +534,39 @@ var _ = Describe("tmux restore, one pane (CS-TMUX-052..063)", func() {
 			}
 		})
 
+		It("CS-TMUX-062: an early die 137 after a kill event, or while the host is stopping, puts the pending row back", func() {
+			for name, setup := range map[string]func(g *cliFixture){
+				"a kill event before the die": func(g *cliFixture) {
+					streamEvents(g.fake, dockerEvent("kill", ""), dockerEvent("die", "137"))
+				},
+				"the host stopping": func(g *cliFixture) {
+					streamEvents(g.fake, dockerEvent("die", "137"))
+					g.fake.On("systemctl is-system-running", "stopping\n", execx.Fail(1))
+				},
+			} {
+				g := newCLIFixture()
+				g.envmap["TMUX"], g.envmap["TMUX_PANE"] = "x", "%7"
+				g.env.ResurrectDir, g.env.interrupt, g.env.Now = dir, f.env.interrupt, f.env.Now
+				g.fake.On("tmux display-message -p -t %7", "main\t2\t0\t4242\t1727000000\t"+row(nil).JSON()+"\n", nil)
+				g.fake.On("docker version", "29.3.0\n", nil)
+				g.fake.On("docker create", markID+"\n", nil)
+				setup(g)
+				g.fake.On("docker start -ai", "", execx.Fail(137))
+				Expect(g.run("tmux", "restore")).To(Equal(137), name)
+				var ms []tmuxpane.Mark
+				for _, call := range g.fake.Calls {
+					if call.Name == "tmux" && len(call.Args) == 6 && call.Args[0] == "set-option" && call.Args[4] == tmuxpane.Option {
+						m, _ := tmuxpane.ParseMark(call.Args[5])
+						ms = append(ms, m)
+					}
+				}
+				Expect(ms).To(HaveLen(3), name)
+				Expect(ms[2]).To(Equal(ms[0]), name+": the pending row went back")
+				Expect(g.out.String()).NotTo(ContainSubstring("not restarted again"), name)
+				Expect(g.out.String()).To(ContainSubstring("ended before it was up (exit 137) — the conversation may be missing"), name)
+			}
+		})
+
 		It("CS-TMUX-062: an early end with no die (a stream that ended) puts the pending row back", func() {
 			pend := row(nil)
 			pane(pend.JSON())

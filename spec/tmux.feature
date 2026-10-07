@@ -719,15 +719,14 @@ Feature: tmux integration (CS-TMUX)
     And a row that fails gets decision row 3 (CS-TMUX-051), naming the field
     # HOST CHECK OWED (plan 18 § 1; read-only, not run in CI): count the existing sidecar rows that the
     # Bidi_Control rule now clears. The resurrect dir is resolved as CS-TMUX-045 resolves it — the
-    # tmux option @resurrect-dir ($HOME, $HOSTNAME and ~ expanded), else ~/.tmux/resurrect when it
-    # exists, else ${XDG_DATA_HOME:-~/.local/share}/tmux/resurrect:
+    # tmux option @resurrect-dir ($HOME, $HOSTNAME and ~ expanded) whenever it is absolute, existing
+    # or not; else ~/.tmux/resurrect when it exists, else ${XDG_DATA_HOME:-~/.local/share}/tmux/resurrect:
     #   python3 -c 'import json,glob,os,re,socket,subprocess as s
     #   h=os.path.expanduser("~"); d=""
     #   try: d=s.run(["tmux","show-option","-gqv","@resurrect-dir"],capture_output=True,text=True,timeout=1).stdout.strip()
     #   except Exception: pass
     #   d=d.replace("$HOME",h).replace("$HOSTNAME",socket.gethostname()).replace("~",h)
-    #   if not os.path.isabs(d): d=os.path.join(h,".tmux/resurrect")
-    #   if not os.path.isdir(d): d=os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.join(h,".local/share"),"tmux/resurrect")
+    #   if not os.path.isabs(d): d=os.path.join(h,".tmux/resurrect"); d=d if os.path.isdir(d) else os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.join(h,".local/share"),"tmux/resurrect")
     #   B=set(map(chr,[0x61c,0x200e,0x200f,*range(0x202a,0x202f),*range(0x2066,0x206a)])); n=0
     #   for f in glob.glob(os.path.join(d,"*.claude-sandbox.json")):
     #     for p in json.load(open(f)).get("panes",[]):
