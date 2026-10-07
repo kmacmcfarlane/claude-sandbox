@@ -53,11 +53,15 @@ What it does not do:
 
 ### Who owns `~/.tmux.conf`
 
-On the operator's workstation (hooper) the tmux configuration is to move into the hooper
-repository (its work item 857d, still to do), which will install `~/.tmux.conf` as a symlink to
-a tracked copy. Until then `~/.tmux.conf` is a plain file, and no hooper document describes the
-tmux setup, so the lines are given here; once hooper documents its config, this section should
-link to it instead.
+On the operator's workstation (hooper) the config is the hooper repository's `system/tmux.conf`,
+which holds the claude-sandbox hook lines below, and `system/install-tmux.sh` installs it:
+`~/.tmux.conf` becomes a symlink to the tracked file, and any existing file is backed up first.
+The hooper repository's README has a section, "Workstation tmux (config + session restore)",
+that links back to this document for the restore internals. Nothing here needs adding by hand
+on hooper, and the installer also clones the two plugins.
+
+On any other host, the operator adds the lines in
+[The `~/.tmux.conf` lines](#the-tmuxconf-lines) to `~/.tmux.conf` by hand.
 
 ### Install the plugins
 
@@ -118,7 +122,8 @@ What each generic option does:
   when you set this up is not the unit's (see
   [Put the tmux server under the unit](#put-the-tmux-server-under-the-unit)). A user unit starts
   at boot only when lingering is enabled for your user (`loginctl enable-linger`), otherwise at
-  your first login; hooper 857d decides which.
+  your first login. On hooper linger is enabled (by hooper's opencode install), so the unit starts at
+  boot. tmux-continuum owns the unit; hooper ships none.
 - `@resurrect-capture-pane-contents 'on'`: restore what was on screen in each pane. It breaks
   if a pane's `default-command` contains `&&` or `||` (the operator's config sets none).
 
@@ -237,8 +242,10 @@ If it happened: `claude-sandbox tmux restore --list` shows the newest save as `n
 the save before it and use [Procedure B](#restore-a-whole-layout-from-an-earlier-save) (the unit
 is already stopped, so its first line does nothing).
 
-hooper 857d's relayed safe-shutdown procedure ends with `tmux kill-server`; with the unit
-active that is this trap, so 857d should use `systemctl --user stop tmux.service` instead.
+hooper's safe-shutdown text agrees: `systemctl --user stop tmux.service` from outside tmux
+whenever the unit runs the server; without the unit, save first (`tmux set -g @continuum-save-interval 0`,
+`prefix + C-s`) and then `tmux kill-server`; if the unit is active but the pids differ, follow step 3 of
+[Put the tmux server under the unit](#put-the-tmux-server-under-the-unit).
 
 ## How a restore decides
 
