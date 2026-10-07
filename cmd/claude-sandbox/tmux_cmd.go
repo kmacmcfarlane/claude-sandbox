@@ -657,7 +657,7 @@ Use a save by its stamp (%[1]s here):
   then arm the panes that exist:  claude-sandbox tmux restore --all --from %[1]s
 A whole layout from a save, when its windows are gone:
 `, example)
-	for _, l := range tmuxpane.Procedures(saves.Dir, example, tmuxpane.SaveInterval(env.Runner)) {
+	for _, l := range tmuxpane.Procedures(saves.Dir, example) {
 		fmt.Fprintln(out, "  "+l)
 	}
 	return nil
@@ -795,7 +795,7 @@ func runRestoreArmAll(env *Env, from string) error {
 	fmt.Fprintln(out)
 	if counts[tmuxpane.ArmMissing] > 0 {
 		fmt.Fprintln(out, "For panes that are gone or moved, restore the whole layout from this save:")
-		for _, l := range tmuxpane.Procedures(saves.Dir, stamp, tmuxpane.SaveInterval(env.Runner)) {
+		for _, l := range tmuxpane.Procedures(saves.Dir, stamp) {
 			fmt.Fprintln(out, "  "+l)
 		}
 	}

@@ -521,29 +521,18 @@ var _ = Describe("tmux restore: saves (CS-TMUX-045..050)", func() {
 	})
 
 	Describe("CS-TMUX-048: the whole-layout procedures", func() {
-		It("CS-TMUX-048: A repoints and puts the interval back; B stops, repoints, starts; a reboot is not one", func() {
+		It("CS-TMUX-048: A repoints and re-sources the config; B stops, repoints, starts; a reboot is not one", func() {
 			d := "/home/u/.local/share/tmux/resurrect"
-			p := strings.Join(tmuxpane.Procedures(d, "20260929T120000", "1"), "\n")
+			p := strings.Join(tmuxpane.Procedures(d, "20260929T120000"), "\n")
 			Expect(p).To(ContainSubstring("tmux set -g @continuum-save-interval 0"))
 			Expect(p).To(ContainSubstring("ln -sf tmux_resurrect_20260929T120000.txt " + d + "/last"))
 			Expect(p).To(ContainSubstring("prefix + C-r"))
-			Expect(p).To(ContainSubstring("tmux set -g @continuum-save-interval 1 "))
+			Expect(p).To(ContainSubstring("tmux source-file ~/.tmux.conf"))
+			Expect(p).NotTo(ContainSubstring("@continuum-save-interval 1"))
+			Expect(p).NotTo(ContainSubstring("set -gu @continuum-save-interval"))
 			Expect(strings.Index(p, "systemctl --user stop tmux.service")).To(BeNumerically("<", strings.Index(p, "systemctl --user start tmux.service")))
 			Expect(p).To(ContainSubstring("A reboot never restores a chosen save"))
-			Expect(strings.Join(tmuxpane.Procedures("/a b", "20260929T120000", ""), "\n")).To(And(
-				ContainSubstring("tmux set -gu @continuum-save-interval"), ContainSubstring("'/a b/last'")))
-		})
-
-		It("CS-TMUX-048: the interval is read with one bounded show and kept only when numeric", func() {
-			for out, want := range map[string]string{"5\n": "5", "": "", "1m\n": "", "-1\n": ""} {
-				fake := &execx.Fake{}
-				fake.On("tmux show -gqv @continuum-save-interval", out, nil)
-				Expect(tmuxpane.SaveInterval(fake)).To(Equal(want), out)
-				Expect(fake.CommandLines()).To(Equal([]string{"tmux show -gqv @continuum-save-interval"}))
-			}
-			fake := &execx.Fake{}
-			fake.On("tmux show", "5\n", execx.Fail(1))
-			Expect(tmuxpane.SaveInterval(fake)).To(BeEmpty())
+			Expect(strings.Join(tmuxpane.Procedures("/a b", "20260929T120000"), "\n")).To(ContainSubstring("'/a b/last'"))
 		})
 	})
 

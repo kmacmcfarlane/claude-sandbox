@@ -470,17 +470,6 @@ func RunningServer(r execx.Runner) *Server {
 	return parseServer(f[0], f[1])
 }
 
-// SaveInterval is continuum's autosave interval as set, for Procedure A
-// (12 § 7): "" when unset, not a number, or tmux does not answer.
-func SaveInterval(r execx.Runner) string {
-	out, ok := bounded(r, CallTimeout, "tmux", "show", "-gqv", "@continuum-save-interval")
-	v := strings.TrimSpace(out)
-	if !ok || v == "" || strings.Trim(v, "0123456789") != "" {
-		return ""
-	}
-	return v
-}
-
 // ReadProbes are the dry-run's probes (CS-TMUX-051): each docker or tmux
 // look runs at most once per process. GuardFunc runs the resume guard (the
 // caller owns discovery and the attach command); Self is the pane the

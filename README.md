@@ -734,8 +734,8 @@ It reads the saves where resurrect keeps them: `@resurrect-dir` (with `$HOME`, `
   was not wired then) says `no record`. It ends with how to use a stamp (in one pane, as a
   preview of every pane, and armed into every pane with `--all --from`), the two ways to
   restore a whole layout from an earlier save, with the stamp and dir filled in — in the running
-  server (autosave off, `ln -sf tmux_resurrect_<stamp>.txt <dir>/last`, `prefix + C-r`, the
-  autosave interval put back as it was), or a fresh server (`systemctl --user stop
+  server (autosave off, `ln -sf tmux_resurrect_<stamp>.txt <dir>/last`, `prefix + C-r`,
+  then `tmux source-file ~/.tmux.conf`, which puts back the interval your config sets), or a fresh server (`systemctl --user stop
   tmux.service`, the `ln -sf`, `systemctl --user start tmux.service`, typed outside tmux and only
   once the unit runs your server — see the guide below). A reboot never restores a
   chosen save: its shutdown save moves `last` again.
