@@ -482,6 +482,49 @@ var _ = Describe("tmux restore: the resurrect hooks (CS-TMUX-064..068)", func() 
 			Expect(res.Skipped).To(Equal(2))
 		})
 
+		Describe("CS-TMUX-078: crashed rows", func() {
+			crashedRows := func() {
+				for i := range rows[:3] {
+					rows[i].Mark = mark(i, tmuxpane.StateCrashed)
+					rows[i].Mark.ExitCode, rows[i].Mark.EndedAt, rows[i].Mark.Labelled = 137, now.UnixMilli(), true
+				}
+			}
+
+			It("CS-TMUX-078: a crashed row is armed as crashed, every field kept, and retyped only at a bare shell; no project check", func() {
+				crashedRows()
+				// The crashed session's shell was cd'd elsewhere after the
+				// crash: its saved dir is not its project, which only an
+				// active row must match.
+				rows[1].Mark.Project = GinkgoT().TempDir()
+				lines := fmt.Sprintf("pane\tmain\t0\t1\t:*\t0\tt\t:%[1]s\t1\tclaude-sandbox\t:claude-sandbox --new\n"+
+					"pane\tmain\t1\t1\t:*\t0\tt\t:%[1]s\t1\tzsh\t:\n"+
+					"pane\tmain\t2\t1\t:*\t0\tt\t:%[1]s\t1\tvim\t:vim notes\n", proj)
+				save(st, &srv, rows[:3], lines)
+				res := rearm()
+				Expect(logged).To(BeEmpty())
+				Expect(res.Marked).To(Equal(3))
+				for i, id := range []string{"%10", "%11", "%12"} {
+					ms := setOn(id)
+					Expect(ms).To(HaveLen(1), id)
+					Expect(ms[0]).To(Equal(rows[i].Mark), "armed as crashed, every field kept: "+id)
+				}
+				Expect(typed()).To(Equal([]string{"tmux send-keys -t %11 C-e C-u claude-sandbox tmux restore --resurrected C-m"}),
+					"the fixed keys only, and only where field 11 was saved and empty")
+				Expect(res.Consumed).To(BeTrue())
+			})
+
+			It("CS-TMUX-078: a crashed pane a client is looking at is marked only, with one log line", func() {
+				crashedRows()
+				save(st, &srv, rows[1:2], fmt.Sprintf("pane\tmain\t1\t1\t:*\t0\tt\t:%s\t1\tzsh\t:\n", proj))
+				fake.On(focusPat, "%11\t1\t1\t1\n", nil)
+				res := rearm()
+				Expect(res.Marked).To(Equal(1))
+				Expect(setOn("%11")[0].State).To(Equal(tmuxpane.StateCrashed))
+				Expect(typed()).To(BeEmpty())
+				Expect(logged).To(ConsistOf(ContainSubstring("main:1.0: marked only: ")))
+			})
+		})
+
 		It("CS-TMUX-067: an active row at a bare shell is marked, never typed into", func() {
 			lines := fmt.Sprintf("pane\tmain\t0\t1\t:*\t0\tt\t:%s\t1\tzsh\t:\n", proj)
 			save(st, &srv, rows[0:1], lines)

@@ -362,11 +362,11 @@ type Run struct {
 	Record bool
 	Err    error
 	Server *Server
-	// Rows, Active and Pending count the newest save's rows.
-	Rows, Active, Pending int
-	Last                  bool
-	Sparse                Sparse
-	key                   string
+	// Rows, Active, Pending and Crashed count the newest save's rows.
+	Rows, Active, Pending, Crashed int
+	Last                           bool
+	Sparse                         Sparse
+	key                            string
 }
 
 // runKey is what makes two saves one run: the server and the multiset of
@@ -406,9 +406,12 @@ func (s *Saves) Runs(since time.Time, idx []Lifetime) []Run {
 			} else {
 				r.Record, r.Server, r.Rows = true, sc.Server, len(sc.Panes)
 				for _, row := range sc.Panes {
-					if row.Mark.State == StatePending {
+					switch row.Mark.State {
+					case StatePending:
 						r.Pending++
-					} else {
+					case StateCrashed:
+						r.Crashed++
+					default:
 						r.Active++
 					}
 				}

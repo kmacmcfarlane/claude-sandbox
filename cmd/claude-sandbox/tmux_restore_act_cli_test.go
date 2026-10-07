@@ -473,20 +473,94 @@ var _ = Describe("tmux restore, one pane (CS-TMUX-052..063)", func() {
 			Expect(labelsOf(args)["claude-sandbox.terminal"]).To(Equal("TERMINAL_EMULATOR=JetBrains-JediTerm"))
 		})
 
-		It("CS-TMUX-062: a resume that ends before it was resumed puts the pending row back and says so", func() {
+		It("CS-TMUX-062: a resume that ends before it was resumed with a clean code puts the pending row back and says so", func() {
 			pend := row(nil)
 			pane(pend.JSON())
-			streamEvents(f.fake, dockerEvent("die", "1"))
-			f.fake.On("docker start -ai", "", execx.Fail(1))
-			Expect(f.run("tmux", "restore")).To(Equal(1))
+			// 78: pidslot refused without the global-config link — the one
+			// early end the operator fixes on the host, so the retry is right.
+			streamEvents(f.fake, dockerEvent("die", "78"))
+			f.fake.On("docker start -ai", "", execx.Fail(78))
+			Expect(f.run("tmux", "restore")).To(Equal(78))
 			ms := marksSet()
 			Expect(ms).To(HaveLen(3))
 			Expect(ms[1].State).To(Equal(tmuxpane.StateActive))
 			Expect(ms[2]).To(Equal(ms[0]), "the pending row went back")
 			Expect(ms[2].Conversation).To(Equal(markConv))
 			Expect(unsets()).To(BeZero())
-			Expect(f.out.String()).To(ContainSubstring("the resume of 'fix the build' (" + markConv + ") ended before it was up (exit 1) — the conversation may be missing from " + cfgDir))
+			Expect(f.out.String()).To(ContainSubstring("the resume of 'fix the build' (" + markConv + ") ended before it was up (exit 78) — the conversation may be missing from " + cfgDir))
 			Expect(lockFree(lockPath)).To(BeTrue())
+		})
+
+		It("CS-TMUX-062 (answer 90 a): an early end with a crash code sets the row back as CRASHED, keeps the label and says so", func() {
+			for _, c := range []struct {
+				events []string
+				code   int
+				oom    string
+			}{
+				{[]string{dockerEvent("oom", ""), dockerEvent("die", "137")}, 137, ", killed by the OOM killer"},
+				{[]string{dockerEvent("die", "1")}, 1, ""},
+			} {
+				f.fake.Calls = nil
+				f.out.Reset()
+				pend := row(func(m *tmuxpane.Mark) { m.Labelled = true })
+				g := newCLIFixture()
+				g.envmap["TMUX"], g.envmap["TMUX_PANE"] = "x", "%7"
+				g.env.ResurrectDir, g.env.interrupt, g.env.Now = dir, f.env.interrupt, f.env.Now
+				g.fake.On("tmux display-message -p -t %7", "main\t2\t0\t4242\t1727000000\t"+pend.JSON()+"\n", nil)
+				g.fake.On("docker version", "29.3.0\n", nil)
+				g.fake.On("docker create", markID+"\n", nil)
+				streamEvents(g.fake, c.events...)
+				g.fake.On("docker start -ai", "", execx.Fail(c.code))
+				Expect(g.run("tmux", "restore")).To(Equal(c.code))
+				var ms []tmuxpane.Mark
+				for _, call := range g.fake.Calls {
+					if call.Name == "tmux" && len(call.Args) == 6 && call.Args[0] == "set-option" && call.Args[4] == tmuxpane.Option {
+						m, _ := tmuxpane.ParseMark(call.Args[5])
+						ms = append(ms, m)
+					}
+				}
+				Expect(ms).To(HaveLen(3))
+				Expect(ms[0].State).To(Equal(tmuxpane.StatePending))
+				Expect(ms[1].State).To(Equal(tmuxpane.StateActive))
+				want := pend
+				want.State, want.ExitCode, want.OOMKilled, want.EndedAt = tmuxpane.StateCrashed, c.code, c.oom != "", base.Add(time.Hour).UnixMilli()
+				Expect(ms[2]).To(Equal(want), "the pending row, crashed, every field kept")
+				Expect(g.fake.CommandLines()).NotTo(ContainElement(HavePrefix("tmux set-option -w -u")), "the label is kept")
+				Expect(g.fake.CommandLines()).NotTo(ContainElement("tmux set-option -p -u -t %7 @claude-sandbox"))
+				Expect(g.out.String()).To(ContainSubstring(fmt.Sprintf("claude-sandbox: the resume of 'fix the build' (%s) ended before it was up (exit %d%s); not restarted again. "+
+					"The conversation may be missing from %s. Resume it by hand: cd %s && CLAUDE_CONFIG_DIR=%s claude-sandbox --new --no-worktree -- --resume %s",
+					markConv, c.code, c.oom, cfgDir, f.proj, cfgDir, markConv)))
+				Expect(g.out.String()).NotTo(ContainSubstring("stays pending"))
+			}
+		})
+
+		It("CS-TMUX-062: an early end with no die (a stream that ended) puts the pending row back", func() {
+			pend := row(nil)
+			pane(pend.JSON())
+			f.fake.On("docker start -ai", "", execx.Fail(1))
+			Expect(f.run("tmux", "restore")).To(Equal(1))
+			ms := marksSet()
+			Expect(ms[len(ms)-1]).To(Equal(ms[0]), "the pending row went back")
+			Expect(f.out.String()).To(ContainSubstring("ended before it was up (exit 1) — the conversation may be missing"))
+		})
+
+		It("CS-TMUX-075 (a): a resume that was resumed, then crashed before the save hook ran, is crashed with the row's id", func() {
+			pane(row(nil).JSON())
+			sim := simulatePane(f.fake) // after pane(): the display-message stub wins, the rest is the pane option
+			streamEvents(f.fake, dockerEvent("die", "1"))
+			f.fake.OnFunc("docker start -ai", func(execx.Cmd) (string, error) {
+				record(classOf()+256, markConv)
+				time.Sleep(100 * time.Millisecond) // the watcher sees "resumed"
+				return "", execx.Fail(1)
+			})
+			Expect(f.run("tmux", "restore")).To(Equal(1))
+			m, ok := tmuxpane.ParseMark(sim.get())
+			Expect(ok).To(BeTrue(), "tmux: %v", tmuxLines())
+			Expect(m.State).To(Equal(tmuxpane.StateCrashed))
+			Expect(m.Conversation).To(Equal(markConv), "rule 2: the row the restore resumed")
+			Expect(m.Name).To(Equal("fix the build"))
+			Expect(m.ContainerID).To(Equal(markID), "the session's own mark")
+			Expect(f.out.String()).NotTo(ContainSubstring("ended before it was up"))
 		})
 
 		It("CS-TMUX-062: an end past EarlyEnd follows CS-TMUX-071 (a clean exit unsets)", func() {
@@ -595,7 +669,146 @@ var _ = Describe("tmux restore, one pane (CS-TMUX-052..063)", func() {
 		Expect(f.sessionLine()).To(HavePrefix("docker start -ai"))
 	})
 
+	Describe("CS-TMUX-077: a crashed row prints its hint and starts nothing", func() {
+		var interrupted bool
+		crashed := func(mut func(*tmuxpane.Mark)) tmuxpane.Mark {
+			return row(func(m *tmuxpane.Mark) {
+				m.State, m.ExitCode, m.OOMKilled = tmuxpane.StateCrashed, 137, true
+				m.EndedAt = time.Date(2026, 10, 5, 14, 2, 0, 0, time.Local).UnixMilli()
+				if mut != nil {
+					mut(m)
+				}
+			})
+		}
+		hint := func() string {
+			return "claude-sandbox: 'fix the build' crashed in this pane on 2026-10-05 14:02 (exit 137, killed by the OOM killer); not restarted. " +
+				"Resume it with: cd " + f.proj + " && CLAUDE_CONFIG_DIR=" + cfgDir + " claude-sandbox --new --no-worktree -- --resume " + markConv +
+				" --name 'fix the build' --add-dir /x\n"
+		}
+		BeforeEach(func() {
+			interrupted = false
+			f.env.interrupt = func() (context.Context, context.CancelFunc) {
+				interrupted = true
+				return context.WithCancel(context.Background())
+			}
+		})
+		// nothingStarted: no pending set, no start lock, no Ctrl-C context, no docker.
+		nothingStarted := func() {
+			for _, m := range marksSet() {
+				Expect(m.State).NotTo(Equal(tmuxpane.StatePending))
+			}
+			Expect(lockPath).NotTo(BeAnExistingFile())
+			Expect(interrupted).To(BeFalse())
+			Expect(f.fake.CommandLines()).NotTo(ContainElement(HavePrefix("docker")))
+		}
+
+		It("CS-TMUX-077, CS-TMUX-053: the pane's own crashed mark: the hint, the mark unset, decided before the pending set", func() {
+			pane(crashed(nil).JSON())
+			Expect(f.run("tmux", "restore")).To(Equal(0), f.errw.String())
+			Expect(f.out.String()).To(Equal(hint()))
+			Expect(unsets()).To(Equal(1))
+			Expect(marksSet()).To(BeEmpty())
+			nothingStarted()
+		})
+
+		It("CS-TMUX-065, CS-TMUX-078: --resurrected over its own crashed mark prints the hint, reading no pin and no save", func() {
+			pane(crashed(nil).JSON())
+			f.env.ResurrectDir = filepath.Join(f.home, "no-such-resurrect-dir")
+			Expect(f.run("tmux", "restore", "--resurrected")).To(Equal(0), f.errw.String())
+			Expect(f.out.String()).To(Equal(hint()))
+			Expect(unsets()).To(Equal(1))
+			nothingStarted()
+		})
+
+		It("CS-TMUX-077: a crashed row read from last, the pane unmarked: the hint; nothing to unset", func() {
+			pane("")
+			stamp := base.Format("20060102T150405")
+			Expect(os.WriteFile(filepath.Join(dir, tmuxpane.StateFileName(stamp)), []byte("pane\tmain\t2\t1\t:*\t0\tt\t:/p\t1\tzsh\t:\n"), 0o600)).To(Succeed())
+			Expect(tmuxpane.WriteSidecar(filepath.Join(dir, tmuxpane.SidecarName(stamp)), tmuxpane.Sidecar{V: 1, StateFile: tmuxpane.StateFileName(stamp),
+				Panes: []tmuxpane.Row{{Session: "main", Window: 2, Pane: 0, Mark: crashed(nil)}}})).To(Succeed())
+			Expect(os.Symlink(tmuxpane.StateFileName(stamp), filepath.Join(dir, "last"))).To(Succeed())
+			for _, args := range [][]string{{"tmux", "restore"}, {"tmux", "restore", "--resurrected"}} {
+				f.out.Reset()
+				f.fake.Calls = nil
+				Expect(f.run(args...)).To(Equal(0), f.errw.String())
+				Expect(f.out.String()).To(HaveSuffix(hint()))
+				Expect(unsets()).To(BeZero())
+				Expect(marksSet()).To(BeEmpty())
+				nothingStarted()
+			}
+		})
+
+		It("CS-TMUX-077, CS-TMUX-049: --from in a pane holding a crashed mark refuses with exit 2, writing nothing", func() {
+			pane(crashed(nil).JSON())
+			stamp := base.Format("20060102T150405")
+			Expect(os.WriteFile(filepath.Join(dir, tmuxpane.StateFileName(stamp)), []byte("pane\tmain\t2\t1\t:*\t0\tt\t:/p\t1\tzsh\t:\n"), 0o600)).To(Succeed())
+			Expect(tmuxpane.WriteSidecar(filepath.Join(dir, tmuxpane.SidecarName(stamp)), tmuxpane.Sidecar{V: 1, StateFile: tmuxpane.StateFileName(stamp),
+				Panes: []tmuxpane.Row{{Session: "main", Window: 2, Pane: 0, Mark: row(nil)}}})).To(Succeed())
+			Expect(f.run("tmux", "restore", "--from", stamp)).To(Equal(2))
+			Expect(f.out.String()).To(Equal(hint() + "claude-sandbox: this pane holds a crashed session; to restore save " + stamp +
+				" here instead, run claude-sandbox tmux restore --drop first\n"))
+			Expect(unsets()).To(BeZero())
+			Expect(marksSet()).To(BeEmpty())
+			nothingStarted()
+
+			// A crashed mark that fails the checks: only its coordinates and field.
+			f.out.Reset()
+			pane2 := crashed(func(m *tmuxpane.Mark) { m.Project = f.proj + "/\u202Egnp"; m.Name = "evil" })
+			g := newCLIFixture()
+			g.envmap["TMUX"], g.envmap["TMUX_PANE"] = "x", "%7"
+			g.env.ResurrectDir, g.env.interrupt = dir, f.env.interrupt
+			g.fake.On("tmux display-message -p -t %7", "main\t2\t0\t4242\t1727000000\t"+pane2.JSON()+"\n", nil)
+			Expect(g.run("tmux", "restore", "--from", stamp)).To(Equal(2))
+			Expect(g.out.String()).To(HavePrefix("claude-sandbox: pane main:2.0 holds a crashed mark that cannot be used (its a control or bidi character is not valid); " +
+				"forget it with claude-sandbox tmux restore --drop in that pane\n"))
+			Expect(g.out.String()).NotTo(ContainSubstring("evil"))
+
+			// The dry run says so and still shows the save row's decision.
+			f.out.Reset()
+			Expect(f.run("tmux", "restore", "--dry-run", "--from", stamp)).To(Equal(0), f.errw.String())
+			Expect(f.out.String()).To(ContainSubstring("  note: " + strings.TrimPrefix(strings.TrimSuffix(hint(), "\n"), "claude-sandbox: ") + "\n"))
+			Expect(f.out.String()).To(ContainSubstring("  note: this pane holds a crashed session; to restore save " + stamp))
+			Expect(f.out.String()).To(ContainSubstring("decision (row "))
+		})
+
+		It("CS-TMUX-051: --dry-run reads the pane's own crashed mark first: row 19, and nothing is changed", func() {
+			pane(crashed(nil).JSON())
+			Expect(f.run("tmux", "restore", "--dry-run")).To(Equal(0), f.errw.String())
+			out := f.out.String()
+			Expect(out).To(ContainSubstring("Pane main:2.0, from its own crashed mark:\n  decision (row 19): 'fix the build' crashed in this pane"))
+			Expect(out).To(ContainSubstring("  would: print the crash hint and forget the row; nothing is started\n"))
+			Expect(unsets()).To(BeZero())
+			nothingStarted()
+		})
+
+		It("CS-TMUX-079: a labelled crashed row reclaims the restored window, never renaming it", func() {
+			f.fake.On("tmux display-message -p -t %7 #{window_id}", "@1\t0\t\tfix the build\t\n", nil)
+			pane(crashed(func(m *tmuxpane.Mark) { m.Labelled = true }).JSON())
+			Expect(f.run("tmux", "restore")).To(Equal(0), f.errw.String())
+			Expect(f.fake.CommandLines()).To(ContainElement("tmux set-option -w -t %7 @claude-sandbox-label fix the build"))
+			Expect(f.fake.CommandLines()).To(ContainElement("tmux set-option -w -t %7 @claude-sandbox-label-pane %7"))
+			Expect(f.fake.CommandLines()).NotTo(ContainElement(HavePrefix("tmux rename-window")))
+		})
+
+		It("CS-TMUX-048: --list counts crashed rows", func() {
+			stamp := base.Format("20060102T150405")
+			Expect(os.WriteFile(filepath.Join(dir, tmuxpane.StateFileName(stamp)), []byte("pane\tmain\t2\t1\t:*\t0\tt\t:/p\t1\tzsh\t:\n"), 0o600)).To(Succeed())
+			Expect(tmuxpane.WriteSidecar(filepath.Join(dir, tmuxpane.SidecarName(stamp)), tmuxpane.Sidecar{V: 1, StateFile: tmuxpane.StateFileName(stamp),
+				Panes: []tmuxpane.Row{{Session: "main", Window: 2, Pane: 0, Mark: crashed(nil)}, {Session: "main", Window: 3, Pane: 0, Mark: row(nil)}}})).To(Succeed())
+			Expect(f.run("tmux", "restore", "--list")).To(Equal(0), f.errw.String())
+			Expect(f.out.String()).To(ContainSubstring("2 sandbox panes (1 pending, 1 crashed)"))
+		})
+	})
+
 	Describe("CS-TMUX-063: --drop", func() {
+		It("CS-TMUX-063: forgets a crashed mark and names it", func() {
+			m := row(func(m *tmuxpane.Mark) { m.State, m.ExitCode = tmuxpane.StateCrashed, 1 })
+			pane(m.JSON())
+			Expect(f.run("tmux", "restore", "--drop")).To(Equal(0), f.errw.String())
+			Expect(f.out.String()).To(Equal("claude-sandbox: dropped the crashed mark of pane main:2.0: 'fix the build' (" + markConv + "); the shell is yours\n"))
+			Expect(unsets()).To(Equal(1))
+		})
+
 		It("CS-TMUX-063: unsets a pending mark and names it", func() {
 			pane(row(nil).JSON())
 			Expect(f.run("tmux", "restore", "--drop")).To(Equal(0), f.errw.String())

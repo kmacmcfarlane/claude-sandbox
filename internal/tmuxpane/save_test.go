@@ -326,6 +326,63 @@ var _ = Describe("tmux save hook (CS-TMUX-030..040)", func() {
 		})
 	})
 
+	Describe("CS-TMUX-076: crashed marks", func() {
+		crashed := func(conv string) tmuxpane.Mark {
+			return mark(func(m *tmuxpane.Mark) {
+				m.State, m.Conversation, m.Name, m.NameSource = tmuxpane.StateCrashed, conv, "old", "user"
+				m.EndedAt, m.ExitCode, m.OOMKilled = since+5000, 137, true
+			})
+		}
+
+		It("CS-TMUX-076: a crashed mark under a shell is recorded verbatim: no docker, no registry, no write-back, no label read", func() {
+			record(7, conv2, proj, since+1000, "renamed", "user")
+			c := crashed(convID)
+			listPanes(paneRow("main", 1, 0, "%1", "zsh", &c))
+			res, err := tmuxpane.Save(state, opts())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.Rows).To(HaveLen(1))
+			Expect(res.Rows[0].Mark).To(Equal(c))
+			Expect(readSidecar(res.Sidecar).Panes[0].Mark).To(Equal(c))
+			Expect(commands("docker")).To(Equal(0))
+			Expect(writeBacks()).To(BeEmpty())
+			Expect(commands("tmux show-options")).To(Equal(0))
+			Expect(commands("tmux display-message")).To(Equal(0))
+		})
+
+		It("CS-TMUX-076: a crashed row whose conversation another kept row names is left out, with one log line; it counts otherwise", func() {
+			state = writeState("tmux_resurrect_20260929T120300.txt",
+				stateLine("main", 1, 0, proj, ""), stateLine("main", 2, 0, proj, ""), stateLine("main", 3, 0, proj, ""))
+			c := crashed(convID)
+			other := crashed(conv3)
+			back := mark(func(m *tmuxpane.Mark) { m.State = tmuxpane.StatePending; m.Conversation = strings.ToUpper(convID) })
+			listPanes(paneRow("main", 1, 0, "%1", "zsh", &c), paneRow("main", 2, 0, "%2", "zsh", &back),
+				paneRow("main", 3, 0, "%3", "bash", &other))
+			res, err := tmuxpane.Save(state, opts())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.Rows).To(HaveLen(2))
+			Expect(res.Rows[0].Mark).To(Equal(back))
+			Expect(res.Rows[1].Mark).To(Equal(other), "a crashed row no other row names stays")
+			Expect(logs).To(ConsistOf(ContainSubstring("main:1.0: crashed row for " + convID + " left out")))
+			Expect(writeBacks()).To(BeEmpty(), "the pane's own crashed mark is left as it is")
+			// CS-TMUX-050: crashed rows count toward the save's n, and the
+			// lifetimes index records them.
+			ls, err := tmuxpane.ReadLifetimes(dir)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(ls).To(HaveLen(1))
+			Expect(ls[0].Rows).To(Equal(2))
+		})
+
+		It("CS-TMUX-076: a crashed row is never dropped for its age (no expiry)", func() {
+			c := crashed(convID)
+			c.EndedAt = now.Add(-365 * 24 * time.Hour).UnixMilli()
+			listPanes(paneRow("main", 1, 0, "%1", "zsh", &c))
+			res, err := tmuxpane.Save(state, opts())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.Rows).To(HaveLen(1))
+			Expect(logs).To(BeEmpty())
+		})
+	})
+
 	Describe("CS-TMUX-033: registry match", func() {
 		run := func(m tmuxpane.Mark) tmuxpane.Mark {
 			fake = &execx.Fake{} // each run lists only this mark

@@ -159,6 +159,41 @@ var _ = Describe("tmux window label (CS-TMUX-020..024)", func() {
 		Expect(f.fake.CommandLines()).NotTo(ContainElement(HavePrefix("tmux set-option -w -u")))
 	})
 
+	It("CS-TMUX-024, CS-TMUX-075: a crashed end keeps its label; one that falls back to an unset hands it back", func() {
+		withConv := true
+		f.fake.OnFunc("docker start -ai", func(execx.Cmd) (string, error) {
+			if withConv {
+				p.update(func(m *tmuxpane.Mark) { m.Conversation = markConv })
+			}
+			time.Sleep(20 * time.Millisecond)
+			return "", execx.Fail(1)
+		})
+		streamEvents(f.fake, dockerEvent("die", "1"))
+		f.run()
+		m, ok := tmuxpane.ParseMark(p.get())
+		Expect(ok).To(BeTrue())
+		Expect(m.State).To(Equal(tmuxpane.StateCrashed))
+		auto, name, label, owner := win.state()
+		Expect(auto).To(BeFalse())
+		Expect(name).To(Equal("proj"))
+		Expect(label).To(Equal("proj"))
+		Expect(owner).To(Equal("%7"))
+		Expect(f.fake.CommandLines()).NotTo(ContainElement(HavePrefix("tmux set-option -w -u")))
+
+		// No conversation known: the crashed end falls back to an unset,
+		// which hands the window back as any unset does.
+		f.fake.Calls = nil
+		p.set("")
+		win.auto, win.name, win.label, win.owner = true, "bash", "", ""
+		withConv = false
+		f.run()
+		Expect(p.get()).To(BeEmpty())
+		auto, _, label, owner = win.state()
+		Expect(auto).To(BeTrue())
+		Expect(label).To(BeEmpty())
+		Expect(owner).To(BeEmpty())
+	})
+
 	It("CS-TMUX-022/024: a window the operator named is never renamed nor handed back", func() {
 		win.auto, win.name = false, "editor"
 		streamEvents(f.fake, dockerEvent("die", "0"))

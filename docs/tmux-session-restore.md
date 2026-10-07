@@ -19,9 +19,11 @@ adds the sandbox sessions:
 
 - **Pane mark.** Every launch, `--attach` and `--join` run inside tmux records in the pane
   option `@claude-sandbox` which sandbox the pane holds, and removes it when the session ends
-  normally (an exit, a detach, a crash, an OOM kill). A session **stopped from outside** — a
+  normally (an exit, a detach). A session **stopped from outside** — a
   `docker stop`/`docker kill`, the host shutting down, or an end the launcher cannot read —
-  keeps the mark as *pending*, so the session is restored rather than forgotten.
+  keeps the mark as *pending*, so the session is restored rather than forgotten. A session that
+  **crashed or was OOM-killed** keeps it as *crashed*: a restore brings the pane back as a shell
+  with one line naming the resume command, and never relaunches it.
 - **Window names.** A launch names its window after the conversation (`--name`, `/rename`) or
   the project folder; resurrect saves and restores the name.
 - **Save hook.** After every resurrect save, `claude-sandbox tmux save` writes a sidecar file
@@ -41,8 +43,20 @@ What it does not do:
 
 - Nothing comes back that is not in the save. Closing a window is how you drop a session:
   the next save no longer has it.
-- A session that **crashed or was OOM-killed** is not restored (its mark is removed, as for
-  `/exit`). Only a stop from outside keeps it pending.
+- A session that **crashed or was OOM-killed** is not restarted. Its pane comes back as a
+  shell at its folder with one hint line, for example:
+
+  ```
+  claude-sandbox: 'myproj' crashed in this pane on 2026-10-05 14:02 (exit 137, killed by the OOM killer); not restarted. Resume it with: cd /home/u/myproj && claude-sandbox --new --no-worktree -- --resume 0b6f…
+  ```
+
+  Run that command to resume it. A crash is a `claude` session whose container died with an
+  exit code other than 0 or 78 (`tmuxpane.CleanExitCodes`) and no sign of a stop from outside;
+  the conversation must be known (the save hook records it within a minute, or the launch's own
+  `--resume <id>`). A crashed join or ralph run, or one whose conversation is not known yet, is
+  forgotten as before. The hint is printed once, at the next restore (and the next hand launch
+  in the pane prints the same command as a note); a crashed mark never expires — it stays
+  until then, until `--drop`, or until the pane is gone.
 - A `--ralph` pane gets one line with its command; the loop is never restarted. A `--join`
   pane gets one line. `headless` and `--detach` sessions are never in a pane, so they are
   never marked.
@@ -249,9 +263,11 @@ whenever the unit runs the server; without the unit, save first (`tmux set -g @c
 
 ## How a restore decides
 
-For each pane, `claude-sandbox tmux restore` reads the pane's own pending mark, else the row
-the save holds at the pane's coordinates (session, window, pane), and marks the pane pending
-before anything else, so a restore cut short anywhere leaves it on the list. Then:
+For each pane, `claude-sandbox tmux restore` reads the pane's own pending or crashed mark, else
+the row the save holds at the pane's coordinates (session, window, pane). A **crashed** row is
+decided at once: the hint line is printed, the pane's crashed mark is removed, and nothing is
+checked, locked or started (decision row 19). Any other row marks the pane pending before
+anything else, so a restore cut short anywhere leaves it on the list. Then:
 
 - **cleared** (one line, the mark removed): nothing to restore; a ralph run or a join (with
   the command to run by hand); the session already on screen in another pane; no conversation
@@ -308,6 +324,18 @@ Without the unit (no `@continuum-boot`), steps 2 and 3 are `tmux kill-server` an
    new server's run holds the same sessions once every pane is up.
 4. `~/.cache/claude-sandbox/tmux-restore.log` has no new lines for `--pin` and `--rearm`, and
    no notice was set.
+
+**Crash drill** (a throwaway sandbox; nothing is relaunched):
+
+1. In a pane, start a sandbox and talk to it for over a minute (so the save hook records its
+   conversation), then kill its claude from another terminal: `docker exec <container> kill -9
+   <claude pid>` reads as a crash, as an OOM kill does. `tmux show-options -p -v -t <pane>
+   @claude-sandbox` shows `"state":"crashed"` with its `exitCode`.
+2. Save (`prefix + C-s`), then `systemctl --user stop tmux.service` and `start` it (or
+   `tmux kill-server` and `tmux`).
+3. The pane comes back at its folder with the typed `claude-sandbox tmux restore --resurrected`
+   and one hint line; no container starts (`claude-sandbox sessions`).
+4. Run the hint's command: it resumes the conversation.
 
 **Sparse-save drill** (shows the warning and the recovery; at least 2 sandbox sessions
 running, throwaway ones if you prefer):
@@ -400,17 +428,23 @@ the pane you typed the command in, or shows a session already on screen elsewher
 decision is final anyway (a ralph run, a join, the conversation open elsewhere). You type
 `--all` yourself; no hook runs it. It works outside tmux too, on the default socket's server.
 
-### Drop a pending pane: `--drop`
+### Drop a pending or crashed pane: `--drop`
 
-A pending mark is carried from save to save until a restore decides it. If you do not want the
-session back, type `claude-sandbox tmux restore --drop` in the pane: it removes the pending
-mark and restores nothing. Closing the window works too.
+A pending mark is carried from save to save until a restore decides it, and so is a crashed
+one until its hint is shown. If you do not want the session back, or the hint, type
+`claude-sandbox tmux restore --drop` in the pane: it removes the pending or crashed mark and
+restores nothing. Closing the window works too.
+
+A pane holding a crashed mark refuses `claude-sandbox tmux restore --from <save>` (exit 2): an
+older row there is usually the same session before its crash. Run `--drop` first if you do
+want that save's row in the pane. `--all` never arms a crashed row, nor a pane holding a
+crashed mark; it prints the hint in its listing instead.
 
 ## Typing safety
 
 claude-sandbox types into a pane in two cases: `--rearm` retyping the restore into a pane that
-was pending at a bare shell when saved (resurrect typed nothing there), and `--all` arming a
-pane. In both, the keys go in only when the pane is provably idle at its own shell's prompt:
+was pending or crashed at a bare shell when saved (resurrect typed nothing there; a crashed
+pane's restore only prints its hint), and `--all` arming a pane. In both, the keys go in only when the pane is provably idle at its own shell's prompt:
 
 - its current command is tmux's `default-shell`;
 - the pane's own shell leads its terminal's foreground process group (so a running script, a
@@ -527,8 +561,10 @@ A launch that marks its pane names the window after the conversation (`--name` o
 `/rename`) or else the project folder, with `rename-window`, which turns tmux's
 `automatic-rename` off for that window, so resurrect saves and restores the name exactly. No
 `tmux.conf` line is involved. A name you set yourself always wins. When the session ends the
-window gets its automatic name back, unless the pane stays pending. A restore reclaims a window
-it named before only when the saved row records that claude-sandbox named it. Every `#` is
+window gets its automatic name back, unless the pane stays pending or crashed. A restore reclaims
+a window it named before only when the saved row records that claude-sandbox named it; a
+crashed row's hint reclaims it the same way (never renaming it), so the next launch in the
+pane owns the name again. Every `#` is
 removed from the name, since `rename-window` expands tmux formats, `#(command)` included. The
 README's [tmux window names](../README.md#tmux-window-names) has the details.
 
@@ -579,11 +615,15 @@ Use throwaway sessions and, where noted, a scratch `CLAUDE_CONFIG_DIR` (never th
   `docker attach --detach-keys=ctrl-q,ctrl-q probe`, detach, `echo $?`; `docker rm -f probe`.
   *Pass:* 0, then 1. *Fail:* a real detach can read as an inconclusive end and leave its pane
   pending (harmless: the next restore attaches; `--drop` clears it).
-- [ ] **claude's exit codes** (CS-TMUX-071) for `/exit`, Ctrl-D, a double Ctrl-C and SIGTERM
+- [ ] **claude's exit codes** (CS-TMUX-071/075) for `/exit`, Ctrl-D, a double Ctrl-C and SIGTERM
   (`kill <pid>` from another terminal): run host `claude` in a scratch directory, end it each
-  way, `echo $?` each time. Nothing passes or fails today — under the current rule any end
-  without outside evidence unsets the mark; the numbers are needed only if a crash should also
-  leave a pane pending (operator decision 64): a crash code must differ from all four.
+  way, `echo $?` each time. *Pass:* `/exit` and Ctrl-D print 0. *Fail:* a clean end that
+  exits non-zero leaves a crashed mark, and the next restore prints one stale hint line for
+  that pane (nothing is ever relaunched); add the code to `tmuxpane.CleanExitCodes` (today 0
+  and 78).
+- [ ] **bidi characters in existing saves** (CS-TMUX-046): the scan in that scenario's comment
+  counts sidecar rows whose values hold one of the twelve Bidi_Control characters, which a
+  restore now clears instead of resuming. *Pass:* 0 rows.
 - [ ] **tpgid at a prompt** (CS-TMUX-067). In a pane at a prompt, from another pane:
   `p=$(tmux display -p -t <pane> '#{pane_pid}'); sed 's/.*) //' /proc/$p/stat | awk '{print $6}'`.
   *Pass:* it prints `$p`; with `sleep 30` running in that pane it prints another number. *Fail:*

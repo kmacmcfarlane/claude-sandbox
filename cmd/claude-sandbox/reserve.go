@@ -354,6 +354,10 @@ func startReserved(env *Env, plan *launch.Plan, headless bool, pre *globalcfg.He
 		o.onChild = onChild
 		if mark != nil {
 			mark.keepUnlessReady = keep
+			// Answer 90 a: an early end that crashed leaves the row crashed;
+			// the restore words its line from this.
+			hooks := env.restore
+			mark.onEarlyCrash = func(c crashEnd) { hooks.crash = &c }
 		}
 	}
 	end, err := runSession(env, plan.StartCmd(), plan.ContainerName, o)

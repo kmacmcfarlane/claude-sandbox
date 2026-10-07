@@ -240,6 +240,32 @@ func (p Pane) BeginLabel(label string, reclaim bool) bool {
 	return false
 }
 
+// ReclaimLabel is the crash hint's reclaim-only form of BeginLabel
+// (CS-TMUX-079): for a labelled crashed row, a window resurrect restored
+// under the row's label (automatic-rename off, no label option, the name
+// equal to the label) is taken back by this pane — both options set, then
+// the confirming read — so the next launch here finds it its own (case B).
+// It never renames, and touches no other window. It reports whether it
+// reclaimed.
+func (p Pane) ReclaimLabel(m Mark) bool {
+	if !m.Labelled {
+		return false
+	}
+	name := ""
+	if m.NameSource == NameSourceUser {
+		name = m.Name
+	}
+	label := LaunchLabel(name, m.Project)
+	if label == "" {
+		return false
+	}
+	w, ok := readWindow(p, CallTimeout)
+	if !ok || w.Auto || w.Label != "" || w.Name != label {
+		return false
+	}
+	return setLabel(p, label, false) && confirm(p, label)
+}
+
 // EndLabel hands the window back when the session ended and this pane owns
 // the label (CS-TMUX-024): automatic-rename is unset at the window level (the
 // global applies again — resurrect's own ":" model) while the name is still

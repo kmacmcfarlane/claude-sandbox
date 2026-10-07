@@ -282,9 +282,14 @@ var _ = Describe("tmux restore, read-only (CS-TMUX-045..051)", func() {
 				m.ContainerID = ""
 			})
 			active := mark(nil)
+			const conv3 = "3c3c3c3c-1f2d-4e5f-8a9b-0c1d2e3f4a5b"
+			crashed := mark(func(m *tmuxpane.Mark) {
+				m.State, m.Conversation, m.Name, m.ContainerID, m.ExitCode = tmuxpane.StateCrashed, conv3, "crashy", "", 137
+			})
 			f.fake.On("tmux list-panes", strings.Join([]string{
 				"%1\tmain\t1\t0\tzsh\t" + pend.JSON(),
 				"%2\twork\t4\t0\tclaude-sandbox\t" + active.JSON(),
+				"%3\tmain\t5\t0\tzsh\t" + crashed.JSON(),
 			}, "\n")+"\n", nil)
 			f.fake.On("docker inspect", "/"+active.Container+"\x1frunning\x1f2026-09-29T12:00:00Z\x1f"+f.proj+"\x1fheron\x1fclaude\n", nil)
 			bad := mark(func(m *tmuxpane.Mark) { m.Project = "relative"; m.Name = "evil\x1b[2J" })
@@ -292,14 +297,20 @@ var _ = Describe("tmux restore, read-only (CS-TMUX-045..051)", func() {
 				{Session: "main", Window: 1, Pane: 0, Mark: mark(nil)},
 				{Session: "main", Window: 2, Pane: 0, Mark: mark(func(m *tmuxpane.Mark) { m.Mode = tmuxpane.ModeJoin })},
 				{Session: "main", Window: 3, Pane: 0, Mark: bad},
+				{Session: "main", Window: 6, Pane: 0, Mark: crashed},
 			}})
 			Expect(os.Symlink(tmuxpane.StateFileName(at(0)), filepath.Join(dir, "last"))).To(Succeed())
 			before := snapshot()
 			Expect(f.run("tmux", "restore", "--dry-run", "--all")).To(Equal(0), f.errw.String())
 			out := f.out.String()
-			Expect(out).To(ContainSubstring("Pending marks in the running tmux server:\n  main:1.0  'other'  heron  " + conv2 + "  [claude, pending]\n"))
-			Expect(out).To(ContainSubstring("Save " + at(0) + " (last) in " + dir + ": 3 sandbox panes:\n"))
-			Expect(strings.Index(out, "Pending marks")).To(BeNumerically("<", strings.Index(out, "Save ")))
+			Expect(out).To(ContainSubstring("Pending and crashed marks in the running tmux server:\n  main:1.0  'other'  heron  " + conv2 + "  [claude, pending]\n"))
+			// CS-TMUX-051 / CS-TMUX-077: a crashed mark is listed with the
+			// pending ones, and its row 19 calls no probe.
+			Expect(out).To(ContainSubstring("  main:5.0  'crashy'  heron  " + conv3 + "  [claude, crashed]\n      decision (row 19): 'crashy' crashed in this pane (exit 137); not restarted. Resume it with: cd " + f.proj))
+			Expect(out).To(ContainSubstring("      would: print the crash hint and forget the row; nothing is started\n"))
+			Expect(out).To(ContainSubstring("  main:6.0  'crashy'  heron  " + conv3 + "  [claude, crashed]\n      decision (row 19): "))
+			Expect(out).To(ContainSubstring("Save " + at(0) + " (last) in " + dir + ": 4 sandbox panes:\n"))
+			Expect(strings.Index(out, "Pending and crashed marks")).To(BeNumerically("<", strings.Index(out, "Save ")))
 			Expect(out).To(ContainSubstring("  main:1.0  'fix the build'  heron  " + markConv + "  [claude, active]\n      decision (row 9): 'fix the build' is already on screen in work:4.0\n"))
 			Expect(out).To(ContainSubstring("  main:2.0  'fix the build'  heron  " + markConv + "  [join, active]\n      decision (row 5): a joined session was here (fix the build); joins are not restored\n"))
 			Expect(out).To(ContainSubstring("      manual: cd " + f.proj + " && claude-sandbox --new --no-worktree -- --resume " + markConv))

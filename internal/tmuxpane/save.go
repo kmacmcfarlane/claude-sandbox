@@ -160,7 +160,7 @@ func Save(stateFile string, o SaveOptions) (SaveResult, error) {
 			continue // not in this save (a grouped session, or opened since)
 		}
 		m, ok := ParseMark(f[7])
-		if !ok || (m.State != StateActive && m.State != StatePending) {
+		if !ok || (m.State != StateActive && m.State != StatePending && m.State != StateCrashed) {
 			continue
 		}
 		// CS-TMUX-032: an active mark only while the launcher runs there.
@@ -187,6 +187,22 @@ func Save(stateFile string, o SaveOptions) (SaveResult, error) {
 			}
 		}
 		lp.row.Mark = lp.mark
+	}
+	// CS-TMUX-076: a crashed row whose conversation a kept active or pending
+	// row of this save names was resumed elsewhere already: the restore acts
+	// on that row, and a hint would point at a session that is back. The
+	// pane's own crashed mark is left as it is.
+	live := map[string]bool{}
+	for _, lp := range kept {
+		if lp.mark.State != StateCrashed && lp.mark.Conversation != "" {
+			live[strings.ToLower(lp.mark.Conversation)] = true
+		}
+	}
+	for _, lp := range kept {
+		if lp.mark.State == StateCrashed && live[strings.ToLower(lp.mark.Conversation)] {
+			o.logf("%s:%d.%d: crashed row for %s left out: another pane of this save holds it", printable(lp.row.Session), lp.row.Window, lp.row.Pane, printable(lp.mark.Conversation))
+			continue
+		}
 		res.Rows = append(res.Rows, lp.row)
 	}
 
