@@ -69,7 +69,8 @@ What it does not do:
 
 On the operator's workstation (hooper) the config is the hooper repository's `system/tmux.conf`,
 which holds the claude-sandbox hook lines below, and `system/install-tmux.sh` installs it:
-`~/.tmux.conf` becomes a symlink to the tracked file, and any existing file is backed up first.
+the installer copies the reviewed file to `~/.tmux.conf` (it is not a symlink), and an existing,
+different file, or an old symlink from an earlier install, is backed up first.
 The hooper repository's README has a section, "Workstation tmux (config + session restore)",
 that links back to this document for the restore internals. Nothing here needs adding by hand
 on hooper, and the installer also clones the two plugins.
@@ -233,7 +234,11 @@ Once, after setting up, when the checks above show your server is not the unit's
    repoint it at the one you want as
    [Procedure B](#restore-a-whole-layout-from-an-earlier-save) does. Then
    `systemctl --user start tmux.service` and `tmux attach`. continuum restores that save, and
-   each sandbox pane reattaches.
+   each sandbox pane reattaches. If the first attach shows an empty session with one bash pane,
+   or prints `[exited]`, the restore is still running (tmux-resurrect kills the default session
+   `0` when it restores from scratch, and that is what the `[exited]` was). Wait until `tmux ls`
+   lists the saved sessions and not only session `0`, then attach again. A restore with many
+   panes or saved pane contents can take longer than a few seconds.
 5. Run the checks above again: `is-active` says `active` and the two pids match.
 
 Why it matters (expected from systemd's rules for a `Type=forking` unit, not yet observed — see
