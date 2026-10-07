@@ -58,7 +58,7 @@ which holds the claude-sandbox hook lines below, and `system/install-tmux.sh` in
 `~/.tmux.conf` becomes a symlink to the tracked file, and any existing file is backed up first.
 The hooper repository's README has a section, "Workstation tmux (config + session restore)",
 that links back to this document for the restore internals. Nothing here needs adding by hand
-on hooper.
+on hooper, and the installer also clones the two plugins.
 
 On any other host, the operator adds the lines in
 [The `~/.tmux.conf` lines](#the-tmuxconf-lines) to `~/.tmux.conf` by hand.
@@ -122,7 +122,8 @@ What each generic option does:
   when you set this up is not the unit's (see
   [Put the tmux server under the unit](#put-the-tmux-server-under-the-unit)). A user unit starts
   at boot only when lingering is enabled for your user (`loginctl enable-linger`), otherwise at
-  your first login. tmux-continuum owns the unit; hooper ships none.
+  your first login. On hooper linger is enabled (by hooper's opencode install), so the unit starts at
+  boot. tmux-continuum owns the unit; hooper ships none.
 - `@resurrect-capture-pane-contents 'on'`: restore what was on screen in each pane. It breaks
   if a pane's `default-command` contains `&&` or `||` (the operator's config sets none).
 
@@ -242,7 +243,9 @@ the save before it and use [Procedure B](#restore-a-whole-layout-from-an-earlier
 is already stopped, so its first line does nothing).
 
 hooper's safe-shutdown text agrees: `systemctl --user stop tmux.service` from outside tmux
-whenever the unit runs the server; `tmux kill-server` only when it does not.
+whenever the unit runs the server; without the unit, save first (`tmux set -g @continuum-save-interval 0`,
+`prefix + C-s`) and then `tmux kill-server`; if the unit is active but the pids differ, follow step 3 of
+[Put the tmux server under the unit](#put-the-tmux-server-under-the-unit).
 
 ## How a restore decides
 
