@@ -141,9 +141,18 @@ func reserveContainer(env *Env, in launch.Inputs, wt worktreeChoice, ralph bool,
 		}()
 	}
 
+	// CS-LNCH-185..187: the launcher network, once per launch, under the
+	// lock and before the first discovery and create; a re-pick reuses it.
+	// Never fails the launch: a problem warns and leaves Network "".
+	if in.NetworkWanted {
+		in.Network = launch.EnsureNetwork(env.Runner, env.Err)
+	}
+	reEnsured := false // CS-LNCH-190: the network is ensured again at most once
+
 	instance := in.Instance
 	var lost []string // nouns a create conflict proved taken
 	reclaimed := false
+	conflicts := 0 // attempts that ended in a name conflict (CS-SESS-053)
 	for attempt := 1; ; attempt++ {
 		found, removing, derr := discoverForReservation(env)
 		if in.Resume != "" {
@@ -202,6 +211,14 @@ func reserveContainer(env *Env, in launch.Inputs, wt worktreeChoice, ralph bool,
 		if err == nil {
 			return plan, nil
 		}
+		var ce *launch.CreateError
+		if in.Network != "" && !reEnsured && errors.As(err, &ce) && ce.NetworkMissing() {
+			// CS-LNCH-190: pruned between the ensure step and the create.
+			// Not a name conflict, so not counted against maxCreateAttempts.
+			reEnsured = true
+			in.Network = launch.EnsureNetwork(env.Runner, env.Err)
+			continue
+		}
 		if !errors.Is(err, launch.ErrNameConflict) {
 			return nil, exitErr(2, "Error: %v", err)
 		}
@@ -226,8 +243,9 @@ func reserveContainer(env *Env, in launch.Inputs, wt worktreeChoice, ralph bool,
 				"its never-started container is reclaimed automatically once it is %s old, so retry in a few seconds.",
 				plan.ContainerName, minReclaimAge)
 		}
-		if attempt >= maxCreateAttempts {
-			return nil, exitErr(2, "Error: container name %s is already in use; gave up after %d attempts to reserve a free instance name.", plan.ContainerName, attempt)
+		conflicts++
+		if conflicts >= maxCreateAttempts {
+			return nil, exitErr(2, "Error: container name %s is already in use; gave up after %d attempts to reserve a free instance name.", plan.ContainerName, conflicts)
 		}
 		fmt.Fprintf(env.Err, "Container name %s was taken during launch; picking another instance.\n", plan.ContainerName)
 		lost = append(lost, instance)

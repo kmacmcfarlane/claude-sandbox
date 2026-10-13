@@ -1260,7 +1260,15 @@ func restoreAttach(env *Env, p *actProbes, m tmuxpane.Mark, d tmuxpane.Decision,
 		keys = cfg.DetachKeys
 		snap, snapErr = cascade.ReadEnvFiles(envFiles)
 		if s.ConfigHash != "" {
-			if want, _ := wouldBeFingerprint(renv, m.Project, &launchFlags{}, cfg, envFiles, snap, snapErr, linked, &s); want != "" && want != s.ConfigHash {
+			want, wantInputs := wouldBeFingerprint(renv, m.Project, &launchFlags{}, cfg, envFiles, snap, snapErr, linked, &s)
+			// CS-LNCH-189: the network inspect, if any, is bounded like the
+			// restore's other probes; a timeout is an error, so the note is
+			// decided without the network.
+			want, _ = networkDriftRecheck(tmuxpane.BoundedRunner{R: env.Runner, Timeout: tmuxpane.ProbeTimeout}, s, want, wantInputs,
+				func() (string, []launch.InputDigest) {
+					return wouldBeFingerprintNet(renv, m.Project, &launchFlags{}, cfg, envFiles, snap, snapErr, linked, &s, false)
+				})
+			if want != "" && want != s.ConfigHash {
 				fmt.Fprintf(env.Err, "Note: '%s' was started with a different configuration; attaching does not apply the changes (claude-sandbox --attach=%s lists them).\n",
 					sessionLabel(s), s.Instance)
 			}

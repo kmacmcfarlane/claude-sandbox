@@ -138,6 +138,16 @@
 # explicit off that overrides an upstream true; the cascade applies.
 # sharedPeerRegistry: false
 
+# Put new containers on the launcher-owned "claude-sandbox" Docker network
+# (default off), whose DNS goes through the host's resolver, so per-link split
+# DNS (a VPN for some domains, the LAN for others) works in sandboxes and
+# follows the host as networks come and go. Cost: siblings started with a plain
+# `docker run` are no longer reachable by IP (start them with
+# --network claude-sandbox; published ports work either way). Any problem warns
+# and launches on the default bridge. CLAUDE_SANDBOX_NETWORK=1/0 overrides it
+# for one launch.
+# sandboxNetwork: false
+
 # Disable the Claude Code version check at launch.
 # Also controllable via --no-update-check flag or CLAUDE_SANDBOX_NO_UPDATE_CHECK=1.
 # disableUpdateCheck: false

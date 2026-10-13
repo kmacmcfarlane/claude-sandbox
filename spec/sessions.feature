@@ -259,13 +259,15 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
       | the normalized mount set (container path plus ro/rw)              |
       | the host-access flags (docker socket, aws, git, ssh)              |
       | the host identity (uid, gid, user, home) and the memory limit     |
+      | the launcher network, only when applied (CS-LNCH-189)             |
     And the model, passthrough args, --limit, the instance noun, and the container
       name are excluded, being per-session choices rather than environment
 
   Scenario: CS-SESS-021 The inputs label explains what drifted
     Then claude-sandbox.inputs holds a compact JSON array of
       [path, short digest, kind] per contributing file in cascade order
-    And kind is one of config, env, image, shadow
+    And kind is one of config, env, image, shadow, network (the <network>
+      pseudo input, CS-LNCH-189)
     And diffing two inputs labels names the files that changed, appeared, or disappeared
     And the drift report shows the kind alongside each entry, because the entries
       are not all filesystem paths — one is an image, several are generated
@@ -1128,3 +1130,18 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
       reading env file: <err>; the session keeps the container's terminal
       identity."
     And the join or attach still runs (subject to the drift decision)
+
+  @new
+  Scenario: CS-SESS-097 Drift names the launcher network in opted-in trees only
+    Given a container created without the claude-sandbox network
+    When an attach or join is chosen with the network wanted
+      (sandboxNetwork: true or CLAUDE_SANDBOX_NETWORK=1, CS-LNCH-188) and the
+      network inspect finds it ours or missing (CS-LNCH-189)
+    Then the drift report lists "added    network     <network>" among its
+      lines; the shadow CLAUDE.md changed too (CS-LNCH-191), so <network> is
+      never the only entry
+    And with the key off the report has no <network> line
+    And with a foreign network named claude-sandbox (or an inspect error), the
+      container — which a launch now would also leave on the default bridge —
+      shows no drift from the network: equal hashes, no prompt, and with no
+      terminal no exit 3

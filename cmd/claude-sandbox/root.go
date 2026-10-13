@@ -1284,7 +1284,9 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 		Resume: resumeLabel(passthrough, headless, f.Ralph),
 		// CS-LNCH-182: the continue label and guard (headless included).
 		Continue: guardedContinue,
-		Out:      env.Out, Err: env.Err,
+		// CS-LNCH-188: resolved here; the ensure step runs under the lock.
+		NetworkWanted: launch.NetworkWanted(env.Getenv, cfg),
+		Out:           env.Out, Err: env.Err,
 	}
 	// CS-GCFG-001: the global-config health check, after the image work and
 	// before the lock and the create, so it never widens the window between

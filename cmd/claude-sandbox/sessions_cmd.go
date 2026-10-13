@@ -398,6 +398,12 @@ func joinExistingSession(env *Env, projectDir string, f *launchFlags, cfg *casca
 	snap, snapErr := cascade.ReadEnvFiles(envFiles)
 
 	wantHash, wantInputs := wouldBeFingerprint(env, projectDir, f, cfg, envFiles, snap, snapErr, linked, &d.Target)
+	if !f.AllowConfigDrift {
+		// CS-LNCH-189: never blame a network a launch now could not apply.
+		wantHash, wantInputs = networkDriftRecheck(env.Runner, d.Target, wantHash, wantInputs, func() (string, []launch.InputDigest) {
+			return wouldBeFingerprintNet(env, projectDir, f, cfg, envFiles, snap, snapErr, linked, &d.Target, false)
+		})
+	}
 	proceed, newContainer, err := confirmDrift(env, d.Target, wantHash, wantInputs, f)
 	if err != nil {
 		return false, err
@@ -470,7 +476,18 @@ func terminalNote(env *Env, s sessions.Session, snap []cascade.EnvFile, snapErr 
 // identity (CS-SESS-092); snapErr is that read's error, reported here as the
 // one warning of an unreadable env file, adding that the session keeps the
 // container's terminal identity (the join and the attach note stand down).
+//
+// The launcher network is assumed to apply whenever the key resolves on
+// (CS-LNCH-189): no docker call here. networkDriftRecheck corrects that when
+// the hashes differ.
 func wouldBeFingerprint(env *Env, projectDir string, f *launchFlags, cfg *cascade.Config, envFiles []string, snap []cascade.EnvFile, snapErr error, linked *launch.LinkedWorktree, target *sessions.Session) (string, []launch.InputDigest) {
+	return wouldBeFingerprintNet(env, projectDir, f, cfg, envFiles, snap, snapErr, linked, target, launch.NetworkWanted(env.Getenv, cfg))
+}
+
+// wouldBeFingerprintNet is wouldBeFingerprint with the network decided by the
+// caller: network false is the would-be launch on the default bridge, without
+// the network's context paragraph (CS-LNCH-189/191).
+func wouldBeFingerprintNet(env *Env, projectDir string, f *launchFlags, cfg *cascade.Config, envFiles []string, snap []cascade.EnvFile, snapErr error, linked *launch.LinkedWorktree, target *sessions.Session, network bool) (string, []launch.InputDigest) {
 	if snapErr != nil {
 		fmt.Fprintf(env.Err, "WARNING: cannot compute the current configuration for the drift check: reading env file: %v; the session keeps the container's terminal identity.\n", snapErr)
 		return "", nil
@@ -519,6 +536,10 @@ func wouldBeFingerprint(env *Env, projectDir string, f *launchFlags, cfg *cascad
 	}
 	defer os.RemoveAll(shadow)
 
+	netName := ""
+	if network {
+		netName = launch.NetworkName
+	}
 	uid, gid, uname, home := hostIdentity(env.Getenv)
 	var peerRoot *launch.PeerRootChoice
 	if target != nil {
@@ -544,7 +565,8 @@ func wouldBeFingerprint(env *Env, projectDir string, f *launchFlags, cfg *cascad
 		MountInfo: env.MountInfo,
 		// CS-DIR-017/019: the target's own root, and nothing created for it.
 		PeerRoot: peerRoot, NoCreatePeerDirs: true,
-		Out: io.Discard, Err: io.Discard,
+		Network: netName,
+		Out:     io.Discard, Err: io.Discard,
 	})
 	if err != nil {
 		// Without a comparable hash, confirmDrift reports drift (a prompt, or
@@ -556,6 +578,35 @@ func wouldBeFingerprint(env *Env, projectDir string, f *launchFlags, cfg *cascad
 		return "", nil
 	}
 	return plan.ConfigHash, plan.ConfigInputs
+}
+
+// networkDriftRecheck corrects wouldBeFingerprint's assumption that the
+// launcher network would apply (CS-LNCH-189). Only when the hashes differ and
+// the drift adds <network> does it run ONE network inspect, through r (the
+// restore attach passes a bounded runner): ours or missing leaves the drift
+// standing — [n] gives a container on the network; foreign or any error
+// returns rebuild(), the would-be launch without the network, since a launch
+// now would stand down too and [n] could not fix the drift (CS-SESS-097).
+// Equal hashes, no recorded hash or no <network> in the drift make no call.
+func networkDriftRecheck(r execx.Runner, s sessions.Session, wantHash string, wantInputs []launch.InputDigest, rebuild func() (string, []launch.InputDigest)) (string, []launch.InputDigest) {
+	if wantHash == "" || s.ConfigHash == "" || s.ConfigHash == wantHash {
+		return wantHash, wantInputs
+	}
+	added := false
+	for _, c := range launch.Drift(s.Inputs, wantInputs) {
+		if c.Path == launch.NetworkInput && c.How == "added" {
+			added = true
+			break
+		}
+	}
+	if !added {
+		return wantHash, wantInputs
+	}
+	switch launch.InspectNetwork(r).State {
+	case launch.NetworkOurs, launch.NetworkMissing:
+		return wantHash, wantInputs
+	}
+	return rebuild()
 }
 
 // newInstance picks the instance noun for a container about to be launched.

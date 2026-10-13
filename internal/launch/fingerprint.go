@@ -83,6 +83,14 @@ func (in *Inputs) configFingerprint(p *Plan, ha hostAccess, sharedPeerRegistry, 
 	// (5) The generated shadow files, by content (collected in tempFile).
 	inputs = append(inputs, in.shadowDigests...)
 
+	// CS-LNCH-189: the APPLIED launcher network, as a pseudo input so the
+	// drift report names it. Only when applied: key-off and stood-down
+	// launches hash exactly as before this feature (the globalConfig=linked
+	// precedent below).
+	if in.Network != "" {
+		inputs = append(inputs, InputDigest{Path: NetworkInput, Digest: shortDigest([]byte(in.Network)), Kind: KindNetwork})
+	}
+
 	// (6)(7)(8) Everything else that shapes the container but is not a file.
 	// Mounts are normalized to the container path plus its ro/rw flag: host
 	// paths of shadow mounts are per-launch temp paths and are already covered
@@ -110,6 +118,10 @@ func (in *Inputs) configFingerprint(p *Plan, ha hostAccess, sharedPeerRegistry, 
 	// both directions (CS-GCFG-031).
 	if globalLinked {
 		env.WriteString("globalConfig=linked\n")
+	}
+	// CS-LNCH-189: a property of the container attach and join cannot change.
+	if in.Network != "" {
+		fmt.Fprintf(&env, "network=%s\n", in.Network)
 	}
 	fmt.Fprintf(&env, "uid=%d gid=%d user=%s home=%s\n", in.HostUID, in.HostGID, in.HostUser, in.Home)
 	fmt.Fprintf(&env, "memory=%s\n", p.MemoryLimit)
