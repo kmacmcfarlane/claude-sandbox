@@ -2585,8 +2585,12 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       | defined only by an upstream config.yaml | that value (inherited)                                       |
       | defined by no config.yaml               | no -e at all (the launcher's default false is NOT exported) |
     And a join inherits the container's environment
-    And it is an EnvFlag like CLAUDE_SANDBOX_MODE: not in the config hash, so
-      an attach or join never reports drift because of it
+    And it is an EnvFlag like CLAUDE_SANDBOX_MODE: the variable adds no hash
+      input of its own; trackInHost is part of the merged config, so changing
+      it is drift as before
+    And when no config.yaml defines it the launcher passes no -e, so a cascade
+      env file that sets the variable reaches the container: it is unset unless
+      an env file sets it
     And there is no CLI flag and no config key for it
     And an env file defining the variable loses to the launcher's -e, as for
       CLAUDE_SANDBOX_MODE (no stand-down logic)

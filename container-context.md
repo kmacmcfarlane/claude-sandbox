@@ -190,7 +190,8 @@ older `.claude-sandbox/agent/LSP_TOOLS.md`) tells you to run it, run the
   own hooks and cannot be edited from here.
 - **`CLAUDE_SANDBOX_TRACK_IN_HOST`** is `true` or `false`, the project's
   effective `trackInHost` (merged over every `.claude-sandbox/config.yaml`
-  from the workspace root down), and unset when no config defines it. Use it to
+  from the workspace root down), and unset when no config.yaml defines it (layout treats that as false;
+  an env file may still set it). Use it to
   choose `wi init --track` or `--no-track`.
 - **`settings.json` is the host file.** The config dir's `settings.json` is not
   a copy: plugin installs and enable/disable, `/model`, `/effort` and

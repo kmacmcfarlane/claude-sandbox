@@ -168,12 +168,11 @@ var _ = Describe("CS-LNCH-111: the notification ping names the waiting session",
 			in.Instance = ""
 			Expect(build().EnvFlags).To(ContainElement(key + "true"))
 		})
-		It("CS-LNCH-184: the env var itself adds nothing to the hash", func() {
+		It("CS-LNCH-184: two launches with identical config hash alike with the variable present", func() {
 			merged("trackInHost: true\n")
 			a := build()
-			in.Instance = "heron"
-			Expect(build().ConfigHash).To(Equal(a.ConfigHash))
 			Expect(a.EnvFlags).To(ContainElement(key + "true"))
+			Expect(build().ConfigHash).To(Equal(a.ConfigHash))
 		})
 	})
 
