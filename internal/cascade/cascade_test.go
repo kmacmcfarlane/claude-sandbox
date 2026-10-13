@@ -8,6 +8,7 @@ package cascade_test
 // at the package level: Config.Validate and Load respectively.
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 
@@ -73,6 +74,29 @@ var _ = Describe("config cascade", func() {
 		cfg, err = cascade.Load(files)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(cfg.SharedPeerRegistry).To(BeNil())
+	})
+
+	It("CS-LNCH-188: sandboxNetwork merges like any other scalar and stays out of the hashed JSON", func() {
+		files := writeConfigs(tmp,
+			"sandboxNetwork: true\n",
+			"sandboxNetwork: false\n",
+		)
+		cfg, err := cascade.Load(files)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.SandboxNetwork).NotTo(BeNil())
+		Expect(*cfg.SandboxNetwork).To(BeFalse())
+
+		files = writeConfigs(tmp, "sandboxNetwork: true\n", "model: opus\n")
+		cfg, err = cascade.Load(files)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(*cfg.SandboxNetwork).To(BeTrue())
+		raw, _ := json.Marshal(cfg)
+		Expect(string(raw)).NotTo(ContainSubstring("andboxNetwork"))
+
+		files = writeConfigs(tmp, "model: opus\n")
+		cfg, err = cascade.Load(files)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.SandboxNetwork).To(BeNil())
 	})
 
 	It("CS-LNCH-112: oomScoreAdj merges like any other scalar; an explicit 0 is not unset", func() {

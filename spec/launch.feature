@@ -2594,3 +2594,198 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     And there is no CLI flag and no config key for it
     And an env file defining the variable loses to the launcher's -e, as for
       CLAUDE_SANDBOX_MODE (no stand-down logic)
+
+  # The launcher network (CS-LNCH-185..191, CS-LNCH-193; plan
+  # container-dns-launcher-network 00..03, operator answer 93 b: opt-in).
+  # On Docker's default bridge a container gets a frozen copy of the host's
+  # flat upstream resolv.conf (systemd-resolved's
+  # /run/systemd/resolve/resolv.conf), so a host that splits DNS per link (a
+  # VPN for some domains, the LAN for others) loses the split, and a VPN drop
+  # leaves the container pointed at an unreachable resolver. On a user-defined
+  # network moby 29.x reads the host's /etc/resolv.conf instead
+  # (daemon/container_operations_unix.go, buildSandboxPlatformOptions), marks
+  # each of its nameservers host-loopback (libnetwork/internal/resolvconf,
+  # TransformForIntNS) and dials them from the daemon in the host namespace
+  # (libnetwork/resolver.go, dialExtDNS), so the embedded resolver at
+  # 127.0.0.11 forwards every query to the host's resolver, which routes it
+  # per link. No host change is needed. A --dns (or a daemon.json dns) is an
+  # override dialled from the container namespace, so the launcher never
+  # passes one; an --internal network does not forward host-loopback
+  # upstreams, so the launcher never makes or adopts one.
+  #
+  # Host checks (the operator's, after the merge; plan 00 § 6 as amended by
+  # 01 § 6, 02 § 5 and 03 § 3): T0-T4, T8 and T9 as written there, and
+  #   T5: CLAUDE_SANDBOX_NETWORK=1 claude-sandbox --new prints one Network:
+  #     line; inside, /etc/resolv.conf has "nameserver 127.0.0.11" and
+  #     "ExtServers: [host(127.0.0.53)]", and the session's CLAUDE.md —
+  #     ~/.claude/CLAUDE.md, or $CLAUDE_CONFIG_DIR/CLAUDE.md when the config
+  #     dir is relocated — ends with the network paragraph; on the host
+  #     docker inspect -f '{{.HostConfig.NetworkMode}}' <container> reads
+  #     claude-sandbox. Without the variable (the default): no line,
+  #     NetworkMode "default", no paragraph.
+  #   T6: CLAUDE_SANDBOX_NETWORK=1 claude-sandbox --attach=<noun> of a session
+  #     started without the network lists "added network <network>" (beside
+  #     "changed shadow CLAUDE.md"); with the key off, no <network> line.
+  #   T7: CLAUDE_SANDBOX_NETWORK=1 claude-sandbox headless -- --version prints
+  #     only the version on stdout and the Network: line on stderr, and
+  #     docker events --filter type=network --filter network=claude-sandbox
+  #     shows one connect; without the variable, no event.
+
+  @new
+  Scenario: CS-LNCH-193 Every new container joins the claude-sandbox network when it applies
+    # The plan's CS-LNCH-184, taken by the trackInHost export before this
+    # landed; the next ID was reserved by another plan.
+    Given the launcher network applies (CS-LNCH-188 resolves on and the ensure
+      step of CS-LNCH-185 returned the network)
+    When any new container is created: interactive, the tier-1 [n], --detach,
+      --branch, the [b] fork, headless, ralph, and a tmux restore resume — all
+      through the one reservation (reserveContainer)
+    Then docker create carries "--network claude-sandbox" right after "--init"
+    And the launch prints exactly one line, through the launch's output
+      (stderr for headless, whose stdout stays claude's):
+      "Network: claude-sandbox - DNS goes through the host's resolver;
+      containers on Docker's default bridge are not reachable by IP (start
+      siblings with --network claude-sandbox)."
+    And a noun re-pick prints it no second time (later attempts discard
+      Build's output)
+    And with the network not applied (key off, or stood down) the create argv
+      is byte-identical to a launch without this feature and no line prints
+    And attach and join are unchanged: the container keeps the network it was
+      created with, and a join's docker exec shares its namespace and
+      resolv.conf
+    And no "--dns" is ever passed
+
+  @new
+  Scenario: CS-LNCH-185 The network is ensured once per launch, under the launch lock
+    Given the launcher network is wanted (CS-LNCH-188)
+    When a new container is reserved
+    Then after the launch lock is taken, and before the attempt loop's
+      discovery and docker create, the launcher runs once
+      "docker network inspect --format '{{.Driver}}<US>{{.Internal}}<US>{{index .Labels "claude-sandbox.network"}}' claude-sandbox"
+      (<US> = \x1f); a noun re-pick reuses the result
+    And driver bridge, internal false and label "1" is OURS: the network
+      applies, with no further call
+    And a non-zero exit whose stderr says "not found" (or "No such network")
+      is MISSING: the launcher reads the default bridge's options with
+      "docker network inspect --format '{{json .Options}}' bridge", then runs
+      "docker network create --driver bridge --label claude-sandbox.network=1
+      [-o …] claude-sandbox"
+    And -o is added for each of exactly these keys, and only where docker0's
+      value differs from Docker's built-in default, in this order:
+      | key                                            | default | copied when                               |
+      | com.docker.network.bridge.enable_icc           | true    | it parses as false                        |
+      | com.docker.network.driver.mtu                  | 1500    | an integer other than 1500 and 0          |
+      | com.docker.network.bridge.enable_ip_masquerade | true    | it parses as false                        |
+      | com.docker.network.bridge.host_binding_ipv4    | 0.0.0.0 | an IP that is not the unspecified address |
+    And an absent or empty key is the default; no other key (default_bridge,
+      bridge.name, …) is ever copied; an explicit -o would override the
+      daemon's default-network-opts, hence "only where it differs"
+    And a default bridge that is "not found" (a daemon run with --bridge=none)
+      creates with no -o
+    And the create carries no --subnet, --ipv6, --internal or --dns
+    And a create whose stderr says "already exists" (a concurrent launcher: a
+      nested one takes another lock file, a lockless one none) re-inspects
+      once with the first step's rules and never creates again
+    And an existing network of ours is never inspected for options: it keeps
+      what it was created with (a later daemon change reaches it only once it
+      is removed)
+    And a network the operator pre-created with the label (a pinned subnet)
+      is adopted as it is
+
+  @new
+  Scenario: CS-LNCH-186 A network named claude-sandbox that is not the launcher's is left alone
+    Given a network named claude-sandbox whose driver is not bridge, which is
+      internal, or which lacks the label claude-sandbox.network=1 ("<no value>"
+      reads as empty)
+    When a launch wants the network
+    Then one line is printed: "WARNING: a Docker network named claude-sandbox
+      exists but was not created by claude-sandbox (<reason>); launching on the
+      default bridge. Remove it (docker network rm claude-sandbox) or recreate
+      it with --label claude-sandbox.network=1."
+    And the container is created exactly as with the key off: no --network, no
+      Network: line, the key-off hash and shadow CLAUDE.md
+    And the launch goes on: it never fails on the network
+
+  @new
+  Scenario: CS-LNCH-187 Any other docker failure stands the network down for the launch
+    When the network inspect fails otherwise or prints something unparsable,
+      the default bridge's options cannot be read (an error, bad JSON, or a
+      value of one of the four keys that does not parse), or the create fails
+      other than with "already exists"
+    Then one WARNING names the step and docker's last stderr line:
+      "WARNING: could not inspect the claude-sandbox network (…)", "WARNING:
+      could not read the default bridge's options (…)" or "WARNING: could not
+      create the claude-sandbox network (…)", each ending "; launching on the
+      default bridge."
+    And nothing is created with guessed options
+    And the container is created exactly as with the key off, and the launch
+      goes on
+
+  @new
+  Scenario: CS-LNCH-188 sandboxNetwork and CLAUDE_SANDBOX_NETWORK opt in; default off
+    # Operator answer 93 (b): CLAUDE.md's transparent-defaults rule ("any
+    # default a user must discover by losing something is the wrong
+    # default"). On by default would cut sibling reach by IP for every user.
+    Then the network is wanted per launch.ResolveTristate:
+      | CLAUDE_SANDBOX_NETWORK | sandboxNetwork (merged cascade) | wanted |
+      | unset                  | unset                           | no     |
+      | unset                  | true                            | yes    |
+      | 1 / true / yes         | false or unset                  | yes    |
+      | 0 / false / no         | true                            | no     |
+    And there is no CLI flag
+    And the key is json:"-" in the merged config: the APPLIED network is what
+      the fingerprint hashes (CS-LNCH-189), so unset and an explicit false hash
+      alike
+    And not wanted means no "docker network" call at all, and an argv, hash
+      and shadow CLAUDE.md identical to a launch without this feature
+    And the key is resolved before the reservation, from the launcher's own
+      environment (a headless client's unit can set it)
+
+  @new
+  Scenario: CS-LNCH-189 The applied network is hashed; a drift check never blames a network it could not apply
+    Given the network applied to a launch
+    Then the fingerprint adds the line "network=claude-sandbox" and the input
+      {path "<network>", kind network}, so the drift report reads
+      "added    network     <network>"
+    And a key-off or stood-down launch adds neither and hashes as before
+    And wouldBeFingerprint builds with the network whenever the key resolves
+      on, making no "docker network" call
+    And only when the hashes differ AND the drift adds <network> does the drift
+      check run ONE network inspect (CS-LNCH-185's first step):
+      | inspect               | drift check                                                  |
+      | ours                  | the drift stands: [n] gives a container on the network       |
+      | missing               | the drift stands: [n]'s launch creates the network           |
+      | foreign, or any error | recomputed without the network and its context paragraph    |
+    And the last row is exactly the cases in which a launch now would stand
+      down (CS-LNCH-186/187), so [n] could not fix that drift
+    And on the tmux restore attach path that inspect is bounded by
+      tmuxpane.ProbeTimeout (the restore probes' runner); a timed-out inspect
+      is an error, so the note is decided without the network
+    And --allow-config-drift, a container with no confighash label, or equal
+      hashes make no network call
+
+  @new
+  Scenario: CS-LNCH-190 A network that vanished before the create is ensured again once
+    Given the network applied, and a prune removed it before docker create
+    When docker create fails with "network claude-sandbox not found"
+    Then the ensure step runs once more and the attempt is retried, not counted
+      against the name-conflict attempts
+    And a second such failure exits 2 like any create error
+    And a prune between the create and the start fails that start through the
+      ordinary start-failure path; the next launch recreates the network
+
+  @new
+  Scenario: CS-LNCH-191 Only a session on the network is told about it
+    Given the network applies
+    Then the shadow CLAUDE.md is the host memory (if any) and a blank line,
+      container-context.md, then a blank line and launch.NetworkContext: one
+      paragraph saying the sandbox is on the claude-sandbox network, that its
+      DNS goes through the host's resolver (nameserver 127.0.0.11), and that
+      siblings started with a plain docker run land on the default bridge,
+      unreachable by IP — start them with --network claude-sandbox (reachable
+      by IP and by name unless the host disables inter-container traffic);
+      their published ports work either way
+    And when it does not apply (key off, stood down, or the drift check's
+      network-off recomputation) the shadow is exactly host memory plus
+      container-context.md, as before
+    And container-context.md itself does not mention the network

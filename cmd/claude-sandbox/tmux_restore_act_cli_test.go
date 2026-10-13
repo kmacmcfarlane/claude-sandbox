@@ -24,6 +24,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/sessions"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/tmuxpane"
 )
 
@@ -303,6 +304,41 @@ var _ = Describe("tmux restore, one pane (CS-TMUX-052..063)", func() {
 			Expect(f.sessionLine()).To(Equal("docker attach --detach-keys=ctrl-q,ctrl-q " + markID))
 		})
 
+		It("CS-LNCH-189: a hung network inspect on the restore attach is bounded; the note is decided without the network", func() {
+			DeferCleanup(func(old time.Duration) { tmuxpane.ProbeTimeout = old }, tmuxpane.ProbeTimeout)
+			tmuxpane.ProbeTimeout = 50 * time.Millisecond
+			f.envmap["CLAUDE_SANDBOX_NETWORK"] = "1"
+			f.fake.OnHang("docker network inspect")
+			// The hang only bites a Started process; prove the inspect went
+			// through Start (the bounded runner) and was signalled at the bound.
+			spy := &netStartSpy{Fake: f.fake}
+			f.env.Runner = spy
+			m := withID()
+			pane(m.JSON())
+			inspectRunning("running")
+			// The container's labels are those of a key-off launch now.
+			renv := restoreEnv(f.env, m)
+			cfg, envFiles, linked, err := restoreCascade(renv, f.proj)
+			Expect(err).NotTo(HaveOccurred())
+			off, offInputs := wouldBeFingerprintNet(renv, f.proj, &launchFlags{}, cfg, envFiles, nil, nil, linked, &sessions.Session{}, false, nil)
+			Expect(off).NotTo(BeEmpty())
+			fields := strings.Split(psRowMark("claude-sandbox-x-proj-abc123-heron", f.proj, "claude", "heron", "", "37", "",
+				"2026-09-18 12:34:56 +0000 UTC", markID, cfgDir, cfgDir+"/sessions", ""), psSep)
+			enc, _ := json.Marshal(offInputs)
+			fields[7], fields[8] = off, string(enc)
+			f.fake.On("docker ps", strings.Join(fields, psSep)+"\n", nil)
+			streamEvents(f.fake, dockerEvent("die", "0"))
+			done := make(chan int, 1)
+			go func() { defer GinkgoRecover(); done <- f.run("tmux", "restore") }()
+			var code int
+			Eventually(done, 10*time.Second).Should(Receive(&code))
+			Expect(code).To(Equal(0), f.errw.String())
+			Expect(f.sessionLine()).To(Equal("docker attach --detach-keys=ctrl-q,ctrl-q " + markID))
+			Expect(spy.startCount()).To(Equal(1), "the network inspect was Started, not Run")
+			Expect(spy.signalCount()).To(Equal(1), "and killed at the bound")
+			Expect(f.errw.String()).NotTo(ContainSubstring("was started with a different configuration"))
+		})
+
 		Describe("CS-SESS-091: the terminal note before a restore attach", func() {
 			// termRow is psRowMark carried through the terminal label and Mounts.
 			termRow := func(terminal string) string {
@@ -436,6 +472,16 @@ var _ = Describe("tmux restore, one pane (CS-TMUX-052..063)", func() {
 			Expect(ms[1].State).To(Equal(tmuxpane.StateActive))
 			Expect(tmuxLines()[len(tmuxLines())-1]).To(Equal(unset), "resumed, then a clean exit: CS-TMUX-071")
 			Expect(lockFree(lockPath)).To(BeTrue())
+		})
+
+		It("CS-LNCH-193: a restore resume with the key on joins the network like any new container", func() {
+			networkOn(f)
+			pane(row(nil).JSON())
+			streamEvents2()
+			Expect(f.run("tmux", "restore")).To(Equal(0), f.errw.String())
+			args := f.launched().Args
+			Expect(args[:6]).To(Equal([]string{"create", "-it", "--rm", "--init", "--network", "claude-sandbox"}))
+			Expect(netInspects(f)).To(Equal(1))
 		})
 
 		It("CS-TMUX-058: a row recorded with no CLAUDE_CONFIG_DIR unsets it; one from before the record takes the shell's", func() {

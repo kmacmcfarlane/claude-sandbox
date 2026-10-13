@@ -136,6 +136,17 @@ type Inputs struct {
 	// claude-sandbox.continue label the continue guard reads (CS-SESS-093).
 	Continue bool
 
+	// NetworkWanted is the resolved sandboxNetwork / CLAUDE_SANDBOX_NETWORK
+	// (NetworkWanted, CS-LNCH-188). Build does not read it: the reservation
+	// runs the ensure step under the lock and sets Network.
+	NetworkWanted bool
+	// Network is the network the container joins, "" for Docker's default
+	// bridge (CS-LNCH-193): NetworkName once the ensure step applied it
+	// (CS-LNCH-185), or when the drift check builds a would-be launch with
+	// the key on (CS-LNCH-189). Non-empty adds --network, the Network:
+	// banner, the context paragraph (CS-LNCH-191) and the hash input.
+	Network string
+
 	// LookupEnv tells set-but-empty from unset for the headless env allowlist
 	// (CS-LNCH-063). Nil falls back to Getenv, where "" reads as unset.
 	LookupEnv func(string) (string, bool)
@@ -308,6 +319,9 @@ type Plan struct {
 	DetachKeys    string   // --detach-keys sequence, for docker start only
 	// Headless renders create with -i but no -t (CS-LNCH-059).
 	Headless bool
+	// Network renders "--network <name>" after --init; "" adds nothing
+	// (CS-LNCH-193).
+	Network string
 	// Instance is the container's instance noun ("" for ralph), for messages
 	// such as the --detach attach hint (CS-LNCH-113).
 	Instance string
@@ -401,7 +415,12 @@ func Build(in Inputs) (*Plan, error) {
 	if in.Cfg == nil {
 		in.Cfg = &cascade.Config{}
 	}
-	p := &Plan{Image: in.ImageName, Headless: in.Headless, Instance: in.Instance}
+	p := &Plan{Image: in.ImageName, Headless: in.Headless, Instance: in.Instance, Network: in.Network}
+	if in.Network != "" && in.Out != nil {
+		// CS-LNCH-193: one line; a re-pick attempt and the drift check
+		// discard Build's output.
+		fmt.Fprintln(in.Out, NetworkBanner)
+	}
 
 	// CS-LNCH-132: one snapshot for everything below — the stand-downs
 	// (CS-LNCH-108), the fingerprint and the copies docker gets.
@@ -812,6 +831,9 @@ func (p *Plan) CreateArgs(workdir string) []string {
 		tty = "-i"
 	}
 	args := []string{"create", tty, "--rm", "--init"}
+	if p.Network != "" {
+		args = append(args, "--network", p.Network) // CS-LNCH-193
+	}
 	for _, v := range p.Volumes {
 		args = append(args, "-v", v)
 	}
@@ -982,6 +1004,11 @@ func (in *Inputs) shadowClaudeMD(p *Plan, configDir string) error {
 		buf.WriteString("\n")
 	}
 	buf.Write(assets.ContainerContext)
+	if in.Network != "" {
+		// CS-LNCH-191: only a session on the network is told about it.
+		buf.WriteString("\n")
+		buf.WriteString(NetworkContext)
+	}
 	tmp, err := in.tempFile("CLAUDE.md", []byte(buf.String()))
 	if err != nil {
 		return err

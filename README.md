@@ -440,7 +440,7 @@ Attaching will NOT apply these changes to the running container.
   [q] quit
 ```
 
-The hash covers the merged config cascade, env file contents, the resolved Dockerfile and the image ID actually in use, the generated shadow files, the mount set, host-access flags, host identity, and the memory limit. It deliberately ignores `--model`, passthrough arguments and `--limit`, which are per-session choices rather than environment — so starting a second session never looks like drift. Because it hashes the *merged* result, an upstream edit that a more-local file fully overrides is correctly not drift.
+The hash covers the merged config cascade, env file contents, the resolved Dockerfile and the image ID actually in use, the generated shadow files, the mount set, host-access flags, host identity, the memory limit, and the [container network](#container-network-and-dns) when one applied. It deliberately ignores `--model`, passthrough arguments and `--limit`, which are per-session choices rather than environment — so starting a second session never looks like drift. Because it hashes the *merged* result, an upstream edit that a more-local file fully overrides is correctly not drift.
 
 `--model` is reported separately: attaching cannot change a running session's model, so a mismatch warns. Joining passes the model through to the new process, where it does apply.
 
@@ -1622,6 +1622,75 @@ each container's `claude-sandbox.registry` label instead (or both roots). A long
 loses 6 bytes of socket-path headroom with the new root: a home of up to 47 bytes still bridges
 (was 53).
 
+#### Container network and DNS
+
+Off by default. On Docker's default bridge each container gets a **frozen copy** of the host's
+flat upstream resolver list (with systemd-resolved, `/run/systemd/resolve/resolv.conf`). On a host
+whose resolver splits DNS per link — a VPN that serves some domains while the LAN serves others —
+containers lose the split: every lookup goes to the first nameserver, so one side's names fail.
+And the copy never updates, so a VPN going down leaves running containers pointed at an
+unreachable resolver until they are relaunched.
+
+```yaml
+sandboxNetwork: true
+```
+
+With the key on (or `CLAUDE_SANDBOX_NETWORK=1`), every new container — interactive, `--detach`,
+`--branch`, headless, ralph and `tmux restore` resumes — joins a user-defined bridge network the
+launcher owns, `claude-sandbox`. On a user-defined network Docker's embedded resolver
+(`nameserver 127.0.0.11`) forwards each query to the host's own `/etc/resolv.conf` resolver from
+the host's network namespace, so containers resolve names exactly as the host does, split DNS
+included, and follow the host as its networks come and go. No host change is needed. The launch
+prints one line:
+
+```
+Network: claude-sandbox - DNS goes through the host's resolver; containers on Docker's default bridge are not reachable by IP (start siblings with --network claude-sandbox).
+```
+
+and the session's `CLAUDE.md` gets one paragraph telling it the same. Attach and join are
+unchanged: a container keeps the network it was created with.
+
+**Who it helps:** hosts whose resolver splits DNS per link (systemd-resolved with a VPN), or that
+change networks while sandboxes run (a laptop). A host with one plain resolver gains little, and
+on Docker Desktop the gain is about nil.
+
+**What it costs:**
+- **Sibling reach by IP.** Containers you start through the Docker socket with a plain
+  `docker run` land on Docker's default bridge, and Docker isolates bridge networks from each
+  other: a sandbox on `claude-sandbox` cannot reach them by IP on an unpublished port. Start them
+  with `--network claude-sandbox` instead — then they are reachable by IP and by container name
+  (unless the host disables inter-container traffic). Published ports (`-p`) work either way,
+  through the container's gateway, so Testcontainers and compose projects are unaffected
+  (compose services were already on networks of their own).
+- **One drift per running container.** Containers started before you turned it on report
+  `added network <network>` (beside the changed shadow `CLAUDE.md`) on `--attach`/`--join`;
+  `[n]` gives a container on the network.
+
+**The network.** On the first launch that needs it the launcher creates it
+(`docker network create --driver bridge --label claude-sandbox.network=1 claude-sandbox`, under
+the launch lock), copying `icc`, MTU, masquerade and host-binding options from the default bridge
+only where they differ from Docker's defaults. Later launches only inspect it. It is never
+`--internal` and the launcher never passes `--dns`: either would defeat the forwarding, and so
+does a daemon-wide `dns` in `daemon.json`. If something goes wrong — a network of that name that
+is not the launcher's (another driver, internal, or no `claude-sandbox.network=1` label), or a
+docker error — the launch prints one `WARNING` and runs on the default bridge, exactly as with
+the key off; it never fails.
+
+- **Pin a subnet** by creating the network yourself before the first launch; the launcher adopts
+  it: `docker network create --driver bridge --label claude-sandbox.network=1 --subnet <cidr>
+  claude-sandbox`. Otherwise Docker picks a free subnet at creation, avoiding only the routes
+  present then (a VPN that later pushes an overlapping route is the reason to pin).
+- **Prunes:** `docker network prune` (and `docker system prune`) remove this network whenever no
+  sandbox is running. The next launch recreates it with a subnet the daemon picks. If you pinned a
+  subnet, recreate the network before the next launch.
+- **Remove it** with `docker network rm claude-sandbox` while no sandbox uses it; an existing
+  network keeps the options it was created with until then.
+- **Image builds** keep the flat DNS (BuildKit's `RUN` steps do not use this network).
+- **IPv6:** the launcher passes no IPv6 options; a daemon whose `default-network-opts` enables
+  IPv6 would give sandboxes v6 egress outside an IPv4-only VPN.
+
+`CLAUDE_SANDBOX_NETWORK=0` keeps one launch off a config's `true`; there is no CLI flag.
+
 #### Host access
 
 Control which host resources are mounted into the container. Each can be enabled via CLI flags, environment variables, or YAML. Precedence: CLI flag > env var > YAML.
@@ -1853,6 +1922,7 @@ If no `.claude-sandbox/Dockerfile` is found anywhere up to `/`, the launcher war
 | `CLAUDE_SANDBOX_DANGEROUS` | (unset) | Set to `1` or `true` to skip permission prompts (equivalent to `--dangerous`) |
 | `CLAUDE_SANDBOX_WORKTREE` | (unset: off interactive, on ralph) | `1`/`true`/`yes` runs sessions in their own worktree (equivalent to `--worktree`); `0`/`false`/`no` runs them in the shared checkout, ralph included; either overrides a config `worktree` key |
 | `CLAUDE_SANDBOX_SHARED_PEER_REGISTRY` | (unset) | `1`/`true`/`yes` shares the Claude Code peer registry and message sockets with other opted-in sandboxes regardless of `CLAUDE_CONFIG_DIR` (equivalent to `sharedPeerRegistry: true`); `0`/`false`/`no` is an explicit off that overrides a config `true` |
+| `CLAUDE_SANDBOX_NETWORK` | (unset: off) | `1`/`true`/`yes` puts new containers on the `claude-sandbox` Docker network, whose DNS goes through the host's resolver (equivalent to `sandboxNetwork: true`, see [Container network and DNS](#container-network-and-dns)); `0`/`false`/`no` is an explicit off that overrides a config `true` |
 | `CLAUDE_SANDBOX_OOM_SCORE_ADJ` | (unset: `oomScoreAdj`, else 500) | The containers' `--oom-score-adj`, -1000..1000; overrides a config `oomScoreAdj` key (see [When the host runs out of memory](#when-the-host-runs-out-of-memory)) |
 | `CLAUDE_SANDBOX_BASE_ONLY` | (unset) | Set to `1` or `true` to skip child Dockerfile and use base image only |
 | `CLAUDE_SANDBOX_NO_UPDATE_CHECK` | (unset) | Set to `1` or `true` to skip Claude Code version check at launch |

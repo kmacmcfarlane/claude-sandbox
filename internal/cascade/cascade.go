@@ -137,13 +137,20 @@ type Config struct {
 	// value (CS-LNCH-054/055) is hashed explicitly by the drift fingerprint, so hashing the
 	// key here as well would only make an unset key and an explicit
 	// "false" — which launch identically — look like drift against each other.
-	SharedPeerRegistry *bool      `yaml:"sharedPeerRegistry" json:"-"`
-	TrackInHost        *bool      `yaml:"trackInHost"`
-	BaseOnly           bool       `yaml:"baseOnly"`
-	DockerfileDir      string     `yaml:"dockerfileDir"`
-	Dockerfile         string     `yaml:"dockerfile"`
-	HostAccess         HostAccess `yaml:"hostAccess"`
-	Mounts             []Mount    `yaml:"mounts"`
+	SharedPeerRegistry *bool `yaml:"sharedPeerRegistry" json:"-"`
+	// SandboxNetwork puts new containers on the launcher's user-defined
+	// Docker network, whose DNS forwards to the host's resolver
+	// (CS-LNCH-185..191, CS-LNCH-193). Opt-in, default off (CS-LNCH-188).
+	// Tri-state and json:"-" for SharedPeerRegistry's reasons: a falsy
+	// CLAUDE_SANDBOX_NETWORK must turn an upstream "true" off, and the
+	// APPLIED network is hashed explicitly (CS-LNCH-189).
+	SandboxNetwork *bool      `yaml:"sandboxNetwork" json:"-"`
+	TrackInHost    *bool      `yaml:"trackInHost"`
+	BaseOnly       bool       `yaml:"baseOnly"`
+	DockerfileDir  string     `yaml:"dockerfileDir"`
+	Dockerfile     string     `yaml:"dockerfile"`
+	HostAccess     HostAccess `yaml:"hostAccess"`
+	Mounts         []Mount    `yaml:"mounts"`
 
 	// DetachKeys overrides the key sequence that detaches from an attached
 	// session. Empty means the built-in default; see defaultDetachKeys.
