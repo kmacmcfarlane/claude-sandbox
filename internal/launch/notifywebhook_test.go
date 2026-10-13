@@ -103,6 +103,80 @@ var _ = Describe("CS-LNCH-111: the notification ping names the waiting session",
 		})
 	})
 
+	Describe("CS-LNCH-184: CLAUDE_SANDBOX_TRACK_IN_HOST", func() {
+		var in launch.Inputs
+		BeforeEach(func() {
+			base, err := filepath.EvalSymlinks(GinkgoT().TempDir())
+			Expect(err).NotTo(HaveOccurred())
+			in = launch.Inputs{
+				ProjectDir: filepath.Join(base, "proj"), Home: filepath.Join(base, "home"),
+				HostUID: 1000, HostGID: 1000, HostUser: "tester",
+				Getenv:    func(string) string { return "" },
+				TempDir:   filepath.Join(base, "shadow"),
+				ImageName: "claude-sandbox-proj", Instance: "otter",
+				Out: &strings.Builder{}, Err: &strings.Builder{},
+			}
+			for _, d := range []string{in.ProjectDir, in.Home, in.TempDir} {
+				Expect(os.MkdirAll(d, 0o755)).To(Succeed())
+			}
+		})
+		// merged runs the real cascade merge over files, root first.
+		merged := func(files ...string) {
+			var snap []cascade.ConfigFile
+			for i, c := range files {
+				snap = append(snap, cascade.ConfigFile{Path: filepath.Join("/x", string(rune('a'+i)), "config.yaml"), Content: []byte(c)})
+			}
+			cfg, err := cascade.LoadSnapshot(snap)
+			Expect(err).NotTo(HaveOccurred())
+			in.Cfg = cfg
+		}
+		build := func() *launch.Plan {
+			p, err := launch.Build(in)
+			Expect(err).NotTo(HaveOccurred())
+			return p
+		}
+		const key = "CLAUDE_SANDBOX_TRACK_IN_HOST="
+
+		It("CS-LNCH-184: exports true", func() {
+			merged("trackInHost: true\n")
+			p := build()
+			Expect(p.EnvFlags).To(ContainElement(key + "true"))
+			Expect(p.CreateArgs(in.ProjectDir)).To(ContainElements("-e", key+"true"))
+		})
+		It("CS-LNCH-184: exports false when explicitly false", func() {
+			merged("trackInHost: false\n")
+			Expect(build().EnvFlags).To(ContainElement(key + "false"))
+		})
+		It("CS-LNCH-184: is unset when no config defines it", func() {
+			merged("memoryLimit: 4g\n")
+			Expect(build().EnvFlags).NotTo(ContainElement(HavePrefix(key)))
+			in.Cfg = nil
+			Expect(build().EnvFlags).NotTo(ContainElement(HavePrefix(key)))
+		})
+		It("CS-LNCH-184: inherits an upstream-only definition and lets a local one win", func() {
+			merged("trackInHost: true\n", "memoryLimit: 4g\n")
+			Expect(build().EnvFlags).To(ContainElement(key + "true"))
+			merged("trackInHost: true\n", "trackInHost: false\n")
+			Expect(build().EnvFlags).To(ContainElement(key + "false"))
+		})
+		It("CS-LNCH-184: headless and ralph get it too", func() {
+			merged("trackInHost: true\n")
+			in.Headless = true
+			Expect(build().EnvFlags).To(ContainElement(key + "true"))
+			in.Headless = false
+			in.RalphMode = true
+			in.Instance = ""
+			Expect(build().EnvFlags).To(ContainElement(key + "true"))
+		})
+		It("CS-LNCH-184: the env var itself adds nothing to the hash", func() {
+			merged("trackInHost: true\n")
+			a := build()
+			in.Instance = "heron"
+			Expect(build().ConfigHash).To(Equal(a.ConfigHash))
+			Expect(a.EnvFlags).To(ContainElement(key + "true"))
+		})
+	})
+
 	Describe("the script's half: what it posts", func() {
 		var (
 			root, bindir, cfg, sink string

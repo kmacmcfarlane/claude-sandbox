@@ -2568,3 +2568,25 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       differing only in the terminal identity hash equal: an attach or join from
       another terminal never reports drift
     And an absent or empty label marks a container from before this scenario
+
+  @new
+  Scenario: CS-LNCH-184 The container carries the effective trackInHost as CLAUDE_SANDBOX_TRACK_IN_HOST
+    # For agents inside the sandbox that must choose `wi init --track` or
+    # `--no-track`. The value is the cascade's MERGED trackInHost, the one
+    # layout and init use, not a new resolution.
+    Given the merged config cascade (every config.yaml from the root down to
+      the project) defines trackInHost as <merged>
+    When any new container is created (interactive, --detach, --branch, the
+      [b] fork, headless, ralph)
+    Then docker create carries -e CLAUDE_SANDBOX_TRACK_IN_HOST=<value> with
+      | merged                                  | value                                                        |
+      | true                                    | true                                                         |
+      | false                                   | false                                                        |
+      | defined only by an upstream config.yaml | that value (inherited)                                       |
+      | defined by no config.yaml               | no -e at all (the launcher's default false is NOT exported) |
+    And a join inherits the container's environment
+    And it is an EnvFlag like CLAUDE_SANDBOX_MODE: not in the config hash, so
+      an attach or join never reports drift because of it
+    And there is no CLI flag and no config key for it
+    And an env file defining the variable loses to the launcher's -e, as for
+      CLAUDE_SANDBOX_MODE (no stand-down logic)
