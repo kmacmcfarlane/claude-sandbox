@@ -719,6 +719,13 @@ func Build(in Inputs) (*Plan, error) {
 		"CLAUDE_SANDBOX_CONTAINER="+p.ContainerName,
 		"CLAUDE_SANDBOX_MODE="+mode,
 	)
+	// CS-LNCH-184: the cascade's merged trackInHost, for agents inside the
+	// container (`wi init --track` vs `--no-track`). Unset when no config.yaml
+	// defines it: the launcher's default false is not exported. An EnvFlag, so
+	// never hashed and never drift.
+	if in.Cfg.TrackInHost != nil {
+		p.EnvFlags = append(p.EnvFlags, "CLAUDE_SANDBOX_TRACK_IN_HOST="+strconv.FormatBool(*in.Cfg.TrackInHost))
+	}
 	// CS-LNCH-039: the pid class rides a label (for allocation) and an env
 	// var (for the in-container helper). EnvFlags are not fingerprinted, and
 	// the label is not either, so a fresh class is never drift (CS-LNCH-040).
