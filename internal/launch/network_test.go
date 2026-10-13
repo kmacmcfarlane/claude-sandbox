@@ -347,6 +347,16 @@ var _ = Describe("the launcher network", func() {
 			// Off hashes as a launch without the feature: two key-off builds agree.
 			Expect(build("").ConfigHash).To(Equal(off.ConfigHash))
 		})
+
+		It("CS-LNCH-189: the hashed text has a network line only when the network applied", func() {
+			var text string
+			DeferCleanup(launch.CaptureFingerprintText(func(s string) { text = s }))
+			build("")
+			Expect(text).To(ContainSubstring("oomScoreAdj="), "the hook saw the hashed text")
+			Expect(text).NotTo(ContainSubstring("network"), "key off: no network line, so the hash is a pre-feature launch's")
+			build("claude-sandbox")
+			Expect(text).To(ContainSubstring("\nnetwork=claude-sandbox\n"))
+		})
 	})
 })
 

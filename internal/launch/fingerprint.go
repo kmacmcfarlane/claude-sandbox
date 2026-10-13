@@ -52,6 +52,11 @@ func shortDigest(b []byte) string {
 	return hex.EncodeToString(sum[:])[:8]
 }
 
+// fingerprintTextHook, when set (tests only, export_test.go), receives the
+// non-file text configFingerprint hashes, so a test can assert what a launch
+// does NOT add to it (CS-LNCH-189: no network line when none applied).
+var fingerprintTextHook func(string)
+
 // configFingerprint hashes the effective launch and returns the hash plus the
 // per-file digests used to explain a mismatch.
 func (in *Inputs) configFingerprint(p *Plan, ha hostAccess, sharedPeerRegistry, globalLinked bool) (string, []InputDigest) {
@@ -137,6 +142,9 @@ func (in *Inputs) configFingerprint(p *Plan, ha hostAccess, sharedPeerRegistry, 
 	// choices, not the environment, and would make every new session look like
 	// drift. The model and the worktree are reported separately, since
 	// attaching cannot change them (CS-SESS-027, CS-SESS-047).
+	if fingerprintTextHook != nil {
+		fingerprintTextHook(env.String())
+	}
 	h := sha256.New()
 	for _, d := range inputs {
 		fmt.Fprintf(h, "%s\x00%s\x00%s\n", d.Kind, d.Path, d.Digest)

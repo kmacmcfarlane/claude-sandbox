@@ -134,6 +134,7 @@ var _ = Describe("the launcher network (CS-LNCH-185..191, CS-LNCH-193)", func() 
 			Expect(args[:6]).To(Equal([]string{"create", "-i", "--rm", "--init", "--network", "claude-sandbox"}))
 			Expect(f.out.String()).To(BeEmpty())
 			Expect(strings.Count(f.errw.String(), "Network: claude-sandbox - ")).To(Equal(1))
+			Expect(netInspects(f)).To(Equal(1))
 		})
 
 		It("CS-LNCH-193: a nested launch makes the same calls", func() {
@@ -367,10 +368,43 @@ var _ = Describe("drift and the launcher network (CS-LNCH-189, CS-SESS-097)", fu
 			Expect(f.errw.String()).NotTo(ContainSubstring("different configuration"))
 			Expect(f.sessionLine()).To(HavePrefix("docker attach "))
 			Expect(netLines(f)).To(HaveLen(1))
+			capInspects := 0
+			for _, l := range f.fake.CommandLines() {
+				if strings.HasPrefix(l, "docker image inspect -f {{.Id}} claude-sandbox:run") {
+					capInspects++
+				}
+			}
+			Expect(capInspects).To(Equal(1), "the rebuild reuses the image ID the drift check resolved")
 		},
 		Entry("foreign", func() { f.fake.On(netInspectPat, netForeign, nil) }),
 		Entry("inspect error", func() { f.fake.OnFunc(netInspectPat, netStderr("Cannot connect to the Docker daemon")) }),
 	)
+
+	It("CS-LNCH-189: other drift on a container already on the network makes no network call", func() {
+		// A container launched with the key on: its inputs carry <network>.
+		g := newCLIFixture()
+		networkOn(g)
+		Expect(g.run("--new")).To(Equal(0), g.errw.String())
+		Expect(netInspects(g)).To(Equal(1))
+		l := labelsOf(g.launched().Args)
+		Expect(l["claude-sandbox.inputs"]).To(ContainSubstring(`"k":"network"`))
+		g.fake = &execx.Fake{}
+		g.env.Runner = g.fake
+		g.lock.fake = g.fake
+		g.out.Reset()
+		g.errw.Reset()
+		networkOn(g)
+		// Unrelated drift: an env file appeared since the launch.
+		writeFile(g.proj+"/.claude-sandbox/env", "FOO=1\n")
+		g.fake.On("docker ps", psRowFull("cs-otter", "Up 1 hour", g.proj, "otter", "", l["claude-sandbox.confighash"], l["claude-sandbox.inputs"])+"\n", nil)
+		g.fake.On("docker top", "PID  COMMAND\n1  claude\n", nil)
+		g.env.Prompter = &prompt.Scripted{IsTTY: true, Answers: []string{"c"}}
+		Expect(g.run("--attach=otter")).To(Equal(0), g.errw.String())
+		Expect(g.errw.String()).To(ContainSubstring("Session 'otter' was started with different configuration:"))
+		Expect(g.errw.String()).To(ContainSubstring("/.claude-sandbox/env"))
+		Expect(g.errw.String()).NotTo(ContainSubstring("<network>"))
+		Expect(netInspects(g)).To(Equal(0), "the drift does not add <network>, so no inspect")
+	})
 
 	It("CS-LNCH-189: --allow-config-drift makes no network call", func() {
 		networkOn(f)
@@ -390,7 +424,7 @@ var _ = Describe("drift and the launcher network (CS-LNCH-189, CS-SESS-097)", fu
 		on, onInputs := wouldBeFingerprint(f.env, f.proj, fl, cfg, nil, nil, nil, nil, nil)
 		Expect(onInputs).To(ContainElement(launch.InputDigest{Path: "<network>", Digest: onInputs[len(onInputs)-1].Digest, Kind: launch.KindNetwork}))
 		Expect(netLines(f)).To(BeEmpty())
-		off, _ := wouldBeFingerprintNet(f.env, f.proj, fl, cfg, nil, nil, nil, nil, nil, false)
+		off, _ := wouldBeFingerprintNet(f.env, f.proj, fl, cfg, nil, nil, nil, nil, nil, false, nil)
 		Expect(off).To(Equal(hash), "network off = the key-off launch")
 		Expect(on).NotTo(Equal(hash))
 	})

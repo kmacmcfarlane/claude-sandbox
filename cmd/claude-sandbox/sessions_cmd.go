@@ -397,11 +397,12 @@ func joinExistingSession(env *Env, projectDir string, f *launchFlags, cfg *casca
 	// session decision and without the refusal check (CS-LNCH-129).
 	snap, snapErr := cascade.ReadEnvFiles(envFiles)
 
-	wantHash, wantInputs := wouldBeFingerprint(env, projectDir, f, cfg, envFiles, snap, snapErr, linked, &d.Target)
+	img := &driftImage{}
+	wantHash, wantInputs := wouldBeFingerprintNet(env, projectDir, f, cfg, envFiles, snap, snapErr, linked, &d.Target, launch.NetworkWanted(env.Getenv, cfg), img)
 	if !f.AllowConfigDrift {
 		// CS-LNCH-189: never blame a network a launch now could not apply.
 		wantHash, wantInputs = networkDriftRecheck(env.Runner, d.Target, wantHash, wantInputs, func() (string, []launch.InputDigest) {
-			return wouldBeFingerprintNet(env, projectDir, f, cfg, envFiles, snap, snapErr, linked, &d.Target, false)
+			return wouldBeFingerprintNet(env, projectDir, f, cfg, envFiles, snap, snapErr, linked, &d.Target, false, img)
 		})
 	}
 	proceed, newContainer, err := confirmDrift(env, d.Target, wantHash, wantInputs, f)
@@ -481,13 +482,21 @@ func terminalNote(env *Env, s sessions.Session, snap []cascade.EnvFile, snapErr 
 // (CS-LNCH-189): no docker call here. networkDriftRecheck corrects that when
 // the hashes differ.
 func wouldBeFingerprint(env *Env, projectDir string, f *launchFlags, cfg *cascade.Config, envFiles []string, snap []cascade.EnvFile, snapErr error, linked *launch.LinkedWorktree, target *sessions.Session) (string, []launch.InputDigest) {
-	return wouldBeFingerprintNet(env, projectDir, f, cfg, envFiles, snap, snapErr, linked, target, launch.NetworkWanted(env.Getenv, cfg))
+	return wouldBeFingerprintNet(env, projectDir, f, cfg, envFiles, snap, snapErr, linked, target, launch.NetworkWanted(env.Getenv, cfg), nil)
+}
+
+// driftImage carries the cap's image ID between the drift check's builds, so
+// the network recheck's rebuild (CS-LNCH-189) asks docker for it only once.
+type driftImage struct {
+	id       string
+	resolved bool
 }
 
 // wouldBeFingerprintNet is wouldBeFingerprint with the network decided by the
 // caller: network false is the would-be launch on the default bridge, without
-// the network's context paragraph (CS-LNCH-189/191).
-func wouldBeFingerprintNet(env *Env, projectDir string, f *launchFlags, cfg *cascade.Config, envFiles []string, snap []cascade.EnvFile, snapErr error, linked *launch.LinkedWorktree, target *sessions.Session, network bool) (string, []launch.InputDigest) {
+// the network's context paragraph (CS-LNCH-189/191). img, when non-nil,
+// holds the image ID once resolved and is reused by later calls.
+func wouldBeFingerprintNet(env *Env, projectDir string, f *launchFlags, cfg *cascade.Config, envFiles []string, snap []cascade.EnvFile, snapErr error, linked *launch.LinkedWorktree, target *sessions.Session, network bool, img *driftImage) (string, []launch.InputDigest) {
 	if snapErr != nil {
 		fmt.Fprintf(env.Err, "WARNING: cannot compute the current configuration for the drift check: reading env file: %v; the session keeps the container's terminal identity.\n", snapErr)
 		return "", nil
@@ -526,7 +535,13 @@ func wouldBeFingerprintNet(env *Env, projectDir string, f *launchFlags, cfg *cas
 	// or a rebuilt tools image (CS-IMG-048) changes the cap's ID while the
 	// parent's stays put.
 	image := imagebuild.CapImageName(parent)
-	id := imagebuild.ImageID(env.Runner, image)
+	if img == nil {
+		img = &driftImage{}
+	}
+	if !img.resolved {
+		img.id, img.resolved = imagebuild.ImageID(env.Runner, image), true
+	}
+	id := img.id
 
 	// CS-LNCH-084: Build writes the shadow files to hash their contents; give
 	// it a private directory and remove it, or every drift check leaks one.

@@ -9,3 +9,11 @@ func SetStatPeerSource(f func(string) (os.FileInfo, error)) func() {
 	statPeerSource = f
 	return func() { statPeerSource = old }
 }
+
+// CaptureFingerprintText hands every hashed non-file text configFingerprint
+// builds to f and returns the restore (CS-LNCH-189).
+func CaptureFingerprintText(f func(string)) func() {
+	old := fingerprintTextHook
+	fingerprintTextHook = f
+	return func() { fingerprintTextHook = old }
+}

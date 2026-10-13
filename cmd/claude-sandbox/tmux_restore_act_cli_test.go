@@ -309,6 +309,10 @@ var _ = Describe("tmux restore, one pane (CS-TMUX-052..063)", func() {
 			tmuxpane.ProbeTimeout = 50 * time.Millisecond
 			f.envmap["CLAUDE_SANDBOX_NETWORK"] = "1"
 			f.fake.OnHang("docker network inspect")
+			// The hang only bites a Started process; prove the inspect went
+			// through Start (the bounded runner) and was signalled at the bound.
+			spy := &netStartSpy{Fake: f.fake}
+			f.env.Runner = spy
 			m := withID()
 			pane(m.JSON())
 			inspectRunning("running")
@@ -316,7 +320,7 @@ var _ = Describe("tmux restore, one pane (CS-TMUX-052..063)", func() {
 			renv := restoreEnv(f.env, m)
 			cfg, envFiles, linked, err := restoreCascade(renv, f.proj)
 			Expect(err).NotTo(HaveOccurred())
-			off, offInputs := wouldBeFingerprintNet(renv, f.proj, &launchFlags{}, cfg, envFiles, nil, nil, linked, &sessions.Session{}, false)
+			off, offInputs := wouldBeFingerprintNet(renv, f.proj, &launchFlags{}, cfg, envFiles, nil, nil, linked, &sessions.Session{}, false, nil)
 			Expect(off).NotTo(BeEmpty())
 			fields := strings.Split(psRowMark("claude-sandbox-x-proj-abc123-heron", f.proj, "claude", "heron", "", "37", "",
 				"2026-09-18 12:34:56 +0000 UTC", markID, cfgDir, cfgDir+"/sessions", ""), psSep)
@@ -330,7 +334,8 @@ var _ = Describe("tmux restore, one pane (CS-TMUX-052..063)", func() {
 			Eventually(done, 10*time.Second).Should(Receive(&code))
 			Expect(code).To(Equal(0), f.errw.String())
 			Expect(f.sessionLine()).To(Equal("docker attach --detach-keys=ctrl-q,ctrl-q " + markID))
-			Expect(f.fake.Killed).To(BeNumerically(">=", 1), "the inspect was killed at the bound")
+			Expect(spy.startCount()).To(Equal(1), "the network inspect was Started, not Run")
+			Expect(spy.signalCount()).To(Equal(1), "and killed at the bound")
 			Expect(f.errw.String()).NotTo(ContainSubstring("was started with a different configuration"))
 		})
 
