@@ -1174,7 +1174,9 @@ launched as part of its repository:
   anything only the worktree sits under → the worktree's own `.claude-sandbox/`, and no level
   appears twice. A worktree inside the repository (`.claude/worktrees/<name>`) already had
   exactly these levels and is unchanged. `claude-sandbox init` reads the same chain, so in
-  such a worktree it offers the main checkout's `trackInHost` as the inherited value.
+  such a worktree it offers the main checkout's `trackInHost` as the inherited value, notes
+  the main checkout's `env` as inherited, and seeds `Dockerfile.example` from the main
+  checkout's `Dockerfile`.
 - **Child Dockerfile:** nearest-wins along the same chain. One found in the main checkout
   builds with the main checkout as context — the same image the main checkout uses, so no
   per-worktree build; its `COPY` lines see the main checkout's files.

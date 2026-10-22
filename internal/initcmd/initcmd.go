@@ -94,7 +94,11 @@ func Run(project string, f Flags, d Deps) error {
 	// (CS-CASC-031), so init reads that checkout's configs too, or it would
 	// resolve a different inherited trackInHost than the next launch.
 	chain := launchChain(project, d)
-	upstreamConfigs, err := paths.CollectChain(withoutDir(chain, project), paths.Config)
+	// The levels above the project along that chain: the upstream configs
+	// here, and the env note and the parent-Dockerfile copy below
+	// (CS-INIT-038), all from the one detection above.
+	upstream := withoutDir(chain, project)
+	upstreamConfigs, err := paths.CollectChain(upstream, paths.Config)
 	if err != nil {
 		return err
 	}
@@ -212,8 +216,9 @@ func Run(project string, f Flags, d Deps) error {
 		}
 		fmt.Fprintf(d.Out, "  created  %s (template; copy to env only for a project-only override)\n", paths.EnvExampleName)
 	}
-	// CS-INIT-020: inherited env files are reported, never copied.
-	if upstreamEnvs, _ := paths.CollectUp(filepath.Dir(project), paths.Env); len(upstreamEnvs) > 0 {
+	// CS-INIT-020: inherited env files are reported, never copied — the ones
+	// the next launch stacks, along its search chain (CS-INIT-038).
+	if upstreamEnvs, _ := paths.CollectChain(upstream, paths.Env); len(upstreamEnvs) > 0 {
 		for _, e := range upstreamEnvs {
 			if projectEnv {
 				fmt.Fprintf(d.Out, "  note: %s is inherited by this project; the project env overrides its keys\n", e)
@@ -224,7 +229,7 @@ func Run(project string, f Flags, d Deps) error {
 	}
 
 	// --- Dockerfile.example (optional; inactive until renamed) ---
-	if err := seedDockerfileExample(project, sb, f, d); err != nil {
+	if err := seedDockerfileExample(upstream, sb, f, d); err != nil {
 		return err
 	}
 
@@ -301,13 +306,16 @@ func promptTrackInHost(p prompt.Prompter, hostTracked int) bool {
 // seedDockerfileExample seeds Dockerfile.example without prompting: a copy of
 // the nearest parent .claude-sandbox/Dockerfile when one exists, the generic
 // scaffold example otherwise; --copy-parent-dockerfile /
-// --no-copy-parent-dockerfile pin the choice (CS-INIT-021..024).
-func seedDockerfileExample(project, sb string, f Flags, d Deps) error {
+// --no-copy-parent-dockerfile pin the choice (CS-INIT-021..024). upstream is
+// the launch's search chain above the project (most-local first), so a
+// linked worktree copies what its next launch's child Dockerfile search
+// finds (CS-INIT-038, CS-CASC-033).
+func seedDockerfileExample(upstream []string, sb string, f Flags, d Deps) error {
 	if fileExists(filepath.Join(sb, "Dockerfile")) || fileExists(filepath.Join(sb, "Dockerfile.example")) {
 		fmt.Fprintln(d.Out, "  skipped  Dockerfile.example (exists)")
 		return nil
 	}
-	parentDockerfile, err := paths.FindUp(filepath.Dir(project), paths.Dockerfile)
+	parentDockerfile, err := paths.FindChain(upstream, paths.Dockerfile)
 	if err != nil {
 		return err
 	}
