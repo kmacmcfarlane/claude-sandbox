@@ -1576,8 +1576,9 @@ bridges the host itself.
 The launcher creates the peers root, its `sessions/` and its `cc-socks/` on the host as you,
 before `docker create`, and forces them to `0700` even if they already exist with a wider mode: Docker would otherwise create a missing bind source as root, and
 Claude Code refuses a socket directory that is group- or world-writable or owned by someone
-else — it then silently falls back to a private `/tmp` inside the container that no other
-container can reach. The registry destination `<config dir>/sessions` is created the same way
+else — it then falls back (logging only a debug line) to a private `/tmp` inside the container
+that no other container can reach, and if that is refused too it turns messaging off for the
+session (`/status` then shows `Peer address: unavailable — <reason>`). The registry destination `<config dir>/sessions` is created the same way
 when it lies under the config dir's own mount (a mountpoint Docker creates as root would land on
 the *host* and break every later un-bridged sandbox). The host root is fixed and not
 configurable, for the same reason as the package caches: a free-form path could name one tree's
