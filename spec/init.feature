@@ -399,3 +399,28 @@ Feature: init subcommand (CS-INIT)
     And when the result does not parse at all (a duplicate key, or a config
       broken for another reason such as "mounts: ["), init fails with
       "cannot set trackInHost in <file>: " and the launch's parse error instead
+
+  # ---- the launch's search chain ----
+
+  Scenario: CS-INIT-037 In a linked git worktree init reads the main checkout's configs, as the launch does
+    Given a project that is a verified linked git worktree outside its
+      repository (CS-LNCH-070, e.g. a Paseo ~/.paseo/worktrees/<id>/<name>)
+    And the main checkout's .claude-sandbox/config.yaml sets trackInHost
+    When "claude-sandbox init" runs in the worktree
+    Then init collects its upstream configs along the launch's search chain
+      (paths.Chain over launch.DetectLinkedWorktree's main checkout,
+      CS-CASC-031), excluding the project's own level as before
+    And the inherited trackInHost value and its source are the main
+      checkout's, so init and the next launch agree
+    And the cascade report init prints lists the main checkout's level
+    And the detection is the launch's one bounded git call (CS-LNCH-176):
+      a git that does not answer within execx.GitTimeout prints one warning
+      ending "reading the upstream configs as for a plain project, without
+      the linked-worktree check." and init reads the plain parent walk, as it
+      does when the project is not a linked worktree
+    And a worktree whose back-link (<git dir>/gitdir) names another path
+      prints one warning ending "reading the upstream configs without the
+      main checkout's, so trackInHost is not inherited from it." and init
+      reads the plain parent walk
+    And plain repositories and harness worktrees (whose parents already
+      include the main checkout) read exactly what they read before

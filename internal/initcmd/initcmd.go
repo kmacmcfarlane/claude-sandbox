@@ -16,6 +16,7 @@ import (
 
 	"github.com/kmacmcfarlane/claude-sandbox/internal/cascade"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/launch"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/layout"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/paths"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/prompt"
@@ -42,6 +43,39 @@ type Deps struct {
 
 const promptTimeout = 60 * time.Second
 
+// launchChain is the search chain the next launch uses (paths.Chain over
+// launch.DetectLinkedWorktree's main checkout, CS-CASC-031). The detection
+// is the launch's own bounded git call (CS-LNCH-176); not linked, or a
+// timeout (one warning), is the plain parent walk. Plain repos and harness
+// worktrees get that walk anyway: their parents already include main.
+func launchChain(project string, d Deps) []string {
+	main := ""
+	if d.Runner != nil {
+		lw, warn := launch.DetectLinkedWorktreeFor(d.Runner, project,
+			"reading the upstream configs as for a plain project, without the linked-worktree check",
+			"reading the upstream configs without the main checkout's, so trackInHost is not inherited from it")
+		if warn != "" && d.Err != nil {
+			fmt.Fprintln(d.Err, warn)
+		}
+		if lw != nil {
+			main = lw.Main
+		}
+	}
+	return paths.Chain(project, main)
+}
+
+// withoutDir is chain without the level dir (init seeds and reads the
+// project's own level separately).
+func withoutDir(chain []string, dir string) []string {
+	out := make([]string, 0, len(chain))
+	for _, c := range chain {
+		if c != dir {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
 // Run bootstraps .claude-sandbox/ in project and returns without launching.
 func Run(project string, f Flags, d Deps) error {
 	if f.Yes {
@@ -54,8 +88,13 @@ func Run(project string, f Flags, d Deps) error {
 	envExamplePath := filepath.Join(sb, paths.EnvExampleName)
 	// Read and resolved before anything is created, so an init that fails on
 	// an upstream config leaves no empty .claude-sandbox/ behind.
-	// Upstream trackInHost (ancestors only — exclude the project's own file).
-	upstreamConfigs, err := paths.CollectUp(filepath.Dir(project), paths.Config)
+	// Upstream trackInHost (ancestors only — exclude the project's own file),
+	// along the launch's own search chain (CS-INIT-037): a linked git worktree
+	// outside its repository (CS-LNCH-070) cascades from its main checkout
+	// (CS-CASC-031), so init reads that checkout's configs too, or it would
+	// resolve a different inherited trackInHost than the next launch.
+	chain := launchChain(project, d)
+	upstreamConfigs, err := paths.CollectChain(withoutDir(chain, project), paths.Config)
 	if err != nil {
 		return err
 	}
@@ -82,7 +121,7 @@ func Run(project string, f Flags, d Deps) error {
 
 	fmt.Fprintf(d.Out, "Initializing .claude-sandbox/ in %s\n", project)
 	// CS-INIT-019: make inheritance visible up front.
-	cascade.PrintReport(d.Out, project)
+	cascade.PrintReportChain(d.Out, chain)
 
 	// Resolve the local trackInHost decision: flag > prompt. When an ancestor
 	// defines it, the prompt shows the inherited value as the default and
@@ -95,7 +134,7 @@ func Run(project string, f Flags, d Deps) error {
 	case cfgExists:
 		// CS-INIT-013: existing config, no flag — leave it alone entirely.
 	case upstreamSet:
-		pre := fmt.Sprintf("Parent config sets trackInHost: %v (inherited from %s)", upstreamVal, upstreamSrc)
+		pre := fmt.Sprintf("Upstream config sets trackInHost: %v (inherited from %s)", upstreamVal, upstreamSrc)
 		ans := d.Prompter.Ask(pre, fmt.Sprintf("Track in host repo? [Enter=inherit %v, y/n=override]", upstreamVal), promptTimeout)
 		if ans != "" {
 			v := prompt.Parse(ans, upstreamVal)

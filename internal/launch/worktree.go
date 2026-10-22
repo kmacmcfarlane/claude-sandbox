@@ -124,6 +124,17 @@ type LinkedWorktree struct {
 // <GitDir>/gitdir, which only "git worktree add" (or "repair") in THAT
 // repository writes, must name <Top>/.git.
 func DetectLinkedWorktree(r execx.Runner, dir string) (lw *LinkedWorktree, warning string) {
+	return DetectLinkedWorktreeFor(r, dir,
+		"launching as a plain project, without the linked-worktree check",
+		"launching without the main checkout's config or git dir")
+}
+
+// DetectLinkedWorktreeFor is DetectLinkedWorktree whose timeout warning
+// (execx.GitTimeoutWarning's "instead") and mismatched back-link warning name
+// the caller's own fallback: init
+// detects the same worktree to read the launch's cascade (CS-INIT-037) but
+// launches nothing.
+func DetectLinkedWorktreeFor(r execx.Runner, dir, timeoutInstead, mismatchInstead string) (lw *LinkedWorktree, warning string) {
 	// CS-LNCH-176: bounded; git reads the .git file, <GitDir>/commondir and
 	// the config with blocking opens, and the common dir is session-writable.
 	out, err := execx.Git(r, execx.Cmd{
@@ -131,7 +142,7 @@ func DetectLinkedWorktree(r execx.Runner, dir string) (lw *LinkedWorktree, warni
 		Args: []string{"-C", dir, "rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel"},
 	})
 	if errors.Is(err, execx.ErrTimedOut) {
-		return nil, execx.GitTimeoutWarning(err, "launching as a plain project, without the linked-worktree check")
+		return nil, execx.GitTimeoutWarning(err, timeoutInstead)
 	}
 	if err != nil {
 		return nil, ""
@@ -182,8 +193,8 @@ func DetectLinkedWorktree(r execx.Runner, dir string) (lw *LinkedWorktree, warni
 	}
 	if !sameGitFile(strings.TrimSpace(string(back)), gitDir, filepath.Join(top, ".git")) {
 		return nil, fmt.Sprintf("WARNING: %s is a git worktree of %s, but the repository's record of it (%s/gitdir) points elsewhere; "+
-			"launching without the main checkout's config or git dir. Run 'git worktree repair' in %s to fix the record.",
-			top, commonDir, gitDir, top)
+			"%s. Run 'git worktree repair' in %s to fix the record.",
+			top, commonDir, gitDir, mismatchInstead, top)
 	}
 	lw = &LinkedWorktree{Top: top, GitDir: gitDir, CommonDir: commonDir}
 	if filepath.Base(commonDir) == ".git" {
