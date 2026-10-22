@@ -455,7 +455,8 @@ Claude Code reads `TERMINAL_EMULATOR` once at start. In GoLand's (and every JetB
 - **Env files win by assignment.** A `TERMINAL_EMULATOR=<value>` line in a cascade env file pins the value and the launcher adds no `-e`. A bare `TERMINAL_EMULATOR` line (the old workaround) is no longer needed; it still works, passing the same value. When several files define it, the last line docker would act on decides.
 - **Join** gives the new claude the joining terminal's identity: `-e TERMINAL_EMULATOR=<value>`, or `/usr/bin/env -u TERMINAL_EMULATOR` when the joining terminal has none (the container may hold the creator's).
 - **Attach cannot change it.** Each container records what its claude saw in the `claude-sandbox.terminal` label (`none` when unset). An attach from a terminal that would get a different value prints one `Note:` before attaching, naming `--join` (a new claude with this terminal's handling) or exiting and relaunching with `--resume`; when an env file assigns the value, the note names that file instead. The label and the variable are not part of the config hash, so attaching from another terminal is never drift.
-- **tmux panes** carry the tmux server's environment, not the attached client's. A server started at boot (e.g. `tmux.service`) has no `TERMINAL_EMULATOR`, so launches from its panes forward nothing. Reading tmux's session environment instead is an open follow-up.
+- **tmux panes** carry the tmux server's environment, not the attached client's. A server started at boot (e.g. `tmux.service`) has no `TERMINAL_EMULATOR`, so launches from its panes forward nothing. Reading tmux's session environment instead is an open follow-up (the clipboard bridge reads it, for the display keys only).
+- **Copying.** JetBrains terminals ignore OSC 52, the only copy route Claude Code has in a sandbox; the [host clipboard bridge](#host-clipboard-bridge) (on by default) copies onto this shell's X display instead — over SSH, connect with `ssh -X`.
 
 ### Messaging between sessions
 
@@ -1691,6 +1692,88 @@ the key off; it never fails.
 
 `CLAUDE_SANDBOX_NETWORK=0` keeps one launch off a config's `true`; there is no CLI flag.
 
+#### Host clipboard bridge
+
+**On by default**, so a fullscreen copy reaches your clipboard as it would from `claude` run
+outside the sandbox. In a sandbox Claude Code has no display and no clipboard tool, so its only
+copy route is OSC 52, which some terminals drop: JetBrains IDEs (JediTerm), VTE terminals (GNOME
+Terminal, Ptyxis, Tilix) and Terminal.app. Copy then says "copied" and nothing arrives.
+
+The bridge is write-only. A small helper on the **host** (`claude-sandbox clipboard-bridge`, one
+per container, started detached after the container is created) copies with the host's own
+`xclip`, `xsel` or `wl-copy` onto a **display target** taken from your shell. In the container,
+`wl-copy` is the launcher binary (a shim), and Claude Code runs it because the claude process gets
+a dummy `WAYLAND_DISPLAY`. The shim asks the helper first, then also writes the copy to its own
+terminal over OSC 52, so terminals that take OSC 52 keep working exactly as before. A launch prints:
+
+```
+Host clipboard: write-only bridge (target: X localhost:10.0; sessions can overwrite your clipboard, never read it).
+```
+
+Turn it off with `hostClipboard: false` in any `config.yaml` (more-local wins), or for one launch
+with `CLAUDE_SANDBOX_HOST_CLIPBOARD=0`. Headless and ralph runs never get it.
+
+**Which display.** The target is resolved from the shell that launched, or last attached to or
+joined, the container:
+- Over SSH only a **forwarded X display** counts (`ssh -X`: `DISPLAY=localhost:10.0`); the
+  machine's own console display and any `WAYLAND_DISPLAY` belong to someone else's screen.
+- Locally, X (`xclip`, else `xsel`) is preferred; `wl-copy` is used when only Wayland is usable —
+  never automatically on GNOME, where `wl-copy` takes keyboard focus on every copy: install
+  `xclip` there (Xwayland bridges the X clipboard to Wayland apps).
+- Under tmux, the pane's session environment (refreshed by tmux from the client that attached
+  last) overrides the pane's stale copy of `DISPLAY`.
+- Only displays on this machine are used, and `XAUTHORITY` (else `~/.Xauthority`) must be a
+  regular file you own.
+- **One target per container; the last usable display wins.** An attach or join from a shell with
+  no usable display leaves the target as it is, so attaching from a plain-SSH terminal does not
+  break the IDE's copies (that terminal gets them over OSC 52).
+- **Override:** `CLAUDE_SANDBOX_CLIPBOARD_DISPLAY` in the launching shell — `none` (also clears
+  the container's target), `x:<DISPLAY>` or a bare `<DISPLAY>`, or `wayland:<name or socket>`.
+  Use it for xpra, VNC or x2go reached over SSH (`:N`), and for waypipe (`wayland:$WAYLAND_DISPLAY`).
+
+| Setup | What happens | Status |
+|---|---|---|
+| Remote over `ssh -X`/`-Y` (e.g. a JetBrains IDE displayed over X forwarding) | copied with `xclip` on the forwarded display | **verified** with a prototype |
+| Plain SSH from an OSC 52 terminal (Windows Terminal, iTerm2, kitty; tmux `set-clipboard`) | no display; the shim's OSC 52 carries the copy | verified without the bridge; expected with it |
+| Plain SSH from a terminal without OSC 52 (JetBrains, VTE) | nothing reaches the clipboard: reconnect with `ssh -X` | expected; a JetBrains launch or attach prints a note once per project |
+| Local X11 desktop | `xclip`/`xsel` on `:0`, clipboard and PRIMARY | expected |
+| Local Wayland desktop with Xwayland and `xclip` | `xclip` on Xwayland's display | expected |
+| Local Wayland without usable X (not GNOME) | `wl-copy` | **experimental** |
+| WSL2 with WSLg | `xclip` on WSLg's `:0`, synced to Windows | expected |
+| xpra / VNC / x2go / waypipe over SSH | none until the override is set | expected |
+| macOS (Docker Desktop) | stands down with a Note; OSC 52 terminals as today | not supported yet |
+
+**X forwarding timeout.** Untrusted forwarding (`ssh -X` without `ForwardX11Trusted yes`) refuses
+new X connections after `ForwardX11Timeout`, 20 minutes by default, and every copy is a new
+connection. Set `ForwardX11Timeout 0` for the host in `~/.ssh/config` (it keeps untrusted mode,
+whose X SECURITY extension stops forwarded clients snooping on others). `ssh -Y` /
+`ForwardX11Trusted yes` also works, but then any X client on the remote machine that can read
+your X cookie gets full access to your local display (keystrokes, screenshots, input).
+
+**What a session can do.** Overwrite your clipboard and PRIMARY with text: at most 1 MiB per copy,
+20 in a burst then 2 per second, no control characters but tab and newline (so a payload cannot
+end bracketed paste early). OSC 52 writes are capped at 256 KiB, and at 10 per 10 s while the
+helper is unreachable. Any program in the container can use it, not only claude (a `pyperclip`
+copy, an `npm` postinstall). It cannot read the clipboard, reach a display, or change the target.
+**Residual:** text you paste can still run in a program without bracketed paste (`cat`, a shell's
+`read`, many REPLs), and look-alike text is allowed. A flood is only logged, in
+`~/.cache/claude-sandbox/clipboard-bridge.log` (no content).
+
+**Notes.**
+- `WAYLAND_DISPLAY` and `CLAUDE_SANDBOX_CLIPBOARD` are set on the claude process only (the
+  primary and joins), never container-wide; a `docker exec` shell does not see them, but
+  claude's own children (Bash tool commands, MCP servers) do. Software in a child image that
+  picks a GUI from `WAYLAND_DISPLAY` (a GUI pinentry, a credential-helper GUI, `xdg-open`) may
+  then try the GUI first and fall back or fail.
+- A helper started from a pane of a systemd-managed tmux server dies with that unit; the next
+  attach or join restarts it ("Clipboard bridge restarted for '<noun>'.").
+- Attaching to a session started without the bridge prints a note with the command that
+  relaunches its conversation with it.
+- With `-t`, everything written to the terminal, OSC 52 copies included (Claude Code's own too),
+  also reaches docker's container log.
+- Existing containers drift once after upgrading: the tools image (it gains the `wl-copy` link)
+  and the config hash (`hostClipboard=on`) change.
+
 #### Host access
 
 Control which host resources are mounted into the container. Each can be enabled via CLI flags, environment variables, or YAML. Precedence: CLI flag > env var > YAML.
@@ -1922,6 +2005,8 @@ If no `.claude-sandbox/Dockerfile` is found anywhere up to `/`, the launcher war
 | `CLAUDE_SANDBOX_DANGEROUS` | (unset) | Set to `1` or `true` to skip permission prompts (equivalent to `--dangerous`) |
 | `CLAUDE_SANDBOX_WORKTREE` | (unset: off interactive, on ralph) | `1`/`true`/`yes` runs sessions in their own worktree (equivalent to `--worktree`); `0`/`false`/`no` runs them in the shared checkout, ralph included; either overrides a config `worktree` key |
 | `CLAUDE_SANDBOX_SHARED_PEER_REGISTRY` | (unset) | `1`/`true`/`yes` shares the Claude Code peer registry and message sockets with other opted-in sandboxes regardless of `CLAUDE_CONFIG_DIR` (equivalent to `sharedPeerRegistry: true`); `0`/`false`/`no` is an explicit off that overrides a config `true` |
+| `CLAUDE_SANDBOX_HOST_CLIPBOARD` | (unset: on) | `0`/`false`/`no` turns the [host clipboard bridge](#host-clipboard-bridge) off for one launch (as `hostClipboard: false`); `1`/`true`/`yes` turns it on over a config `false` |
+| `CLAUDE_SANDBOX_CLIPBOARD_DISPLAY` | (unset) | the bridge's display target from this shell: `none`, `x:<DISPLAY>` or `<DISPLAY>`, `wayland:<name or socket>` (read from the launching shell only, never an env file) |
 | `CLAUDE_SANDBOX_NETWORK` | (unset: off) | `1`/`true`/`yes` puts new containers on the `claude-sandbox` Docker network, whose DNS goes through the host's resolver (equivalent to `sandboxNetwork: true`, see [Container network and DNS](#container-network-and-dns)); `0`/`false`/`no` is an explicit off that overrides a config `true` |
 | `CLAUDE_SANDBOX_OOM_SCORE_ADJ` | (unset: `oomScoreAdj`, else 500) | The containers' `--oom-score-adj`, -1000..1000; overrides a config `oomScoreAdj` key (see [When the host runs out of memory](#when-the-host-runs-out-of-memory)) |
 | `CLAUDE_SANDBOX_BASE_ONLY` | (unset) | Set to `1` or `true` to skip child Dockerfile and use base image only |

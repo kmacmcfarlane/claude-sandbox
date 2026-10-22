@@ -148,6 +148,16 @@
 # for one launch.
 # sandboxNetwork: false
 
+# Write-only host clipboard bridge (default ON), so a fullscreen copy reaches
+# your clipboard as it would from claude outside the sandbox, even in terminals
+# that drop OSC 52 (JetBrains, VTE): the host's xclip/xsel/wl-copy copies onto
+# this shell's display (over SSH, an `ssh -X` forwarded one), and copies also
+# go to the terminal over OSC 52. Sessions — and any program in the container —
+# can overwrite your clipboard (filtered text, rate-limited), never read it;
+# pasted text can still run in programs without bracketed paste. Turn it off
+# here, or for one launch with CLAUDE_SANDBOX_HOST_CLIPBOARD=0.
+# hostClipboard: false
+
 # Disable the Claude Code version check at launch.
 # Also controllable via --no-update-check flag or CLAUDE_SANDBOX_NO_UPDATE_CHECK=1.
 # disableUpdateCheck: false

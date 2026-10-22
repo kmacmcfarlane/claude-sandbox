@@ -718,7 +718,13 @@ func (h *Helper) Watch() string {
 	defer close(stopped)
 	go func() {
 		for {
-			pr, pw := io.Pipe()
+			// An OS pipe, not io.Pipe: its kernel buffer takes a write made
+			// before the reader starts (a runner that writes at Start).
+			pr, pw, perr := os.Pipe()
+			if perr != nil {
+				gone <- "cannot watch: " + perr.Error()
+				return
+			}
 			proc, err := h.Runner.Start(execx.Cmd{Name: "docker", Args: []string{
 				"events", "--filter", "container=" + h.ref(), "--filter", "event=die", "--filter", "event=destroy",
 				"--format", "{{.Actor.ID}} {{.Action}} {{.Actor.Attributes.name}}"}, Stdout: pw})
@@ -742,6 +748,8 @@ func (h *Helper) Watch() string {
 						return
 					}
 				}
+			} else {
+				pw.Close()
 			}
 			pr.Close()
 			if !h.containerExists() {

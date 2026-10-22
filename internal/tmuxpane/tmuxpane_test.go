@@ -311,6 +311,22 @@ var _ = Describe("tmuxpane", func() {
 			Expect(tmuxpane.ResumeCommand(m)).To(Equal("cd /home/u/proj && claude-sandbox --new --worktree=otter -- --resume " + convID))
 		})
 
+		It("CS-LNCH-197: the picker variant shares ResumeCommand's rules and ends in a bare -- --resume", func() {
+			m := pending
+			dir := "/cfg dir"
+			m.ConfigDirEnv, m.Worktree, m.Model, m.Conversation = &dir, "", "", ""
+			Expect(tmuxpane.ResumeCommand(m)).To(BeEmpty(), "no conversation, no ResumeCommand")
+			Expect(tmuxpane.ResumePickerCommand(m)).To(Equal("cd /home/u/proj && CLAUDE_CONFIG_DIR='/cfg dir' claude-sandbox --new --no-worktree -- --resume"))
+			m.Worktree = "otter"
+			Expect(tmuxpane.ResumePickerCommand(m)).To(Equal("cd /home/u/proj && CLAUDE_CONFIG_DIR='/cfg dir' claude-sandbox --new --worktree=otter -- --resume"))
+			gen := m
+			gen.Worktree, gen.WorktreeGenerated = "", true
+			Expect(tmuxpane.ResumePickerCommand(gen)).To(BeEmpty())
+			Expect(tmuxpane.PrintableMark(m)).To(BeTrue())
+			m.Project = "/p‮"
+			Expect(tmuxpane.PrintableMark(m)).To(BeFalse())
+		})
+
 		It("CS-TMUX-017: silent for an active mark, a pending one without an id, or the same conversation", func() {
 			active := pending
 			active.State = tmuxpane.StateActive
