@@ -227,7 +227,7 @@ var _ = Describe("the launcher network", func() {
 
 	Describe("NetworkWanted", func() {
 		yes, no := true, false
-		DescribeTable("CS-LNCH-188: opt-in tri-state, default off",
+		DescribeTable("CS-LNCH-188: tri-state, default on",
 			func(envVal string, key *bool, want bool) {
 				getenv := func(k string) string {
 					if k == "CLAUDE_SANDBOX_NETWORK" {
@@ -237,7 +237,8 @@ var _ = Describe("the launcher network", func() {
 				}
 				Expect(launch.NetworkWanted(getenv, &cascade.Config{SandboxNetwork: key})).To(Equal(want))
 			},
-			Entry("unset, unset", "", nil, false),
+			Entry("unset, unset: the default is on", "", nil, true),
+			Entry("unset, key false", "", &no, false),
 			Entry("unset, key true", "", &yes, true),
 			Entry("env 1, key false", "1", &no, true),
 			Entry("env yes, key unset", "yes", nil, true),
@@ -246,8 +247,14 @@ var _ = Describe("the launcher network", func() {
 			Entry("env false over key true", "false", &yes, false),
 			Entry("env no over key true", "no", &yes, false),
 		)
-		It("CS-LNCH-188: a nil config is off", func() {
-			Expect(launch.NetworkWanted(func(string) string { return "" }, nil)).To(BeFalse())
+		It("CS-LNCH-188: a nil config is on (the default), and an env off still wins", func() {
+			Expect(launch.NetworkWanted(func(string) string { return "" }, nil)).To(BeTrue())
+			Expect(launch.NetworkWanted(func(k string) string {
+				if k == "CLAUDE_SANDBOX_NETWORK" {
+					return "0"
+				}
+				return ""
+			}, nil)).To(BeFalse())
 		})
 	})
 
@@ -340,7 +347,7 @@ var _ = Describe("the launcher network", func() {
 			Expect(on.ConfigHash).NotTo(Equal(off.ConfigHash))
 			changes := launch.Drift(off.ConfigInputs, on.ConfigInputs)
 			Expect(changes).To(ContainElement(launch.DriftChange{Path: "<network>", How: "added", Kind: launch.KindNetwork}))
-			// An opted-in tree's report also shows the context paragraph's
+			// A tree with the network wanted's report also shows the context paragraph's
 			// shadow change: <network> is never the only line.
 			Expect(changes).To(ContainElement(launch.DriftChange{Path: "CLAUDE.md", How: "changed", Kind: launch.KindShadow}))
 

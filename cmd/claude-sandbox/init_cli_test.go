@@ -37,6 +37,10 @@ func newInitCLI(vars map[string]string) *initCLI {
 		// Key-off, as newCLIFixture (the bridge is on by default, CS-LNCH-194).
 		c.vars["CLAUDE_SANDBOX_HOST_CLIPBOARD"] = "0"
 	}
+	if _, ok := c.vars["CLAUDE_SANDBOX_NETWORK"]; !ok {
+		// Key-off, as newCLIFixture (the network is on by default, CS-LNCH-188).
+		c.vars["CLAUDE_SANDBOX_NETWORK"] = "0"
+	}
 	c.env = &Env{
 		Runner: c.fake, Prompter: c.prompter, Out: &c.out, Err: &c.err,
 		Getenv: func(k string) string { return c.vars[k] },

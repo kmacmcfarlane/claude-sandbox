@@ -15,9 +15,9 @@ package launch
 // --dns (an override, dialled from the container namespace) and an
 // --internal network (which does not forward host-loopback upstreams).
 //
-// Opt-in (CS-LNCH-188), and it never fails a launch: every problem warns once
-// and the container lands on the default bridge, exactly as with the key off
-// (the CS-LNCH-107 precedent).
+// On by default, off by key or env (CS-LNCH-188), and it never fails a
+// launch: every problem warns once and the container lands on the default
+// bridge, exactly as with the key off (the CS-LNCH-107 precedent).
 
 import (
 	"encoding/json"
@@ -49,15 +49,15 @@ const KindNetwork Kind = "network"
 const NetworkInput = "<network>"
 
 // NetworkBanner is the one line a launch on the network prints (CS-LNCH-193):
-// the opt-in usually arrives from a workspace config, not from the launch the
-// person typed, and it changes what a session can reach.
+// it is on by default (CS-LNCH-188), not from anything the person typed, and
+// it changes what a session can reach.
 const NetworkBanner = "Network: claude-sandbox - DNS goes through the host's resolver; " +
 	"containers on Docker's default bridge are not reachable by IP (start siblings with --network claude-sandbox)."
 
 // NetworkContext is the paragraph appended to the shadow CLAUDE.md only when
 // the network applies (CS-LNCH-191), so a session reads it only when it is
-// true, and container-context.md stays silent about a network most sessions
-// are not on.
+// true, and container-context.md stays silent about a network a session with
+// the key off (or a stood-down launch) is not on.
 const NetworkContext = "- **Sibling containers and DNS.** This sandbox runs on the `claude-sandbox` Docker network,\n" +
 	"  so its DNS goes through the host's resolver (`nameserver 127.0.0.11`), and names that\n" +
 	"  resolve only on certain networks (a VPN, the LAN) work as they do on the host. Containers\n" +
@@ -68,13 +68,15 @@ const NetworkContext = "- **Sibling containers and DNS.** This sandbox runs on t
 	"  through this container's gateway.\n"
 
 // NetworkWanted resolves the key (CS-LNCH-188): CLAUDE_SANDBOX_NETWORK
-// (1/true/yes on, 0/false/no off) > sandboxNetwork > off.
+// (1/true/yes on, 0/false/no off) > sandboxNetwork > on. Default ON for host
+// parity (operator answer 102 a): the host's per-link split DNS reaches the
+// container; sandboxNetwork: false or CLAUDE_SANDBOX_NETWORK=0 turns it off.
 func NetworkWanted(getenv func(string) string, cfg *cascade.Config) bool {
 	var key *bool
 	if cfg != nil {
 		key = cfg.SandboxNetwork
 	}
-	return ResolveTristate(nil, getenv(NetworkEnv), key, false)
+	return ResolveTristate(nil, getenv(NetworkEnv), key, true)
 }
 
 // NetworkState is what an inspect of the launcher network found.

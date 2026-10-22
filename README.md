@@ -1625,18 +1625,14 @@ loses 6 bytes of socket-path headroom with the new root: a home of up to 47 byte
 
 #### Container network and DNS
 
-Off by default. On Docker's default bridge each container gets a **frozen copy** of the host's
+**On by default** (for parity with `claude` run on the host). On Docker's default bridge each container gets a **frozen copy** of the host's
 flat upstream resolver list (with systemd-resolved, `/run/systemd/resolve/resolv.conf`). On a host
 whose resolver splits DNS per link — a VPN that serves some domains while the LAN serves others —
 containers lose the split: every lookup goes to the first nameserver, so one side's names fail.
 And the copy never updates, so a VPN going down leaves running containers pointed at an
 unreachable resolver until they are relaunched.
 
-```yaml
-sandboxNetwork: true
-```
-
-With the key on (or `CLAUDE_SANDBOX_NETWORK=1`), every new container — interactive, `--detach`,
+So, unless you turn it off, every new container — interactive, `--detach`,
 `--branch`, headless, ralph and `tmux restore` resumes — joins a user-defined bridge network the
 launcher owns, `claude-sandbox`. On a user-defined network Docker's embedded resolver
 (`nameserver 127.0.0.11`) forwards each query to the host's own `/etc/resolv.conf` resolver from
@@ -1663,9 +1659,19 @@ on Docker Desktop the gain is about nil.
   (unless the host disables inter-container traffic). Published ports (`-p`) work either way,
   through the container's gateway, so Testcontainers and compose projects are unaffected
   (compose services were already on networks of their own).
-- **One drift per running container.** Containers started before you turned it on report
-  `added network <network>` (beside the changed shadow `CLAUDE.md`) on `--attach`/`--join`;
-  `[n]` gives a container on the network.
+- **One drift per running container.** Containers started before the default flipped on (or
+  before you turned it on) report `added network <network>` (beside the changed shadow
+  `CLAUDE.md`) on `--attach`/`--join`; `[n]` gives a container on the network.
+
+**Turn it off** in any `config.yaml` of the cascade, or for one launch with
+`CLAUDE_SANDBOX_NETWORK=0` (`false`/`no`):
+
+```yaml
+sandboxNetwork: false
+```
+
+Off, the launcher makes no `docker network` call and the container is created exactly as before
+the feature: Docker's default bridge, the host's flat resolver list.
 
 **The network.** On the first launch that needs it the launcher creates it
 (`docker network create --driver bridge --label claude-sandbox.network=1 claude-sandbox`, under
@@ -1690,7 +1696,8 @@ the key off; it never fails.
 - **IPv6:** the launcher passes no IPv6 options; a daemon whose `default-network-opts` enables
   IPv6 would give sandboxes v6 egress outside an IPv4-only VPN.
 
-`CLAUDE_SANDBOX_NETWORK=0` keeps one launch off a config's `true`; there is no CLI flag.
+`CLAUDE_SANDBOX_NETWORK=0` keeps one launch off the network, and `=1` puts one on despite a
+config's `false`; there is no CLI flag.
 
 #### Host clipboard bridge
 
@@ -2007,7 +2014,7 @@ If no `.claude-sandbox/Dockerfile` is found anywhere up to `/`, the launcher war
 | `CLAUDE_SANDBOX_SHARED_PEER_REGISTRY` | (unset) | `1`/`true`/`yes` shares the Claude Code peer registry and message sockets with other opted-in sandboxes regardless of `CLAUDE_CONFIG_DIR` (equivalent to `sharedPeerRegistry: true`); `0`/`false`/`no` is an explicit off that overrides a config `true` |
 | `CLAUDE_SANDBOX_HOST_CLIPBOARD` | (unset: on) | `0`/`false`/`no` turns the [host clipboard bridge](#host-clipboard-bridge) off for one launch (as `hostClipboard: false`); `1`/`true`/`yes` turns it on over a config `false` |
 | `CLAUDE_SANDBOX_CLIPBOARD_DISPLAY` | (unset) | the bridge's display target from this shell: `none`, `x:<DISPLAY>` or `<DISPLAY>`, `wayland:<name or socket>` (read from the launching shell only, never an env file) |
-| `CLAUDE_SANDBOX_NETWORK` | (unset: off) | `1`/`true`/`yes` puts new containers on the `claude-sandbox` Docker network, whose DNS goes through the host's resolver (equivalent to `sandboxNetwork: true`, see [Container network and DNS](#container-network-and-dns)); `0`/`false`/`no` is an explicit off that overrides a config `true` |
+| `CLAUDE_SANDBOX_NETWORK` | (unset: on) | New containers join the `claude-sandbox` Docker network by default, whose DNS goes through the host's resolver (see [Container network and DNS](#container-network-and-dns)); `0`/`false`/`no` turns it off for the launch (overriding a config `true` or the default, like `sandboxNetwork: false`); `1`/`true`/`yes` overrides a config `false` |
 | `CLAUDE_SANDBOX_OOM_SCORE_ADJ` | (unset: `oomScoreAdj`, else 500) | The containers' `--oom-score-adj`, -1000..1000; overrides a config `oomScoreAdj` key (see [When the host runs out of memory](#when-the-host-runs-out-of-memory)) |
 | `CLAUDE_SANDBOX_BASE_ONLY` | (unset) | Set to `1` or `true` to skip child Dockerfile and use base image only |
 | `CLAUDE_SANDBOX_NO_UPDATE_CHECK` | (unset) | Set to `1` or `true` to skip Claude Code version check at launch |
