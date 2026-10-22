@@ -70,7 +70,7 @@ var _ = Describe("CS-INIT-037: init reads the launch's search chain in a linked 
 		Expect(r.init(proj, initcmd.Flags{})).To(Succeed())
 		Expect(strings.Count(r.errOut.String(), "points elsewhere")).To(Equal(1))
 		Expect(r.errOut.String()).To(ContainSubstring(
-			"points elsewhere; reading the upstream configs without the main checkout's, so trackInHost is not inherited from it. Run 'git worktree repair' in " + proj))
+			"points elsewhere; reading the upstream levels without the main checkout's: its trackInHost is not inherited, its env is not noted and its Dockerfile is not copied. Run 'git worktree repair' in " + proj))
 		Expect(r.prompter.Asked).NotTo(ContainElement(ContainSubstring("Enter=inherit")))
 		Expect(r.out.String()).NotTo(ContainSubstring(filepath.Join(main, ".claude-sandbox")))
 		Expect(read(cfg)).To(MatchRegexp(`(?m)^trackInHost: false$`))
@@ -165,6 +165,9 @@ var _ = Describe("CS-INIT-038: init's env note and Dockerfile copy read the laun
 		write(filepath.Join(main, ".git", "worktrees", "proj", "gitdir"), "/somewhere/else/.git\n")
 		r := &run{fake: linkedFake(), prompter: &prompt.Scripted{IsTTY: true, Answers: []string{"n"}}}
 		Expect(r.init(proj, initcmd.Flags{})).To(Succeed())
+		Expect(strings.Count(r.errOut.String(), "points elsewhere")).To(Equal(1))
+		Expect(r.errOut.String()).To(ContainSubstring(
+			"points elsewhere; reading the upstream levels without the main checkout's: its trackInHost is not inherited, its env is not noted and its Dockerfile is not copied."))
 		Expect(r.out.String()).NotTo(ContainSubstring(mainEnv))
 		Expect(read(example)).NotTo(ContainSubstring("main checkout's child"))
 	})

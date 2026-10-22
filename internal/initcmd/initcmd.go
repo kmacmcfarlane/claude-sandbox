@@ -53,7 +53,7 @@ func launchChain(project string, d Deps) []string {
 	if d.Runner != nil {
 		lw, warn := launch.DetectLinkedWorktreeFor(d.Runner, project,
 			"reading the upstream configs as for a plain project, without the linked-worktree check",
-			"reading the upstream configs without the main checkout's, so trackInHost is not inherited from it")
+			"reading the upstream levels without the main checkout's: its trackInHost is not inherited, its env is not noted and its Dockerfile is not copied")
 		if warn != "" && d.Err != nil {
 			fmt.Fprintln(d.Err, warn)
 		}
