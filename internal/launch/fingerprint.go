@@ -128,6 +128,16 @@ func (in *Inputs) configFingerprint(p *Plan, ha hostAccess, sharedPeerRegistry, 
 	if in.Network != "" {
 		fmt.Fprintf(&env, "network=%s\n", in.Network)
 	}
+	// CS-LNCH-201: the WANTED host clipboard bridge (the requested value,
+	// on by default for an interactive kind; never for headless or ralph).
+	// Wanted, not applied: a structural stand-down is recorded by the
+	// clipboard label, and hashing the request keeps drift a configuration
+	// question a nested drift check answers as the host does. The bridge
+	// mount and the display target are never hashed (a per-launch shadow
+	// path; a property of the operator's shell). Off adds nothing.
+	if in.ClipboardWanted {
+		env.WriteString("hostClipboard=on\n")
+	}
 	fmt.Fprintf(&env, "uid=%d gid=%d user=%s home=%s\n", in.HostUID, in.HostGID, in.HostUser, in.Home)
 	fmt.Fprintf(&env, "memory=%s\n", p.MemoryLimit)
 	// CS-LNCH-112: the APPLIED value (cascade.Config.OOMScoreAdj is json:"-"),

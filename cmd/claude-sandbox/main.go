@@ -10,6 +10,10 @@ import (
 
 func main() {
 	args := os.Args[1:]
+	if filepath.Base(os.Args[0]) == "wl-copy" {
+		// The host clipboard bridge's shim (CS-LNCH-199, CS-IMG-077).
+		os.Exit(runWlCopy(args, os.Stdin))
+	}
 	if filepath.Base(os.Args[0]) == "ralph" {
 		args = append([]string{"ralph"}, args...)
 	}

@@ -23,6 +23,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/kmacmcfarlane/claude-sandbox/internal/clipboard"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/globalcfg"
 )
 
@@ -57,6 +58,48 @@ type Ops struct {
 	// GlobalConfig are the filesystem seams of the global-config link
 	// (CS-GCFG-033); nil means the real calls.
 	GlobalConfig *globalcfg.LinkOps
+	// ClipboardMounted reports whether the host clipboard bridge's
+	// directory is mounted (CS-LNCH-195); nil means a real Lstat of
+	// clipboard.ContainerDir. Setenv sets a variable for the exec'd command
+	// (nil = os.Setenv).
+	ClipboardMounted func() bool
+	Setenv           func(k, v string) error
+}
+
+// ClipboardEnv is what the claude process gets when the bridge is mounted
+// (CS-LNCH-195): the dummy WAYLAND_DISPLAY that makes Claude Code run the
+// wl-copy shim, and the socket the shim talks to. Set by pidslot on the
+// command it execs (the primary's claude and a join's), never container-wide:
+// a docker exec shell and the entrypoint never see them; claude's own
+// children (Bash tool commands, MCP servers) inherit them.
+func ClipboardEnv() [][2]string {
+	return [][2]string{
+		{"WAYLAND_DISPLAY", clipboard.DummyWaylandDisplay},
+		{clipboard.EnvSocket, clipboard.ContainerSocket},
+	}
+}
+
+func clipboardMounted() bool {
+	fi, err := os.Lstat(clipboard.ContainerDir)
+	return err == nil && fi.IsDir()
+}
+
+// applyClipboardEnv sets ClipboardEnv when the bridge is mounted.
+func applyClipboardEnv(ops Ops) {
+	mounted := ops.ClipboardMounted
+	if mounted == nil {
+		mounted = clipboardMounted
+	}
+	if !mounted() {
+		return
+	}
+	set := ops.Setenv
+	if set == nil {
+		set = os.Setenv
+	}
+	for _, kv := range ClipboardEnv() {
+		set(kv[0], kv[1])
+	}
 }
 
 // Real returns the operating-system implementations.
@@ -164,6 +207,7 @@ func Run(ops Ops, argv []string) int {
 			return globalcfg.ExitLink
 		}
 	}
+	applyClipboardEnv(ops)
 	direct := func(reason string) int {
 		fmt.Fprintf(ops.Stderr, "Warning: pid class not applied (%s); this session may be invisible to sibling sandboxes.\n", reason)
 		return execDirect(ops, argv)

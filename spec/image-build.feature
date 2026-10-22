@@ -838,3 +838,18 @@ Feature: Image build lifecycle (CS-IMG)
       CS-LNCH-176 warning ending 'using the version stamp "unknown"' is
       printed on stderr (a headless launch's too)
     And the launch, or "--version", goes on
+
+  @new
+  Scenario: CS-IMG-077 The tools image ships the wl-copy shim, and no image a clipboard tool
+    # The host clipboard bridge (CS-LNCH-194..203): the copy runs on the
+    # host; the container only needs a wl-copy for Claude Code to find.
+    Given Dockerfile.tools
+    Then it links /opt/claude-sandbox/bin/wl-copy -> claude-sandbox, beside the
+      ralph link, so argv0 "wl-copy" runs the shim (CS-LNCH-199) and the cap's
+      directory copy keeps the link
+    And it creates the empty, root-owned /opt/claude-sandbox/clipboard, under
+      which the dummy WAYLAND_DISPLAY names a path nothing can plant
+    And neither the base Dockerfile nor Dockerfile.tools installs wl-clipboard,
+      xclip or xsel
+    And existing containers drift once after upgrading: the tools image, and so
+      every cap, changes (as any baked-source change does)

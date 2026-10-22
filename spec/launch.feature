@@ -2789,3 +2789,348 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       network-off recomputation) the shadow is exactly host memory plus
       container-context.md, as before
     And container-context.md itself does not mention the network
+
+  # The host clipboard bridge (CS-LNCH-194..203, CS-IMG-077; plan
+  # jetbrains-clipboard 07 as amended by 08; operator answers 127-135).
+  # In a sandbox Claude Code's fullscreen copy has only OSC 52 (it uses
+  # wl-copy when WAYLAND_DISPLAY is set and wl-copy is on PATH, xclip/xsel
+  # when DISPLAY is set, per its docs and anthropics/claude-code#80184), and
+  # some terminals drop OSC 52: JetBrains' JediTerm, VTE, Terminal.app. The
+  # bridge: a per-container helper on the HOST copies with the host's
+  # xclip/xsel/wl-copy onto a display target taken from the operator's shell;
+  # in the container, "wl-copy" is the launcher binary (argv0, the shim),
+  # which asks the helper first and then also writes OSC 52 to its own
+  # terminal, so turning the bridge on never takes away a copy path that
+  # works today. Write-only: a session can overwrite the clipboard and
+  # PRIMARY with filtered text, within the limits; it cannot read the
+  # clipboard, reach a display or change the target.
+  #
+  # Operator answers: the bridge only, no Wayland-socket passthrough (121/OQ-A);
+  # limits as planned (127 a); the JetBrains note on new launches and attaches
+  # (128 a); floods are logged only (129 a); one display target per
+  # container, the last usable display wins and none never replaces it
+  # (130 a); no automatic wl-copy on GNOME (131 b); no upstream action
+  # (132 b); ON by default, so a sandbox copies as claude outside it would
+  # (135, 2026-10-22).
+  #
+  # Host checks still owed (plan 07 § 7): T-C1 (SlimJim through OSC 52 with
+  # the bridge on; the osc= path a real primary and a join log), T-C2 (the
+  # untrusted X-forwarding timeout), T-C3 (re-pointing on attach and
+  # never-downgrade), T-C4 (interleaving and a flood), T-L1 (a local GNOME
+  # console), T-B3 (Shift-drag in JediTerm).
+
+  @new
+  Scenario: CS-LNCH-194 hostClipboard is on by default and tri-state; explicitly off launches as before
+    Given the key hostClipboard (top level, any config.yaml, more-local wins)
+      and CLAUDE_SANDBOX_HOST_CLIPBOARD (1/true/yes on, 0/false/no off)
+    Then the bridge is wanted:
+      | CLAUDE_SANDBOX_HOST_CLIPBOARD | hostClipboard   | wanted |
+      | unset                         | unset           | yes    |
+      | unset                         | true            | yes    |
+      | 0 / false / no                | true or unset   | no     |
+      | 1 / true / yes                | false           | yes    |
+      | unset                         | false           | no     |
+    And there is no CLI flag; the key is json:"-" in the merged config
+    And headless and ralph never want it, whatever the key or the variable
+    And explicitly off gives today's docker create argv, hash text and shadow
+      files, plus the one label claude-sandbox.clipboard=none (unhashed)
+    And launch.Inputs' zero value is off: the launcher resolves the wanted
+      value (launch.ClipboardWanted) and passes it in
+
+  @new
+  Scenario: CS-LNCH-195 An applied bridge: the directory, the read-only mount, the label, the banner, the helper
+    Given the bridge is wanted and no stand-down applies (CS-LNCH-196)
+    Then the launcher creates <shadow dir>/clipboard 0700 as the user and adds
+      --mount type=bind,source=<dir>,target=/run/claude-sandbox/clipboard,readonly
+      (after the -v list; --mount, so a missing source is an error, never a
+      root-owned directory docker makes)
+    And the container gets the label claude-sandbox.clipboard=bridge and NO -e
+      for the bridge: pidslot sets WAYLAND_DISPLAY=/opt/claude-sandbox/clipboard/no-wayland-display
+      and CLAUDE_SANDBOX_CLIPBOARD=/run/claude-sandbox/clipboard/bridge.sock on
+      the command it execs (the primary's claude, a join's) only when
+      /run/claude-sandbox/clipboard is a directory, so a docker exec shell and
+      the entrypoint never see them; claude's own children (Bash tool
+      commands, MCP servers) inherit them
+    And it prints one line "Host clipboard: write-only bridge (target: <X
+      localhost:10.0 | Wayland <socket> (experimental) | none: OSC 52 only
+      [(install xclip on the host)]>; sessions can overwrite your clipboard,
+      never read it)." — printed once (not on re-pick attempts or the drift
+      check)
+    And the display target (CS-LNCH-203) is resolved in launchWith after the
+      image work and outside the launch lock, carried into the reservation,
+      and written into the shadow directory right after docker create
+      succeeds; then "claude-sandbox clipboard-bridge --dir <dir> --container
+      <name> --log <cache>/clipboard-bridge.log [--id <64-hex>] --target <file>"
+      is started detached (Cmd.Detach, working directory /), so its first
+      read finds the target
+    And a reservation that is removed (a start that failed or never ran)
+      signals that helper (SIGTERM) before the docker rm
+    And no display is not a stand-down and prints no warning: copies then go
+      over OSC 52 only
+
+  @new
+  Scenario: CS-LNCH-196 Structural stand-downs launch as with the key off
+    Given the bridge is wanted
+    When any of these holds:
+      | condition                                                                     | message |
+      | darwin (v1)                                                                   | Note    |
+      | an env file defines WAYLAND_DISPLAY or CLAUDE_SANDBOX_CLIPBOARD               | WARNING |
+      | a cascade mount at, above or below /run/claude-sandbox/clipboard              | WARNING |
+      | nested (a sandbox launcher) with no CLAUDE_SANDBOX_CLIPBOARD of its own       | Note    |
+      | the shadow dir (symlinks resolved) lies under the HOST side of any -v mount   | WARNING |
+      | <dir>/bridge.sock would be longer than 107 bytes                              | WARNING |
+      | <dir> cannot be created as the user, or is not a real directory of the user's | WARNING |
+      | <dir> holds a comma or "=" (the --mount syntax)                               | WARNING |
+    Then one line "<WARNING|Note>: hostClipboard: <why>; this session copies
+      over OSC 52 only." is printed on stderr, nothing on a tmux restore
+      resume (nobody watches that pane)
+    And the launch goes on with the key-off argv and the label
+      claude-sandbox.clipboard=none; the hash still carries the wanted value
+      (CS-LNCH-201)
+    And the shadow-dir rule exists because the target file is safe only while
+      no container can reach it (TMPDIR may point into a project); a nested
+      launch keeps its shadow root in the config-dir mount by design
+      (CS-LNCH-162) and writes no target (CS-LNCH-200)
+
+  @new
+  Scenario: CS-LNCH-197 Session kinds: headless and ralph never; attach and join re-point and restart; the attach note
+    Given a session kind
+    Then headless and ralph never get the bridge (no mount, label none, no
+      banner, nothing on the hash)
+    And a tmux restore resume applies it silently and writes no target: the
+      first real attach sets one
+    And an attach (hand or restore) and a join of a container labelled
+      clipboard=bridge resolve this shell's target, write it under
+      never-downgrade (CS-LNCH-203), then ping the helper (500 ms) and, when it
+      does not answer, start a new one and print "Clipboard bridge restarted
+      for '<noun>'." (a helper spawned from a tmux.service pane dies with that
+      unit under KillMode=control-group; this repairs it)
+    And inside a sandbox the restart runs only for a directory that Lstats as a
+      real directory of the user's, chained to the launcher's own
+      CLAUDE_SANDBOX_CLIPBOARD, and no target is written
+    And a hand attach to a container labelled clipboard=none while this
+      launcher wants the bridge prints one Note before attaching:
+      "Note: '<noun>' was started without the clipboard bridge, so its copies
+      stay on OSC 52. To get it, end that session, then relaunch the
+      conversation it started with: <command>. If you have since switched
+      conversations in it, use the same command without the id and pick the
+      conversation in claude's resume picker."
+    And <command> is built by tmuxpane.ResumeCommand from the container's
+      labels (project, configdir, worktree, resume), or, without a resume
+      label, by its picker variant tmuxpane.ResumePickerCommand, which ends in
+      a bare "-- --resume": "... then relaunch with: <command> and pick the
+      conversation in claude's resume picker."
+    And when a label value used holds a control or bidi character
+      (tmuxpane.PrintableMark) no command is printed: "... then relaunch it
+      with --resume."
+    And a container without the label (it predates the bridge) gets no note
+
+  @new
+  Scenario: CS-LNCH-198 The helper serves one container's bridge
+    Given "claude-sandbox clipboard-bridge" for one container
+    Then it requires the bridge directory to be a real directory of its uid,
+      takes flock(LOCK_EX|LOCK_NB) on <dir>/.lock (held: exit 0), removes a
+      stale bridge.sock only after a connect to it failed, binds it and
+      chmods it 0600
+    And a request is "CSCB1 <op> <len>[ osc=<path>]\n" plus exactly <len>
+      bytes; op is clipboard, primary, clear-clipboard, clear-primary or ping;
+      osc=<path> is the shim's terminal path (tty, ancestor:<level>:<fd>,
+      none): the terminal it FOUND, not proof it wrote there
+    And each connection has a 2 s deadline; past 4 concurrent connections a
+      new one gets "err busy"; a peer whose SO_PEERCRED uid differs gets "err
+      peer" (hygiene, not a control: rootless docker or userns-remap fail
+      closed)
+    And it answers in two lines: an admission line at once, before any backend
+      runs — "accepted", or "err too-large" (over 1 MiB), "err utf8", "err
+      control-char" (C0 except tab, LF and CR; DEL; C1 — so ESC[201~ and the
+      one-code-point CSI U+009B cannot end bracketed paste early), "err
+      rate-limited" (a token bucket of 20, refilled 2 per second), "err
+      bad-request" — then a result line: "ok", "pending" (at 1.2 s, the run
+      goes on) or "err <reason>"
+    And ping answers "accepted" then "ok", takes no token and runs nothing
+    And one run at a time per selection (clipboard, primary), latest wins: a
+      newer queued request replaces the older queued one, which gets "err
+      superseded"
+    And each run reads the target file anew (O_NOFOLLOW, a regular file of its
+      uid, at most 4 KiB, every field re-validated as CS-LNCH-203); missing,
+      none or invalid gives "err no-display" with no process started; there is
+      NO systemd-environment fallback
+    And a run is "/usr/bin/env -i PATH=<its PATH> HOME=<home> LC_ALL=C
+      <the target's DISPLAY and XAUTHORITY, or WAYLAND_DISPLAY> <tool> ...":
+      the helper's own display variables never reach it; X runs "xclip
+      -selection clipboard|primary -t UTF8_STRING -i", else "xsel
+      --clipboard|--primary --input" (--clear for a clear); Wayland runs
+      "wl-copy [--primary] --type text/plain;charset=utf-8" (or --clear)
+    And each run has its own process group, stdout and stderr /dev/null (so
+      xclip's forked serving child never holds a pipe) and a 3 s bound, the
+      group killed at it ("err timeout")
+    And when xclip fails and xsel succeeds, xsel is tried first for 5 minutes
+      within that target (sticky fallback); a new target resets it
+    And before each X run the display must still be the one the target meant
+      (plan 08 N2): a TCP display (localhost:N, 127.x:N, the machine's name)
+      needs a LISTEN row in /proc/net/tcp or tcp6 on port 6000+N owned by the
+      helper's uid or by root, bound to loopback — or to the wildcard for a
+      display named by the machine's own name; a unix display (:N, unix:N)
+      needs /tmp/.X11-unix/XN to be a socket owned by the uid or root;
+      otherwise "err stale-display", with no connection made and no cookie
+      sent
+    And residuals, accepted: a time-of-check gap of milliseconds; X clients
+      also try the abstract socket @/tmp/.X11-unix/XN, which has no owner to
+      check
+    And it logs one content-free line per request to
+      <cache>/clipboard-bridge.log (0600, O_NOFOLLOW, emptied past 64 KiB):
+      op, bytes, backend, result, latency and the osc= path; refusals at most
+      one line a second; never content; a flood is logged only (no
+      notification)
+    And it exits, removing the socket, on a die or destroy event whose
+      Actor.ID equals the container's id exactly (else, without an id, whose
+      name equals the name), when the directory is gone (checked every 30 s),
+      or when a bounded inspect (every 5 minutes, and whenever the event
+      stream ends) answers "No such container"
+
+  @new
+  Scenario: CS-LNCH-199 The wl-copy shim asks the helper first, then writes OSC 52
+    Given "wl-copy" in a container (the launcher binary through argv0)
+    When CLAUDE_SANDBOX_CLIPBOARD is unset
+    Then it execs the next wl-copy on PATH that is not itself (a child image's),
+      with the variable removed, else exits 1 "wl-copy: no clipboard in this
+      sandbox (hostClipboard is off)"
+    When it is set
+    Then the arguments are:
+      | argument                              | effect                       |
+      | none                                  | clipboard                    |
+      | -p / --primary                        | PRIMARY                      |
+      | -n / --trim-newline                   | drop one trailing newline    |
+      | -t / --type T, --type=T               | text/* only, else exit 1     |
+      | -c / --clear                          | clear                        |
+      | -f, --foreground, -o, --paste-once    | accepted, no effect          |
+      | positional words (also after --)      | copied, joined by spaces     |
+      | anything else                         | exit 2                       |
+    And stdin is read up to 1 MiB + 1; too large, invalid UTF-8 or a rejected
+      code point exits 1 and nothing is written anywhere
+    And it connects within 500 ms, sends the request and waits up to 300 ms for
+      the admission line
+    And OSC 52 (ESC ] 52 ; c ; <base64> BEL, the plain form) is considered
+      only for a clipboard op whose payload is at most 256 KiB:
+      | helper's answer                                        | OSC 52 write            |
+      | accepted                                               | write                   |
+      | unreachable (connect failed, no admission in 300 ms)   | write, under the guard  |
+      | err busy                                               | write, under the guard  |
+      | err rate-limited, too-large, utf8, control-char, other | no write                |
+    And the guard allows 10 such writes per 10 s per container (a flocked
+      counter file in the container's /tmp); over it, exit 1 with no write
+    And the write is a complete sequence, one write unless interrupted: TERM,
+      INT and HUP are held (signal.Notify) and acted on after it with exit
+      143, 130 or 129, and a short count loops until every byte is written
+    And the terminal is /dev/tty (O_WRONLY|O_NOCTTY), else an ancestor walk:
+      the parent's tty_nr (field 7 of /proc/<ppid>/stat, after the last ")";
+      0 = none), then from the parent up at most 4 levels, stopping at PID 1
+      or a process not owned by the shim's uid, the first fd 0, 1 or 2 that
+      is a character device whose rdev equals that tty_nr; else none, and no
+      OSC 52 — it never writes to a terminal it cannot tie to the session
+    And the path found (tty, ancestor:<level>:<fd>, none) is sent as osc=
+    And it then waits for the result within what is left of 1.5 s:
+      | outcome                                           | exit |
+      | ok or pending                                     | 0    |
+      | err no-display after the OSC 52 write             | 0    |
+      | unreachable or busy after the OSC 52 write        | 0, with a stderr note |
+      | any refusal or other err                          | 1    |
+      | unreachable or busy with no write (PRIMARY, etc.) | 1    |
+    And residuals: under a full pty buffer Node may split a frame and the OSC
+      can land inside an escape sequence; a short write can let Claude Code's
+      output interleave the shim's parts; both print stray text until the
+      next repaint (Ctrl+L)
+
+  @new
+  Scenario: CS-LNCH-200 A nested launcher chains to the outer bridge
+    Given a launcher inside a sandbox whose own environment has
+      CLAUDE_SANDBOX_CLIPBOARD (it runs under the outer claude, e.g. its Bash
+      tool)
+    Then the inner container gets the bridge as CS-LNCH-195, and its helper is
+      started with --outer <that socket> instead of --target: each request is
+      forwarded to the outer bridge in process, the outer's rate limit
+      covering both
+    And no target file is written and no display is resolved
+    And without the variable (a docker exec shell has none) the bridge stands
+      down with a Note (CS-LNCH-196)
+    And a sibling sandbox sharing the config dir can reach the inner socket
+      directory, which lies under the config-dir mount (CS-LNCH-162): the
+      same exposure the config dir already gives transcripts and scratchpads
+
+  @new
+  Scenario: CS-LNCH-201 The fingerprint hashes the wanted bridge, never its mount or target
+    Given a launch
+    Then the hash text gains "hostClipboard=on" when the bridge is wanted (by
+      default, for an interactive kind) and nothing when it is off
+    And the --mount is not in the normalized mount set, the target is never
+      hashed, and the label is outside the hash
+    And so a container launched before the bridge drifts once after the
+      upgrade (with the key on), as it does for the tools image (CS-IMG-077);
+      a stood-down launch hashes like an applied one
+
+  @new
+  Scenario: CS-LNCH-202 The JetBrains note when copies cannot reach the clipboard
+    Given a new interactive launch (not headless, ralph, --detach, a join or a
+      tmux restore resume) with the bridge applied, or a hand attach to a
+      container labelled clipboard=bridge with the bridge wanted
+    And the terminal resolves (launch.ResolveTerminal) to JetBrains-JediTerm
+    And no env file sets CLAUDE_CODE_DISABLE_MOUSE,
+      CLAUDE_CODE_DISABLE_MOUSE_CLICKS or CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN
+      to a non-empty value other than 0/false, nor CLAUDE_CODE_NO_FLICKER=0
+    And the effective display target after this launch or attach is none
+    Then one stderr Note is printed: "Note: this shell has no display the
+      clipboard bridge can use (over SSH only a forwarded X display counts;
+      see CLAUDE_SANDBOX_CLIPBOARD_DISPLAY for remote desktops), and
+      JetBrains terminals ignore OSC 52, so copies will not reach your
+      clipboard. Reconnect with ssh -X and attach again. Shown once for this
+      project."
+    And at most once per project: the marker
+      <cache>/notes/jediterm-copy-ii-<sha256(project)[:16]> is created
+      O_EXCL|O_NOFOLLOW 0600 when it prints
+    And the plan's case (i) (key off, not explicitly false) cannot arise since
+      the key defaults on (answer 135): any off is explicit, which silences it
+    And the plan's Shift-drag clause is left out until T-B3 confirms it
+
+  @new
+  Scenario: CS-LNCH-203 The display target comes from the operator's shell
+    Given a new container (not a restore resume), an attach or a join
+    Then the target is resolved from the launcher's own environment:
+      1. CLAUDE_SANDBOX_CLIPBOARD_DISPLAY (the launcher's environment only,
+         never an env file) wins: "none" (the one value that also clears a
+         usable target), "x:<DISPLAY>" or a bare <DISPLAY>, or
+         "wayland:<name or absolute socket path>"; an invalid value prints one
+         WARNING naming the variable and the rule and is ignored
+      2. the shell's DISPLAY, XAUTHORITY, WAYLAND_DISPLAY, XDG_RUNTIME_DIR,
+         SSH_CONNECTION
+      3. with TMUX and TMUX_PANE set, one "tmux show-environment -t
+         $TMUX_PANE" bounded at 1 s: for DISPLAY, XAUTHORITY and
+         SSH_CONNECTION the session's value, or its removal (-KEY), wins; a
+         timeout or error keeps the shell's values. Residual: the session
+         environment reflects the client that attached most recently
+      4. under SSH (SSH_CONNECTION set after step 3) only an X display whose
+         host part names this machine and is not empty or unix counts (a
+         forwarded display); any WAYLAND_DISPLAY is ignored. Not under SSH,
+         DISPLAY and WAYLAND_DISPLAY both count; a relative WAYLAND_DISPLAY is
+         joined to an absolute XDG_RUNTIME_DIR
+      5. X when a counted DISPLAY exists and host xclip or xsel is found; else
+         Wayland when a counted WAYLAND_DISPLAY exists and host wl-copy is
+         found — but never automatically when XDG_CURRENT_DESKTOP contains
+         GNOME (mutter gives wl-copy keyboard focus on every copy): there the
+         target is none with the hint to install xclip, and wl-copy is used
+         only through the override; else none
+    And validation, applied to the override, the shell's values and again by
+      the helper at each read:
+      | item            | rule                                                                 |
+      | DISPLAY         | ^(HOST)?:[0-9]{1,4}(\.[0-9]{1,2})?$, HOST empty, unix, localhost, 127.0.0.0/8 or this machine's name (short or full); any other host is refused |
+      | XAUTHORITY      | the shell's value, else $HOME/.Xauthority; absolute, opened O_NOFOLLOW as a regular file of the user's, else the X target is dropped |
+      | WAYLAND_DISPLAY | ^[A-Za-z0-9._-]+$ when relative; the absolute path must be a socket of the user's |
+      | every value     | printable: no control or bidi character                              |
+    And the target file <shadow dir>/clipboard-target.json (outside the
+      mounted directory) is {v:1, backend: x|wayland|none, display,
+      xauthority, waylandDisplay, setAt, by: create|attach|join}, written as a
+      0600 temp file renamed into place; missing means none
+    And never downgrade: a resolved none leaves the file as it is, so the last
+      usable display wins; only the override "none" writes a none target
+    And residual: a target can outlive its display (the SSH session ended:
+      xclip fails, OSC 52 already went out), and a later SSH session of the
+      same user reusing the display number receives the copies

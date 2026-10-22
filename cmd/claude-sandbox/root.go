@@ -19,6 +19,7 @@ import (
 
 	assets "github.com/kmacmcfarlane/claude-sandbox"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/cascade"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/clipboard"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/hostdirs"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/imagebuild"
@@ -102,6 +103,13 @@ type Env struct {
 	// (CS-TMUX-045); "" resolves it as resurrect does. Tests point it at a
 	// scratch directory: resurrectDir() panics under go test when unset.
 	ResurrectDir string
+	// ClipboardLookPath finds the host's copy tools for the clipboard
+	// bridge's display target (CS-LNCH-203); nil means exec.LookPath, and
+	// panics under go test (a fixture must never depend on the host's
+	// xclip). Hostname is this machine's name for the X host rule; nil means
+	// os.Hostname, likewise panicking under go test.
+	ClipboardLookPath func(string) (string, error)
+	Hostname          func() (string, error)
 
 	// restore is set only on the Env copy a "tmux restore" resumes with
 	// (CS-TMUX-058, plan 10 § 5.2): the pane's pending row to put back and
@@ -184,7 +192,7 @@ func Main(args []string) int {
 // path so "claude-sandbox --rebuild init" errors instead of routing to init.
 func isSubcommand(a string) bool {
 	switch a {
-	case "init", "init-ralph", "ralph", "help", "completion", "sessions", "pidslot", "headless", "global-config", "tmux", cacheBudgetCheckCmd, imagebuild.PrefetchSubcommand:
+	case "init", "init-ralph", "ralph", "help", "completion", "sessions", "pidslot", "headless", "global-config", "tmux", cacheBudgetCheckCmd, imagebuild.PrefetchSubcommand, clipboard.HelperSubcommand:
 		return true
 	// CS-COMP-002/003: the hidden commands the generated completion scripts
 	// call on every keystroke. Without these they fall through to runLaunch,
@@ -260,7 +268,7 @@ func newRootCmd(env *Env) *cobra.Command {
 	}
 	ralphCmd := newRalphCmd(env)
 	registerRalphCompletions(ralphCmd)
-	root.AddCommand(newInitCmd(env, false), newInitCmd(env, true), ralphCmd, newSessionsCmd(env), newGlobalConfigCmd(env), newTmuxCmd(env), newPidslotCmd(env), newHeadlessCmd(env), newCacheBudgetCheckCmd(env), newCLIPrefetchCmd(env))
+	root.AddCommand(newInitCmd(env, false), newInitCmd(env, true), ralphCmd, newSessionsCmd(env), newGlobalConfigCmd(env), newTmuxCmd(env), newPidslotCmd(env), newHeadlessCmd(env), newCacheBudgetCheckCmd(env), newCLIPrefetchCmd(env), newClipboardBridgeCmd(env))
 	// CS-INIT-002: a rejected flag names itself and lists the command's valid
 	// options (inherited by init/init-ralph/ralph).
 	root.SetFlagErrorFunc(func(c *cobra.Command, err error) error {
@@ -1288,6 +1296,19 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 		NetworkWanted: launch.NetworkWanted(env.Getenv, cfg),
 		Out:           env.Out, Err: env.Err,
 	}
+	// CS-LNCH-194/203: the host clipboard bridge, on by default for an
+	// interactive kind. Its display target is resolved here, after the image
+	// work and outside the launch lock; a tmux restore resume writes none
+	// (nobody sits at that pane) and stands down silently.
+	in.ClipboardWanted = launch.ClipboardWanted(env.Getenv, cfg, headless, f.Ralph)
+	in.ClipboardQuiet = env.restore != nil
+	if in.ClipboardWanted && env.restore == nil && !hostdirs.InSandbox(env.Getenv) {
+		res := resolveClipboard(env)
+		if res.Warning != "" {
+			fmt.Fprintln(env.Err, res.Warning)
+		}
+		in.ClipboardTarget = &res
+	}
 	// CS-GCFG-001: the global-config health check, after the image work and
 	// before the lock and the create, so it never widens the window between
 	// the create and the start (CS-SESS-052).
@@ -1303,6 +1324,10 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 	if f.Detach {
 		// CS-TMUX-014: never marked; its launcher exits at once.
 		return startDetached(env, plan, projectDir, home)
+	}
+	if plan.ClipboardDir != "" && !headless && !f.Ralph && env.restore == nil && in.ClipboardTarget != nil {
+		// CS-LNCH-202: the JetBrains note, before the session.
+		jetbrainsNote(env, projectDir, envSnap, in.ClipboardTarget.Target)
 	}
 	var mark *paneMark
 	if !headless {

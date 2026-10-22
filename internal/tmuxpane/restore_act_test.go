@@ -195,8 +195,8 @@ var _ = Describe("tmux restore: readiness (CS-TMUX-061/062)", func() {
 	other := "9b5e9c3a-1f2d-4e5f-8a9b-0c1d2e3f4a5b"
 
 	It("CS-TMUX-061: up is any record at the class since the reservation; the lock goes after the gap", func() {
-		record(256+class+1, convID, time.Now()) // another class
-		record(class, convID, since.Add(-time.Hour))  // an earlier container's
+		record(256+class+1, convID, time.Now())      // another class
+		record(class, convID, since.Add(-time.Hour)) // an earlier container's
 		w := start(150 * time.Millisecond)
 		defer w.ChildReturned()
 		Consistently(released.Load, 80*time.Millisecond).Should(BeZero())

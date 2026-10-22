@@ -150,6 +150,17 @@ var _ = Describe("baked sources", func() {
 		Expect(repoFile("mcp-servers.json")).To(ContainSubstring(`"/opt/claude-sandbox/mcp/discord-notify/dist/index.mjs"`))
 	})
 
+	It("CS-IMG-077: Dockerfile.tools links the wl-copy shim; no image installs a clipboard tool", func() {
+		df := repoFile("Dockerfile.tools")
+		Expect(df).To(MatchRegexp(`(?m)^RUN ln -s /opt/claude-sandbox/bin/claude-sandbox /opt/claude-sandbox/bin/wl-copy \\\s*$`))
+		Expect(df).To(MatchRegexp(`(?m)^\s+&& install -d -m 0755 /opt/claude-sandbox/clipboard\s*$`))
+		for _, name := range []string{"Dockerfile", "Dockerfile.tools"} {
+			for _, tool := range []string{"wl-clipboard", "xclip", "xsel"} {
+				Expect(repoFile(name)).NotTo(MatchRegexp(`(?m)^[^#]*apt-get install[^#\n]*\b`+tool+`\b`), name+" installs "+tool)
+			}
+		}
+	})
+
 	It("CS-IMG-069: sessions are told to install LSP plugins natively", func() {
 		cc := repoFile("container-context.md")
 		for _, want := range []string{
