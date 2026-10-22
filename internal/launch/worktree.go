@@ -124,6 +124,14 @@ type LinkedWorktree struct {
 // <GitDir>/gitdir, which only "git worktree add" (or "repair") in THAT
 // repository writes, must name <Top>/.git.
 func DetectLinkedWorktree(r execx.Runner, dir string) (lw *LinkedWorktree, warning string) {
+	return DetectLinkedWorktreeFor(r, dir, "launching as a plain project, without the linked-worktree check")
+}
+
+// DetectLinkedWorktreeFor is DetectLinkedWorktree whose timeout warning ends
+// with the caller's own fallback (execx.GitTimeoutWarning's "instead"): init
+// detects the same worktree to read the launch's cascade (CS-INIT-037) but
+// launches nothing.
+func DetectLinkedWorktreeFor(r execx.Runner, dir, instead string) (lw *LinkedWorktree, warning string) {
 	// CS-LNCH-176: bounded; git reads the .git file, <GitDir>/commondir and
 	// the config with blocking opens, and the common dir is session-writable.
 	out, err := execx.Git(r, execx.Cmd{
@@ -131,7 +139,7 @@ func DetectLinkedWorktree(r execx.Runner, dir string) (lw *LinkedWorktree, warni
 		Args: []string{"-C", dir, "rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel"},
 	})
 	if errors.Is(err, execx.ErrTimedOut) {
-		return nil, execx.GitTimeoutWarning(err, "launching as a plain project, without the linked-worktree check")
+		return nil, execx.GitTimeoutWarning(err, instead)
 	}
 	if err != nil {
 		return nil, ""
