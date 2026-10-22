@@ -52,7 +52,8 @@ func launchChain(project string, d Deps) []string {
 	main := ""
 	if d.Runner != nil {
 		lw, warn := launch.DetectLinkedWorktreeFor(d.Runner, project,
-			"reading the upstream configs as for a plain project, without the linked-worktree check")
+			"reading the upstream configs as for a plain project, without the linked-worktree check",
+			"reading the upstream configs without the main checkout's, so trackInHost is not inherited from it")
 		if warn != "" && d.Err != nil {
 			fmt.Fprintln(d.Err, warn)
 		}
@@ -133,7 +134,7 @@ func Run(project string, f Flags, d Deps) error {
 	case cfgExists:
 		// CS-INIT-013: existing config, no flag — leave it alone entirely.
 	case upstreamSet:
-		pre := fmt.Sprintf("Parent config sets trackInHost: %v (inherited from %s)", upstreamVal, upstreamSrc)
+		pre := fmt.Sprintf("Upstream config sets trackInHost: %v (inherited from %s)", upstreamVal, upstreamSrc)
 		ans := d.Prompter.Ask(pre, fmt.Sprintf("Track in host repo? [Enter=inherit %v, y/n=override]", upstreamVal), promptTimeout)
 		if ans != "" {
 			v := prompt.Parse(ans, upstreamVal)

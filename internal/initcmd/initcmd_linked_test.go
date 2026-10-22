@@ -52,7 +52,7 @@ var _ = Describe("CS-INIT-037: init reads the launch's search chain in a linked 
 		Expect(r.init(proj, initcmd.Flags{})).To(Succeed())
 		Expect(r.fake.CommandLines()).To(ContainElement(execx.GitSafePrefix + " -C " + proj + " " + linkedRevParse))
 		Expect(r.prompter.Asked).To(ContainElement(ContainSubstring("[Enter=inherit true, y/n=override]")))
-		Expect(r.errOut.String()).To(ContainSubstring(mainCfg))
+		Expect(r.errOut.String()).To(ContainSubstring("Upstream config sets trackInHost: true (inherited from " + mainCfg + ")"))
 		Expect(read(cfg)).To(ContainSubstring("# trackInHost: true   # inherited from " + mainCfg))
 		Expect(r.out.String()).To(ContainSubstring(filepath.Join(main, ".claude-sandbox") + "/"))
 	})
@@ -62,6 +62,18 @@ var _ = Describe("CS-INIT-037: init reads the launch's search chain in a linked 
 		Expect(r.init(proj, initcmd.Flags{})).To(Succeed())
 		Expect(r.prompter.Asked).NotTo(ContainElement(ContainSubstring("Enter=inherit")))
 		Expect(r.out.String()).NotTo(ContainSubstring(filepath.Join(main, ".claude-sandbox")))
+	})
+
+	It("CS-INIT-037: a back-link naming another path warns once and reads the plain parent walk", func() {
+		write(filepath.Join(main, ".git", "worktrees", "proj", "gitdir"), "/somewhere/else/.git\n")
+		r := &run{fake: linkedFake(), prompter: &prompt.Scripted{IsTTY: true, Answers: []string{"n"}}}
+		Expect(r.init(proj, initcmd.Flags{})).To(Succeed())
+		Expect(strings.Count(r.errOut.String(), "points elsewhere")).To(Equal(1))
+		Expect(r.errOut.String()).To(ContainSubstring(
+			"points elsewhere; reading the upstream configs without the main checkout's, so trackInHost is not inherited from it. Run 'git worktree repair' in " + proj))
+		Expect(r.prompter.Asked).NotTo(ContainElement(ContainSubstring("Enter=inherit")))
+		Expect(r.out.String()).NotTo(ContainSubstring(filepath.Join(main, ".claude-sandbox")))
+		Expect(read(cfg)).To(MatchRegexp(`(?m)^trackInHost: false$`))
 	})
 
 	It("CS-INIT-037: a git timeout warns once and falls back to the plain parent walk", func() {

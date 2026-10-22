@@ -418,5 +418,9 @@ Feature: init subcommand (CS-INIT)
       ending "reading the upstream configs as for a plain project, without
       the linked-worktree check." and init reads the plain parent walk, as it
       does when the project is not a linked worktree
+    And a worktree whose back-link (<git dir>/gitdir) names another path
+      prints one warning ending "reading the upstream configs without the
+      main checkout's, so trackInHost is not inherited from it." and init
+      reads the plain parent walk
     And plain repositories and harness worktrees (whose parents already
       include the main checkout) read exactly what they read before
