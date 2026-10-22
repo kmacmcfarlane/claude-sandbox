@@ -68,22 +68,27 @@ func pruneDir(dir string, whole bool, now time.Time) {
 	if err != nil {
 		return
 	}
-	// Locks first: a held one keeps the whole directory as it is.
+	// Locks first, and only for a directory that goes whole: a held one
+	// keeps it as it is. A directory a row names is never locked at all — a
+	// brief exclusive lock there would make a session-end helper's LOCK_NB
+	// on end.lock fail; only its dead leases go.
 	var locked []*os.File
 	defer func() {
 		for _, f := range locked {
 			f.Close()
 		}
 	}()
-	for _, e := range ents {
-		if !strings.HasSuffix(e.Name(), LockSuffix) {
-			continue
+	if whole {
+		for _, e := range ents {
+			if !strings.HasSuffix(e.Name(), LockSuffix) {
+				continue
+			}
+			f, ok := lockExclusive(filepath.Join(dir, e.Name()))
+			if !ok {
+				return
+			}
+			locked = append(locked, f)
 		}
-		f, ok := lockExclusive(filepath.Join(dir, e.Name()))
-		if !ok {
-			return
-		}
-		locked = append(locked, f)
 	}
 	removedAll := true
 	for _, e := range ents {

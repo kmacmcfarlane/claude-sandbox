@@ -18,6 +18,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/kmacmcfarlane/claude-sandbox/internal/clients"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/hostdirs"
 )
 
 const (
@@ -109,6 +110,24 @@ var _ = Describe("client leases (CS-LNCH-204, CS-DIR-029)", func() {
 		_, err := clients.Take(root, "abc", clients.KindAttach, time.Now(), "")
 		Expect(err).To(HaveOccurred())
 		Expect(func() { clients.Take("", idA, clients.KindAttach, time.Now(), "") }).To(PanicWith(ContainSubstring("real one")))
+	})
+
+	It("CS-DIR-029: a state root at or inside the real one panics under go test, before anything is written", func() {
+		home, err := os.UserHomeDir()
+		Expect(err).NotTo(HaveOccurred())
+		real := hostdirs.StateRoot(home, os.Getenv)
+		for _, r := range []string{real, real + "/", filepath.Join(real, "sub"), filepath.Join(home, ".local/state/claude-sandbox")} {
+			Expect(func() { clients.Take(r, idA, clients.KindAttach, time.Now(), "") }).To(PanicWith(ContainSubstring("real state root")), r)
+			Expect(func() { clients.ReadLeases(r, idA) }).To(PanicWith(ContainSubstring("real state root")), r)
+			Expect(func() { clients.Prune(r, nil, nil, time.Now()) }).To(PanicWith(ContainSubstring("real state root")), r)
+		}
+		// Reached through a symlink: resolved before the comparison.
+		link := filepath.Join(GinkgoT().TempDir(), "state")
+		Expect(os.Symlink(home, link)).To(Succeed())
+		Expect(func() {
+			clients.Take(filepath.Join(link, ".local/state/claude-sandbox"), idA, clients.KindAttach, time.Now(), "")
+		}).
+			To(PanicWith(ContainSubstring("real state root")))
 	})
 
 	It("CS-LNCH-204: a state root it cannot own (a symlink) fails the take, nothing is followed", func() {
@@ -247,6 +266,19 @@ var _ = Describe("pruning client directories (CS-DIR-029)", func() {
 		Expect(clients.Prune(root, nil, nil, now)).To(Succeed())
 		_, err = os.Lstat(clients.ContainerDir(root, idA))
 		Expect(errors.Is(err, os.ErrNotExist)).To(BeTrue())
+	})
+
+	It("CS-DIR-029: in a directory a row names, no lock file is ever locked; a held end.lock does not stop dead leases going", func() {
+		dead := write(idA, "1.00.lease")
+		lock := write(idA, clients.EndLockName)
+		f, err := os.Open(lock)
+		Expect(err).NotTo(HaveOccurred())
+		defer f.Close()
+		Expect(syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)).To(Succeed())
+		Expect(clients.Prune(root, []string{idA}, nil, now)).To(Succeed())
+		_, err = os.Lstat(dead)
+		Expect(errors.Is(err, os.ErrNotExist)).To(BeTrue())
+		Expect(lock).To(BeAnExistingFile())
 	})
 
 	It("CS-DIR-029: a young temp file is a lease being taken and stays; an old dead one goes", func() {

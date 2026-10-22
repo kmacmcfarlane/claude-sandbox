@@ -17,7 +17,7 @@ import (
 // Invocation is a docker CLI command line read as a client of containers
 // (CS-SESS-098).
 type Invocation struct {
-	// Kind: start -a = primary, attach = attach, exec = join.
+	// Kind: start -a|-i = primary, attach = attach, exec = join.
 	Kind Kind
 	// Containers are the container arguments: attach's and exec's first
 	// positional, every positional of start.
@@ -136,11 +136,11 @@ func isOption(a string) bool { return len(a) > 1 && a[0] == '-' }
 
 // ParseInvocation reads argv as a docker CLI client command (CS-SESS-098):
 // argv[0]'s basename is docker or com.docker.cli; after the global options
-// the subcommand is attach, start (with -a) or exec (without -d), or
+// the subcommand is attach, start (with -a or -i) or exec (without -d), or
 // "container attach|start|exec"; the container argument is the first
 // positional after the subcommand's own options (start: every positional).
 // ok is false for anything else — "docker events", "docker inspect", a
-// start without -a, a detached exec.
+// start without -a or -i, a detached exec.
 func ParseInvocation(argv []string) (inv Invocation, ok bool) {
 	if len(argv) < 2 {
 		return inv, false
@@ -210,7 +210,9 @@ func ParseInvocation(argv []string) (inv Invocation, ok bool) {
 			inv.Containers = pos[:1]
 		}
 	case "start":
-		if !p.set["attach"] && !p.unknown {
+		// docker's RunStart attaches on Attach || OpenStdin: -i alone
+		// attaches too.
+		if !p.set["attach"] && !p.set["interactive"] && !p.unknown {
 			return inv, false
 		}
 		inv.Kind = KindPrimary

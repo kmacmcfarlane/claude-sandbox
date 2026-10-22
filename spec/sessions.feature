@@ -1168,7 +1168,7 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
       - after the global options (--context/-c, -H/--host, --config,
         -l/--log-level, -D/--debug, --tls*, with "=" or separate values), the
         subcommand is attach, start or exec, or "container attach|start|exec"
-      - start counts only with -a/--attach (alone or in a cluster such as
+      - start counts only with -a/--attach or -i/--interactive (alone or in a cluster such as
         -ai/-ia); exec with -d/--detach does not count
       - the container argument is the first positional after the
         subcommand's own options (start: every positional), skipping the
@@ -1182,7 +1182,7 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
       (conservative: it can keep a container longer, never end one early)
     And "docker events", "docker inspect", "docker ps" and "docker top" never
       match
-    And a scan hit carries its pid, argv and kind: start -a = primary,
+    And a scan hit carries its pid, argv and kind: start -a|-i = primary,
       attach = attach, exec = join; a lease's kind is its own
     And when the clients directory exists but cannot be read, or <proc>
       cannot be listed, the answer is "cannot tell", never "no client"

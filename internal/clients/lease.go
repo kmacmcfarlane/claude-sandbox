@@ -223,6 +223,9 @@ func checkRoot(stateRoot string) string {
 		}
 		panic("clients: empty state root")
 	}
+	if testing.Testing() && isRealStateRoot(stateRoot) {
+		panic("clients: a test would use the real state root " + stateRoot + "; pass a scratch directory")
+	}
 	return stateRoot
 }
 

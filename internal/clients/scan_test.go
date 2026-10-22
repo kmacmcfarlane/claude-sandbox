@@ -79,9 +79,11 @@ var _ = Describe("docker CLI argv (CS-SESS-098)", func() {
 		Expect(clientOf(a, "docker", "container", "exec", "-it", nameA, "bash")).To(BeTrue())
 	})
 
-	It("CS-SESS-098: start counts only with -a/--attach; exec with -d does not count", func() {
+	It("CS-SESS-098: start counts only with -a/--attach or -i/--interactive; exec with -d does not count", func() {
 		Expect(clientOf(a, "docker", "start", nameA)).To(BeFalse())
-		Expect(clientOf(a, "docker", "start", "-i", nameA)).To(BeFalse())
+		Expect(clientOf(a, "docker", "start", "-i", nameA)).To(BeTrue(), "docker attaches on Attach || OpenStdin")
+		Expect(clientOf(a, "docker", "start", "--attach=false", "-i", nameA)).To(BeTrue())
+		Expect(clientOf(a, "docker", "start", "--interactive=false", nameA)).To(BeFalse())
 		Expect(clientOf(a, "docker", "start", "--attach=false", nameA)).To(BeFalse())
 		Expect(clientOf(a, "docker", "start", "-ia", nameA)).To(BeTrue())
 		Expect(clientOf(a, "docker", "start", "--attach", nameA)).To(BeTrue())
