@@ -77,6 +77,12 @@ var _ = Describe("terminal identity resolver (CS-LNCH-178..181, CS-SESS-090/092)
 			[]string(nil), "none", []string(nil), []string{"TERMINAL_EMULATOR"}, ""),
 	)
 
+	It("CS-LNCH-179: a bare line with S set but empty counts S as unset and passes an empty -e (docker would pass the empty value)", func() {
+		r := resolve(map[string]string{"TERMINAL_EMULATOR": ""}, envFile("/f1", "TERMINAL_EMULATOR\n"))
+		Expect(r.CreateEnv(false)).To(Equal([]string{"TERMINAL_EMULATOR="}))
+		Expect(r.Label(false)).To(Equal("none"))
+	})
+
 	It("CS-LNCH-179: a bare line with S unset but the client holding a value passes an empty -e (the S-source seam)", func() {
 		// S from elsewhere than the docker client's environment (OQ-B's seam):
 		// S unset while the bare line would pass the client's stale value.

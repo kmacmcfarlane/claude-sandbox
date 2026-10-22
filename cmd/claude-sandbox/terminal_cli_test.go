@@ -14,6 +14,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/prompt"
 )
 
 const jediTerm = "JetBrains-JediTerm"
@@ -62,6 +63,24 @@ var _ = Describe("terminal identity (CS-LNCH-178..181, CS-SESS-090..092)", func(
 			Expect(createLabel()).To(Equal("TERMINAL_EMULATOR=" + jediTerm))
 		})
 
+		It("CS-LNCH-178, CS-SESS-039: the tier-1 [b] fork passes it too, like a new launch", func() {
+			f.envmap["TERMINAL_EMULATOR"] = jediTerm
+			f.fake.On("docker ps", psRow("cs-a", "Up 1 hour", f.proj, "otter")+"\n", nil)
+			f.fake.On("docker top", "PID  COMMAND\n1  claude\n", nil)
+			f.env.Prompter = &prompt.Scripted{IsTTY: true, Answers: []string{"b"}}
+			Expect(f.run()).To(Equal(0), f.errw.String())
+			Expect(f.launchLine()).To(HaveSuffix(" claude --continue --fork-session"))
+			Expect(createEnv()).To(ContainElement("TERMINAL_EMULATOR=" + jediTerm))
+			Expect(createLabel()).To(Equal("TERMINAL_EMULATOR=" + jediTerm))
+		})
+
+		It("CS-LNCH-178: an empty launcher value is unset: no -e, label none", func() {
+			f.envmap["TERMINAL_EMULATOR"] = ""
+			Expect(f.run("--new")).To(Equal(0), f.errw.String())
+			noTerminalEnv(createEnv())
+			Expect(createLabel()).To(Equal("none"))
+		})
+
 		It("CS-LNCH-178: --detach passes it too (the launcher's terminal is the best evidence)", func() {
 			saved := detachedSettle
 			detachedSettle = 20 * time.Millisecond
@@ -95,6 +114,32 @@ var _ = Describe("terminal identity (CS-LNCH-178..181, CS-SESS-090..092)", func(
 			Expect(f.run("headless", "--", "-p", "hi")).To(Equal(0), f.errw.String())
 			noTerminalEnv(createEnv())
 			Expect(createLabel()).To(Equal("TERMINAL_EMULATOR=" + jediTerm))
+		})
+
+		It("CS-LNCH-180: headless differs from interactive in terminal identity only by the missing -e", func() {
+			terminalTokens := func(args []string) []string {
+				var out []string
+				for _, a := range args {
+					if strings.Contains(a, "TERMINAL_EMULATOR") {
+						out = append(out, a)
+					}
+				}
+				return out
+			}
+			f.envmap["TERMINAL_EMULATOR"] = jediTerm
+			writeFile(envFile(), "TERMINAL_EMULATOR\n")
+			Expect(f.run("--new")).To(Equal(0), f.errw.String())
+			interactive := terminalTokens(f.launched().Args)
+
+			h := newCLIFixture()
+			h.envmap["TERMINAL_EMULATOR"] = jediTerm
+			writeFile(filepath.Join(h.proj, ".claude-sandbox", "env"), "TERMINAL_EMULATOR\n")
+			Expect(h.run("headless", "--", "-p", "hi")).To(Equal(0), h.errw.String())
+			headless := terminalTokens(h.launched().Args)
+
+			Expect(interactive).To(ConsistOf("TERMINAL_EMULATOR="+jediTerm, "claude-sandbox.terminal=TERMINAL_EMULATOR="+jediTerm))
+			Expect(headless).To(Equal([]string{"claude-sandbox.terminal=TERMINAL_EMULATOR=" + jediTerm}),
+				"headless: no -e, the label from the env-file walk alone")
 		})
 
 		It("CS-LNCH-180: ralph passes none; with no env-file line its label is none", func() {

@@ -9,6 +9,7 @@ package main
 // internal/tmuxpane (startlock, notice, ready, restore).
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -361,6 +362,24 @@ var _ = Describe("tmux restore, one pane (CS-TMUX-052..063)", func() {
 				got := attachWith("TERMINAL_EMULATOR=JetBrains-JediTerm")
 				Expect(got).To(ContainSubstring("Note: session 'heron' was started in a terminal with TERMINAL_EMULATOR=JetBrains-JediTerm; this terminal has TERMINAL_EMULATOR unset."))
 				Expect(got).To(ContainSubstring("--join"))
+			})
+
+			It("CS-SESS-091: the note follows the restore's own line and precedes docker attach", func() {
+				// One stream for both, so the order across stdout and stderr is observable.
+				var both bytes.Buffer
+				f.env.Out, f.env.Err = &both, &both
+				var atAttach string
+				pane(withID().JSON())
+				inspectRunning("running")
+				f.fake.On("docker ps", termRow("TERMINAL_EMULATOR=JetBrains-JediTerm")+"\n", nil)
+				streamEvents(f.fake, dockerEvent("die", "0"))
+				f.fake.OnFunc("docker attach", func(execx.Cmd) (string, error) { atAttach = both.String(); return "", nil })
+				Expect(f.run("tmux", "restore")).To(Equal(0), both.String())
+				line := strings.Index(atAttach, "claude-sandbox: ")
+				note := strings.Index(atAttach, "Note: session 'heron' was started in a terminal")
+				Expect(line).To(BeNumerically(">=", 0), atAttach)
+				Expect(note).To(BeNumerically(">", line), "the note follows the restore's own line:\n%s", atAttach)
+				Expect(strings.Count(atAttach, "was started in a terminal")).To(Equal(1))
 			})
 
 			It("CS-SESS-091: an equal identity prints nothing", func() {
