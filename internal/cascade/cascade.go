@@ -343,6 +343,21 @@ func readable(files []string) []ConfigFile {
 func TrackInHostResolveOf(snap []ConfigFile) (value, isSet bool, source string, err error) {
 	cfg, err := LoadSnapshot(snap)
 	if err != nil {
+		// A merge that fails on trackInHost's own value (a string, a
+		// number) names the whole cascade; name the file that set it.
+		if src := KeySourceOf(snap, "trackInHost"); src != "" {
+			for _, f := range snap {
+				if f.Path != src {
+					continue
+				}
+				var one struct {
+					TrackInHost *bool `yaml:"trackInHost"`
+				}
+				if kerr := yaml.Unmarshal(f.Content, &one); kerr != nil {
+					return false, false, "", fmt.Errorf("cascade: invalid trackInHost in %s: %w", src, kerr)
+				}
+			}
+		}
 		return false, false, "", err
 	}
 	if cfg.TrackInHost == nil {

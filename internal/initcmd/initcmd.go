@@ -52,14 +52,8 @@ func Run(project string, f Flags, d Deps) error {
 	sb := paths.SandboxDir(project)
 	cfgPath := filepath.Join(sb, "config.yaml")
 	envExamplePath := filepath.Join(sb, paths.EnvExampleName)
-	if err := os.MkdirAll(sb, 0o755); err != nil {
-		return err
-	}
-
-	fmt.Fprintf(d.Out, "Initializing .claude-sandbox/ in %s\n", project)
-	// CS-INIT-019: make inheritance visible up front.
-	cascade.PrintReport(d.Out, project)
-
+	// Read and resolved before anything is created, so an init that fails on
+	// an upstream config leaves no empty .claude-sandbox/ behind.
 	// Upstream trackInHost (ancestors only — exclude the project's own file).
 	upstreamConfigs, err := paths.CollectUp(filepath.Dir(project), paths.Config)
 	if err != nil {
@@ -81,6 +75,14 @@ func Run(project string, f Flags, d Deps) error {
 	if err != nil {
 		return err
 	}
+
+	if err := os.MkdirAll(sb, 0o755); err != nil {
+		return err
+	}
+
+	fmt.Fprintf(d.Out, "Initializing .claude-sandbox/ in %s\n", project)
+	// CS-INIT-019: make inheritance visible up front.
+	cascade.PrintReport(d.Out, project)
 
 	// Resolve the local trackInHost decision: flag > prompt. When an ancestor
 	// defines it, the prompt shows the inherited value as the default and
@@ -315,45 +317,55 @@ func printNextSteps(w io.Writer, ralph bool) {
 	}
 }
 
-// trackLineRe matches a TOP-LEVEL trackInHost line only, commented or not
-// (CS-INIT-036): a key at column 0. An indented line is a nested key of the
-// same name under another key, which the launch's merge does not read as
-// trackInHost and which init must not rewrite into a top-level one.
-var trackLineRe = regexp.MustCompile(`(?m)^(?:#[ \t]*)?trackInHost:.*$`)
+// liveTrackRe matches a top-level, uncommented trackInHost line (column 0);
+// commentTrackRe a top-level commented one, such as the scaffold's hint.
+var (
+	liveTrackRe    = regexp.MustCompile(`(?m)^trackInHost:.*$`)
+	commentTrackRe = regexp.MustCompile(`(?m)^#[ \t]*trackInHost:.*$`)
+)
 
-// SetTrackInHost forces the config's trackInHost to val (uncommented),
-// replacing any existing commented or uncommented line, or appending when
-// absent (CS-INIT-012).
+// replaceTrackLine puts line in place of the live top-level trackInHost
+// line(s) when live is set and there is one, leaving commented hints alone (a
+// hint turned live beside a live line would be a duplicate key); else in
+// place of the FIRST commented one; else appends it (CS-INIT-012, 036).
+func replaceTrackLine(content, line string, live bool) string {
+	if live && liveTrackRe.MatchString(content) {
+		return liveTrackRe.ReplaceAllLiteralString(content, line)
+	}
+	if loc := commentTrackRe.FindStringIndex(content); loc != nil {
+		return content[:loc[0]] + line + content[loc[1]:]
+	}
+	return content + fmt.Sprintf("\n%s\n", line)
+}
+
+// SetTrackInHost forces the config's trackInHost to val (uncommented). The
+// result is checked with the launch's own merge before it is written: when
+// the launch would not read trackInHost: val from it (a flow map, an indented
+// mapping, a later YAML document, a key spelled another way), nothing is
+// written and the error says to set it by hand (CS-INIT-036).
 func SetTrackInHost(cfgPath string, val bool) error {
 	raw, err := cascade.ReadRegularFile(cfgPath)
 	if err != nil {
 		return err
 	}
-	line := fmt.Sprintf("trackInHost: %v", val)
-	content := string(raw)
-	if trackLineRe.MatchString(content) {
-		content = trackLineRe.ReplaceAllString(content, line)
-	} else {
-		content += fmt.Sprintf("\n%s\n", line)
+	content := replaceTrackLine(string(raw), fmt.Sprintf("trackInHost: %v", val), true)
+	cfg, err := cascade.LoadSnapshot([]cascade.ConfigFile{{Path: cfgPath, Content: []byte(content)}})
+	if err != nil || cfg.TrackInHost == nil || *cfg.TrackInHost != val {
+		return fmt.Errorf("cannot set trackInHost in %s safely; set \"trackInHost: %v\" at its top level by hand", cfgPath, val)
 	}
 	return os.WriteFile(cfgPath, []byte(content), 0o644)
 }
 
 // setTrackInHostHint rewrites the commented hint line so it reflects the
-// inherited effective value and its source (CS-INIT-016).
+// inherited effective value and its source (CS-INIT-016). It replaces only a
+// commented line, never a live one.
 func setTrackInHostHint(cfgPath string, val bool, source string) error {
 	raw, err := cascade.ReadRegularFile(cfgPath)
 	if err != nil {
 		return err
 	}
 	line := fmt.Sprintf("# trackInHost: %v   # inherited from %s", val, source)
-	content := string(raw)
-	if trackLineRe.MatchString(content) {
-		content = trackLineRe.ReplaceAllString(content, line)
-	} else {
-		content += fmt.Sprintf("\n%s\n", line)
-	}
-	return os.WriteFile(cfgPath, []byte(content), 0o644)
+	return os.WriteFile(cfgPath, []byte(replaceTrackLine(string(raw), line, false)), 0o644)
 }
 
 func pathExists(p string) bool {

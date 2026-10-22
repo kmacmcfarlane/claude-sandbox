@@ -144,8 +144,10 @@ Feature: init subcommand (CS-INIT)
     When "claude-sandbox init --track-in-host" is run
     Then the commented line is replaced by "trackInHost: true"
     And stdout reports config.yaml as "updated"
-    # Replacement matches an existing commented OR uncommented trackInHost line;
-    # if no such line exists the key is appended.
+    # A live (uncommented) top-level trackInHost line wins: it is replaced and
+    # commented hints are left alone; with none, the FIRST commented one is
+    # replaced; with neither, the key is appended. The result is checked with
+    # the launch's merge before it is written (CS-INIT-036).
 
   Scenario: CS-INIT-013 No flag on an existing config leaves it untouched
     Given .claude-sandbox/config.yaml exists
@@ -374,9 +376,22 @@ Feature: init subcommand (CS-INIT)
     When "claude-sandbox init" runs
     Then init fails with the launch's parse error naming the file, as the
       next launch would, instead of resolving trackInHost from it
+    And a trackInHost value the merge cannot take as a bool (a string, a
+      number) names the one file that set it, not the whole cascade
+    And an upstream config that fails leaves no .claude-sandbox/ created
 
   Scenario: CS-INIT-036 init rewrites only the top-level trackInHost line
     Given a config.yaml with a nested key named trackInHost under another key
     When init writes trackInHost (CS-INIT-012) or the inherited hint (CS-INIT-016)
     Then only a top-level "trackInHost:" or "# trackInHost:" line at column 0
       is replaced (else the key is appended), and the nested key is left as it was
+    And a live top-level line wins over a commented one: with both, only the
+      live line is rewritten, so the hint never becomes a duplicate key
+    Given a config.yaml whose trackInHost the launch would not read from such
+      a line: a flow map "{trackInHost: false}", a whole top-level mapping
+      indented, the key in a later YAML document, or "trackInHost : false"
+    When init would write trackInHost: <v> into it
+    Then the result is checked with the launch's merge (cascade.LoadSnapshot)
+      first; unless it reads exactly trackInHost: <v>, nothing is written and
+      init fails with "cannot set trackInHost in <file> safely; set
+      "trackInHost: <v>" at its top level by hand"

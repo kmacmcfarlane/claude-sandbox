@@ -145,7 +145,7 @@ var _ = Describe("CS-INIT-034..036: init reads trackInHost as the launch does", 
 
 			err = (&run{}).init(proj, initcmd.Flags{TrackInHost: ptr(false)})
 			Expect(err).To(MatchError(ContainSubstring(wsCfg)))
-			Expect(exists(cfg)).To(BeFalse(), "nothing seeded")
+			Expect(exists(sb)).To(BeFalse(), "nothing created")
 		},
 		Entry("not YAML", "trackInHost: [\n"),
 		Entry("a quoted string", "trackInHost: \"true\"\n"),
@@ -181,4 +181,40 @@ var _ = Describe("CS-INIT-034..036: init reads trackInHost as the launch does", 
 		Expect(initcmd.SetTrackInHostHint(cfg, true, wsCfg)).To(Succeed())
 		Expect(read(cfg)).To(Equal("extra:\n  trackInHost: false\n# trackInHost: true   # inherited from " + wsCfg + "\n"))
 	})
+
+	It("CS-INIT-035: a trackInHost the merge cannot take as a bool names the one file that set it", func() {
+		write(wsCfg, "trackInHost: true\n")
+		mid := filepath.Join(ws, "q", ".claude-sandbox", "config.yaml")
+		write(mid, "trackInHost: 1\n")
+		proj = filepath.Join(ws, "q", "p")
+		mkdir(proj)
+		err := (&run{}).init(proj, initcmd.Flags{TrackInHost: ptr(false)})
+		Expect(err).To(MatchError(ContainSubstring("invalid trackInHost in " + mid)))
+		Expect(err.Error()).NotTo(ContainSubstring(wsCfg))
+	})
+
+	It("CS-INIT-036: a live line wins over a commented hint: no duplicate key", func() {
+		write(cfg, "# trackInHost: false\ntrackInHost: false\n")
+		Expect((&run{}).init(proj, initcmd.Flags{TrackInHost: ptr(true)})).To(Succeed())
+		Expect(read(cfg)).To(Equal("# trackInHost: false\ntrackInHost: true\n"))
+		lv, lset := launchReads(cfg)
+		Expect(lset).To(BeTrue())
+		Expect(lv).To(BeTrue())
+	})
+
+	DescribeTable("CS-INIT-036: a config the launch would read differently is refused, unchanged",
+		func(content string) {
+			write(cfg, content)
+			err := (&run{}).init(proj, initcmd.Flags{TrackInHost: ptr(true)})
+			Expect(err).To(MatchError(ContainSubstring("cannot set trackInHost in " + cfg + " safely")))
+			Expect(err).To(MatchError(ContainSubstring(`set "trackInHost: true" at its top level by hand`)))
+			Expect(read(cfg)).To(Equal(content))
+		},
+		Entry("a flow map", "{trackInHost: false}\n"),
+		Entry("an indented top-level mapping", "  a: 1\n  trackInHost: false\n"),
+		Entry("a later YAML document", "a: 1\n---\ntrackInHost: false\n"),
+		Entry("a space before the colon", "trackInHost : false\n"),
+		Entry("a quoted key", "\"trackInHost\": false\n"),
+		Entry("a BOM before the key", "\ufefftrackInHost: false\n"),
+	)
 })
