@@ -48,6 +48,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/kmacmcfarlane/claude-sandbox/internal/cascade"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/clients"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/hostdirs"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/launch"
@@ -1233,6 +1234,10 @@ func restoreCascade(env *Env, project string) (*cascade.Config, []string, *launc
 // active mark (onChild), so another pane on the same container then finds
 // it on screen (CS-TMUX-057).
 func restoreAttach(env *Env, p *actProbes, m tmuxpane.Mark, d tmuxpane.Decision, prior string) error {
+	// CS-LNCH-204: the attach's client lease, as soon as the container is
+	// chosen; released on every return.
+	lease := takeLease(env, m.ContainerID, clients.KindAttach)
+	defer lease.Release()
 	if err := os.Chdir(m.Project); err != nil {
 		p.release()
 		restorePending(env, fmt.Sprintf("cannot enter %s (%v)", m.Project, err), d.Manual)
@@ -1286,7 +1291,7 @@ func restoreAttach(env *Env, p *actProbes, m tmuxpane.Mark, d tmuxpane.Decision,
 	terminalNote(renv, s, snap, snapErr)
 	// CS-LNCH-197: a restore attach pings and restarts the clipboard helper
 	// but writes no target (the pane's environment is the service's).
-	return attachToWith(renv, s, keys, mark, p.release, "", nil)
+	return attachToWith(renv, s, keys, mark, p.release, lease, "", nil)
 }
 
 // restoreResume is row 18's resume (CS-TMUX-058..062): the normal launch

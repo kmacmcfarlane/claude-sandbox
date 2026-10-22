@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kmacmcfarlane/claude-sandbox/internal/clients"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/globalcfg"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/hostdirs"
@@ -166,6 +167,8 @@ func reserveContainer(env *Env, in launch.Inputs, wt worktreeChoice, ralph bool,
 			// After discovery, so the directories of the stale reservations it
 			// just removed are already unreferenced.
 			pruneShadowDirs(env, in.TempDir, in.Home)
+			// CS-DIR-029: what dead clients left; nothing when discovery failed.
+			pruneClients(env, found, removing, derr)
 		}
 		project := sessions.ForProject(found, in.ProjectDir)
 
@@ -357,7 +360,16 @@ func pidClassFrom(found []sessions.Session) string {
 // (CS-GCFG-014).
 // mark is the pane mark for the session (CS-TMUX-011), nil for none.
 func startReserved(env *Env, plan *launch.Plan, headless bool, pre *globalcfg.Health, mark *paneMark) error {
+	// CS-LNCH-204: the client lease, from the create's 64-hex id, before the
+	// start; released on every return.
+	kind := clients.KindPrimary
+	if headless {
+		kind = clients.KindSDK
+	}
+	lease := takeLease(env, plan.ContainerID, kind)
+	defer lease.Release()
 	o := sessionOpts{
+		lease:    lease,
 		kind:     reservedSession,
 		fallback: oomreport.Limit{Value: plan.MemoryLimit, Source: plan.MemoryLimitSource},
 		headless: headless,

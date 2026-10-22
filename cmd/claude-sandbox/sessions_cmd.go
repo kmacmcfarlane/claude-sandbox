@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/kmacmcfarlane/claude-sandbox/internal/cascade"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/clients"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/clipboard"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/imagebuild"
@@ -386,6 +387,19 @@ func selectInstance(env *Env, candidates []sessions.Session, verb string) (sessi
 // or shadow-file injection — the container is already configured. That is
 // exactly why config drift is reported instead (CS-SESS-033).
 func joinExistingSession(env *Env, projectDir string, f *launchFlags, cfg *cascade.Config, envFiles []string, d sessionDecision, wt worktreeChoice, linked *launch.LinkedWorktree) (bool, error) {
+	// CS-LNCH-204: the client lease, as soon as the container is chosen —
+	// before the drift check, its prompt, the clipboard re-resolve and the
+	// pane mark — so nothing reads this container as unattended while a
+	// person sits at a prompt about to attach. Released on every return,
+	// including a quit, a refused drift and a drift that chose a new
+	// container.
+	kind := clients.KindAttach
+	if d.Action == actionJoin {
+		kind = clients.KindJoin
+	}
+	lease := takeLease(env, d.Target.ID, kind)
+	defer lease.Release()
+
 	model := f.Model
 	if model == "" {
 		model = cfg.Model
@@ -426,13 +440,13 @@ func joinExistingSession(env *Env, projectDir string, f *launchFlags, cfg *casca
 		_, _, _, home := hostIdentity(env.Getenv)
 		if snapErr == nil {
 			// CS-LNCH-202: the JetBrains note, after the target is written.
-			return true, attachToWith(env, d.Target, cfg.DetachKeys, attachMark(d.Target, home, wt.Root), nil, clipboard.ByAttach, func(eff *clipboard.Target, bridged bool) {
+			return true, attachToWith(env, d.Target, cfg.DetachKeys, attachMark(d.Target, home, wt.Root), nil, lease, clipboard.ByAttach, func(eff *clipboard.Target, bridged bool) {
 				if bridged && launch.ClipboardWanted(env.Getenv, cfg, false, false) {
 					jetbrainsNote(env, projectDir, snap, eff)
 				}
 			})
 		}
-		return true, attachTo(env, d.Target, cfg.DetachKeys, attachMark(d.Target, home, wt.Root), nil)
+		return true, attachTo(env, d.Target, cfg.DetachKeys, attachMark(d.Target, home, wt.Root), nil, lease)
 	}
 	_, _, hostUser, _ := hostIdentity(env.Getenv)
 	// CS-SESS-092: an unreadable snapshot leaves the container's identity
@@ -443,7 +457,7 @@ func joinExistingSession(env *Env, projectDir string, f *launchFlags, cfg *casca
 		t := launch.ResolveTerminal(env.lookupEnv, snap, env.lookupEnv)
 		term = &t
 	}
-	return true, joinInto(env, d.Target, projectDir, hostUser, model, cfg.DetachKeys, resolveDangerous(env, f, cfg), f, wt, term)
+	return true, joinInto(env, d.Target, projectDir, hostUser, model, cfg.DetachKeys, resolveDangerous(env, f, cfg), f, wt, term, lease)
 }
 
 // terminalNote prints one stderr Note before an attach when the container's
@@ -672,13 +686,14 @@ func newInstance(env *Env, projectDir string, f *launchFlags, gitRoot string) st
 // releases its start lock there, CS-TMUX-060). docker attach gets the full
 // 64-hex id when it is known, else the name; the event filter keeps the name,
 // which oomreport matches exactly (CS-TMUX-056, CS-LNCH-095).
-func attachTo(env *Env, s sessions.Session, configuredKeys string, mark *paneMark, onChild func()) error {
-	return attachToWith(env, s, configuredKeys, mark, onChild, clipboard.ByAttach, nil)
+func attachTo(env *Env, s sessions.Session, configuredKeys string, mark *paneMark, onChild func(), lease *clients.Lease) error {
+	return attachToWith(env, s, configuredKeys, mark, onChild, lease, clipboard.ByAttach, nil)
 }
 
 // attachToWith is attachTo with a hook that sees the clipboard bridge's
-// effective target once the attach re-pointed it (CS-LNCH-197/202).
-func attachToWith(env *Env, s sessions.Session, configuredKeys string, mark *paneMark, onChild func(), by string, clip func(*clipboard.Target, bool)) error {
+// effective target once the attach re-pointed it (CS-LNCH-197/202). lease is
+// the attach's client lease (CS-LNCH-204), taken and released by the caller.
+func attachToWith(env *Env, s sessions.Session, configuredKeys string, mark *paneMark, onChild func(), lease *clients.Lease, by string, clip func(*clipboard.Target, bool)) error {
 	// CS-LNCH-197: re-point the bridge to this shell's display, never
 	// downgrading, and restart a dead helper.
 	eff, bridged := refreshClipboardBridge(env, s, by)
@@ -699,7 +714,7 @@ func attachToWith(env *Env, s sessions.Session, configuredKeys string, mark *pan
 	end, err := runSession(env, execx.Cmd{
 		Name: "docker",
 		Args: []string{"attach", "--detach-keys=" + detachKeys, target},
-	}, s.Name, sessionOpts{kind: primarySession, after: func() { checkGlobalConfig(env, pre) }, mark: mark, onChild: onChild})
+	}, s.Name, sessionOpts{kind: primarySession, after: func() { checkGlobalConfig(env, pre) }, mark: mark, onChild: onChild, lease: lease})
 	if err != nil {
 		return err
 	}
@@ -712,7 +727,7 @@ func attachToWith(env *Env, s sessions.Session, configuredKeys string, mark *pan
 // term is the joining terminal's identity (CS-SESS-090/092), nil when the env
 // files could not be read: then no identity variable is touched and the
 // container's value stands.
-func joinInto(env *Env, s sessions.Session, projectDir, hostUser, model, configuredKeys string, dangerous bool, f *launchFlags, wt worktreeChoice, term *launch.TerminalResult) error {
+func joinInto(env *Env, s sessions.Session, projectDir, hostUser, model, configuredKeys string, dangerous bool, f *launchFlags, wt worktreeChoice, term *launch.TerminalResult, lease *clients.Lease) error {
 	if tmuxpane.GuardedContinue(f.Passthrough) {
 		// CS-SESS-095: before the docker exec, which nothing undoes.
 		if err := guardJoinContinue(env, projectDir, wt, f.Passthrough); err != nil {
@@ -789,7 +804,7 @@ func joinInto(env *Env, s sessions.Session, projectDir, hostUser, model, configu
 	mark := joinMark(s, home, wt, launchRecord(env, f), env.now(), tmuxpane.ResumeID(f.Passthrough))
 	// CS-SESS-060: judged by the exec's own status, since the container
 	// normally outlives it.
-	end, err := runSession(env, execx.Cmd{Name: "docker", Args: args}, s.Name, sessionOpts{kind: joinedSession, mark: mark})
+	end, err := runSession(env, execx.Cmd{Name: "docker", Args: args}, s.Name, sessionOpts{kind: joinedSession, mark: mark, lease: lease})
 	if err != nil {
 		return err
 	}

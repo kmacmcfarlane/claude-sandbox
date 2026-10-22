@@ -166,3 +166,10 @@ var _ = Describe("InSandbox", func() {
 		}))).To(BeFalse())
 	})
 })
+
+var _ = Describe("client lease paths (CS-DIR-029)", func() {
+	It("CS-DIR-029: client leases and the session-end log live under the state root", func() {
+		Expect(hostdirs.ClientsDir("/s")).To(Equal("/s/clients"))
+		Expect(hostdirs.SessionEndsLog("/s")).To(Equal("/s/session-ends.jsonl"))
+	})
+})
