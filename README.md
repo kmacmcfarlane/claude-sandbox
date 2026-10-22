@@ -522,26 +522,38 @@ either direction.
 `~/.local/state/claude-sandbox-peers`, or `~/.cache/claude-sandbox/peers` while the
 [drain](#moving-the-registry-out-of-the-cache) lasts):
 
-1. **Banner.** Each launch printed `Peer registry: shared (…)`. Missing means the bridge is not
-   on for that launch (key unset, or switched off by `CLAUDE_SANDBOX_SHARED_PEER_REGISTRY=0`) or
-   it stood down: look for a `Warning:` line near the banner (an env file defining
-   `XDG_RUNTIME_DIR`, a socket path too long, a peer directory that could not be created).
-2. **Peer address.** In each session `/status` should show the session's messaging socket
-   address as `<peers root>/cc-socks/<pid>.sock`. A container-private path such as
-   `/tmp/cc-socks-<uid>/…` means Claude Code could not use the shared socket directory and fell
-   back silently; that session is not reachable from other containers. (The exact `/status`
-   label is Claude Code's and may change; the path is what to look for.)
-3. **`/peers` both ways.** Run `/peers` in two bridged sessions: each must list the other. One
-   side listing and the other not means the second was started before the key was on, or is not
-   bridged (step 1).
-4. **Record (optional).** `<peers root>/sessions/<pid>.json` for a session has a
-   `messagingSocketPath` field naming the same path as step 2. A record in the session's own
-   `<config dir>/sessions` instead means that session is unbridged.
+1. **Banner.** Each new container's launch printed `Peer registry: shared (<peers root>) - …`
+   (an attach or a join prints nothing: it reuses the container's mounts). Missing means the
+   bridge is off for that launch (key unset or `false`, or `CLAUDE_SANDBOX_SHARED_PEER_REGISTRY=0`)
+   or it stood down, which the launch output says in one
+   `Warning: sharedPeerRegistry is off for this session: …` line naming the cause: an env file
+   that sets `XDG_RUNTIME_DIR`, a socket path over Claude Code's 103-byte limit, a peer directory
+   that could not be made yours, or a launcher run inside a sandbox that does not mount the
+   peers root.
+2. **Peer address.** In each session `/status` shows a `Peer address` line; bridged, it reads
+   `uds:<peers root>/cc-socks/<pid>.sock`. `uds:/tmp/cc-socks-<uid>/<pid>.sock` means Claude Code
+   refused the shared socket directory (a directory on its path is group- or world-writable, or
+   not owned by you or root) and fell back to a container-private one, logging it only to its
+   debug log: no other container can reach that session. `unavailable — …` means messaging is
+   off for the session, for the reason shown, and no `Peer address` line at all means
+   cross-session messaging is not enabled in it. (Label and format as of Claude Code 2.1.301.)
+3. **`/peers` both ways.** Run `/peers` in two bridged sessions: each must list the other. If
+   only one lists the other, the one left out has a socket the other cannot reach (step 2). If
+   neither lists the other, one of them is not bridged (step 1) or was started before the key
+   was on.
+4. **Record (optional, on the host).** The session's record is `<peers root>/sessions/<pid>.json`
+   (the `<pid>` in step 2's path; its `sessionId` is the Session ID `/status` shows), and its
+   `messagingSocketPath` names the same path as step 2: that field, not the mounts, is the
+   address other sessions connect to. A record for the session in the host's real
+   `<config dir>/sessions` instead, typically advertising `<config dir>/tmp/cc-socks/<pid>.sock`,
+   means it is unbridged. Look from the host: inside a bridged container, `<config dir>/sessions`
+   *is* the shared directory.
 
-Whatever fails, the fix is the same: make sure the key is on for every participating tree
-(`sharedPeerRegistry: true` or `CLAUDE_SANDBOX_SHARED_PEER_REGISTRY=1`), fix whatever the
-banner's warning names, and **relaunch every participant**; a session started before the change
-keeps its old registry and socket path.
+Whatever fails, make sure the key is on for every participating tree
+(`sharedPeerRegistry: true` or `CLAUDE_SANDBOX_SHARED_PEER_REGISTRY=1`), fix what the `Warning:`
+line names or, for a `/tmp/cc-socks-<uid>` address, the group- or world-writable directory on
+the peers root's path (Claude Code's `--debug` log names it), and **relaunch every
+participant**; a session started before the change keeps its old registry and socket path.
 
 An *unbridged* sandbox shares the real registry with the host, so the host may list it — whether
 the host can also message it is unverified (Claude Code's reply-target check may refuse a socket
