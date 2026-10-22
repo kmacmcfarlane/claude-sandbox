@@ -3176,3 +3176,39 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     And residual: a target can outlive its display (the SSH session ended:
       xclip fails, OSC 52 already went out), and a later SSH session of the
       same user reusing the display number receives the copies
+
+  @new
+  Scenario: CS-LNCH-204 Every session client holds a lease on its container while it lives
+    # Plan detached-sandboxes 01 F1 as amended by 02 § 7 (M8): "does anyone
+    # still hold container C?" must be answerable for the session-end helper
+    # (F2) and the listing (F4). A written "attached" goes stale when the
+    # launcher is SIGKILLed; a flock is dropped by the kernel however it dies.
+    Given a launch on the host (not inside a sandbox, CS-DIR-006)
+    When a new container is reserved for an attached, ralph or headless
+      session (not --detach)
+    Then right after "docker create" printed the 64-hex id, and before
+      "docker start", the launcher takes a lease of kind "primary" (headless:
+      "sdk") on that id
+    When an attach or a join chooses its container (--attach/--join by name,
+      the only candidate, the second-tier pick, the tier-1 [a]/[j], or a tmux
+      restore attach)
+    Then the lease (kind "attach" or "join") is taken at once, before the
+      drift check, its prompt, the clipboard re-resolve and the pane mark
+    And the lease is released on every return path: the session's end, a
+      refused drift, a quit at a prompt, a drift that chose a new container, a
+      failed start
+    And a lease is <StateRoot>/clients/<64-hex id>/<launcher pid>.<rand>.lease,
+      created race-free: a ".<pid>.<rand>.tmp" opened
+      O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC 0600, flock(LOCK_EX), the JSON
+      {v:1, kind, since (ms), tmuxPane?} written, then renamed into place — so
+      a reader never sees a lease file that is not yet locked; a temp file or
+      directory that vanished under a concurrent prune is retried
+    And the open file is kept referenced until the release, which unlinks the
+      file and then closes it (dropping the lock); docker never inherits it
+      (O_CLOEXEC)
+    And a container whose id is not a known 64-hex id gets no lease, and a
+      lease that cannot be taken (an unusable state root) is skipped
+      silently: the launch goes on, and the process scan (CS-SESS-098) still
+      sees the docker client
+    And --detach takes no lease: nobody is attached
+    And inside a sandbox nothing is written (its state root is container-local)

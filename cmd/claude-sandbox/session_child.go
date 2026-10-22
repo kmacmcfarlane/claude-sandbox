@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/kmacmcfarlane/claude-sandbox/internal/clients"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/globalcfg"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/oomreport"
@@ -48,6 +49,12 @@ type sessionOpts struct {
 	// mark is the tmux pane mark set while the child runs (CS-TMUX-010);
 	// nil for none. Ignored when headless or outside tmux (CS-TMUX-014).
 	mark *paneMark
+	// lease is this client's lease on the container (CS-LNCH-204), taken by
+	// the caller as soon as the container was known and released by it on
+	// every return; nil for none. Here so the session's end can release it
+	// early (the session-end helper must not count this launcher, plan
+	// detached-sandboxes F2); Release is idempotent.
+	lease *clients.Lease
 	// onChild runs right after the pane is marked and right before the
 	// session child starts: a restore releases its start lock there after
 	// an attach, or starts its readiness watcher (CS-TMUX-060/061). nil on

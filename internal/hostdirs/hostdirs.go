@@ -74,6 +74,20 @@ func LegacyPeersRoot(home string) string {
 	return filepath.Join(home, LegacyPeersRootRel)
 }
 
+// ClientsDir is where client leases live, one directory per container's
+// 64-hex id (CS-DIR-029, CS-LNCH-204). State, not cache: a cleaner unlinking
+// a held lease would make a session read as unattended.
+func ClientsDir(stateRoot string) string {
+	return filepath.Join(stateRoot, "clients")
+}
+
+// SessionEndsLog is the session-end log's path (CS-DIR-029): one JSON line
+// per container the launcher ended, with the command that resumes it.
+// Reserved here; the session-end helper writes it.
+func SessionEndsLog(stateRoot string) string {
+	return filepath.Join(stateRoot, "session-ends.jsonl")
+}
+
 // CheckOwnedDir is EnsureOwnedDir's refusals without its side effects: it
 // creates and re-modes nothing (CS-DIR-019). An absent dir is fine — a launch
 // would create it; a symlink, a non-directory or another uid's directory is

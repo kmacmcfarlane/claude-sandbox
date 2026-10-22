@@ -24,6 +24,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	"github.com/kmacmcfarlane/claude-sandbox/internal/clients"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/sessions"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/tmuxpane"
@@ -259,10 +260,18 @@ var _ = Describe("tmux restore, one pane (CS-TMUX-052..063)", func() {
 				"2026-09-18 12:34:56 +0000 UTC", markID, cfgDir, cfgDir+"/sessions", "--add-dir")+"\n", nil)
 			streamEvents(f.fake, dockerEvent("die", "0"))
 			freeAtAttach := false
-			f.fake.OnFunc("docker attach", func(execx.Cmd) (string, error) { freeAtAttach = lockFree(lockPath); return "", nil })
+			var leases []clients.Kind
+			f.fake.OnFunc("docker attach", func(execx.Cmd) (string, error) {
+				freeAtAttach = lockFree(lockPath)
+				leases = heldKinds(f.state, markID)
+				return "", nil
+			})
 			Expect(f.run("tmux", "restore")).To(Equal(0), f.errw.String())
 			Expect(f.sessionLine()).To(Equal("docker attach --detach-keys=ctrl-q,ctrl-q " + markID))
 			Expect(freeAtAttach).To(BeTrue(), "released from onChild")
+			// CS-LNCH-204: the restore attach holds an attach lease, released after.
+			Expect(leases).To(Equal([]clients.Kind{clients.KindAttach}))
+			Expect(heldKinds(f.state, markID)).To(BeEmpty())
 			Expect(f.fake.CommandLines()).To(ContainElement(ContainSubstring("container=claude-sandbox-x-proj-abc123-heron")))
 			ms := marksSet()
 			Expect(ms).To(HaveLen(2))

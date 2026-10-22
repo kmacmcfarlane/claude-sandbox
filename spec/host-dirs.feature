@@ -243,3 +243,29 @@ Feature: Host directories — cache root, state root, owned directories (CS-DIR)
     # The choice uses host discovery (the docker daemon is the host's), so a
     # nested launcher sees the same rows and picks the same root as the host;
     # a parent bridged to the legacy root keeps it pinned.
+
+  @new
+  Scenario: CS-DIR-029 Client leases live under the state root, and the launch prunes dead ones
+    # Plan detached-sandboxes 01 F1 (00 § 2.1), 02 § 7 (L8). State, not
+    # cache: a cleaner unlinking a held lease would make a session read as
+    # unattended.
+    Then client leases live in <StateRoot>/clients/<64-hex container id>/,
+      each level made with EnsureOwnedDir 0700 (CS-DIR-004/005)
+    And <StateRoot>/session-ends.jsonl is the reserved name of the
+      session-end log (written from F2 on)
+    When a launch on the host holds the launch lock and its first discovery
+      succeeded (beside the shadow-directory sweep, CS-LNCH-081)
+    Then a clients/<id> directory that no discovered row names (running,
+      paused, created or exited) is removed, after each of its files is
+      removed — a lease or temp file only once LOCK_EX|LOCK_NB on it succeeds
+      (its holder is dead) and the path still names the locked file
+    And a directory no row names, where any *.lock file's flock is held (the
+      session-end helper's end.lock), is kept whole; in a directory a row
+      names, *.lock files are never locked or removed
+    And in a directory that a row does name, only dead leases are removed
+    And a temp file younger than one minute is left alone (a lease being
+      taken)
+    And when discovery failed, or a row has no 64-hex id, nothing is removed
+      (a missing row cannot be told from a container that is gone)
+    And every failure is silent and never fails the launch; inside a sandbox
+      nothing is pruned
