@@ -93,6 +93,11 @@ func newCLIFixture() *cliFixture {
 		// fixture pins it off so every other test keeps its argv, and
 		// clipboard_cli_test.go deletes this key to test the default.
 		"CLAUDE_SANDBOX_HOST_CLIPBOARD": "0",
+		// The launcher network is ON by default too (CS-LNCH-188, answer
+		// 102 a), and a default-on launch runs docker network inspect; the
+		// fixture pins it off, and network_cli_test.go deletes this key to
+		// test the default.
+		"CLAUDE_SANDBOX_NETWORK": "0",
 	}
 	// Never the real /proc (the guards' host check reads it): a scratch tree
 	// with only this namespace's link; a test needing more sets its own.

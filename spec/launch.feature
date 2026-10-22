@@ -2596,7 +2596,9 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       CLAUDE_SANDBOX_MODE (no stand-down logic)
 
   # The launcher network (CS-LNCH-185..191, CS-LNCH-193; plan
-  # container-dns-launcher-network 00..03, operator answer 93 b: opt-in).
+  # container-dns-launcher-network 00..03; operator answer 93 b made it
+  # opt-in, answer 102 a (2026-10-22) made it default ON for host parity,
+  # off with sandboxNetwork: false or CLAUDE_SANDBOX_NETWORK=0).
   # On Docker's default bridge a container gets a frozen copy of the host's
   # flat upstream resolv.conf (systemd-resolved's
   # /run/systemd/resolve/resolv.conf), so a host that splits DNS per link (a
@@ -2615,13 +2617,16 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
   #
   # Host checks (the operator's, after the merge; plan 00 § 6 as amended by
   # 01 § 6, 02 § 5 and 03 § 3): T0-T4, T8 and T9 as written there, and
+  #   (Since answer 102 a the network is on by default: T5-T7 hold without
+  #   the variable, and their "without the variable" halves now need
+  #   CLAUDE_SANDBOX_NETWORK=0.)
   #   T5: CLAUDE_SANDBOX_NETWORK=1 claude-sandbox --new prints one Network:
   #     line; inside, /etc/resolv.conf has "nameserver 127.0.0.11" and
   #     "ExtServers: [host(127.0.0.53)]", and the session's CLAUDE.md —
   #     ~/.claude/CLAUDE.md, or $CLAUDE_CONFIG_DIR/CLAUDE.md when the config
   #     dir is relocated — ends with the network paragraph; on the host
   #     docker inspect -f '{{.HostConfig.NetworkMode}}' <container> reads
-  #     claude-sandbox. Without the variable (the default): no line,
+  #     claude-sandbox. With CLAUDE_SANDBOX_NETWORK=0: no line,
   #     NetworkMode "default", no paragraph.
   #   T6: CLAUDE_SANDBOX_NETWORK=1 claude-sandbox --attach=<noun> of a session
   #     started without the network lists "added network <network>" (beside
@@ -2629,7 +2634,7 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
   #   T7: CLAUDE_SANDBOX_NETWORK=1 claude-sandbox headless -- --version prints
   #     only the version on stdout and the Network: line on stderr, and
   #     docker events --filter type=network --filter network=claude-sandbox
-  #     shows one connect; without the variable, no event.
+  #     shows one connect; with CLAUDE_SANDBOX_NETWORK=0, no event.
 
   @new
   Scenario: CS-LNCH-193 Every new container joins the claude-sandbox network when it applies
@@ -2722,22 +2727,34 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       goes on
 
   @new
-  Scenario: CS-LNCH-188 sandboxNetwork and CLAUDE_SANDBOX_NETWORK opt in; default off
-    # Operator answer 93 (b): CLAUDE.md's transparent-defaults rule ("any
-    # default a user must discover by losing something is the wrong
-    # default"). On by default would cut sibling reach by IP for every user.
-    Then the network is wanted per launch.ResolveTristate:
+  Scenario: CS-LNCH-188 The network is on by default; sandboxNetwork: false or CLAUDE_SANDBOX_NETWORK=0 turns it off
+    # Operator answer 102 a (2026-10-22), superseding answer 93 b's opt-in:
+    # host parity (CLAUDE.md ## Principles) — host claude resolves through
+    # the host's per-link split DNS, and a sandbox on the default bridge does
+    # not. The isolation cost: a sibling started with a plain docker run on
+    # Docker's default bridge is not reachable by IP (published ports still
+    # work), while sandboxes on the network can find each other by name.
+    Then the network is wanted per launch.ResolveTristate, default on:
       | CLAUDE_SANDBOX_NETWORK | sandboxNetwork (merged cascade) | wanted |
-      | unset                  | unset                           | no     |
+      | unset                  | unset                           | yes    |
       | unset                  | true                            | yes    |
+      | unset                  | false                           | no     |
       | 1 / true / yes         | false or unset                  | yes    |
-      | 0 / false / no         | true                            | no     |
+      | 0 / false / no         | true or unset                   | no     |
     And there is no CLI flag
     And the key is json:"-" in the merged config: the APPLIED network is what
-      the fingerprint hashes (CS-LNCH-189), so unset and an explicit false hash
-      alike
-    And not wanted means no "docker network" call at all, and an argv, hash
-      and shadow CLAUDE.md identical to a launch without this feature
+      the fingerprint hashes (CS-LNCH-189), so unset and an explicit true hash
+      alike, and an explicit off hashes as a launch without this feature
+    And not wanted (an explicit off) means no "docker network" call at all,
+      and an argv, hash and shadow CLAUDE.md identical to a launch without
+      this feature
+    And the default changes none of the stand-downs: a foreign network
+      (CS-LNCH-186) or any other docker failure (CS-LNCH-187) still means the
+      default bridge with one WARNING, never a failed launch
+    And a container created before the default flipped drifts once on attach
+      or join (the hash gains network=claude-sandbox: "added network
+      <network>" and "changed shadow CLAUDE.md", CS-LNCH-189); [n] or an
+      explicit off clears it
     And the key is resolved before the reservation, from the launcher's own
       environment (a headless client's unit can set it)
 

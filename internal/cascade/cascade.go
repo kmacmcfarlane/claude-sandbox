@@ -140,7 +140,8 @@ type Config struct {
 	SharedPeerRegistry *bool `yaml:"sharedPeerRegistry" json:"-"`
 	// SandboxNetwork puts new containers on the launcher's user-defined
 	// Docker network, whose DNS forwards to the host's resolver
-	// (CS-LNCH-185..191, CS-LNCH-193). Opt-in, default off (CS-LNCH-188).
+	// (CS-LNCH-185..191, CS-LNCH-193). Default ON (CS-LNCH-188, operator
+	// answer 102 a); false turns it off.
 	// Tri-state and json:"-" for SharedPeerRegistry's reasons: a falsy
 	// CLAUDE_SANDBOX_NETWORK must turn an upstream "true" off, and the
 	// APPLIED network is hashed explicitly (CS-LNCH-189).

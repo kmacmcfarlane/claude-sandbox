@@ -181,14 +181,55 @@ var _ = Describe("the launcher network (CS-LNCH-185..191, CS-LNCH-193)", func() 
 		expectOnNetwork(f, "re-pick")
 	})
 
-	Describe("CS-LNCH-188: opt-in", func() {
-		It("CS-LNCH-188: the unset key makes no docker network call and leaves the argv alone", func() {
+	Describe("CS-LNCH-188: default on, off by key or env", func() {
+		It("CS-LNCH-188: with neither the key nor the variable set, the launch is on the network", func() {
+			delete(f.envmap, "CLAUDE_SANDBOX_NETWORK") // the default: on
+			f.fake.On(netInspectPat, netOurs, nil)
+			Expect(f.run()).To(Equal(0), f.errw.String())
+			Expect(netLines(f)).To(HaveLen(1), "one inspect under the lock")
+			expectOnNetwork(f, "default")
+		})
+
+		It("CS-LNCH-188: by default a foreign network stands down with one WARNING; the launch goes on", func() {
+			delete(f.envmap, "CLAUDE_SANDBOX_NETWORK")
+			f.fake.On(netInspectPat, netForeign, nil)
+			Expect(f.run()).To(Equal(0), f.errw.String())
+			Expect(strings.Count(f.out.String()+f.errw.String(), "WARNING: a Docker network named claude-sandbox exists")).To(Equal(1))
+			expectDefaultBridge(f)
+		})
+
+		It("CS-LNCH-188: CLAUDE_SANDBOX_NETWORK=0 makes no docker network call and leaves the argv alone", func() {
+			Expect(f.envmap["CLAUDE_SANDBOX_NETWORK"]).To(Equal("0"))
 			Expect(f.run()).To(Equal(0), f.errw.String())
 			Expect(netLines(f)).To(BeEmpty())
 			expectDefaultBridge(f)
 		})
 
-		It("CS-LNCH-188: sandboxNetwork: true turns it on; CLAUDE_SANDBOX_NETWORK=0 turns it off for one launch", func() {
+		It("CS-LNCH-188: sandboxNetwork: false turns it off; CLAUDE_SANDBOX_NETWORK=1 turns it back on for one launch", func() {
+			delete(f.envmap, "CLAUDE_SANDBOX_NETWORK")
+			writeFile(f.proj+"/.claude-sandbox/config.yaml", "sandboxNetwork: false\n")
+			Expect(f.run()).To(Equal(0), f.errw.String())
+			Expect(netLines(f)).To(BeEmpty())
+			expectDefaultBridge(f)
+			// The key-off hash: a launch in the same tree with only the
+			// fixture's CLAUDE_SANDBOX_NETWORK=0 (keyOffHash, inlined).
+			h := newCLIFixture()
+			h.home, h.proj = f.home, f.proj
+			h.envmap["HOME"], h.envmap["PROJECT_DIR"] = f.home, f.proj
+			Expect(h.run()).To(Equal(0), h.errw.String())
+			Expect(labelsOf(f.launched().Args)["claude-sandbox.confighash"]).
+				To(Equal(labelsOf(h.launched().Args)["claude-sandbox.confighash"]), "an explicit off hashes as key-off")
+
+			g := newCLIFixture()
+			writeFile(g.proj+"/.claude-sandbox/config.yaml", "sandboxNetwork: false\n")
+			g.envmap["CLAUDE_SANDBOX_NETWORK"] = "1"
+			g.fake.On(netInspectPat, netOurs, nil)
+			Expect(g.run()).To(Equal(0), g.errw.String())
+			expectOnNetwork(g, "env over config false")
+		})
+
+		It("CS-LNCH-188: sandboxNetwork: true is on; CLAUDE_SANDBOX_NETWORK=0 turns it off for one launch", func() {
+			delete(f.envmap, "CLAUDE_SANDBOX_NETWORK")
 			writeFile(f.proj+"/.claude-sandbox/config.yaml", "sandboxNetwork: true\n")
 			f.fake.On(netInspectPat, netOurs, nil)
 			Expect(f.run()).To(Equal(0), f.errw.String())
@@ -336,7 +377,20 @@ var _ = Describe("drift and the launcher network (CS-LNCH-189, CS-SESS-097)", fu
 		e := f.errw.String()
 		Expect(e).To(ContainSubstring("Session 'otter' was started with different configuration:"))
 		Expect(e).To(ContainSubstring("  added    network     <network>\n"))
-		Expect(e).To(ContainSubstring("  changed  shadow      CLAUDE.md\n"), "an opted-in tree also shows the context paragraph")
+		Expect(e).To(ContainSubstring("  changed  shadow      CLAUDE.md\n"), "a tree with the network wanted also shows the context paragraph")
+		Expect(netLines(f)).To(HaveLen(1))
+	})
+
+	It("CS-SESS-097, CS-LNCH-188: under the default (no key, no variable) a key-off container drifts once, naming <network>", func() {
+		delete(f.envmap, "CLAUDE_SANDBOX_NETWORK") // the default: on
+		f.fake.On(netInspectPat, netOurs, nil)
+		running()
+		tty("c")
+		Expect(f.run("--attach=otter")).To(Equal(0), f.errw.String())
+		e := f.errw.String()
+		Expect(e).To(ContainSubstring("Session 'otter' was started with different configuration:"))
+		Expect(e).To(ContainSubstring("  added    network     <network>\n"))
+		Expect(e).To(ContainSubstring("  changed  shadow      CLAUDE.md\n"))
 		Expect(netLines(f)).To(HaveLen(1))
 	})
 
