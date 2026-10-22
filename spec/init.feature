@@ -389,9 +389,13 @@ Feature: init subcommand (CS-INIT)
       live line is rewritten, so the hint never becomes a duplicate key
     Given a config.yaml whose trackInHost the launch would not read from such
       a line: a flow map "{trackInHost: false}", a whole top-level mapping
-      indented, the key in a later YAML document, or "trackInHost : false"
+      indented, the key in a later YAML document, "trackInHost : false", a
+      quoted key "\"trackInHost\": false", or a BOM before the key on line 1
     When init would write trackInHost: <v> into it
     Then the result is checked with the launch's merge (cascade.LoadSnapshot)
       first; unless it reads exactly trackInHost: <v>, nothing is written and
       init fails with "cannot set trackInHost in <file> safely; set
       "trackInHost: <v>" at its top level by hand"
+    And when the result does not parse at all (a duplicate key, or a config
+      broken for another reason such as "mounts: ["), init fails with
+      "cannot set trackInHost in <file>: " and the launch's parse error instead

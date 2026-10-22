@@ -350,7 +350,10 @@ func SetTrackInHost(cfgPath string, val bool) error {
 	}
 	content := replaceTrackLine(string(raw), fmt.Sprintf("trackInHost: %v", val), true)
 	cfg, err := cascade.LoadSnapshot([]cascade.ConfigFile{{Path: cfgPath, Content: []byte(content)}})
-	if err != nil || cfg.TrackInHost == nil || *cfg.TrackInHost != val {
+	if err != nil {
+		return fmt.Errorf("cannot set trackInHost in %s: %w", cfgPath, err)
+	}
+	if cfg.TrackInHost == nil || *cfg.TrackInHost != val {
 		return fmt.Errorf("cannot set trackInHost in %s safely; set \"trackInHost: %v\" at its top level by hand", cfgPath, val)
 	}
 	return os.WriteFile(cfgPath, []byte(content), 0o644)

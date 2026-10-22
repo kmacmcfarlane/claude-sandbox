@@ -202,19 +202,27 @@ var _ = Describe("CS-INIT-034..036: init reads trackInHost as the launch does", 
 		Expect(lv).To(BeTrue())
 	})
 
+	// A result the launch's merge cannot parse returns that parse error;
+	// one it parses but reads differently gets the by-hand advice.
 	DescribeTable("CS-INIT-036: a config the launch would read differently is refused, unchanged",
-		func(content string) {
+		func(content, want string) {
 			write(cfg, content)
 			err := (&run{}).init(proj, initcmd.Flags{TrackInHost: ptr(true)})
-			Expect(err).To(MatchError(ContainSubstring("cannot set trackInHost in " + cfg + " safely")))
-			Expect(err).To(MatchError(ContainSubstring(`set "trackInHost: true" at its top level by hand`)))
+			Expect(err).To(MatchError(ContainSubstring("cannot set trackInHost in " + cfg)))
+			if want == "" {
+				want = `safely; set "trackInHost: true" at its top level by hand`
+			} else {
+				want = want + " " + cfg
+			}
+			Expect(err).To(MatchError(ContainSubstring(want)))
 			Expect(read(cfg)).To(Equal(content))
 		},
-		Entry("a flow map", "{trackInHost: false}\n"),
-		Entry("an indented top-level mapping", "  a: 1\n  trackInHost: false\n"),
-		Entry("a later YAML document", "a: 1\n---\ntrackInHost: false\n"),
-		Entry("a space before the colon", "trackInHost : false\n"),
-		Entry("a quoted key", "\"trackInHost\": false\n"),
-		Entry("a BOM before the key", "\ufefftrackInHost: false\n"),
+		Entry("a flow map", "{trackInHost: false}\n", ""),
+		Entry("an indented top-level mapping", "  a: 1\n  trackInHost: false\n", ""),
+		Entry("a later YAML document", "a: 1\n---\ntrackInHost: false\n", ""),
+		Entry("a space before the colon", "trackInHost : false\n", "cascade: parsing"),
+		Entry("a quoted key", "\"trackInHost\": false\n", "cascade: parsing"),
+		Entry("a BOM before the key", "\ufefftrackInHost: false\n", "cascade: parsing"),
+		Entry("a config broken for another reason", "mounts: [\n", "cascade: parsing"),
 	)
 })
