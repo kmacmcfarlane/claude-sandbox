@@ -51,6 +51,11 @@ type Options struct {
 	Err      io.Writer // notes/warnings (stderr)
 	// Gitignore forces the host-gitignore prompt outcome: nil = prompt.
 	Gitignore *bool
+	// Init marks a bootstrap (init / init-ralph) run, as opposed to a launch.
+	// Only CS-LAY-026's note reads it: init prints it even with nothing to
+	// propose. It is independent of Gitignore, which init may leave nil
+	// (CS_GITIGNORE_ASSUME) and which says only how the prompt resolves.
+	Init bool
 }
 
 func (o *Options) out() io.Writer {
@@ -193,8 +198,10 @@ func Setup(project string, trackInHost bool, opts Options) error {
 			// CS-LAY-018: over a rule excluding the directory itself or a
 			// sidecar repo these lines are dead (git cannot re-include inside
 			// an excluded dir) and only leave the tree dirty. A rule excluding
-			// only the children (".claude-sandbox/*") is not a conflict: the
-			// negations work beneath it (CS-LAY-021). Warn, never switch modes, and still
+			// only the children (".claude-sandbox/*") in the project's or an outer
+			// .gitignore is not a conflict: the negations work beneath it
+			// (CS-LAY-021); an inner .claude-sandbox/.gitignore with "*" takes
+			// precedence over them and is not covered. Warn, never switch modes, and still
 			// propose the worktrees line alone.
 			conflict, gerr := hostTrackConflict(opts.Runner, project, sb)
 			if gerr != nil {
@@ -211,10 +218,10 @@ func Setup(project string, trackInHost bool, opts Options) error {
 				".claude-sandbox/env", ".claude-sandbox/temp/", ".claude-sandbox/ralph/",
 				"!.claude-sandbox/config.yaml", "!.claude-sandbox/Dockerfile")...)
 			// CS-LAY-026: only while the host-tracked entries are being
-			// decided — proposed (whatever the answer) or init, which passes
-			// Options.Gitignore (the launch path never does) — so an ordinary
+			// decided — proposed (whatever the answer) or init
+			// (Options.Init; the launch path never sets it) — so an ordinary
 			// launch with nothing to decide stays quiet.
-			if hostTrackedEntryIn(proposed) || opts.Gitignore != nil {
+			if hostTrackedEntryIn(proposed) || opts.Init {
 				noteChildrenHidden(project, opts)
 			}
 		}

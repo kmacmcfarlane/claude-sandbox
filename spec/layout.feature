@@ -258,9 +258,12 @@ Feature: .claude-sandbox/ layout lifecycle (CS-LAY)
     # git cannot re-include a file whose parent DIRECTORY is excluded, but a
     # rule such as ".claude-sandbox/*" or "/.claude-sandbox/**" excludes the
     # children, not the directory, so "!.claude-sandbox/config.yaml" and
-    # "!.claude-sandbox/Dockerfile" take effect beneath it (verified with git
-    # 2.39: both become untracked-visible, every other new file stays
-    # ignored). The CS-LAY-009 lines are live there, so refusing them was a
+    # "!.claude-sandbox/Dockerfile" take effect beneath it when the rule is in the
+    # project's or an outer .gitignore (verified with git 2.39: both become
+    # untracked-visible, every other new file stays ignored). An inner
+    # .claude-sandbox/.gitignore holding "*" is NOT covered: a deeper
+    # .gitignore takes precedence over the root's "!" lines (verified, git
+    # 2.39.5: both files stay ignored), so there the lines are dead. The CS-LAY-009 lines are live there, so refusing them was a
     # false positive (review of 18a7, 2026-09-18).
     Given the project is a git work tree, the effective trackInHost is true and no .claude-sandbox/.git exists
     And the host rule excludes only the children of .claude-sandbox/ (the --no-index

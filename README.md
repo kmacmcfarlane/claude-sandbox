@@ -1331,7 +1331,9 @@ Set in `.claude-sandbox/config.yaml`. Controls how the directory is version-cont
   reports a directory holding tracked files as ignored) and the sidecar `.git` to track the
   directory in the host. Modes are never switched silently. A rule that excludes only the
   directory's children, such as `.claude-sandbox/*`, is not a conflict: the `!` lines work
-  beneath it, so the entries are proposed as usual — but new files there stay hidden from the
+  beneath a children-only rule in the project's or an outer `.gitignore` (an inner
+  `.claude-sandbox/.gitignore` holding `*` takes precedence over them and defeats them), so the
+  entries are proposed as usual — but new files there stay hidden from the
   host repo except the paths your rules re-include, so when it proposes the entries (and during
   `init`) the launcher prints one `Note:` saying so (`git check-ignore -v --no-index
   .claude-sandbox/<path>` names the rule hiding a path).
