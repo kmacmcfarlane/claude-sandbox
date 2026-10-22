@@ -74,8 +74,13 @@ func Run(project string, f Flags, d Deps) error {
 	if err != nil {
 		return err
 	}
-	upstreamVal, upstreamSet := cascade.TrackInHostExplicitOf(upstreamSnap)
-	upstreamSrc := cascade.TrackInHostSourceOf(upstreamSnap)
+	// Resolved with the launch's own YAML merge (CS-INIT-034), so the
+	// inherited value init shows is the one the next launch applies; an
+	// upstream config the launch could not parse fails init (CS-INIT-035).
+	upstreamVal, upstreamSet, upstreamSrc, err := cascade.TrackInHostResolveOf(upstreamSnap)
+	if err != nil {
+		return err
+	}
 
 	// Resolve the local trackInHost decision: flag > prompt. When an ancestor
 	// defines it, the prompt shows the inherited value as the default and
@@ -199,7 +204,11 @@ func Run(project string, f Flags, d Deps) error {
 			}
 			snap = append(append([]cascade.ConfigFile{}, upstreamSnap...), own...)
 		}
-		effective = cascade.TrackInHostOf(snap)
+		v, _, _, err := cascade.TrackInHostResolveOf(snap)
+		if err != nil {
+			return err
+		}
+		effective = v
 	}
 	// The trackInHost answer already chose the shape of the host .gitignore,
 	// so init writes the entries without a further prompt (CS-INIT-028):
@@ -306,7 +315,11 @@ func printNextSteps(w io.Writer, ralph bool) {
 	}
 }
 
-var trackLineRe = regexp.MustCompile(`(?m)^[ \t]*#?[ \t]*trackInHost:.*$`)
+// trackLineRe matches a TOP-LEVEL trackInHost line only, commented or not
+// (CS-INIT-036): a key at column 0. An indented line is a nested key of the
+// same name under another key, which the launch's merge does not read as
+// trackInHost and which init must not rewrite into a top-level one.
+var trackLineRe = regexp.MustCompile(`(?m)^(?:#[ \t]*)?trackInHost:.*$`)
 
 // SetTrackInHost forces the config's trackInHost to val (uncommented),
 // replacing any existing commented or uncommented line, or appending when

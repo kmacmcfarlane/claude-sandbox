@@ -344,3 +344,39 @@ Feature: init subcommand (CS-INIT)
       at once with an error naming the file, never a hang
     And an upstream config that cannot be read fails init naming it, as it
       would fail the next launch (it used to be skipped silently)
+
+  # ---- trackInHost read as the launch reads it ----
+
+  Scenario: CS-INIT-034 init resolves trackInHost with the launch's YAML merge, not a line scan
+    Given a cascade of config.yaml files above and in the project
+    When init resolves the inherited trackInHost (value and source) and the
+      effective layout value
+    Then it uses the launch's own merge (cascade.LoadSnapshot → cfg.TrackInHost),
+      so init and the next launch always agree:
+      | most-local setting                  | init and launch read     |
+      | trackInHost: True / TRUE            | true                     |
+      | trackInHost: yes / on / y           | true                     |
+      | trackInHost: False / no             | false                    |
+      | trackInHost: ~ (or no value)        | unset, upstream ignored  |
+      | a nested key (e.g. x: {trackInHost: false}) | not trackInHost  |
+    And the inherited-value source is the most-local file whose top-level
+      trackInHost the merge kept
+    And an unset result (a null override included) is the greenfield
+      question of CS-INIT-029/031, not the inherited-value prompt
+    # The old line regex took only lowercase true/false at any indentation:
+    # it missed True/yes (yaml.v3 decodes YAML 1.1 bools into a typed bool),
+    # read past a null override to an upstream true, and took a nested key
+    # of the same name as the top-level one.
+
+  Scenario: CS-INIT-035 A config.yaml the launch could not parse fails init, naming it
+    Given an upstream config.yaml, or the project's own one read for the
+      layout value, that does not parse as the launch's merged config
+    When "claude-sandbox init" runs
+    Then init fails with the launch's parse error naming the file, as the
+      next launch would, instead of resolving trackInHost from it
+
+  Scenario: CS-INIT-036 init rewrites only the top-level trackInHost line
+    Given a config.yaml with a nested key named trackInHost under another key
+    When init writes trackInHost (CS-INIT-012) or the inherited hint (CS-INIT-016)
+    Then only a top-level "trackInHost:" or "# trackInHost:" line at column 0
+      is replaced (else the key is appended), and the nested key is left as it was

@@ -12,7 +12,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"regexp"
 
 	"gopkg.in/yaml.v3"
 
@@ -318,8 +317,6 @@ func (c *Config) Validate(files []string) error {
 	return nil
 }
 
-var trackRe = regexp.MustCompile(`(?m)^[ \t]*trackInHost:[ \t]*(true|false)([ \t].*)?$`)
-
 // readable reads the files that can be read, skipping the rest: the
 // path-taking helpers below have always ignored an unreadable file. It reads
 // through ReadRegularFile, so a FIFO is skipped rather than waited on.
@@ -333,51 +330,48 @@ func readable(files []string) []ConfigFile {
 	return out
 }
 
-// TrackInHost resolves the cascade-wide trackInHost with a line scan (not a
-// YAML parse) so it works on files in any state: the most-local file with an
-// explicit uncommented setting wins; default false. files are root-first.
-func TrackInHost(files []string) bool {
-	return TrackInHostOf(readable(files))
+// TrackInHostResolveOf resolves trackInHost over a snapshot exactly as the
+// launch does (CS-INIT-034): the snapshot goes through LoadSnapshot, the
+// launch's own merge, and the result is cfg.TrackInHost. So yaml.v3 decides
+// the spelling (True, yes, on, y are true — YAML 1.1 bools decoded into a
+// typed bool), a null override (`trackInHost: ~` or no value) unsets an
+// upstream value, and a nested key of the same name is not trackInHost.
+// isSet is false when the merged value is unset (the caller's default is
+// false). source is the most-local file whose top-level trackInHost the merge
+// kept ("" when unset). A snapshot the launch could not merge is an error
+// naming the file (CS-INIT-035), as it would fail the next launch.
+func TrackInHostResolveOf(snap []ConfigFile) (value, isSet bool, source string, err error) {
+	cfg, err := LoadSnapshot(snap)
+	if err != nil {
+		return false, false, "", err
+	}
+	if cfg.TrackInHost == nil {
+		return false, false, "", nil
+	}
+	return *cfg.TrackInHost, true, KeySourceOf(snap, "trackInHost"), nil
 }
 
-// TrackInHostOf is TrackInHost over a snapshot (CS-CASC-046).
-func TrackInHostOf(snap []ConfigFile) bool {
-	v, _ := TrackInHostExplicitOf(snap)
+// TrackInHost resolves the cascade-wide trackInHost from the files
+// (root-first) with the launch's merge; default false. It is lenient, as the
+// path-taking helpers have always been: an unreadable file is skipped and a
+// cascade that does not parse reads as unset. Callers that must agree with a
+// launch (init) use TrackInHostResolveOf over a snapshot and its error.
+func TrackInHost(files []string) bool {
+	v, _, _, _ := TrackInHostResolveOf(readable(files))
 	return v
 }
 
-// TrackInHostExplicit reports whether any of the files explicitly sets
-// trackInHost, and the resolved value when so.
+// TrackInHostExplicit reports whether the cascade sets trackInHost, and the
+// resolved value when so (lenient, as TrackInHost).
 func TrackInHostExplicit(files []string) (value, isSet bool) {
-	return TrackInHostExplicitOf(readable(files))
-}
-
-// TrackInHostExplicitOf is TrackInHostExplicit over a snapshot (CS-CASC-046).
-func TrackInHostExplicitOf(snap []ConfigFile) (value, isSet bool) {
-	for _, f := range snap {
-		ms := trackRe.FindAllStringSubmatch(string(f.Content), -1)
-		if len(ms) > 0 {
-			isSet = true
-			value = ms[len(ms)-1][1] == "true"
-		}
-	}
+	value, isSet, _, _ = TrackInHostResolveOf(readable(files))
 	return value, isSet
 }
 
-// TrackInHostSource returns the most-local file that explicitly sets
-// trackInHost ("" when none). files are root-first.
+// TrackInHostSource returns the most-local file whose trackInHost the merge
+// kept ("" when unset; lenient, as TrackInHost). files are root-first.
 func TrackInHostSource(files []string) string {
-	return TrackInHostSourceOf(readable(files))
-}
-
-// TrackInHostSourceOf is TrackInHostSource over a snapshot (CS-CASC-046).
-func TrackInHostSourceOf(snap []ConfigFile) string {
-	src := ""
-	for _, f := range snap {
-		if trackRe.Match(f.Content) {
-			src = f.Path
-		}
-	}
+	_, _, src, _ := TrackInHostResolveOf(readable(files))
 	return src
 }
 
