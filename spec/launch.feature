@@ -2626,7 +2626,7 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
   #     ~/.claude/CLAUDE.md, or $CLAUDE_CONFIG_DIR/CLAUDE.md when the config
   #     dir is relocated — ends with the network paragraph; on the host
   #     docker inspect -f '{{.HostConfig.NetworkMode}}' <container> reads
-  #     claude-sandbox. Without the variable (the default): no line,
+  #     claude-sandbox. With CLAUDE_SANDBOX_NETWORK=0: no line,
   #     NetworkMode "default", no paragraph.
   #   T6: CLAUDE_SANDBOX_NETWORK=1 claude-sandbox --attach=<noun> of a session
   #     started without the network lists "added network <network>" (beside
@@ -2634,7 +2634,7 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
   #   T7: CLAUDE_SANDBOX_NETWORK=1 claude-sandbox headless -- --version prints
   #     only the version on stdout and the Network: line on stderr, and
   #     docker events --filter type=network --filter network=claude-sandbox
-  #     shows one connect; without the variable, no event.
+  #     shows one connect; with CLAUDE_SANDBOX_NETWORK=0, no event.
 
   @new
   Scenario: CS-LNCH-193 Every new container joins the claude-sandbox network when it applies

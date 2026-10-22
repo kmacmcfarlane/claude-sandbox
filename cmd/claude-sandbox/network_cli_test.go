@@ -211,6 +211,14 @@ var _ = Describe("the launcher network (CS-LNCH-185..191, CS-LNCH-193)", func() 
 			Expect(f.run()).To(Equal(0), f.errw.String())
 			Expect(netLines(f)).To(BeEmpty())
 			expectDefaultBridge(f)
+			// The key-off hash: a launch in the same tree with only the
+			// fixture's CLAUDE_SANDBOX_NETWORK=0 (keyOffHash, inlined).
+			h := newCLIFixture()
+			h.home, h.proj = f.home, f.proj
+			h.envmap["HOME"], h.envmap["PROJECT_DIR"] = f.home, f.proj
+			Expect(h.run()).To(Equal(0), h.errw.String())
+			Expect(labelsOf(f.launched().Args)["claude-sandbox.confighash"]).
+				To(Equal(labelsOf(h.launched().Args)["claude-sandbox.confighash"]), "an explicit off hashes as key-off")
 
 			g := newCLIFixture()
 			writeFile(g.proj+"/.claude-sandbox/config.yaml", "sandboxNetwork: false\n")
@@ -370,6 +378,19 @@ var _ = Describe("drift and the launcher network (CS-LNCH-189, CS-SESS-097)", fu
 		Expect(e).To(ContainSubstring("Session 'otter' was started with different configuration:"))
 		Expect(e).To(ContainSubstring("  added    network     <network>\n"))
 		Expect(e).To(ContainSubstring("  changed  shadow      CLAUDE.md\n"), "a tree with the network wanted also shows the context paragraph")
+		Expect(netLines(f)).To(HaveLen(1))
+	})
+
+	It("CS-SESS-097, CS-LNCH-188: under the default (no key, no variable) a key-off container drifts once, naming <network>", func() {
+		delete(f.envmap, "CLAUDE_SANDBOX_NETWORK") // the default: on
+		f.fake.On(netInspectPat, netOurs, nil)
+		running()
+		tty("c")
+		Expect(f.run("--attach=otter")).To(Equal(0), f.errw.String())
+		e := f.errw.String()
+		Expect(e).To(ContainSubstring("Session 'otter' was started with different configuration:"))
+		Expect(e).To(ContainSubstring("  added    network     <network>\n"))
+		Expect(e).To(ContainSubstring("  changed  shadow      CLAUDE.md\n"))
 		Expect(netLines(f)).To(HaveLen(1))
 	})
 
