@@ -146,7 +146,8 @@ type Config struct {
 	// APPLIED network is hashed explicitly (CS-LNCH-189).
 	SandboxNetwork *bool `yaml:"sandboxNetwork" json:"-"`
 	// HostClipboard turns on the write-only host clipboard bridge
-	// (CS-LNCH-194..203). Opt-in, default off. Tri-state and json:"-" for
+	// (CS-LNCH-194..203). Default ON (operator answer 135); false turns it
+	// off. Tri-state and json:"-" for
 	// SharedPeerRegistry's reasons: a falsy CLAUDE_SANDBOX_HOST_CLIPBOARD
 	// must turn an upstream "true" off, and the WANTED value is hashed
 	// explicitly (CS-LNCH-201).

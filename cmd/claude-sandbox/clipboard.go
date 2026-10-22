@@ -147,7 +147,8 @@ func stopClipboardHelper(plan *launch.Plan) {
 
 // refreshClipboardBridge is the attach and join step (CS-LNCH-197): resolve
 // this shell's target and write it (never downgrading), then ping the helper
-// and restart it when it is dead. Returns the effective target (nil: none or
+// and restart it when it is dead. by "" (a tmux restore attach) writes no
+// target: that pane's environment says nothing about where the operator is. Returns the effective target (nil: none or
 // not applicable) and whether the container has the bridge.
 func refreshClipboardBridge(env *Env, s sessions.Session, by string) (*clipboard.Target, bool) {
 	if s.Clipboard != launch.ClipboardLabelValue(true) || s.ShadowDir == "" {
@@ -164,11 +165,18 @@ func refreshClipboardBridge(env *Env, s sessions.Session, by string) (*clipboard
 			return nil, true
 		}
 	}
+	if !nested && launch.UnderAnySource(s.ShadowDir, s.Mounts) {
+		// A nested container's shadow root lies inside a mount (the config
+		// dir, CS-LNCH-162), where sandboxes can reach it: never write a
+		// target there, nor start a host helper on it.
+		return nil, true
+	}
 	var eff *clipboard.Target
 	outer := ""
-	if nested {
+	switch {
+	case nested:
 		outer = env.Getenv(clipboard.EnvSocket)
-	} else {
+	case by != "":
 		eff = writeClipboardTarget(env, s.ShadowDir, resolveClipboard(env), by)
 	}
 	if clipboard.Ping(filepath.Join(dir, clipboard.SocketName), clipboardPingTimeout) {

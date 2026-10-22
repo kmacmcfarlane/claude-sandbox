@@ -115,40 +115,9 @@ func (s *Shim) Run() int {
 	if sock == "" {
 		return s.execNext()
 	}
-	o, code, msg := parseArgs(s.Args)
-	if code != 0 {
-		s.errf("%s", msg)
+	op, data, code := s.request()
+	if code >= 0 {
 		return code
-	}
-	var data []byte
-	if !o.clear {
-		if len(o.words) > 0 {
-			data = []byte(strings.Join(o.words, " "))
-		} else if s.Stdin != nil {
-			b, err := io.ReadAll(io.LimitReader(s.Stdin, MaxCopyBytes+1))
-			if err != nil {
-				s.errf("reading stdin: %v", err)
-				return 1
-			}
-			data = b
-		}
-		if o.trim && len(data) > 0 && data[len(data)-1] == '\n' {
-			data = data[:len(data)-1]
-		}
-		if err := ValidatePayload(data); err != nil {
-			// Nothing is written anywhere.
-			s.errf("not copied: %s", payloadWhy(err.Error()))
-			return 1
-		}
-	}
-	op := OpClipboard
-	switch {
-	case o.clear && o.primary:
-		op = OpClearPrimary
-	case o.clear:
-		op = OpClearClipboard
-	case o.primary:
-		op = OpPrimary
 	}
 	oscEligible := op == OpClipboard && len(data) <= MaxOSCBytes
 	var term io.WriteCloser
@@ -173,7 +142,12 @@ func (s *Shim) Run() int {
 	}
 	kind, reason := ParseAnswer(adm)
 	unreachable := err != nil || adm == ""
-	busy := kind == "err" && reason == ReasonBusy
+	// Only rate-limited and the payload refusals say this copy must not go
+	// out (CS-LNCH-199); busy and any other error (peer, bad-request, an
+	// unknown answer) say nothing about it and are treated as unreachable.
+	refused := kind == "err" && (reason == ReasonRateLimited || reason == ReasonTooLarge ||
+		reason == ReasonUTF8 || reason == ReasonControlChar)
+	busy := !unreachable && kind != AnswerAccepted && !refused
 
 	wrote := false
 	switch {
@@ -202,7 +176,7 @@ func (s *Shim) Run() int {
 		s.errf("the clipboard bridge is not reachable")
 		return 1
 	}
-	if kind == "err" {
+	if refused {
 		s.errf("not copied: %s", payloadWhy(reason))
 		return 1
 	}
@@ -237,6 +211,77 @@ func payloadWhy(reason string) string {
 		return "too many copies; the bridge is rate-limited"
 	}
 	return reason
+}
+
+// request parses the arguments and reads and validates the payload. code
+// is -1 to go on, else the exit status.
+func (s *Shim) request() (op string, data []byte, code int) {
+	o, code, msg := parseArgs(s.Args)
+	if code != 0 {
+		s.errf("%s", msg)
+		return "", nil, code
+	}
+	if !o.clear {
+		if len(o.words) > 0 {
+			data = []byte(strings.Join(o.words, " "))
+		} else if s.Stdin != nil {
+			b, err := io.ReadAll(io.LimitReader(s.Stdin, MaxCopyBytes+1))
+			if err != nil {
+				s.errf("reading stdin: %v", err)
+				return "", nil, 1
+			}
+			data = b
+		}
+		if o.trim && len(data) > 0 && data[len(data)-1] == '\n' {
+			data = data[:len(data)-1]
+		}
+		if err := ValidatePayload(data); err != nil {
+			// Nothing is written anywhere.
+			s.errf("not copied: %s", payloadWhy(err.Error()))
+			return "", nil, 1
+		}
+	}
+	op = OpClipboard
+	switch {
+	case o.clear && o.primary:
+		op = OpClearPrimary
+	case o.clear:
+		op = OpClearClipboard
+	case o.primary:
+		op = OpPrimary
+	}
+	return op, data, -1
+}
+
+// oscOnly is the shim with no bridge variable and no other wl-copy on PATH
+// (CS-LNCH-199): the link is on every container's PATH, so a WAYLAND_DISPLAY
+// from an env file or a child image's ENV makes Claude Code run it. A
+// clipboard op of at most 256 KiB takes the unreachable path — the terminal
+// rule, under the guard, exit 0 — so the copy Claude Code used to make over
+// OSC 52 still reaches an OSC 52 terminal.
+func (s *Shim) oscOnly() int {
+	op, data, code := s.request()
+	if code >= 0 {
+		return code
+	}
+	if op != OpClipboard || len(data) > MaxOSCBytes {
+		s.errf("no clipboard bridge in this session; only text copies of up to %d KiB go to the terminal over OSC 52", MaxOSCBytes>>10)
+		return 1
+	}
+	term, _ := s.findTerminal()
+	if term == nil {
+		s.errf("no clipboard bridge in this session, and no terminal to copy to over OSC 52")
+		return 1
+	}
+	defer term.Close()
+	if !s.guard() {
+		s.errf("not copied: the terminal-copy limit (%d per %s) is reached", GuardWrites, GuardWindow)
+		return 1
+	}
+	if rc, ok := s.writeOSC(term, data); !ok {
+		return rc
+	}
+	return 0
 }
 
 // OSCSequence is the OSC 52 clipboard write, in the plain form Claude Code
@@ -476,6 +521,5 @@ func (s *Shim) execNext() int {
 		}
 		return 0
 	}
-	s.errf("no clipboard in this sandbox (hostClipboard is off)")
-	return 1
+	return s.oscOnly()
 }

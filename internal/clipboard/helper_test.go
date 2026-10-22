@@ -229,6 +229,10 @@ var _ = Describe("the clipboard helper (CS-LNCH-198)", func() {
 		_, res = f.copy("clipboard", "x")
 		Expect(res).To(Equal("ok"), "::1 in tcp6")
 
+		f.setTCP(tcpHeader+tcpRow("0100007F", 6010, os.Getuid()), tcpHeader+tcpRow("00000000000000000000000001000000", 6010, os.Getuid()+1))
+		_, res = f.copy("clipboard", "x")
+		Expect(res).To(Equal("err stale-display"), "any reachable listener of another non-root uid refuses")
+
 		f.setTCP(tcpHeader+tcpRow("00000000", 6010, os.Getuid()), tcpHeader)
 		_, res = f.copy("clipboard", "x")
 		Expect(res).To(Equal("err stale-display"), "a wildcard does not count for localhost")
@@ -281,21 +285,36 @@ var _ = Describe("the clipboard helper (CS-LNCH-198)", func() {
 	It("CS-LNCH-198: past 4 concurrent connections a new one gets err busy", func() {
 		f := newHelperFixture()
 		f.start()
-		var held []net.Conn
-		for i := 0; i < clipboard.MaxConns; i++ {
-			c, err := net.Dial("unix", f.sock)
-			Expect(err).NotTo(HaveOccurred())
-			held = append(held, c)
-		}
+		held := make([]net.Conn, clipboard.MaxConns)
 		defer func() {
 			for _, c := range held {
-				c.Close()
+				if c != nil {
+					c.Close()
+				}
 			}
 		}()
+		// Accept order is not dial order: a held connection may itself be
+		// the one answered busy (and closed), so top the held set up until
+		// all four are being served and a fifth is refused.
 		Eventually(func() string {
+			for i, c := range held {
+				if c != nil {
+					c.SetReadDeadline(time.Now().Add(5 * time.Millisecond))
+					if _, err := c.Read(make([]byte, 16)); err == nil || !os.IsTimeout(err) {
+						c.Close()
+						c = nil
+					}
+				}
+				if c == nil {
+					nc, err := net.Dial("unix", f.sock)
+					Expect(err).NotTo(HaveOccurred())
+					held[i] = nc
+				}
+			}
+			time.Sleep(20 * time.Millisecond)
 			adm, _, _ := clipboard.Exchange(f.sock, clipboard.Request{Op: "ping"}, nil, time.Second)
 			return adm
-		}).Should(Equal("err busy"))
+		}, 3*time.Second).Should(Equal("err busy"))
 	})
 
 	It("CS-LNCH-198: exits on the die event of the exact id, never a prefix match", func() {
@@ -313,6 +332,23 @@ var _ = Describe("the clipboard helper (CS-LNCH-198)", func() {
 		})
 		g.h.DirCheck, g.h.InspectEvery, g.h.EventsRetry = time.Hour, time.Hour, time.Millisecond
 		Expect(g.h.Watch()).To(Equal("container gone"), "the prefix event is ignored; the inspect decides")
+	})
+
+	It("CS-LNCH-198: the docker events child is tethered and killed when the watch returns", func() {
+		f := newHelperFixture()
+		f.fake.OnHang("docker events")
+		f.h.DirCheck, f.h.InspectEvery, f.h.EventsRetry = 10*time.Millisecond, time.Hour, time.Hour
+		Expect(os.RemoveAll(f.dir)).To(Succeed())
+		Expect(f.h.Watch()).To(Equal("directory gone"))
+		Eventually(func() int { return f.fake.Killed }).Should(Equal(1))
+		var events []execx.Cmd
+		for _, c := range f.fake.Calls {
+			if c.Name == "docker" && len(c.Args) > 0 && c.Args[0] == "events" {
+				events = append(events, c)
+			}
+		}
+		Expect(events).To(HaveLen(1))
+		Expect(events[0].DieWithParent).To(BeTrue())
 	})
 
 	It("CS-LNCH-200: a nested helper forwards to the outer bridge and ignores any target", func() {

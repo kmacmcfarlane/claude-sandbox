@@ -147,11 +147,23 @@ var _ = Describe("the wl-copy shim (CS-LNCH-199)", func() {
 	})
 
 	It("CS-LNCH-199: refusals write no OSC 52 and exit 1", func() {
-		for _, adm := range []string{"err rate-limited", "err too-large", "err control-char", "err utf8", "err peer"} {
+		for _, adm := range []string{"err rate-limited", "err too-large", "err control-char", "err utf8"} {
 			b := newFakeBridge(adm, "")
 			f := newShimFixture(b.sock)
 			Expect(f.shim("x").Run()).To(Equal(1), adm)
 			Expect(f.tty.Len()).To(BeZero(), adm)
+		}
+	})
+
+	It("CS-LNCH-199: any other admission error (peer, bad-request, an unknown answer) is treated as unreachable", func() {
+		for _, adm := range []string{"err peer", "err bad-request", "what"} {
+			b := newFakeBridge(adm, "")
+			f := newShimFixture(b.sock)
+			Expect(f.shim("x").Run()).To(Equal(0), adm)
+			Expect(f.tty.String()).To(Equal(osc("x")), adm)
+			Expect(f.stderr.String()).To(ContainSubstring("over OSC 52 only"), adm)
+			data, _ := os.ReadFile(f.guard)
+			Expect(strings.Fields(string(data))).To(HaveLen(1), "under the guard")
 		}
 	})
 
@@ -226,7 +238,7 @@ var _ = Describe("the wl-copy shim (CS-LNCH-199)", func() {
 		Expect(w.writes).To(BeNumerically(">", 1))
 	})
 
-	It("CS-LNCH-199: without the variable it execs the next real wl-copy on PATH, else exits 1", func() {
+	It("CS-LNCH-199: without the variable it execs the next real wl-copy on PATH", func() {
 		dir := shortDir()
 		self := filepath.Join(dir, "self", "wl-copy")
 		other := filepath.Join(dir, "other", "wl-copy")
@@ -260,8 +272,39 @@ var _ = Describe("the wl-copy shim (CS-LNCH-199)", func() {
 			}
 			return ""
 		}
-		Expect(s.Run()).To(Equal(1))
-		Expect(stderr.String()).To(ContainSubstring("no clipboard in this sandbox (hostClipboard is off)"))
+		s.Exec = func(string, []string, []string) error {
+			Fail("no other wl-copy: nothing to exec")
+			return nil
+		}
+		tty := &bytes.Buffer{}
+		s.Args, s.Stdin = nil, strings.NewReader("copied")
+		s.OpenTTY = func() (io.WriteCloser, error) { return nopCloser{tty}, nil }
+		s.GuardPath = filepath.Join(dir, "guard")
+		Expect(s.Run()).To(Equal(0))
+		Expect(tty.String()).To(Equal(osc("copied")))
+	})
+
+	It("CS-LNCH-199: WAYLAND_DISPLAY from an env file, no socket and no other wl-copy: OSC 52 under the guard, exit 0", func() {
+		dir := shortDir()
+		tty, stderr := &bytes.Buffer{}, &bytes.Buffer{}
+		env := map[string]string{"WAYLAND_DISPLAY": "wayland-0", "PATH": dir}
+		uid := os.Getuid()
+		shim := func(stdin string, args ...string) *clipboard.Shim {
+			return &clipboard.Shim{Args: args, Stdin: strings.NewReader(stdin), Stderr: stderr,
+				Getenv:    func(k string) string { return env[k] },
+				OpenTTY:   func() (io.WriteCloser, error) { return nopCloser{tty}, nil },
+				GuardPath: filepath.Join(dir, "guard"), UID: &uid,
+				Self: func() (string, error) { return "/nowhere/wl-copy", nil }}
+		}
+		Expect(shim("hi").Run()).To(Equal(0))
+		Expect(tty.String()).To(Equal(osc("hi")))
+		Expect(shim("hi", "--primary").Run()).To(Equal(1))
+		Expect(stderr.String()).To(ContainSubstring("no clipboard bridge in this session"))
+		Expect(shim(strings.Repeat("a", clipboard.MaxOSCBytes+1)).Run()).To(Equal(1))
+		Expect(shim("\x1b").Run()).To(Equal(1))
+		Expect(tty.String()).To(Equal(osc("hi")), "nothing more written")
+		data, _ := os.ReadFile(filepath.Join(dir, "guard"))
+		Expect(strings.Fields(string(data))).To(HaveLen(1), "under the guard")
 	})
 })
 

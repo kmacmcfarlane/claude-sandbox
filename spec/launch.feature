@@ -2881,8 +2881,9 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       | <dir>/bridge.sock would be longer than 107 bytes                              | WARNING |
       | <dir> cannot be created as the user, or is not a real directory of the user's | WARNING |
       | <dir> holds a comma or "=" (the --mount syntax)                               | WARNING |
-    Then one line "<WARNING|Note>: hostClipboard: <why>; this session copies
-      over OSC 52 only." is printed on stderr, nothing on a tmux restore
+    Then one line "<WARNING|Note>: hostClipboard: <why>; this session has no
+      clipboard bridge, so copies reach only terminals that take OSC 52." is
+      printed on stderr, nothing on a tmux restore
       resume (nobody watches that pane)
     And the launch goes on with the key-off argv and the label
       claude-sandbox.clipboard=none; the hash still carries the wanted value
@@ -2899,12 +2900,20 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       banner, nothing on the hash)
     And a tmux restore resume applies it silently and writes no target: the
       first real attach sets one
-    And an attach (hand or restore) and a join of a container labelled
-      clipboard=bridge resolve this shell's target, write it under
-      never-downgrade (CS-LNCH-203), then ping the helper (500 ms) and, when it
-      does not answer, start a new one and print "Clipboard bridge restarted
-      for '<noun>'." (a helper spawned from a tmux.service pane dies with that
-      unit under KillMode=control-group; this repairs it)
+    And a hand attach and a join of a container labelled clipboard=bridge
+      resolve this shell's target, write it under never-downgrade
+      (CS-LNCH-203), then ping the helper (500 ms) and, when it does not
+      answer, start a new one and print "Clipboard bridge restarted for
+      '<noun>'." (a helper spawned from a tmux.service pane dies with that unit
+      under KillMode=control-group; this repairs it)
+    And a tmux restore attach only pings and restarts the helper and writes NO
+      target: it runs from a pane whose environment (often the service's
+      console :0) says nothing about where the operator sits
+    And on the host, when the container's shadow directory lies at or under
+      any of its own bind sources (lexically, or after EvalSymlinks of both) —
+      a nested container whose shadow root is inside the config-dir mount
+      (CS-LNCH-162), reachable by sandboxes — the attach or join neither
+      writes a target nor restarts the helper
     And inside a sandbox the restart runs only for a directory that Lstats as a
       real directory of the user's, chained to the launcher's own
       CLAUDE_SANDBOX_CLIPBOARD, and no target is written
@@ -2970,7 +2979,9 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       (plan 08 N2): a TCP display (localhost:N, 127.x:N, the machine's name)
       needs a LISTEN row in /proc/net/tcp or tcp6 on port 6000+N owned by the
       helper's uid or by root, bound to loopback — or to the wildcard for a
-      display named by the machine's own name; a unix display (:N, unix:N)
+      display named by the machine's own name — and none of the reachable
+      listeners on that port (loopback, or the wildcard where it counts) may
+      belong to another non-root uid; a unix display (:N, unix:N)
       needs /tmp/.X11-unix/XN to be a socket owned by the uid or root;
       otherwise "err stale-display", with no connection made and no cookie
       sent
@@ -2987,14 +2998,23 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       name equals the name), when the directory is gone (checked every 30 s),
       or when a bounded inspect (every 5 minutes, and whenever the event
       stream ends) answers "No such container"
+    And its "docker events" child is started with DieWithParent (its own
+      process group, killed if the helper dies) and its group is killed on
+      every exit path of the watch, so it never outlives the helper
 
   @new
   Scenario: CS-LNCH-199 The wl-copy shim asks the helper first, then writes OSC 52
     Given "wl-copy" in a container (the launcher binary through argv0)
     When CLAUDE_SANDBOX_CLIPBOARD is unset
     Then it execs the next wl-copy on PATH that is not itself (a child image's),
-      with the variable removed, else exits 1 "wl-copy: no clipboard in this
-      sandbox (hostClipboard is off)"
+      with the variable removed
+    And with none (the link is on every container's PATH, so a WAYLAND_DISPLAY
+      from an env file or a child image's ENV makes Claude Code run it), a
+      clipboard op of at most 256 KiB takes the unreachable path: the
+      terminal rule below, under the guard, exit 0 — the copy Claude Code
+      used to make over OSC 52 still reaches an OSC 52 terminal; anything
+      else exits 1 "wl-copy: no clipboard bridge in this session; only text
+      copies of up to 256 KiB go to the terminal over OSC 52"
     When it is set
     Then the arguments are:
       | argument                              | effect                       |
@@ -3015,8 +3035,8 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       | helper's answer                                        | OSC 52 write            |
       | accepted                                               | write                   |
       | unreachable (connect failed, no admission in 300 ms)   | write, under the guard  |
-      | err busy                                               | write, under the guard  |
-      | err rate-limited, too-large, utf8, control-char, other | no write                |
+      | err busy, or any other err (peer, bad-request, ...)    | write, under the guard  |
+      | err rate-limited, too-large, utf8, control-char        | no write                |
     And the guard allows 10 such writes per 10 s per container (a flocked
       counter file in the container's /tmp); over it, exit 1 with no write
     And the write is a complete sequence, one write unless interrupted: TERM,
@@ -3033,9 +3053,9 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       | outcome                                           | exit |
       | ok or pending                                     | 0    |
       | err no-display after the OSC 52 write             | 0    |
-      | unreachable or busy after the OSC 52 write        | 0, with a stderr note |
-      | any refusal or other err                          | 1    |
-      | unreachable or busy with no write (PRIMARY, etc.) | 1    |
+      | unreachable, busy or another err after the write  | 0, with a stderr note |
+      | rate-limited or a payload refusal; a result err   | 1    |
+      | unreachable, busy or another err with no write    | 1    |
     And residuals: under a full pty buffer Node may split a frame and the OSC
       can land inside an escape sequence; a short write can let Claude Code's
       output interleave the shim's parts; both print stray text until the

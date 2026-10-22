@@ -11,12 +11,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	"github.com/kmacmcfarlane/claude-sandbox/internal/clipboard"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/sessions"
 )
 
 // psRowClip is a discovery row carried through the clipboard and shadowdir
@@ -25,6 +27,28 @@ func psRowClip(name, project, instance, clip, shadow, resume, worktree string) s
 	return strings.Join([]string{name, "Up 1 hour", project, "claude", instance, "v1", "", "", "", "3", worktree,
 		"running", "2026-09-30 12:00:00 +0000 UTC", "", "", "",
 		strings.Repeat("b", 64), "", "", "", resume, "none", "none", "", clip, shadow, ""}, psSep)
+}
+
+// signalRunner wraps the fake and hands back, for the clipboard helper's
+// start, a process that records the signals it gets.
+type signalRunner struct {
+	*execx.Fake
+	helper *recordedProc
+}
+
+type recordedProc struct{ signals []os.Signal }
+
+func (p *recordedProc) Signal(s os.Signal) error { p.signals = append(p.signals, s); return nil }
+func (p *recordedProc) Wait() error              { return nil }
+func (p *recordedProc) Pid() int                 { return 4243 }
+
+func (r *signalRunner) Start(c execx.Cmd) (execx.Process, error) {
+	if len(c.Args) > 0 && c.Args[0] == "clipboard-bridge" {
+		r.Fake.Start(c)
+		r.helper = &recordedProc{}
+		return r.helper, nil
+	}
+	return r.Fake.Start(c)
 }
 
 var _ = Describe("the host clipboard bridge (CLI)", func() {
@@ -87,6 +111,15 @@ var _ = Describe("the host clipboard bridge (CLI)", func() {
 		Expect(strings.Join(starts[0].Args, " ")).To(Equal("clipboard-bridge --dir " + filepath.Join(shadow, "clipboard") +
 			" --container " + argPairsCLI(args, "--name")[0] +
 			" --log " + filepath.Join(f.cache, "clipboard-bridge.log") + " --target " + filepath.Join(shadow, "clipboard-target.json")))
+	})
+
+	It("CS-LNCH-195: a removed reservation (a docker start that could not run) SIGTERMs the helper", func() {
+		rec := &signalRunner{Fake: f.fake}
+		f.env.Runner = rec
+		f.fake.On("docker start -ai", "", errors.New("exec: docker: not found"))
+		Expect(f.run("--new")).NotTo(Equal(0))
+		Expect(rec.helper).NotTo(BeNil())
+		Expect(rec.helper.signals).To(Equal([]os.Signal{syscall.SIGTERM}))
 	})
 
 	It("CS-LNCH-194: explicitly off (env or key) launches without it", func() {
@@ -174,6 +207,32 @@ var _ = Describe("the host clipboard bridge (CLI)", func() {
 			f.envmap["CLAUDE_SANDBOX_CLIPBOARD_DISPLAY"] = "none"
 			attach(psRowClip("cs-a", f.proj, "otter", "bridge", shadow, "", ""))
 			Expect(readTarget(shadow)["backend"]).To(Equal("none"), "only the override none clears it")
+		})
+
+		It("CS-LNCH-197: on the host, a container whose shadow dir lies under one of its bind sources gets no target and no helper", func() {
+			f.envmap["DISPLAY"] = ":0"
+			// A nested container: its shadow root is inside the config-dir
+			// mount, here the TempRoot itself as a bind source.
+			attach(psRowClip("cs-a", f.proj, "otter", "bridge", shadow, "", "") + f.env.TempRoot + "," + f.proj)
+			_, err := os.Stat(filepath.Join(shadow, "clipboard-target.json"))
+			Expect(os.IsNotExist(err)).To(BeTrue())
+			Expect(helperStarts()).To(BeEmpty())
+
+			link := filepath.Join(f.env.TempRoot, "link")
+			Expect(os.Symlink(f.env.TempRoot, link)).To(Succeed())
+			attach(psRowClip("cs-a", f.proj, "otter", "bridge", shadow, "", "") + link)
+			Expect(helperStarts()).To(BeEmpty(), "the source after EvalSymlinks")
+		})
+
+		It("CS-LNCH-197: a restore attach (by \"\") pings and restarts the helper but writes no target", func() {
+			f.envmap["DISPLAY"] = ":0"
+			s := sessions.Session{Name: "cs-a", Instance: "otter", Clipboard: "bridge", ShadowDir: shadow}
+			eff, bridged := refreshClipboardBridge(f.env, s, "")
+			Expect(bridged).To(BeTrue())
+			Expect(eff).To(BeNil())
+			_, err := os.Stat(filepath.Join(shadow, "clipboard-target.json"))
+			Expect(os.IsNotExist(err)).To(BeTrue())
+			Expect(helperStarts()).To(HaveLen(1))
 		})
 
 		It("CS-LNCH-197: a join re-points the target too", func() {

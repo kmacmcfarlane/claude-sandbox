@@ -426,7 +426,7 @@ func joinExistingSession(env *Env, projectDir string, f *launchFlags, cfg *casca
 		_, _, _, home := hostIdentity(env.Getenv)
 		if snapErr == nil {
 			// CS-LNCH-202: the JetBrains note, after the target is written.
-			return true, attachToWith(env, d.Target, cfg.DetachKeys, attachMark(d.Target, home, wt.Root), nil, func(eff *clipboard.Target, bridged bool) {
+			return true, attachToWith(env, d.Target, cfg.DetachKeys, attachMark(d.Target, home, wt.Root), nil, clipboard.ByAttach, func(eff *clipboard.Target, bridged bool) {
 				if bridged && launch.ClipboardWanted(env.Getenv, cfg, false, false) {
 					jetbrainsNote(env, projectDir, snap, eff)
 				}
@@ -673,15 +673,15 @@ func newInstance(env *Env, projectDir string, f *launchFlags, gitRoot string) st
 // 64-hex id when it is known, else the name; the event filter keeps the name,
 // which oomreport matches exactly (CS-TMUX-056, CS-LNCH-095).
 func attachTo(env *Env, s sessions.Session, configuredKeys string, mark *paneMark, onChild func()) error {
-	return attachToWith(env, s, configuredKeys, mark, onChild, nil)
+	return attachToWith(env, s, configuredKeys, mark, onChild, clipboard.ByAttach, nil)
 }
 
 // attachToWith is attachTo with a hook that sees the clipboard bridge's
 // effective target once the attach re-pointed it (CS-LNCH-197/202).
-func attachToWith(env *Env, s sessions.Session, configuredKeys string, mark *paneMark, onChild func(), clip func(*clipboard.Target, bool)) error {
+func attachToWith(env *Env, s sessions.Session, configuredKeys string, mark *paneMark, onChild func(), by string, clip func(*clipboard.Target, bool)) error {
 	// CS-LNCH-197: re-point the bridge to this shell's display, never
 	// downgrading, and restart a dead helper.
-	eff, bridged := refreshClipboardBridge(env, s, clipboard.ByAttach)
+	eff, bridged := refreshClipboardBridge(env, s, by)
 	if clip != nil {
 		clip(eff, bridged)
 	}

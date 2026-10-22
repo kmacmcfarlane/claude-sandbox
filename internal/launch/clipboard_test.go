@@ -65,13 +65,10 @@ var _ = Describe("the host clipboard bridge (launcher side)", func() {
 		for _, v := range []string{"0", "false", "no"} {
 			env["CLAUDE_SANDBOX_HOST_CLIPBOARD"] = v
 			Expect(launch.ClipboardWanted(get, &cascade.Config{HostClipboard: &t}, false, false)).To(BeFalse(), v)
-			Expect(launch.ClipboardExplicitlyOff(get, nil)).To(BeTrue())
 		}
 		env["CLAUDE_SANDBOX_HOST_CLIPBOARD"] = "1"
 		Expect(launch.ClipboardWanted(get, &cascade.Config{HostClipboard: &f}, false, false)).To(BeTrue())
 		delete(env, "CLAUDE_SANDBOX_HOST_CLIPBOARD")
-		Expect(launch.ClipboardExplicitlyOff(get, &cascade.Config{HostClipboard: &f})).To(BeTrue())
-		Expect(launch.ClipboardExplicitlyOff(get, &cascade.Config{})).To(BeFalse())
 	})
 
 	It("CS-LNCH-194: off gives today's argv plus the clipboard=none label, and no hash line", func() {
@@ -125,7 +122,7 @@ var _ = Describe("the host clipboard bridge (launcher side)", func() {
 			Expect(args).NotTo(ContainElement("--mount"))
 			Expect(strings.Join(args, " ")).To(ContainSubstring("claude-sandbox.clipboard=none"))
 			Expect(errw.String()).To(ContainSubstring(want))
-			Expect(errw.String()).To(HaveSuffix("this session copies over OSC 52 only.\n"))
+			Expect(errw.String()).To(HaveSuffix("this session has no clipboard bridge, so copies reach only terminals that take OSC 52.\n"))
 		}
 		in := inputs()
 		in.GOOS = "darwin"
@@ -147,6 +144,14 @@ var _ = Describe("the host clipboard bridge (launcher side)", func() {
 		in.TempDir = filepath.Join(proj, "claude-sandbox9")
 		mkdir(in.TempDir)
 		standsDown(in, "lies under a path mounted into the container")
+
+		// L7: a mount source that is a symlink to the shadow's parent.
+		link := filepath.Join(home, "via-link")
+		Expect(os.Symlink(base, link)).To(Succeed())
+		in = inputs()
+		in.Cfg = &cascade.Config{Mounts: []cascade.Mount{{Host: link, Container: "/data"}}}
+		standsDown(in, "lies under a path mounted into the container")
+		Expect(launch.UnderAnySource(filepath.Join(link, "x"), []string{base})).To(BeTrue(), "the path's resolved form too")
 
 		in = inputs()
 		long := filepath.Join(base, strings.Repeat("d", 100))

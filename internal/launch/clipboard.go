@@ -40,23 +40,6 @@ func ClipboardWanted(getenv func(string) string, cfg *cascade.Config, headless, 
 	return ResolveTristate(nil, getenv(clipboard.EnvKey), key, true)
 }
 
-// ClipboardExplicitlyOff reports an explicit off (env or key), which
-// silences the JetBrains note's case (i) (CS-LNCH-202).
-func ClipboardExplicitlyOff(getenv func(string) string, cfg *cascade.Config) bool {
-	if v := strings.TrimSpace(getenv(clipboard.EnvKey)); v != "" {
-		return !envTruthy(v)
-	}
-	return cfg != nil && cfg.HostClipboard != nil && !*cfg.HostClipboard
-}
-
-func envTruthy(v string) bool {
-	switch strings.ToLower(strings.TrimSpace(v)) {
-	case "1", "true", "yes":
-		return true
-	}
-	return false
-}
-
 // ClipboardBanner is the one line an applied bridge prints (CS-LNCH-195):
 // the bridge usually arrives as a default, and it changes what a session
 // can do on the host.
@@ -95,7 +78,7 @@ func (in *Inputs) assembleClipboard(p *Plan) bool {
 		if note {
 			prefix = "Note: hostClipboard: "
 		}
-		fmt.Fprintf(in.Err, prefix+format+"; this session copies over OSC 52 only.\n", a...)
+		fmt.Fprintf(in.Err, prefix+format+"; this session has no clipboard bridge, so copies reach only terminals that take OSC 52.\n", a...)
 		return false
 	}
 	goos := runtime.GOOS
@@ -197,15 +180,37 @@ func coversPath(volumes []string, path string) bool {
 // underAnyHostMount reports whether path lies at or below the HOST side of
 // any -v spec.
 func underAnyHostMount(volumes []string, path string) bool {
-	path = filepath.Clean(path)
+	var srcs []string
 	for _, v := range volumes {
-		src, _, ok := strings.Cut(v, ":")
-		if !ok {
+		if src, _, ok := strings.Cut(v, ":"); ok {
+			srcs = append(srcs, src)
+		}
+	}
+	return UnderAnySource(path, srcs)
+}
+
+// UnderAnySource reports whether path lies at or below any bind source,
+// comparing the lexical and the symlink-resolved form of each side
+// (CS-LNCH-196/197): the target file must stay where no container reaches.
+func UnderAnySource(path string, sources []string) bool {
+	forms := func(p string) []string {
+		out := []string{filepath.Clean(p)}
+		if r, err := filepath.EvalSymlinks(p); err == nil && r != out[0] {
+			out = append(out, r)
+		}
+		return out
+	}
+	paths := forms(path)
+	for _, s := range sources {
+		if s == "" {
 			continue
 		}
-		src = filepath.Clean(src)
-		if path == src || strings.HasPrefix(path, src+"/") || src == "/" {
-			return true
+		for _, src := range forms(s) {
+			for _, p := range paths {
+				if src == "/" || p == src || strings.HasPrefix(p, src+"/") {
+					return true
+				}
+			}
 		}
 	}
 	return false

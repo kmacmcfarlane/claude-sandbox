@@ -321,9 +321,17 @@ func (in ResolveInput) xauthority(env func(string) string) (string, bool) {
 		return "", false
 	}
 	if err := in.Files.ownedRegular(xa); err != nil {
-		return "", false
+		return xa, false
 	}
 	return xa, true
+}
+
+// xauthHint names the X authority file that failed and the rule (CS-LNCH-203).
+func xauthHint(xa string) string {
+	if xa == "" {
+		return "XAUTHORITY must be an absolute path to a regular file you own"
+	}
+	return "XAUTHORITY " + xa + " must be a regular file you own (not a symlink)"
 }
 
 func (in ResolveInput) xTarget(display string, env func(string) string) (*Target, string) {
@@ -332,7 +340,7 @@ func (in ResolveInput) xTarget(display string, env func(string) string) (*Target
 	}
 	xa, ok := in.xauthority(env)
 	if !ok {
-		return nil, ""
+		return nil, xauthHint(xa)
 	}
 	return &Target{V: 1, Backend: BackendX, Display: display, XAuthority: xa}, ""
 }
@@ -383,6 +391,9 @@ func (in ResolveInput) override(raw string) (Resolution, bool) {
 	d := strings.TrimPrefix(raw, "x:")
 	if !ValidDisplay(d, in.Hostname) {
 		return bad("not an X display on this machine")
+	}
+	if _, ok := in.xauthority(in.Getenv); !ok && in.hasX() {
+		return bad("no XAUTHORITY file you own")
 	}
 	t, hint := in.xTarget(d, in.Getenv)
 	if t == nil && hint == "" {

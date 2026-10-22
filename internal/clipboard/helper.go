@@ -618,16 +618,20 @@ func (h *Helper) checkXDisplay(d string) error {
 		root = "/proc"
 	}
 	ls := ReadListeners(filepath.Join(root, "net/tcp"), filepath.Join(root, "net/tcp6"))
+	found := false
 	for _, l := range ls {
-		if l.Port != 6000+n {
+		if l.Port != 6000+n || !(l.IP.IsLoopback() || (wildcardOK && l.IP.IsUnspecified())) {
 			continue
 		}
+		// Any reachable listener of another non-root user refuses: xclip
+		// might connect to it (IPv4 vs IPv6, loopback vs wildcard).
 		if l.UID != h.UID && l.UID != 0 {
-			continue
+			return fmt.Errorf("port %d has a listener of uid %d", 6000+n, l.UID)
 		}
-		if l.IP.IsLoopback() || (wildcardOK && l.IP.IsUnspecified()) {
-			return nil
-		}
+		found = true
+	}
+	if found {
+		return nil
 	}
 	return fmt.Errorf("no listener of yours on port %d", 6000+n)
 }
@@ -715,8 +719,30 @@ func (h *Helper) Watch() string {
 	}
 	gone := make(chan string, 4)
 	stopped := make(chan struct{})
-	defer close(stopped)
+	// The events child: started with DieWithParent (its own group, killed
+	// if the helper dies) and its group killed on every return below, so
+	// it never outlives the watch (CS-LNCH-198).
+	var (
+		procMu  sync.Mutex
+		current execx.Process
+		closed  bool
+	)
+	watcherDone := make(chan struct{})
+	defer func() {
+		procMu.Lock()
+		closed = true
+		p := current
+		procMu.Unlock()
+		if p != nil {
+			killGroup(p)
+		}
+		close(stopped)
+		// The watcher ends promptly once its child is gone; nothing it
+		// started is left behind when Watch returns.
+		<-watcherDone
+	}()
 	go func() {
+		defer close(watcherDone)
 		for {
 			// An OS pipe, not io.Pipe: its kernel buffer takes a write made
 			// before the reader starts (a runner that writes at Start).
@@ -725,9 +751,20 @@ func (h *Helper) Watch() string {
 				gone <- "cannot watch: " + perr.Error()
 				return
 			}
+			procMu.Lock()
+			if closed {
+				procMu.Unlock()
+				pr.Close()
+				pw.Close()
+				return
+			}
 			proc, err := h.Runner.Start(execx.Cmd{Name: "docker", Args: []string{
 				"events", "--filter", "container=" + h.ref(), "--filter", "event=die", "--filter", "event=destroy",
-				"--format", "{{.Actor.ID}} {{.Action}} {{.Actor.Attributes.name}}"}, Stdout: pw})
+				"--format", "{{.Actor.ID}} {{.Action}} {{.Actor.Attributes.name}}"}, Stdout: pw, DieWithParent: true})
+			if err == nil {
+				current = proc
+			}
+			procMu.Unlock()
 			if err == nil {
 				go func() { proc.Wait(); pw.Close() }()
 				sc := bufio.NewScanner(pr)
@@ -752,6 +789,13 @@ func (h *Helper) Watch() string {
 				pw.Close()
 			}
 			pr.Close()
+			procMu.Lock()
+			current = nil
+			done := closed
+			procMu.Unlock()
+			if done {
+				return
+			}
 			if !h.containerExists() {
 				gone <- "container gone"
 				return
@@ -783,6 +827,16 @@ func (h *Helper) Watch() string {
 			}
 		}
 	}
+}
+
+// killGroup SIGKILLs a process's whole group (a real tethered process leads
+// its own), else the process.
+func killGroup(p execx.Process) {
+	if g, ok := p.(execx.GroupKiller); ok {
+		g.KillGroup()
+		return
+	}
+	p.Signal(os.Kill)
 }
 
 // containerExists runs one bounded inspect; only docker's "No such ..."

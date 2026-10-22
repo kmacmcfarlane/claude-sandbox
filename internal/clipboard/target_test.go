@@ -160,7 +160,9 @@ var _ = Describe("display target resolution (CS-LNCH-203)", func() {
 		r := newResolver()
 		r.env["DISPLAY"] = ":0"
 		r.env["XAUTHORITY"] = "/tmp/link"
-		Expect(r.resolve().Target).To(BeNil())
+		res := r.resolve()
+		Expect(res.Target).To(BeNil())
+		Expect(res.Hint).To(Equal("XAUTHORITY /tmp/link must be a regular file you own (not a symlink)"))
 
 		dir := shortDir()
 		real := filepath.Join(dir, "auth")
