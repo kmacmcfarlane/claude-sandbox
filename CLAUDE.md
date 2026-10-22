@@ -4,6 +4,22 @@
 
 Docker-based sandbox for running Claude Code with filesystem isolation and opt-in host access (Docker socket, AWS, git, SSH, package caches — via CLI flags, env vars, or `.claude-sandbox/config.yaml`). Part of the [claude-kit](https://github.com/kmacmcfarlane/claude-kit) ecosystem.
 
+## Principles
+
+Two operator principles (2026-10-22) govern every default and every change; weigh them together.
+
+- **Host parity:** "the behavior is in alignment with what running `claude` outside the sandbox would do". Defaults make a sandboxed claude behave as plain claude on the host would; a deviation must be visible (a banner, a note, a documented default) and switchable off.
+- **Isolation is the point:** "consider security/isolation tradeoffs when making it work more like vanilla claude, because after all the point of using a sandbox is to get SOME sort of isolation". Parity never extends to access the sandbox exists to withhold, and every parity change states its isolation cost.
+- **Corollary, transparent defaults:** any default a user must discover by losing something is the wrong default. Isolation a person would trip over is opt-in for people and default-on only for unattended runs.
+
+Where today's defaults stand:
+
+- `worktree`: off for interactive launches (transparent: `--resume` sees the repo's history), on for ralph (an unattended run is isolated).
+- `hostClipboard`: on (parity, answer 135); write-only, local displays only — its isolation cost.
+- `sandboxNetwork`: off, so container DNS differs from the host's per-link split DNS (a parity gap; under review as decision 102).
+- `dangerous`: off unless the cascade, `--dangerous` or `CLAUDE_SANDBOX_DANGEROUS` turns it on — headless included.
+- Env allowlists (`HeadlessEnv`, `TerminalEnv`, the AWS list) and refused env keys (`cascade.RefusedEnvKeys`): isolation exceptions to parity — the host's environment is never passed through wholesale.
+
 ## Key Architecture
 
 - **Same-path mounting:** Container sees the project at its real host path so `docker compose` volume resolution works correctly against the host daemon.
