@@ -345,7 +345,7 @@ Feature: .claude-sandbox/ layout lifecycle (CS-LAY)
     Given CS-LAY-018 fires (the directory itself is excluded, or a sidecar .git exists)
     Then only its warning is printed and no child probe runs
     And the note is never printed with trackInHost false, and goes to stderr only (headless stdout stays clean)
-    Given CS-LAY-027 fires (an inner .claude-sandbox/.gitignore rule ignores config.yaml or Dockerfile)
+    Given CS-LAY-027 prints its warning (an inner .claude-sandbox/.gitignore rule ignores config.yaml or Dockerfile)
     Then only its warning is printed and no child probe runs: it already names the rule that hides them
 
   @new
@@ -358,25 +358,44 @@ Feature: .claude-sandbox/ layout lifecycle (CS-LAY)
     # dead "!" lines are refused: the env, temp/ and ralph/ lines still
     # work (or are harmless) under the inner rule, and the env line keeps the
     # secret file out of the host when the inner rule does not cover it.
-    # Asked with ONE bounded `git check-ignore -v --no-index --
-    # .claude-sandbox/config.yaml .claude-sandbox/Dockerfile` (--no-index: the
+    # Asked with ONE bounded `git check-ignore -v -z --no-index --stdin`, the
+    # two paths NUL-terminated on stdin (-z needs --stdin; --no-index: the
     # files are usually tracked), run only when .claude-sandbox/.gitignore
-    # exists. -v names the last matching rule per path; a file counts as dead
-    # only when that rule's source is the inner .gitignore (repo-root
-    # relative: ".claude-sandbox/.gitignore", or "<prefix>/.claude-sandbox/.gitignore"
-    # for a project in a subdirectory) and its pattern is not a "!" negation
-    # ("*" followed by "!config.yaml" there leaves config.yaml live).
+    # exists. -z gives NUL-separated records (source, line number, pattern,
+    # path), so a source git would otherwise C-quote (a non-ASCII, `"`, `\` or
+    # control character in a subdirectory prefix) or one holding ":<digits>:"
+    # is read verbatim. -v names the last matching rule per path; a file
+    # counts as dead only when that rule's source is the inner .gitignore
+    # (repo-root relative: ".claude-sandbox/.gitignore", or
+    # "<prefix>/.claude-sandbox/.gitignore" for a project in a subdirectory)
+    # and its pattern is not a "!" negation ("*" followed by "!config.yaml"
+    # there leaves config.yaml live).
+    # The warning prints only while it matters — a dead line already in the
+    # host .gitignore, the entries being decided, or init — because an inner
+    # rule can be deliberate and a steady state should stay quiet.
+    # Known limits, accepted: the source match is a suffix match, so a
+    # repo-relative ".gitignore" of an ANCESTOR directory itself named
+    # ".claude-sandbox" (a project nested as .claude-sandbox/<...>/p) would
+    # count too; and the CS-LAY-026 note is left out only when this warning
+    # prints, so an outer rule hiding other new files goes unmentioned then.
     Given the project is a git work tree, the effective trackInHost is true and CS-LAY-018 does not fire
     And .claude-sandbox/.gitignore holds a rule that ignores config.yaml, Dockerfile or both
     When SetupLayout runs
     Then the "!" line of each file the inner rule ignores is neither proposed nor appended
     And the other CS-LAY-009 entries (env, temp/, ralph/, the "!" line of a file it does not ignore)
       and ".claude/worktrees/" (CS-LAY-017) are proposed as in CS-LAY-009
-    And stderr carries one warning, before the proposal, naming the inner file, the ignored file(s) and
-      the refused line(s), and the two remedies: delete or narrow .claude-sandbox/.gitignore
-      (`git check-ignore -v --no-index <the files>` names the rule), or set trackInHost: false in
-      .claude-sandbox/config.yaml and delete the host-tracked lines a previous launch already appended
-    And the warning repeats on every launch while the rule is there, as CS-LAY-018's does
+    And when a dead "!" line is already in the host .gitignore, or another entry is missing (the
+      entries are being decided), or the run is init (Options.Init), stderr carries one warning,
+      before any proposal, naming the inner file, the ignored file(s) and each dead line — "skipping
+      <line>, which would be dead there" for one not in the host .gitignore, "<line> is dead there
+      (already in .gitignore: delete it)" for one that is (the launcher never removes it) — and the
+      two remedies: delete or narrow .claude-sandbox/.gitignore (`git check-ignore -v --no-index
+      <the files>` names the rule), or "set trackInHost: false in .claude-sandbox/config.yaml (the
+      next launch names the steps to move the directory out of the host repo); any
+      !.claude-sandbox/config.yaml or !.claude-sandbox/Dockerfile line already in .gitignore is dead
+      and can go." — never telling the user to delete the env, temp/ or ralph/ lines, which still
+      keep env out of the host here
+    And otherwise (every other entry present, no dead line present, a launch) nothing is printed
     Given the inner .gitignore exists but no rule there ignores either file (a narrower rule, or a
       later "!" negation of the file)
     Then no warning is printed and the CS-LAY-009 entries are proposed unchanged

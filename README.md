@@ -1335,9 +1335,10 @@ Set in `.claude-sandbox/config.yaml`. Controls how the directory is version-cont
   `.gitignore`, `.git/info/exclude` or `core.excludesFile`. They do not work under a later rule in
   the same file, or under any rule in an inner `.claude-sandbox/.gitignore` matching `config.yaml`
   or `Dockerfile` (such as `*`); git gives those precedence. Under such an inner rule the
-  launcher leaves out the dead `!` line for each file it ignores and warns, naming the inner file:
-  delete or narrow `.claude-sandbox/.gitignore`, or set `trackInHost: false`; the other entries
-  are still proposed. Otherwise the entries are proposed as usual — but new files there stay hidden from the
+  launcher leaves out the dead `!` line for each file it ignores, and — while the entries are being
+  proposed, during `init`, or while a dead line is still in `.gitignore` — warns, naming the inner
+  file: delete or narrow `.claude-sandbox/.gitignore`, or set `trackInHost: false`; the other
+  entries are still proposed. Otherwise the entries are proposed as usual — but new files there stay hidden from the
   host repo except the paths your rules re-include, so when it proposes the entries (and during
   `init`) the launcher prints one `Note:` saying so (`git check-ignore -v --no-index
   .claude-sandbox/<path>` names the rule hiding a path).

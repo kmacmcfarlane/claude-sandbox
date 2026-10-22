@@ -226,13 +226,35 @@ func Setup(project string, trackInHost bool, opts Options) error {
 			if gerr != nil {
 				return gitUnknown(gerr)
 			}
-			if len(dead) > 0 {
-				warnInnerIgnore(opts.errw(), dead)
-			}
 			entries := []string{".claude-sandbox/env", ".claude-sandbox/temp/", ".claude-sandbox/ralph/"}
 			for _, f := range reincludedFiles {
 				if !contains(dead, f) {
 					entries = append(entries, "!"+f)
+				}
+			}
+			// The warning prints only while it matters: a dead line already
+			// in the host .gitignore, the entries being decided (one is
+			// missing, so a proposal follows), or init. Otherwise silent: an
+			// inner rule can be deliberate, and repeating the warning on
+			// every launch would only nag.
+			warned := false
+			if len(dead) > 0 {
+				present := hostLines(hostGI)
+				var already []string
+				for _, f := range dead {
+					if present["!"+f] {
+						already = append(already, f)
+					}
+				}
+				deciding := false
+				for _, l := range entries {
+					if !present[l] {
+						deciding = true
+					}
+				}
+				if len(already) > 0 || deciding || opts.Init {
+					warnInnerIgnore(opts.errw(), dead, already)
+					warned = true
 				}
 			}
 			proposed := gitignoreAdd(project, hostGI, opts, withWorktreesLine(hostGI, entries...)...)
@@ -241,7 +263,7 @@ func Setup(project string, trackInHost bool, opts Options) error {
 			// (Options.Init; the launch path never sets it) — so an ordinary
 			// launch with nothing to decide stays quiet. Not after the
 			// CS-LAY-027 warning, which already names the inner rule.
-			if len(dead) == 0 && (hostTrackedEntryIn(proposed) || opts.Init) {
+			if !warned && (hostTrackedEntryIn(proposed) || opts.Init) {
 				noteChildrenHidden(project, opts)
 			}
 		}
@@ -393,25 +415,31 @@ const innerIgnoreSource = ".claude-sandbox/.gitignore"
 // innerIgnoreDead returns the reincludedFiles whose "!" line would be dead in
 // the host .gitignore because a rule in the inner .claude-sandbox/.gitignore
 // (sideGI) — which git gives precedence — ignores them (CS-LAY-027). One
-// bounded `git check-ignore -v --no-index` over both paths, run only when
-// sideGI exists (CS-LAY-023 already refused one that is not a readable
-// regular file); --no-index because the files are usually tracked. -v names
-// the LAST matching rule per path, so a "!config.yaml" there after "*" is a
-// negation and not dead. Any failure but a timeout is "none dead": behaviour
-// as before. The error is non-nil only when the probe timed out (CS-LAY-024).
+// bounded `git check-ignore -v -z --no-index --stdin` over both paths, run
+// only when sideGI exists (CS-LAY-023 already refused one that is not a
+// readable regular file); --no-index because the files are usually tracked.
+// -z (which needs --stdin) gives NUL-separated records, so a source path git
+// would otherwise C-quote (non-ASCII, `"`, `\`, control characters) or one
+// holding ":<digits>:" is read verbatim. -v names the LAST matching rule per
+// path, so a "!config.yaml" there after "*" is a negation and not dead. Any
+// failure but a timeout is "none dead": behaviour as before. The error is
+// non-nil only when the probe timed out (CS-LAY-024).
 func innerIgnoreDead(r execx.Runner, project, sideGI string) ([]string, error) {
 	if _, err := os.Lstat(sideGI); err != nil {
 		return nil, nil
 	}
-	args := append([]string{"-C", project, "check-ignore", "-v", "--no-index", "--"}, reincludedFiles...)
-	out, err := execx.Git(r, execx.Cmd{Name: "git", Args: args})
+	out, err := execx.Git(r, execx.Cmd{Name: "git",
+		Args:  []string{"-C", project, "check-ignore", "-v", "-z", "--no-index", "--stdin"},
+		Stdin: strings.NewReader(strings.Join(reincludedFiles, "\x00") + "\x00")})
 	if errors.Is(err, execx.ErrTimedOut) {
 		return nil, err
 	}
+	// Records of four fields: source, line number, pattern, path.
+	fields := strings.Split(out, "\x00")
 	var dead []string
-	for _, line := range strings.Split(out, "\n") {
-		src, pattern, path, ok := parseCheckIgnoreV(line)
-		if !ok || strings.HasPrefix(pattern, "!") || !contains(reincludedFiles, path) {
+	for i := 0; i+3 < len(fields); i += 4 {
+		src, pattern, path := fields[i], fields[i+2], fields[i+3]
+		if strings.HasPrefix(pattern, "!") || !contains(reincludedFiles, path) {
 			continue
 		}
 		if (src == innerIgnoreSource || strings.HasSuffix(src, "/"+innerIgnoreSource)) &&
@@ -429,28 +457,16 @@ func innerIgnoreDead(r execx.Runner, project, sideGI string) ([]string, error) {
 	return ordered, nil
 }
 
-// parseCheckIgnoreV splits one `git check-ignore -v` line,
-// "<source>:<linenum>:<pattern>\t<pathname>". The source ends at the first
-// ":<digits>:"; a line in any other shape is not ok.
-func parseCheckIgnoreV(line string) (src, pattern, path string, ok bool) {
-	tab := strings.LastIndexByte(line, '\t')
-	if tab < 0 {
-		return "", "", "", false
+// hostLines is the set of lines of the host .gitignore; empty when it is
+// missing (CS-LAY-023 already refused one that is not a readable regular
+// file).
+func hostLines(gi string) map[string]bool {
+	raw, _ := cascade.ReadRegularFile(gi)
+	set := map[string]bool{}
+	for _, l := range strings.Split(string(raw), "\n") {
+		set[l] = true
 	}
-	left, path := line[:tab], line[tab+1:]
-	for i := 0; i < len(left); i++ {
-		if left[i] != ':' {
-			continue
-		}
-		j := i + 1
-		for j < len(left) && left[j] >= '0' && left[j] <= '9' {
-			j++
-		}
-		if j > i+1 && j < len(left) && left[j] == ':' {
-			return left[:i], left[j+1:], path, true
-		}
-	}
-	return "", "", "", false
+	return set
 }
 
 func contains(list []string, s string) bool {
@@ -462,21 +478,36 @@ func contains(list []string, s string) bool {
 	return false
 }
 
-// warnInnerIgnore prints the one CS-LAY-027 warning: the "!" lines for dead
-// are refused because the inner .claude-sandbox/.gitignore ignores those
-// files, and the remedies.
-func warnInnerIgnore(w io.Writer, dead []string) {
-	names := make([]string, len(dead))
-	lines := make([]string, len(dead))
-	for i, f := range dead {
-		names[i] = strings.TrimPrefix(f, ".claude-sandbox/")
-		lines[i] = "!" + f
+// warnInnerIgnore prints the one CS-LAY-027 warning: the inner
+// .claude-sandbox/.gitignore ignores the dead files, so their "!" lines are
+// skipped, or — those in already, present in the host .gitignore — are dead
+// there and should go; then the remedies.
+func warnInnerIgnore(w io.Writer, dead, already []string) {
+	var names, skipped, present []string
+	for _, f := range dead {
+		names = append(names, strings.TrimPrefix(f, ".claude-sandbox/"))
+		if contains(already, f) {
+			present = append(present, "!"+f)
+		} else {
+			skipped = append(skipped, "!"+f)
+		}
 	}
-	fmt.Fprintf(w, "WARNING: trackInHost is true but %s ignores %s, and a deeper .gitignore wins over the host's; skipping %s, which would be dead there.\n",
-		innerIgnoreSource, strings.Join(names, " and "), strings.Join(lines, " and "))
+	var parts []string
+	if len(skipped) > 0 {
+		parts = append(parts, "skipping "+strings.Join(skipped, " and ")+", which would be dead there")
+	}
+	if len(present) > 0 {
+		verb := "is"
+		if len(present) > 1 {
+			verb = "are"
+		}
+		parts = append(parts, strings.Join(present, " and ")+" "+verb+" dead there (already in .gitignore: delete it)")
+	}
+	fmt.Fprintf(w, "WARNING: trackInHost is true but %s ignores %s, and a deeper .gitignore wins over the host's; %s.\n",
+		innerIgnoreSource, strings.Join(names, " and "), strings.Join(parts, "; "))
 	fmt.Fprintf(w, "  Either delete or narrow %s (`git check-ignore -v --no-index %s` names the rule) to track %s in the host,\n",
 		innerIgnoreSource, strings.Join(dead, " "), strings.Join(names, " and "))
-	fmt.Fprintln(w, "  or set trackInHost: false in .claude-sandbox/config.yaml (and delete any .claude-sandbox/env, temp/, ralph/, !config.yaml or !Dockerfile lines already in .gitignore — they are dead).")
+	fmt.Fprintln(w, "  or set trackInHost: false in .claude-sandbox/config.yaml (the next launch names the steps to move the directory out of the host repo); any !.claude-sandbox/config.yaml or !.claude-sandbox/Dockerfile line already in .gitignore is dead and can go.")
 }
 
 // HostTrackedCount returns how many files the host repo tracks under

@@ -87,9 +87,9 @@ var _ = Describe("CS-LAY-024: bounded layout git calls", func() {
 	It("CS-LAY-027: trackInHost true — a hung inner probe is unknown, never dead: no refusal, no host .gitignore, no child probe", func() {
 		write(sideGI, "*\n")
 		fake.On("check-ignore -q --no-index", "", execx.Fail(1)) // the directory itself is not excluded
-		fake.OnHang("check-ignore -v --no-index -- .claude-sandbox/config.yaml .claude-sandbox/Dockerfile")
+		fake.OnHang("check-ignore -v -z --no-index --stdin")
 		Expect(setup(true)).To(Succeed())
-		Expect(errOut.String()).To(Equal(timeoutWarning("check-ignore -v --no-index -- .claude-sandbox/config.yaml .claude-sandbox/Dockerfile") +
+		Expect(errOut.String()).To(Equal(timeoutWarning("check-ignore -v -z --no-index --stdin") +
 			"skipping the .gitignore update and the git ignore checks.\n"))
 		Expect(hostGI).NotTo(BeAnExistingFile())
 		Expect(fake.Killed).To(Equal(1))
