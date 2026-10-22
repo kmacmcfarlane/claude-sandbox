@@ -419,8 +419,27 @@ Feature: init subcommand (CS-INIT)
       the linked-worktree check." and init reads the plain parent walk, as it
       does when the project is not a linked worktree
     And a worktree whose back-link (<git dir>/gitdir) names another path
-      prints one warning ending "reading the upstream configs without the
-      main checkout's, so trackInHost is not inherited from it." and init
+      prints one warning ending "reading the upstream levels without the
+      main checkout's: its trackInHost is not inherited, its env is not
+      noted and its Dockerfile is not copied." and init
       reads the plain parent walk
     And plain repositories and harness worktrees (whose parents already
       include the main checkout) read exactly what they read before
+
+  Scenario: CS-INIT-038 In a linked git worktree init's env note and Dockerfile copy read the launch's chain too
+    Given a project that is a verified linked git worktree outside its
+      repository (CS-LNCH-070)
+    And the main checkout has a .claude-sandbox/env and a
+      .claude-sandbox/Dockerfile
+    When "claude-sandbox init" runs in the worktree
+    Then the upstream-env note (CS-INIT-020) names the main checkout's env as
+      inherited, collected along the same chain CS-INIT-037 reads (the
+      project's own level excluded), as the next launch stacks it
+    And Dockerfile.example is a copy of the nearest Dockerfile along that
+      chain (CS-INIT-021), the main checkout's here, as the next launch's
+      child Dockerfile search finds it (CS-CASC-033)
+    And the chain is the one CS-INIT-037 computed: init runs the
+      linked-worktree git call once
+    And when that check falls back to the plain parent walk (not linked, a
+      timeout, a mismatched back-link), the env note and the Dockerfile copy
+      read the plain parent walk, as they did before
