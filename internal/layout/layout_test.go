@@ -91,7 +91,7 @@ var _ = Describe("layout lifecycle", func() {
 
 	setup := func(track bool, gitignore *bool) error {
 		return layout.Setup(proj, track, layout.Options{
-			Runner: fake, Prompter: sp, Out: &out, Err: &errOut, Gitignore: gitignore,
+			Runner: fake, Prompter: sp, Out: &out, Err: &errOut, Gitignore: gitignore, Init: gitignore != nil, // a forced answer models init here
 		})
 	}
 
@@ -690,8 +690,21 @@ var _ = Describe("layout lifecycle", func() {
 			Expect(childProbes()).To(BeEmpty())
 			Expect(read(hostGI)).To(Equal(all))
 
-			By("init (Options.Gitignore set) prints it even with nothing missing")
-			Expect(setup(true, ptr(true))).To(Succeed())
+			By("a set Options.Gitignore alone is not init: still quiet")
+			Expect(layout.Setup(proj, true, layout.Options{
+				Runner: fake, Prompter: sp, Out: &out, Err: &errOut, Gitignore: ptr(true),
+			})).To(Succeed())
+			Expect(errOut.String()).To(BeEmpty())
+
+			By("init (Options.Init) prints it even with nothing missing, Gitignore nil or set")
+			Expect(layout.Setup(proj, true, layout.Options{
+				Runner: fake, Prompter: sp, Out: &out, Err: &errOut, Init: true,
+			})).To(Succeed())
+			Expect(errOut.String()).To(Equal(hiddenNote))
+			errOut.Reset()
+			Expect(layout.Setup(proj, true, layout.Options{
+				Runner: fake, Prompter: sp, Out: &out, Err: &errOut, Init: true, Gitignore: ptr(true),
+			})).To(Succeed())
 			Expect(errOut.String()).To(Equal(hiddenNote))
 		})
 

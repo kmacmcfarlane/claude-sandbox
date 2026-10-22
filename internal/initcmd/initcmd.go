@@ -223,7 +223,7 @@ func Run(project string, f Flags, d Deps) error {
 		gi = &t
 	}
 	if err := layout.Setup(project, effective, layout.Options{
-		Runner: d.Runner, Prompter: d.Prompter, Out: d.Out, Err: d.Err, Gitignore: gi,
+		Runner: d.Runner, Prompter: d.Prompter, Out: d.Out, Err: d.Err, Gitignore: gi, Init: true,
 	}); err != nil {
 		return err
 	}

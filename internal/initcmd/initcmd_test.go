@@ -414,6 +414,34 @@ var _ = Describe("init subcommand", func() {
 		})
 	})
 
+	Describe("the children-hidden note (CS-LAY-026)", func() {
+		// Every CS-LAY-009 entry already present under a children-only rule:
+		// nothing to propose, so only Options.Init (set by init, whatever the
+		// gitignore flag or CS_GITIGNORE_ASSUME say) can print the note.
+		const hiddenNote = "Note: trackInHost is true but a host ignore rule hides new files under .claude-sandbox/"
+		setupAllPresent := func() *run {
+			write(filepath.Join(proj, ".gitignore"), ".claude-sandbox/*\n.claude-sandbox/env\n.claude-sandbox/temp/\n.claude-sandbox/ralph/\n"+
+				"!.claude-sandbox/config.yaml\n!.claude-sandbox/Dockerfile\n.claude/worktrees/\n")
+			f := &execx.Fake{}
+			f.On("--no-index", "", execx.Fail(1)) // the directory itself is not excluded
+			f.On("check-ignore", "", nil)         // every child probe is ignored
+			return &run{fake: f}
+		}
+
+		It("CS-LAY-026: init prints it with nothing to propose, under CS_GITIGNORE_ASSUME and with --gitignore", func() {
+			os.Setenv("CS_GITIGNORE_ASSUME", "y")
+			DeferCleanup(os.Unsetenv, "CS_GITIGNORE_ASSUME")
+			r := setupAllPresent()
+			Expect(r.init(proj, initcmd.Flags{TrackInHost: ptr(true)})).To(Succeed())
+			Expect(strings.Count(r.errOut.String(), hiddenNote)).To(Equal(1), r.errOut.String())
+
+			os.Unsetenv("CS_GITIGNORE_ASSUME")
+			r = setupAllPresent()
+			Expect(r.init(proj, initcmd.Flags{TrackInHost: ptr(true), Gitignore: ptr(true)})).To(Succeed())
+			Expect(strings.Count(r.errOut.String(), hiddenNote)).To(Equal(1), r.errOut.String())
+		})
+	})
+
 	Describe("inheritance visibility and parent-file handling", func() {
 		var ws string
 
