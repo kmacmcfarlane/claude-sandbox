@@ -42,11 +42,11 @@ var _ = Describe("CS-CASC-046: the config snapshot", func() {
 		Expect(*cfg.HostAccess.DockerSocket.Enabled).To(BeFalse())
 		Expect(cascade.MemoryLimitSourceOf(snap)).To(Equal(files[0]))
 		Expect(cascade.KeySourceOf(snap, "oomScoreAdj")).To(Equal(files[1]))
-		Expect(cascade.TrackInHostOf(snap)).To(BeTrue())
-		v, set := cascade.TrackInHostExplicitOf(snap)
+		v, set, src, err := cascade.TrackInHostResolveOf(snap)
+		Expect(err).NotTo(HaveOccurred())
 		Expect(set).To(BeTrue())
 		Expect(v).To(BeTrue())
-		Expect(cascade.TrackInHostSourceOf(snap)).To(Equal(files[1]))
+		Expect(src).To(Equal(files[1]))
 
 		// The path-taking forms read again, and see the rewrite: exactly the
 		// second read the launch no longer makes.
