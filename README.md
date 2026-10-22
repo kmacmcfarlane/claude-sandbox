@@ -1923,6 +1923,8 @@ ENV PATH="/home/claude/go/bin:$PATH"
 
 **Share the download caches.** The sandbox's Dockerfiles declare BuildKit cache mounts with fixed ids — `claude-sandbox-apt`, `-apt-lists`, `-pip`, `-npm`, `-go-mod`, `-go-build`. Reuse the same ids in your child and every image on the machine is served from one cache per package manager instead of downloading again. Under `USER claude` the mount must carry `uid=1000,gid=1000` and target a path under `/home/claude`, and the parent directories must be created as `claude` in an earlier step (BuildKit creates a missing parent as root, and `go` then cannot write `~/go/pkg/sumdb` beside the mounted `~/go/pkg/mod`), as in the example. Pin versions: `@latest` re-resolves on every rebuild and turns a cache hit into a download plus a compile.
 
+**Retry downloads.** A build that fetches files should retry them (`curl -fsSL --retry 5 --retry-all-errors --retry-delay 2`; add `-C -` to resume a large file) because a dropped HTTP/2 stream (curl exit 18) otherwise fails the whole rebuild; pin the version and verify a published checksum with `sha256sum -c`.
+
 **Home directory convention:** Always use `/home/claude` in child Dockerfiles — never hardcode a host-specific path like `/home/yourname`. At runtime, the entrypoint:
 
 1. Renames the `claude` user to match the host caller
