@@ -518,6 +518,31 @@ live, and it binds its inbox socket under its own runtime dir (typically `/run/u
 a path no container mounts — so a host session and a bridged sandbox cannot see each other in
 either direction.
 
+**Check it.** After relaunching the sessions you want bridged (below, `<peers root>` is
+`~/.local/state/claude-sandbox-peers`, or `~/.cache/claude-sandbox/peers` while the
+[drain](#moving-the-registry-out-of-the-cache) lasts):
+
+1. **Banner.** Each launch printed `Peer registry: shared (…)`. Missing means the bridge is not
+   on for that launch (key unset, or switched off by `CLAUDE_SANDBOX_SHARED_PEER_REGISTRY=0`) or
+   it stood down: look for a `Warning:` line near the banner (an env file defining
+   `XDG_RUNTIME_DIR`, a socket path too long, a peer directory that could not be created).
+2. **Peer address.** In each session `/status` should show the session's messaging socket
+   address as `<peers root>/cc-socks/<pid>.sock`. A container-private path such as
+   `/tmp/cc-socks-<uid>/…` means Claude Code could not use the shared socket directory and fell
+   back silently; that session is not reachable from other containers. (The exact `/status`
+   label is Claude Code's and may change; the path is what to look for.)
+3. **`/peers` both ways.** Run `/peers` in two bridged sessions: each must list the other. One
+   side listing and the other not means the second was started before the key was on, or is not
+   bridged (step 1).
+4. **Record (optional).** `<peers root>/sessions/<pid>.json` for a session has a
+   `messagingSocketPath` field naming the same path as step 2. A record in the session's own
+   `<config dir>/sessions` instead means that session is unbridged.
+
+Whatever fails, the fix is the same: make sure the key is on for every participating tree
+(`sharedPeerRegistry: true` or `CLAUDE_SANDBOX_SHARED_PEER_REGISTRY=1`), fix whatever the
+banner's warning names, and **relaunch every participant**; a session started before the change
+keeps its old registry and socket path.
+
 An *unbridged* sandbox shares the real registry with the host, so the host may list it — whether
 the host can also message it is unverified (Claude Code's reply-target check may refuse a socket
 outside the sender's own directory or its default locations). Either way the sandbox itself
