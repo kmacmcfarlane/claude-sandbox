@@ -715,6 +715,130 @@ var _ = Describe("layout lifecycle", func() {
 			Expect(errOut.String()).NotTo(ContainSubstring("Note: trackInHost is true"))
 		})
 
+		// CS-LAY-027: the inner probe, answered as real git 2.39.5 answers it
+		// (source repo-root relative, a tab before the cwd-relative path).
+		const innerProbe = "check-ignore -v --no-index -- .claude-sandbox/config.yaml .claude-sandbox/Dockerfile"
+		innerAnswers := func(stdout string, err error) { fake.On(innerProbe, stdout, err) }
+		writeInner := func(content string) { write(filepath.Join(sb, ".gitignore"), content) }
+		innerProbes := func() int {
+			n := 0
+			for _, l := range fake.CommandLines() {
+				if strings.Contains(l, innerProbe) {
+					n++
+				}
+			}
+			return n
+		}
+		const innerWarn = "WARNING: trackInHost is true but .claude-sandbox/.gitignore ignores"
+
+		It("CS-LAY-027: an inner \"*\" refuses both ! lines with one warning; the other entries are still added", func() {
+			writeInner("*\n")
+			innerAnswers(".claude-sandbox/.gitignore:1:*\t.claude-sandbox/config.yaml\n"+
+				".claude-sandbox/.gitignore:1:*\t.claude-sandbox/Dockerfile\n", nil)
+			ignores(false, map[string]bool{bare: true, withExt: true})
+			Expect(setup(true, ptr(true))).To(Succeed())
+
+			e := errOut.String()
+			Expect(strings.Count(e, "WARNING:")).To(Equal(1), "one warning")
+			Expect(e).To(ContainSubstring(innerWarn + " config.yaml and Dockerfile, and a deeper .gitignore wins over the host's; skipping !.claude-sandbox/config.yaml and !.claude-sandbox/Dockerfile, which would be dead there.\n"))
+			Expect(e).To(ContainSubstring("Either delete or narrow .claude-sandbox/.gitignore (`git check-ignore -v --no-index .claude-sandbox/config.yaml .claude-sandbox/Dockerfile` names the rule)"))
+			Expect(e).To(ContainSubstring("or set trackInHost: false in .claude-sandbox/config.yaml"))
+			Expect(strings.Index(e, innerWarn)).To(BeNumerically("<", strings.Index(e, "These entries are missing")), "before the proposal")
+			Expect(e).NotTo(ContainSubstring("  !.claude-sandbox/"), "never proposed")
+			Expect(e).NotTo(ContainSubstring("Note:"), "the warning already names the rule")
+			Expect(childProbes()).To(BeEmpty())
+
+			content := read(hostGI)
+			Expect(countLine(content, "!.claude-sandbox/config.yaml")).To(BeZero())
+			Expect(countLine(content, "!.claude-sandbox/Dockerfile")).To(BeZero())
+			for _, l := range []string{".claude-sandbox/env", ".claude-sandbox/temp/", ".claude-sandbox/ralph/", ".claude/worktrees/"} {
+				Expect(countLine(content, l)).To(Equal(1), l)
+			}
+			Expect(innerProbes()).To(Equal(1), "one git call")
+
+			By("the warning repeats on the next launch, with nothing left to propose")
+			errOut.Reset()
+			Expect(setup(true, nil)).To(Succeed())
+			Expect(read(hostGI)).To(Equal(content))
+			Expect(strings.Count(errOut.String(), innerWarn)).To(Equal(1))
+			Expect(errOut.String()).NotTo(ContainSubstring("These entries are missing"))
+		})
+
+		It("CS-LAY-027: a rule for one file refuses only its ! line; a project in a repo subdirectory is matched too", func() {
+			writeInner("*.yaml\n")
+			innerAnswers("sub/.claude-sandbox/.gitignore:1:*.yaml\t.claude-sandbox/config.yaml\n"+
+				".gitignore:3:!.claude-sandbox/Dockerfile\t.claude-sandbox/Dockerfile\n", nil)
+			hostTracks()
+			Expect(setup(true, ptr(true))).To(Succeed())
+			Expect(errOut.String()).To(ContainSubstring(innerWarn + " config.yaml, and a deeper .gitignore wins over the host's; skipping !.claude-sandbox/config.yaml, which would be dead there.\n"))
+			content := read(hostGI)
+			Expect(countLine(content, "!.claude-sandbox/config.yaml")).To(BeZero())
+			Expect(countLine(content, "!.claude-sandbox/Dockerfile")).To(Equal(1))
+			Expect(countLine(content, ".claude-sandbox/env")).To(Equal(1))
+		})
+
+		It("CS-LAY-027: an inner rule that ignores neither file (narrower, or negated after \"*\") changes nothing", func() {
+			writeInner("*\n!config.yaml\n!Dockerfile\n")
+			for _, answer := range []string{
+				"",
+				".claude-sandbox/.gitignore:2:!config.yaml\t.claude-sandbox/config.yaml\n" +
+					".claude-sandbox/.gitignore:3:!Dockerfile\t.claude-sandbox/Dockerfile\n",
+				".gitignore:2:!.claude-sandbox/config.yaml\t.claude-sandbox/config.yaml\n" +
+					".gitignore:3:!.claude-sandbox/Dockerfile\t.claude-sandbox/Dockerfile\n",
+				".gitignore:1:.claude-sandbox/*\t.claude-sandbox/config.yaml\n", // an outer children-only rule: CS-LAY-021
+			} {
+				fake = &execx.Fake{}
+				innerAnswers(answer, nil)
+				hostTracks()
+				Expect(os.RemoveAll(hostGI)).To(Succeed())
+				errOut.Reset()
+				Expect(setup(true, ptr(true))).To(Succeed())
+				Expect(errOut.String()).NotTo(ContainSubstring("WARNING"), answer)
+				for _, l := range trueLines {
+					Expect(countLine(read(hostGI), l)).To(Equal(1), l)
+				}
+				Expect(innerProbes()).To(Equal(1))
+			}
+		})
+
+		It("CS-LAY-027: no inner .gitignore — the probe is not run; a failed probe never refuses", func() {
+			hostTracks()
+			Expect(setup(true, ptr(true))).To(Succeed())
+			Expect(innerProbes()).To(BeZero())
+			Expect(errOut.String()).NotTo(ContainSubstring("WARNING"))
+
+			writeInner("*\n")
+			Expect(os.RemoveAll(hostGI)).To(Succeed())
+			fake = &execx.Fake{}
+			innerAnswers("", execx.Fail(128))
+			hostTracks()
+			errOut.Reset()
+			Expect(setup(true, ptr(true))).To(Succeed())
+			Expect(innerProbes()).To(Equal(1))
+			Expect(errOut.String()).NotTo(ContainSubstring("WARNING"))
+			for _, l := range trueLines {
+				Expect(countLine(read(hostGI), l)).To(Equal(1), l)
+			}
+		})
+
+		It("CS-LAY-027: CS-LAY-018 firing means only its warning, and the inner probe is not run", func() {
+			writeInner("*\n")
+			innerAnswers(".claude-sandbox/.gitignore:1:*\t.claude-sandbox/config.yaml\n", nil)
+			ignores(true, map[string]bool{bare: true, withExt: true})
+			Expect(setup(true, ptr(true))).To(Succeed())
+			Expect(errOut.String()).To(ContainSubstring("WARNING: trackInHost is true but the host repo already ignores .claude-sandbox/; skipping"))
+			Expect(errOut.String()).NotTo(ContainSubstring(innerWarn))
+			Expect(innerProbes()).To(BeZero())
+		})
+
+		It("CS-LAY-027: never with trackInHost false", func() {
+			writeInner("*\n")
+			innerAnswers(".claude-sandbox/.gitignore:1:*\t.claude-sandbox/config.yaml\n", nil)
+			Expect(setup(false, ptr(true))).To(Succeed())
+			Expect(innerProbes()).To(BeZero())
+			Expect(errOut.String()).NotTo(ContainSubstring(innerWarn))
+		})
+
 		It("CS-LAY-022: a whitelist-style ignore that hides only the dot-less probe does not count", func() {
 			// "*", "!*/", "!*.*": ignore-probe is hidden, ignore-probe.md is not.
 			ignores(false, map[string]bool{bare: true})

@@ -216,14 +216,32 @@ func Setup(project string, trackInHost bool, opts Options) error {
 				gitignoreAdd(project, hostGI, opts, withWorktreesLine(hostGI)...)
 				return nil
 			}
-			proposed := gitignoreAdd(project, hostGI, opts, withWorktreesLine(hostGI,
-				".claude-sandbox/env", ".claude-sandbox/temp/", ".claude-sandbox/ralph/",
-				"!.claude-sandbox/config.yaml", "!.claude-sandbox/Dockerfile")...)
+			// CS-LAY-027: an inner .claude-sandbox/.gitignore rule matching
+			// config.yaml or Dockerfile wins over the host's "!" lines (a
+			// deeper .gitignore takes precedence), so those lines would be
+			// dead: refused with a warning, the other entries still proposed.
+			// Asked only when the inner file exists; before the host step, so
+			// a timeout is unknown (CS-LAY-024) and skips the update.
+			dead, gerr := innerIgnoreDead(opts.Runner, project, sideGI)
+			if gerr != nil {
+				return gitUnknown(gerr)
+			}
+			if len(dead) > 0 {
+				warnInnerIgnore(opts.errw(), dead)
+			}
+			entries := []string{".claude-sandbox/env", ".claude-sandbox/temp/", ".claude-sandbox/ralph/"}
+			for _, f := range reincludedFiles {
+				if !contains(dead, f) {
+					entries = append(entries, "!"+f)
+				}
+			}
+			proposed := gitignoreAdd(project, hostGI, opts, withWorktreesLine(hostGI, entries...)...)
 			// CS-LAY-026: only while the host-tracked entries are being
 			// decided — proposed (whatever the answer) or init
 			// (Options.Init; the launch path never sets it) — so an ordinary
-			// launch with nothing to decide stays quiet.
-			if hostTrackedEntryIn(proposed) || opts.Init {
+			// launch with nothing to decide stays quiet. Not after the
+			// CS-LAY-027 warning, which already names the inner rule.
+			if len(dead) == 0 && (hostTrackedEntryIn(proposed) || opts.Init) {
 				noteChildrenHidden(project, opts)
 			}
 		}
@@ -361,6 +379,104 @@ func hostTrackConflict(r execx.Runner, project, sb string) (string, error) {
 		return ".claude-sandbox/.git exists", nil
 	}
 	return "", nil
+}
+
+// reincludedFiles are the paths the CS-LAY-009 "!" lines re-include, in
+// the order the lines are written.
+var reincludedFiles = []string{".claude-sandbox/config.yaml", ".claude-sandbox/Dockerfile"}
+
+// innerIgnoreSource is the source git check-ignore -v names for a rule in
+// the inner .gitignore, relative to the repository root: exactly this for a
+// project at the root, "<prefix>/" + this for one in a subdirectory.
+const innerIgnoreSource = ".claude-sandbox/.gitignore"
+
+// innerIgnoreDead returns the reincludedFiles whose "!" line would be dead in
+// the host .gitignore because a rule in the inner .claude-sandbox/.gitignore
+// (sideGI) — which git gives precedence — ignores them (CS-LAY-027). One
+// bounded `git check-ignore -v --no-index` over both paths, run only when
+// sideGI exists (CS-LAY-023 already refused one that is not a readable
+// regular file); --no-index because the files are usually tracked. -v names
+// the LAST matching rule per path, so a "!config.yaml" there after "*" is a
+// negation and not dead. Any failure but a timeout is "none dead": behaviour
+// as before. The error is non-nil only when the probe timed out (CS-LAY-024).
+func innerIgnoreDead(r execx.Runner, project, sideGI string) ([]string, error) {
+	if _, err := os.Lstat(sideGI); err != nil {
+		return nil, nil
+	}
+	args := append([]string{"-C", project, "check-ignore", "-v", "--no-index", "--"}, reincludedFiles...)
+	out, err := execx.Git(r, execx.Cmd{Name: "git", Args: args})
+	if errors.Is(err, execx.ErrTimedOut) {
+		return nil, err
+	}
+	var dead []string
+	for _, line := range strings.Split(out, "\n") {
+		src, pattern, path, ok := parseCheckIgnoreV(line)
+		if !ok || strings.HasPrefix(pattern, "!") || !contains(reincludedFiles, path) {
+			continue
+		}
+		if (src == innerIgnoreSource || strings.HasSuffix(src, "/"+innerIgnoreSource)) &&
+			!strings.HasPrefix(src, "/") && !contains(dead, path) {
+			dead = append(dead, path)
+		}
+	}
+	// In reincludedFiles order, whatever order git printed.
+	var ordered []string
+	for _, f := range reincludedFiles {
+		if contains(dead, f) {
+			ordered = append(ordered, f)
+		}
+	}
+	return ordered, nil
+}
+
+// parseCheckIgnoreV splits one `git check-ignore -v` line,
+// "<source>:<linenum>:<pattern>\t<pathname>". The source ends at the first
+// ":<digits>:"; a line in any other shape is not ok.
+func parseCheckIgnoreV(line string) (src, pattern, path string, ok bool) {
+	tab := strings.LastIndexByte(line, '\t')
+	if tab < 0 {
+		return "", "", "", false
+	}
+	left, path := line[:tab], line[tab+1:]
+	for i := 0; i < len(left); i++ {
+		if left[i] != ':' {
+			continue
+		}
+		j := i + 1
+		for j < len(left) && left[j] >= '0' && left[j] <= '9' {
+			j++
+		}
+		if j > i+1 && j < len(left) && left[j] == ':' {
+			return left[:i], left[j+1:], path, true
+		}
+	}
+	return "", "", "", false
+}
+
+func contains(list []string, s string) bool {
+	for _, l := range list {
+		if l == s {
+			return true
+		}
+	}
+	return false
+}
+
+// warnInnerIgnore prints the one CS-LAY-027 warning: the "!" lines for dead
+// are refused because the inner .claude-sandbox/.gitignore ignores those
+// files, and the remedies.
+func warnInnerIgnore(w io.Writer, dead []string) {
+	names := make([]string, len(dead))
+	lines := make([]string, len(dead))
+	for i, f := range dead {
+		names[i] = strings.TrimPrefix(f, ".claude-sandbox/")
+		lines[i] = "!" + f
+	}
+	fmt.Fprintf(w, "WARNING: trackInHost is true but %s ignores %s, and a deeper .gitignore wins over the host's; skipping %s, which would be dead there.\n",
+		innerIgnoreSource, strings.Join(names, " and "), strings.Join(lines, " and "))
+	fmt.Fprintf(w, "  Either delete or narrow %s (`git check-ignore -v --no-index %s` names the rule) to track %s in the host,\n",
+		innerIgnoreSource, strings.Join(dead, " "), strings.Join(names, " and "))
+	fmt.Fprintln(w, "  or set trackInHost: false in .claude-sandbox/config.yaml (and delete any .claude-sandbox/env, temp/, ralph/, !config.yaml or !Dockerfile lines already in .gitignore — they are dead).")
 }
 
 // HostTrackedCount returns how many files the host repo tracks under
