@@ -4,6 +4,23 @@
 
 Docker-based sandbox for running Claude Code with filesystem isolation and opt-in host access (Docker socket, AWS, git, SSH, package caches — via CLI flags, env vars, or `.claude-sandbox/config.yaml`). Part of the [claude-kit](https://github.com/kmacmcfarlane/claude-kit) ecosystem.
 
+## Principles
+
+Two operator principles (2026-10-22) govern every default and every change; weigh them together.
+
+- **Host parity:** "the behavior is in alignment with what running `claude` outside the sandbox would do". Defaults make a sandboxed claude behave as plain claude on the host would. A parity feature on by default keeps a way to turn it off (answer 135); a deviation from parity is documented.
+- **Isolation is the point:** "consider security/isolation tradeoffs when making it work more like vanilla claude, because after all the point of using a sandbox is to get SOME sort of isolation". Parity is weighed against the isolation the sandbox exists for, not maximised: every parity change states its isolation cost and keeps it bounded.
+- **Corollary, transparent defaults:** any default a user must discover by losing something is the wrong default. Isolation a person would trip over is opt-in for people, default-on only for ralph's unattended loop.
+
+Where today's defaults stand:
+
+- `worktree`: off for interactive launches (transparent: `--resume` sees the repo's history), on for ralph (an unattended run is isolated).
+- `hostClipboard`: on for interactive launches (parity, answer 135; never headless or ralph). Isolation cost: a session can overwrite the host clipboard; bounded by write-only, limits, local displays only.
+- `sandboxNetwork`: off, so containers lose the host's per-link split DNS (a parity gap); on would cut reach by IP to siblings on Docker's default bridge (README "Container network and DNS"). Its default is under review as decision 102.
+- `dangerous`: off unless the cascade, `--dangerous` or `CLAUDE_SANDBOX_DANGEROUS` turns it on (parity: host claude prompts). In headless it overrides the SDK client's permission mode, and `CLAUDE_SANDBOX_DANGEROUS=0` cannot turn off a cascade `true`.
+- Env allowlists (`launch.HeadlessEnv`, `launch.TerminalEnv`, `launch.awsEnvAllowlist`): isolation exceptions — the host's environment is never passed through wholesale.
+- Refused env keys (`cascade.RefusedEnvKeys`): an isolation exception — an env file never sets loader or shell-startup variables for the root entrypoint.
+
 ## Key Architecture
 
 - **Same-path mounting:** Container sees the project at its real host path so `docker compose` volume resolution works correctly against the host daemon.
