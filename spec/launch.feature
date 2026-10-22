@@ -2506,8 +2506,11 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     # A terminal brand string, not a credential: the CS-LNCH-102 bare-name rule
     # is for secrets, and the label carries the value anyway. An explicit value
     # lets a later source the docker client cannot see feed the same argv.
-    When the launcher's environment does not set it, or sets it empty
-    Then no -e TERMINAL_EMULATOR is added
+    When the launcher's environment does not set it, or sets it empty (an
+      empty value counts as unset)
+    Then no -e TERMINAL_EMULATOR is added, unless a bare env-file line applies
+      (CS-LNCH-179: an empty-but-set value is still "set" to docker, so that
+      case adds "-e TERMINAL_EMULATOR=")
     And the list of forwarded names (launch.TerminalEnv) is exactly
       TERMINAL_EMULATOR: never TERM (docker -t sets xterm; a host TERM needs
       terminfo the image may lack), TMUX or TMUX_PANE (host socket paths), and
@@ -2528,7 +2531,8 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     Given the last effective line is bare, or no line takes effect
     Then CS-LNCH-178 applies: "-e TERMINAL_EMULATOR=<S>" when S is set, else
       nothing — except "-e TERMINAL_EMULATOR=" when S is unset while a bare line
-      would pass the docker client's value (possible only once S comes from
+      would pass the docker client's value (today an empty-but-set launcher
+      value, which docker's bare line passes as set; later also an S from
       elsewhere than the launcher's environment)
     And a bare TERMINAL_EMULATOR line (the old workaround) still works: the
       container gets the launcher's value, as before
@@ -2539,6 +2543,7 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     # | f1 bare, f2 =X        | Y            | none                   | TERMINAL_EMULATOR=X    |
     # | f1 =X, f2 =Z          | any          | none                   | TERMINAL_EMULATOR=Z    |
     # | f1 = (empty)          | Y            | none                   | none                   |
+    # | f1 bare               | set, empty   | TERMINAL_EMULATOR=     | none                   |
     # | no line               | Y / unset    | TERMINAL_EMULATOR=Y / none | TERMINAL_EMULATOR=Y / none |
 
   @new

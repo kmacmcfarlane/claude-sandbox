@@ -101,9 +101,11 @@ func ResolveTerminal(src TerminalSource, snap []cascade.EnvFile, clientEnv func(
 // CreateEnv is the -e specs a new container gets (CS-LNCH-178/179). passive
 // marks headless and ralph, which pass none (CS-LNCH-180). Rule 2 (the walk
 // ends on an assignment): none, docker's result over the files stands. Rule
-// 3: NAME=<S> when S is set; NAME= when S is unset but a bare line would pass
-// the docker client's value (possible only once S comes from elsewhere than
-// the launcher's environment); else none.
+// 3: NAME=<S> when S is set (non-empty: an empty S counts as unset); NAME=
+// when S is unset but a bare line would pass the docker client's value, which
+// includes an empty-but-set launcher value, since docker passes a set empty
+// variable (so the container sees an empty one, as plain docker would); else
+// none.
 func (r TerminalResult) CreateEnv(passive bool) []string {
 	if passive {
 		return nil
