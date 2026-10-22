@@ -161,7 +161,9 @@ Feature: .claude-sandbox/ layout lifecycle (CS-LAY)
     # trackInHost: true", 2026-09-18); with a trailing slash git matches the
     # path against "dir/*" rules as if it were a child. Until 2026-09-19 this
     # asked the CS-LAY-020 child probe instead, which also fired under rules
-    # that exclude only the children (CS-LAY-021).
+    # that exclude only the children (CS-LAY-021). An inner
+    # .claude-sandbox/.gitignore rule ignoring config.yaml or Dockerfile kills
+    # only the matching "!" lines; CS-LAY-027 refuses those alone.
     Given the project is a git work tree and the effective trackInHost is true
     And EITHER the host repo excludes the .claude-sandbox directory itself (the --no-index directory probe)
       OR .claude-sandbox/.git exists (a sidecar repo), or both
@@ -266,7 +268,9 @@ Feature: .claude-sandbox/ layout lifecycle (CS-LAY)
     # (last match wins), or under any rule in an inner .claude-sandbox/.gitignore
     # that matches config.yaml or Dockerfile ("*", "/*", "**", "config.yaml",
     # "*.yaml"): git gives a deeper .gitignore precedence (verified, git
-    # 2.39.5: both files stay ignored), so there the lines are dead. Under a
+    # 2.39.5: both files stay ignored), so there the lines are dead and
+    # CS-LAY-027 refuses them (a later rule in the same file is the user's
+    # own ordering and is not probed). Under a
     # project or outer rule the CS-LAY-009 lines are live, so refusing them
     # was a false positive (review of 18a7, 2026-09-18).
     Given the project is a git work tree, the effective trackInHost is true and no .claude-sandbox/.git exists
@@ -341,6 +345,70 @@ Feature: .claude-sandbox/ layout lifecycle (CS-LAY)
     Given CS-LAY-018 fires (the directory itself is excluded, or a sidecar .git exists)
     Then only its warning is printed and no child probe runs
     And the note is never printed with trackInHost false, and goes to stderr only (headless stdout stays clean)
+    Given CS-LAY-027 prints its warning (an inner .claude-sandbox/.gitignore rule ignores config.yaml or Dockerfile)
+    Then only its warning is printed and no child probe runs: it already names the rule that hides them
+
+  @new
+  Scenario: CS-LAY-027 The "!" lines are refused under an inner .claude-sandbox/.gitignore rule that ignores their file
+    # git gives a deeper .gitignore precedence over the host's (verified, git
+    # 2.39.5), so under an inner rule matching config.yaml or Dockerfile
+    # ("*", "/*", "**", "config.yaml", "*.yaml") the CS-LAY-009 "!" line for
+    # that file is dead — writing it only leaves the host tree dirty, the
+    # state CS-LAY-018 exists to prevent (CS-LAY-021 names the case). Only the
+    # dead "!" lines are refused: the env, temp/ and ralph/ lines still
+    # work (or are harmless) under the inner rule, and the env line keeps the
+    # secret file out of the host when the inner rule does not cover it.
+    # Asked with ONE bounded `git check-ignore -v -z --no-index --stdin`, the
+    # two paths NUL-terminated on stdin (-z needs --stdin; --no-index: the
+    # files are usually tracked), run only when .claude-sandbox/.gitignore
+    # exists. -z gives NUL-separated records (source, line number, pattern,
+    # path), so a source git would otherwise C-quote (a non-ASCII, `"`, `\` or
+    # control character in a subdirectory prefix) or one holding ":<digits>:"
+    # is read verbatim. -v names the last matching rule per path; a file
+    # counts as dead only when that rule's source is the inner .gitignore
+    # (repo-root relative: ".claude-sandbox/.gitignore", or
+    # "<prefix>/.claude-sandbox/.gitignore" for a project in a subdirectory)
+    # and its pattern is not a "!" negation ("*" followed by "!config.yaml"
+    # there leaves config.yaml live).
+    # The warning prints only while it matters — a dead line already in the
+    # host .gitignore, the entries being decided, or init — because an inner
+    # rule can be deliberate and a steady state should stay quiet.
+    # Known limits, accepted: the source match is a suffix match, so a
+    # repo-relative ".gitignore" of an ANCESTOR directory itself named
+    # ".claude-sandbox" (a project nested as .claude-sandbox/<...>/p) would
+    # count too; and the CS-LAY-026 note is left out only when this warning
+    # prints, so an outer rule hiding other new files goes unmentioned then.
+    Given the project is a git work tree, the effective trackInHost is true and CS-LAY-018 does not fire
+    And .claude-sandbox/.gitignore holds a rule that ignores config.yaml, Dockerfile or both
+    When SetupLayout runs
+    Then the "!" line of each file the inner rule ignores is neither proposed nor appended
+    And the other CS-LAY-009 entries (env, temp/, ralph/, the "!" line of a file it does not ignore)
+      and ".claude/worktrees/" (CS-LAY-017) are proposed as in CS-LAY-009
+    And when a dead "!" line is already in the host .gitignore, or another entry is missing (the
+      entries are being decided), or the run is init (Options.Init), stderr carries one warning,
+      before any proposal, naming the inner file, the ignored file(s) and each dead line — "skipping
+      <line>, which would be dead there" for one not in the host .gitignore, "<line> is dead there
+      (already in .gitignore: delete it)" for one that is (the launcher never removes it) — and the
+      two remedies: delete or narrow .claude-sandbox/.gitignore (`git check-ignore -v --no-index
+      <the files>` names the rule), or "set trackInHost: false in .claude-sandbox/config.yaml (the
+      next launch names the steps to move the directory out of the host repo); any
+      !.claude-sandbox/config.yaml or !.claude-sandbox/Dockerfile line already in .gitignore is dead
+      and can go." — never telling the user to delete the env, temp/ or ralph/ lines, which still
+      keep env out of the host here
+    And otherwise (every other entry present, no dead line present, a launch) nothing is printed
+    Given the inner .gitignore exists but no rule there ignores either file (a narrower rule, or a
+      later "!" negation of the file)
+    Then no warning is printed and the CS-LAY-009 entries are proposed unchanged
+    Given no .claude-sandbox/.gitignore exists
+    Then the probe is not run and the CS-LAY-009 entries are proposed unchanged
+    Given the probe fails for any other reason (non-zero exit with no matching line)
+    Then the CS-LAY-009 entries are proposed unchanged: a failed probe never refuses
+    Given the probe does not finish within the bound (CS-LAY-024)
+    Then it is killed and the answer is unknown, never "dead": as for the other probes before the
+      host .gitignore step, one timeout warning and the host .gitignore update is skipped, no refusal
+      warning and no child probe
+    Given CS-LAY-018 fires (the directory itself is excluded, or a sidecar .git exists)
+    Then only its warning is printed and this probe does not run
 
   Scenario: CS-LAY-023 A FIFO, device or socket at a .gitignore or the seeded CLAUDE.md never blocks the setup
     # The layout setup runs on the launch path and the project tree is mounted
@@ -349,7 +417,7 @@ Feature: .claude-sandbox/ layout lifecycle (CS-LAY)
     # open, fstat, regular files only, symlinks followed); its writes open
     # O_NONBLOCK and write only once the opened descriptor is a regular file
     # (a FIFO with no reader fails open(2) with ENXIO), truncating only after
-    # that check. The git check-ignore probes (CS-LAY-005/006, 018, 020..022)
+    # that check. The git check-ignore probes (CS-LAY-005/006, 018, 020..022, 027)
     # open the host .gitignore, and for a path under .claude-sandbox/ the
     # sidecar one, with git's own blocking open, so they are not run at all
     # when either is not a readable regular file.
@@ -389,7 +457,7 @@ Feature: .claude-sandbox/ layout lifecycle (CS-LAY)
     # guess. It also closes the window between the CS-LAY-023 look and the
     # probes, and the .gitignore files above a project in a repo subdir.
     Given a layout git probe that comes before the host .gitignore step
-      (rev-parse, ls-files, the CS-LAY-018 --no-index probe, the CS-LAY-020
+      (rev-parse, ls-files, the CS-LAY-018 --no-index probe, the CS-LAY-027 inner probe, the CS-LAY-020
       child probes) does not finish within the bound
     Then it is killed, no later probe runs, and the setup prints one CS-LNCH-176
       warning ending "skipping the .gitignore update and the git ignore
