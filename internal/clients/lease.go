@@ -64,8 +64,9 @@ const (
 	TempSuffix  = ".tmp"
 	// LockSuffix names the lock files other features keep in a container's
 	// directory: the session-end helper's EndLockName (F2), a join helper's
-	// "join-<token>.lock" (F3). The prune never touches a directory where
-	// one of them is held (CS-DIR-029).
+	// "join-<token>.lock" (F3). The prune keeps whole a directory no row
+	// names where one is held, and never locks one in a named directory
+	// (CS-DIR-029).
 	LockSuffix = ".lock"
 	// EndLockName is the session-end helper's lock (one helper per
 	// container, F2).

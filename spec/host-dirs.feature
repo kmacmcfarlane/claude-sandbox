@@ -259,8 +259,9 @@ Feature: Host directories — cache root, state root, owned directories (CS-DIR)
       paused, created or exited) is removed, after each of its files is
       removed — a lease or temp file only once LOCK_EX|LOCK_NB on it succeeds
       (its holder is dead) and the path still names the locked file
-    And a directory holding any *.lock file whose flock is held (the
-      session-end helper's end.lock) is never touched
+    And a directory no row names, where any *.lock file's flock is held (the
+      session-end helper's end.lock), is kept whole; in a directory a row
+      names, *.lock files are never locked or removed
     And in a directory that a row does name, only dead leases are removed
     And a temp file younger than one minute is left alone (a lease being
       taken)

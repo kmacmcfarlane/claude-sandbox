@@ -18,8 +18,8 @@ import (
 // a named one only dead leases go. A file is removed only once
 // LOCK_EX|LOCK_NB on it succeeds and the path still names the locked file;
 // a temp file younger than TempMinAge is left alone (a lease being taken);
-// a directory where any *.lock is held (the session-end helper's) is never
-// touched.
+// a directory no row names where any *.lock is held is kept whole; a named
+// directory's *.lock files are never locked or touched.
 //
 // When discovery failed (discoveryErr != nil), or a row's id is not a full
 // id (an empty known entry or anything else), nothing is removed: a missing
