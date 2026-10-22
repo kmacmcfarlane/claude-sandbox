@@ -198,11 +198,13 @@ func Setup(project string, trackInHost bool, opts Options) error {
 			// CS-LAY-018: over a rule excluding the directory itself or a
 			// sidecar repo these lines are dead (git cannot re-include inside
 			// an excluded dir) and only leave the tree dirty. A rule excluding
-			// only the children (".claude-sandbox/*") in the project's or an outer
-			// .gitignore is not a conflict: the negations work beneath it
-			// (CS-LAY-021); an inner .claude-sandbox/.gitignore with "*" takes
-			// precedence over them and is not covered. Warn, never switch modes, and still
-			// propose the worktrees line alone.
+			// only the children (".claude-sandbox/*") is not a conflict: the
+			// negations work beneath it when it is written above them in the
+			// project's .gitignore or is in an outer .gitignore/info/exclude/
+			// core.excludesFile (CS-LAY-021); a later rule in the same file or an
+			// inner .claude-sandbox/.gitignore rule matching config.yaml or
+			// Dockerfile (such as "*") takes precedence and is not covered. Warn,
+			// never switch modes, and still propose the worktrees line alone.
 			conflict, gerr := hostTrackConflict(opts.Runner, project, sb)
 			if gerr != nil {
 				return gitUnknown(gerr)

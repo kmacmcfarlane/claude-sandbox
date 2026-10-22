@@ -258,13 +258,17 @@ Feature: .claude-sandbox/ layout lifecycle (CS-LAY)
     # git cannot re-include a file whose parent DIRECTORY is excluded, but a
     # rule such as ".claude-sandbox/*" or "/.claude-sandbox/**" excludes the
     # children, not the directory, so "!.claude-sandbox/config.yaml" and
-    # "!.claude-sandbox/Dockerfile" take effect beneath it when the rule is in the
-    # project's or an outer .gitignore (verified with git 2.39: both become
-    # untracked-visible, every other new file stays ignored). An inner
-    # .claude-sandbox/.gitignore holding "*" is NOT covered: a deeper
-    # .gitignore takes precedence over the root's "!" lines (verified, git
-    # 2.39.5: both files stay ignored), so there the lines are dead. The CS-LAY-009 lines are live there, so refusing them was a
-    # false positive (review of 18a7, 2026-09-18).
+    # "!.claude-sandbox/Dockerfile" take effect beneath it when the rule is
+    # written above them in the project's .gitignore, or is in an outer
+    # .gitignore, .git/info/exclude or core.excludesFile (verified with git
+    # 2.39: both become untracked-visible, every other new file stays
+    # ignored). They do NOT take effect under a later rule in the same file
+    # (last match wins), or under any rule in an inner .claude-sandbox/.gitignore
+    # that matches config.yaml or Dockerfile ("*", "/*", "**", "config.yaml",
+    # "*.yaml"): git gives a deeper .gitignore precedence (verified, git
+    # 2.39.5: both files stay ignored), so there the lines are dead. Under a
+    # project or outer rule the CS-LAY-009 lines are live, so refusing them
+    # was a false positive (review of 18a7, 2026-09-18).
     Given the project is a git work tree, the effective trackInHost is true and no .claude-sandbox/.git exists
     And the host rule excludes only the children of .claude-sandbox/ (the --no-index
       directory probe of CS-LAY-018 reports the directory not ignored, e.g. ".claude-sandbox/*")
@@ -308,8 +312,8 @@ Feature: .claude-sandbox/ layout lifecycle (CS-LAY)
     # CS-LAY-022 child probes prove — that new files there are hidden — and
     # names no file as re-included or hidden: the "!" lines may not be written
     # (declined, no tty, --no-gitignore, a refused .gitignore), an inner
-    # .claude-sandbox/.gitignore holding "*" takes precedence over the root's
-    # "!" lines (verified with git), and a user's own "!" lines or files
+    # .claude-sandbox/.gitignore rule (such as "*") takes precedence over the
+    # root's "!" lines (verified with git), and a user's own "!" lines or files
     # already tracked leave other paths visible. The probes, which nothing on
     # this path ran before, are at most two extra git calls; they run after
     # the host .gitignore step, so a timeout (CS-LAY-024: unknown) changes
@@ -318,13 +322,16 @@ Feature: .claude-sandbox/ layout lifecycle (CS-LAY)
     Given the project is a git work tree, the effective trackInHost is true and CS-LAY-018 does not fire
       (the --no-index directory probe reports the directory not ignored and no .claude-sandbox/.git exists)
     And the setup proposes at least one CS-LAY-009 entry (whatever the answer: added, declined, or
-      skipped for no tty), or runs from init (which passes Options.Gitignore; the launch path never does)
+      skipped for no tty), or runs from init (Options.Init, whatever --gitignore/--no-gitignore or
+      CS_GITIGNORE_ASSUME say; the launch path never sets it)
     And both CS-LAY-022 child probes are ignored
     When SetupLayout runs
     Then after the host .gitignore step stderr carries exactly one line "Note: trackInHost is true but
       a host ignore rule hides new files under .claude-sandbox/ (only paths your rules re-include are
       tracked); `git check-ignore -v --no-index .claude-sandbox/<path>` names the rule."
     And the CS-LAY-009 entries are proposed exactly as in CS-LAY-021
+    Given init with every CS-LAY-009 entry already present, CS_GITIGNORE_ASSUME set and no --gitignore flag
+    Then the note is printed once, as for any init
     Given a launch on which every CS-LAY-009 entry is already present (nothing to decide)
     Then no child probe runs and no note is printed
     Given either child probe is not ignored (no rule, or one aimed at some names only)
