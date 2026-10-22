@@ -59,6 +59,13 @@ COPY --link --chmod=755 entrypoint.sh /opt/claude-sandbox/bin/entrypoint.sh
 # The cap copies /opt/claude-sandbox/ as a directory, so the link stays a link.
 COPY --link --chmod=755 --from=builder /out/claude-sandbox /opt/claude-sandbox/bin/claude-sandbox
 RUN ln -s /opt/claude-sandbox/bin/claude-sandbox /opt/claude-sandbox/bin/ralph
+# The host clipboard bridge's wl-copy shim (CS-IMG-077, CS-LNCH-199): argv0
+# selects it. /opt/claude-sandbox/bin is first on the image PATH, so Claude
+# Code finds it when the claude process has the dummy WAYLAND_DISPLAY, which
+# names a path under the root-owned, empty /opt/claude-sandbox/clipboard. No
+# clipboard tool is installed anywhere: the copy runs on the host.
+RUN ln -s /opt/claude-sandbox/bin/claude-sandbox /opt/claude-sandbox/bin/wl-copy \
+    && install -d -m 0755 /opt/claude-sandbox/clipboard
 # The body of the managed-settings Notification hook below (CS-LNCH-111): it
 # names the waiting session in the Discord ping instead of posting a fixed line.
 COPY --link --chmod=755 bin/notify-webhook /opt/claude-sandbox/bin/notify-webhook

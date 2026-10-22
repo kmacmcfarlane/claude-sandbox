@@ -50,6 +50,12 @@ func newFixture(last int) *fixture {
 		},
 		Getenv: func(k string) string { return f.env[k] },
 		Stderr: f.stderr,
+		// Never the real /run/claude-sandbox/clipboard, never os.Setenv.
+		ClipboardMounted: func() bool { return false },
+		Setenv: func(k, v string) error {
+			f.env[k] = v
+			return nil
+		},
 	}
 	return f
 }
@@ -212,5 +218,23 @@ var _ = Describe("the global-config link (CS-GCFG)", func() {
 		Expect(pidslot.Run(f.ops, []string{"claude"})).To(Equal(globalcfg.ExitLink))
 		Expect(f.execs).To(BeEmpty())
 		Expect(f.stderr.String()).To(HavePrefix(globalcfg.LinkPrefix + " "))
+	})
+})
+
+var _ = Describe("the host clipboard bridge's environment (CS-LNCH-195)", func() {
+	It("CS-LNCH-195: sets the dummy WAYLAND_DISPLAY and the socket on the exec'd command only when the bridge is mounted", func() {
+		f := newFixture(7)
+		f.env[pidslot.EnvVar] = "8"
+		f.ops.ClipboardMounted = func() bool { return true }
+		Expect(pidslot.Run(f.ops, []string{"claude"})).To(Equal(0))
+		Expect(f.env).To(HaveKeyWithValue("WAYLAND_DISPLAY", "/opt/claude-sandbox/clipboard/no-wayland-display"))
+		Expect(f.env).To(HaveKeyWithValue("CLAUDE_SANDBOX_CLIPBOARD", "/run/claude-sandbox/clipboard/bridge.sock"))
+		Expect(f.execs).To(HaveLen(1))
+
+		g := newFixture(7)
+		g.env[pidslot.EnvVar] = "8"
+		Expect(pidslot.Run(g.ops, []string{"claude"})).To(Equal(0))
+		Expect(g.env).NotTo(HaveKey("WAYLAND_DISPLAY"))
+		Expect(g.env).NotTo(HaveKey("CLAUDE_SANDBOX_CLIPBOARD"))
 	})
 })

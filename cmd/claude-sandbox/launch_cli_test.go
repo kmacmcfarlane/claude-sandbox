@@ -89,6 +89,10 @@ func newCLIFixture() *cliFixture {
 		"PROJECT_DIR":              f.proj,
 		"CLAUDE_SANDBOX_REPO_ROOT": f.repo,
 		"CLAUDE_SANDBOX_BASE_ONLY": "1",
+		// The host clipboard bridge is ON by default (CS-LNCH-194); the
+		// fixture pins it off so every other test keeps its argv, and
+		// clipboard_cli_test.go deletes this key to test the default.
+		"CLAUDE_SANDBOX_HOST_CLIPBOARD": "0",
 	}
 	// Never the real /proc (the guards' host check reads it): a scratch tree
 	// with only this namespace's link; a test needing more sets its own.

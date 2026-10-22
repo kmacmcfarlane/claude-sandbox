@@ -177,6 +177,14 @@ older `.claude-sandbox/agent/LSP_TOOLS.md`) tells you to run it, run the
   warning says which was skipped — so a launch from an unbridged sandbox
   normally does not bridge.
 - **Discord MCP server** — baked in at `/opt/claude-sandbox/mcp/discord-notify/dist/index.mjs`. Provides the `send_discord_notification` tool when `DISCORD_WEBHOOK_URL` is set in the env file (`.claude-sandbox/env`). Configured via `~/.mcp.json` — no per-project setup needed.
+- **`wl-copy` writes the host clipboard; nothing reads it.** `/opt/claude-sandbox/bin/wl-copy`
+  is a shim of the write-only host clipboard bridge, on by default (the launcher's
+  `hostClipboard` key; `false` turns it off). When the bridge is on, the claude process and
+  its children have `CLAUDE_SANDBOX_CLIPBOARD` and a dummy `WAYLAND_DISPLAY` that names no
+  display (there is no Wayland or X server here): `wl-copy` then sends text to a helper on
+  the host, which copies it onto the operator's display, and also writes it to the terminal
+  over OSC 52. Every copy overwrites the operator's clipboard, so do not pipe into `wl-copy`
+  unless asked. There is no `wl-paste`, `xclip` or `xsel`.
 - **Notification hooks are managed settings.** A `Notification` hook is baked
   into the image at `/etc/claude-code/managed-settings.d/10-claude-sandbox.json`.
   On a permission or idle prompt it runs `/opt/claude-sandbox/bin/notify-webhook`,

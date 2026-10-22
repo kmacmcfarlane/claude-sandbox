@@ -22,6 +22,7 @@ import (
 
 	assets "github.com/kmacmcfarlane/claude-sandbox"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/cascade"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/clipboard"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/globalcfg"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/hostdirs"
@@ -146,6 +147,19 @@ type Inputs struct {
 	// the key on (CS-LNCH-189). Non-empty adds --network, the Network:
 	// banner, the context paragraph (CS-LNCH-191) and the hash input.
 	Network string
+
+	// ClipboardWanted is the resolved hostClipboard / CLAUDE_SANDBOX_HOST_CLIPBOARD
+	// for this kind of launch (ClipboardWanted, CS-LNCH-194): on by default,
+	// never for headless or ralph. The zero value is off.
+	ClipboardWanted bool
+	// ClipboardQuiet silences the bridge's stand-down warnings (a tmux
+	// restore resume: nobody watches the pane, CS-LNCH-196/197).
+	ClipboardQuiet bool
+	// ClipboardTarget is the display target resolved from the launcher's
+	// shell (CS-LNCH-203), named by the banner; nil for none or unknown.
+	ClipboardTarget *clipboard.Resolution
+	// GOOS overrides runtime.GOOS for the darwin stand-down (tests).
+	GOOS string
 
 	// LookupEnv tells set-but-empty from unset for the headless env allowlist
 	// (CS-LNCH-063). Nil falls back to Getenv, where "" reads as unset.
@@ -322,6 +336,15 @@ type Plan struct {
 	// Network renders "--network <name>" after --init; "" adds nothing
 	// (CS-LNCH-193).
 	Network string
+	// ClipboardDir is the applied host clipboard bridge's directory,
+	// rendered as a read-only --mount at clipboard.ContainerDir; "" when
+	// not applied (CS-LNCH-195). ClipboardOuter is a nested launcher's
+	// outer bridge socket, the inner helper's backend (CS-LNCH-200).
+	ClipboardDir   string
+	ClipboardOuter string
+	// ClipboardHelper is the helper the launcher spawned after
+	// the create, nil for none; a removed reservation stops it.
+	ClipboardHelper execx.Process
 	// Instance is the container's instance noun ("" for ralph), for messages
 	// such as the --detach attach hint (CS-LNCH-113).
 	Instance string
@@ -687,6 +710,12 @@ func Build(in Inputs) (*Plan, error) {
 	// cascade entries, caches, the peer registry — is known.
 	in.prepareShadowDests(p)
 
+	// CS-LNCH-195/196: the host clipboard bridge. After every mount is
+	// known, for the stand-downs that read them. Its --mount is not in
+	// p.Volumes, so the normalized mount set (and the hash) never sees its
+	// per-launch source; the WANTED value is hashed instead (CS-LNCH-201).
+	clipApplied := in.assembleClipboard(p)
+
 	// CS-SESS-020/021: hash the effective configuration, then record it and the
 	// contributing files on the container so a later attach can tell whether it
 	// is joining a container built from the config now on disk.
@@ -719,6 +748,9 @@ func Build(in Inputs) (*Plan, error) {
 	if in.Detached {
 		p.Labels = append(p.Labels, LabelDetached+"=1") // CS-LNCH-118
 	}
+	// CS-LNCH-194/195: what the container got, for the attach note
+	// (CS-LNCH-197) and the restart on attach and join. Outside the hash.
+	p.Labels = append(p.Labels, clipboard.LabelClipboard+"="+ClipboardLabelValue(clipApplied))
 	// CS-LNCH-111: the container's own identity, for code inside it — the
 	// baked Notification hook posts it so an operator running a dozen
 	// sandboxes can tell which one is waiting and how to reach it. Env vars
@@ -836,6 +868,9 @@ func (p *Plan) CreateArgs(workdir string) []string {
 	}
 	for _, v := range p.Volumes {
 		args = append(args, "-v", v)
+	}
+	if p.ClipboardDir != "" {
+		args = append(args, "--mount", ClipboardMountArg(p.ClipboardDir)) // CS-LNCH-195
 	}
 	args = append(args, "-w", workdir)
 	for _, ef := range p.EnvFiles {

@@ -77,7 +77,7 @@ var _ = Describe("CS-GCFG-060: the health check never blocks on a FIFO", func() 
 		Expect(f.slept).To(BeEmpty())
 		fi, err := os.Lstat(f.target)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(fi.Mode() & os.ModeNamedPipe).NotTo(BeZero(), "never written")
+		Expect(fi.Mode()&os.ModeNamedPipe).NotTo(BeZero(), "never written")
 	})
 
 	It("CS-GCFG-060: a FIFO among the snapshots is skipped as unparseable, never waited on", func() {

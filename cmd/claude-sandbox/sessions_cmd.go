@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/kmacmcfarlane/claude-sandbox/internal/cascade"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/clipboard"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/imagebuild"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/launch"
@@ -420,7 +421,17 @@ func joinExistingSession(env *Env, projectDir string, f *launchFlags, cfg *casca
 		warnModelMismatch(env, d.Target, model)
 		noteWorktree(env, d.Target, wt)
 		terminalNote(env, d.Target, snap, snapErr)
+		// CS-LNCH-197: started without the bridge this launcher wants.
+		clipboardAttachNote(env, d.Target, cfg)
 		_, _, _, home := hostIdentity(env.Getenv)
+		if snapErr == nil {
+			// CS-LNCH-202: the JetBrains note, after the target is written.
+			return true, attachToWith(env, d.Target, cfg.DetachKeys, attachMark(d.Target, home, wt.Root), nil, clipboard.ByAttach, func(eff *clipboard.Target, bridged bool) {
+				if bridged && launch.ClipboardWanted(env.Getenv, cfg, false, false) {
+					jetbrainsNote(env, projectDir, snap, eff)
+				}
+			})
+		}
 		return true, attachTo(env, d.Target, cfg.DetachKeys, attachMark(d.Target, home, wt.Root), nil)
 	}
 	_, _, hostUser, _ := hostIdentity(env.Getenv)
@@ -581,7 +592,10 @@ func wouldBeFingerprintNet(env *Env, projectDir string, f *launchFlags, cfg *cas
 		// CS-DIR-017/019: the target's own root, and nothing created for it.
 		PeerRoot: peerRoot, NoCreatePeerDirs: true,
 		Network: netName,
-		Out:     io.Discard, Err: io.Discard,
+		// CS-LNCH-201: the wanted bridge, as the launch hashes it.
+		ClipboardWanted: launch.ClipboardWanted(env.Getenv, cfg, false, f.Ralph),
+		ClipboardQuiet:  true,
+		Out:             io.Discard, Err: io.Discard,
 	})
 	if err != nil {
 		// Without a comparable hash, confirmDrift reports drift (a prompt, or
@@ -659,6 +673,18 @@ func newInstance(env *Env, projectDir string, f *launchFlags, gitRoot string) st
 // 64-hex id when it is known, else the name; the event filter keeps the name,
 // which oomreport matches exactly (CS-TMUX-056, CS-LNCH-095).
 func attachTo(env *Env, s sessions.Session, configuredKeys string, mark *paneMark, onChild func()) error {
+	return attachToWith(env, s, configuredKeys, mark, onChild, clipboard.ByAttach, nil)
+}
+
+// attachToWith is attachTo with a hook that sees the clipboard bridge's
+// effective target once the attach re-pointed it (CS-LNCH-197/202).
+func attachToWith(env *Env, s sessions.Session, configuredKeys string, mark *paneMark, onChild func(), by string, clip func(*clipboard.Target, bool)) error {
+	// CS-LNCH-197: re-point the bridge to this shell's display, never
+	// downgrading, and restart a dead helper.
+	eff, bridged := refreshClipboardBridge(env, s, by)
+	if clip != nil {
+		clip(eff, bridged)
+	}
 	detachKeys := launch.ResolveDetachKeys(configuredKeys)
 	fmt.Fprintf(env.Out, "Attaching to %s. Press %s to detach without stopping it.\n", sessionLabel(s), detachKeys)
 	// Docker cannot report whether another client is already attached, so this
@@ -753,6 +779,9 @@ func joinInto(env *Env, s sessions.Session, projectDir, hostUser, model, configu
 		args = append(args, "--model", model)
 	}
 	args = append(args, f.Passthrough...)
+	// CS-LNCH-197: a join re-points the bridge too and restarts a dead
+	// helper; its claude gets the bridge's environment from pidslot.
+	refreshClipboardBridge(env, s, clipboard.ByJoin)
 	// CS-GCFG-001: before the session only — a join is not the primary.
 	checkGlobalConfig(env, nil)
 	// CS-TMUX-012: a join's pane mark, "since" taken before the exec.

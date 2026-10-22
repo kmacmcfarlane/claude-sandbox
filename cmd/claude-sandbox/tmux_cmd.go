@@ -1284,7 +1284,9 @@ func restoreAttach(env *Env, p *actProbes, m tmuxpane.Mark, d tmuxpane.Decision,
 	// The session built above when discovery misses the id (its name from
 	// the restore's Inspect probe) carries no terminal label: no note.
 	terminalNote(renv, s, snap, snapErr)
-	return attachTo(renv, s, keys, mark, p.release)
+	// CS-LNCH-197: a restore attach pings and restarts the clipboard helper
+	// but writes no target (the pane's environment is the service's).
+	return attachToWith(renv, s, keys, mark, p.release, "", nil)
 }
 
 // restoreResume is row 18's resume (CS-TMUX-058..062): the normal launch

@@ -80,7 +80,7 @@ var _ = Describe("discovery of the terminal label (CS-SESS-091)", func() {
 		Expect(found[0].Mounts).To(Equal([]string{"/h/.cache/claude-sandbox/peers"}))
 		line := strings.Join(fake.Calls[0].Args, " ")
 		// CS-LNCH-182's continue label sits between them now.
-		Expect(line).To(ContainSubstring(`{{.Label "claude-sandbox.terminal"}}` + sep + `{{.Label "claude-sandbox.continue"}}` + sep + "{{.Mounts}} "))
+		Expect(line).To(ContainSubstring(`{{.Label "claude-sandbox.terminal"}}` + sep + `{{.Label "claude-sandbox.continue"}}` + sep))
 	})
 
 	It("CS-SESS-091: a 23-field row (the format before the label) keeps its Mounts and the legacy pin, with no terminal label", func() {
@@ -116,7 +116,24 @@ var _ = Describe("discovery of the continue label (CS-LNCH-182)", func() {
 		Expect(found[0].Terminal).To(Equal("none"))
 		Expect(found[0].Mounts).To(Equal([]string{"/m1"}))
 		line := strings.Join(fake.Calls[0].Args, " ")
-		Expect(line).To(ContainSubstring(`{{.Label "claude-sandbox.continue"}}` + sep + "{{.Mounts}} "))
+		Expect(line).To(ContainSubstring(`{{.Label "claude-sandbox.continue"}}` + sep + `{{.Label "claude-sandbox.clipboard"}}` + sep + `{{.Label "claude-sandbox.shadowdir"}}` + sep + "{{.Mounts}} "))
+	})
+
+	It("CS-LNCH-197: the clipboard and shadowdir labels sit before {{.Mounts}}; a 25-field row has neither", func() {
+		fake := &execx.Fake{}
+		fake.On("docker ps", strings.Join([]string{
+			strings.Join(append(head("a"), "", "bridge", "/tmp/claude-sandbox1", "/m1"), sep),
+			strings.Join(append(head("b"), "", "/m2"), sep),
+		}, "\n")+"\n", nil)
+		found, err := sessions.DiscoverAllUncounted(fake)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(found).To(HaveLen(2))
+		Expect(found[0].Clipboard).To(Equal("bridge"))
+		Expect(found[0].ShadowDir).To(Equal("/tmp/claude-sandbox1"))
+		Expect(found[0].Mounts).To(Equal([]string{"/m1"}))
+		Expect(found[1].Clipboard).To(BeEmpty())
+		Expect(found[1].ShadowDir).To(BeEmpty())
+		Expect(found[1].Mounts).To(Equal([]string{"/m2"}))
 	})
 
 	It("CS-LNCH-182: a 24-field row (the format before the label) keeps its terminal label and Mounts, with no continue", func() {

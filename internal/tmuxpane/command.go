@@ -24,7 +24,36 @@ const NameSourceUser = "user"
 // Every word is shell-quoted. "" when the mark names no conversation, or a
 // worktree whose generated name is not recorded yet.
 func ResumeCommand(m Mark) string {
-	args := ResumeArgs(m)
+	return commandLine(m, ResumeArgs(m))
+}
+
+// ResumePickerCommand is ResumeCommand's picker form (the clipboard attach
+// note, CS-LNCH-197): the same cd, CLAUDE_CONFIG_DIR, worktree and quoting
+// rules, ending in a bare "-- --resume" that opens claude's resume picker,
+// so it needs no conversation. "" for a worktree whose generated name is not
+// recorded yet (any worktree flag would open the picker in the wrong place).
+func ResumePickerCommand(m Mark) string {
+	if m.WorktreeGenerated && m.Worktree == "" {
+		return ""
+	}
+	w := []string{"--new"}
+	if m.Worktree != "" {
+		w = append(w, "--worktree="+m.Worktree)
+	} else {
+		w = append(w, "--no-worktree")
+	}
+	if m.Model != "" {
+		w = append(w, "--model", m.Model)
+	}
+	return commandLine(m, append(w, "--", "--resume"))
+}
+
+// PrintableMark reports whether every mark value a printed command shows is
+// free of control and bidi characters (CS-TMUX-017's rule, shared with the
+// clipboard attach note).
+func PrintableMark(m Mark) bool { return printableMark(m) }
+
+func commandLine(m Mark, args []string) string {
 	if args == nil {
 		return ""
 	}

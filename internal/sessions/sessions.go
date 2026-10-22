@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kmacmcfarlane/claude-sandbox/internal/clipboard"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/launch"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/oomreport"
@@ -61,6 +62,10 @@ const (
 	// conversation unforked (CS-LNCH-182), read by the continue guard
 	// (CS-SESS-093 rule a').
 	LabelContinue = launch.LabelContinue
+	// LabelClipboard records whether the host clipboard bridge applied.
+	LabelClipboard = clipboard.LabelClipboard
+	// LabelShadowDir names the container's shadow directory.
+	LabelShadowDir = launch.LabelShadowDir
 )
 
 // ModeRalph marks a ralph loop container.
@@ -131,6 +136,12 @@ type Session struct {
 	// Continue is the claude-sandbox.continue label (CS-LNCH-182): true when
 	// "1"; false when unset or on an older row.
 	Continue bool `json:"-"`
+	// Clipboard is the claude-sandbox.clipboard label (CS-LNCH-194/197):
+	// "bridge", "none", or "" for a container that predates it. ShadowDir
+	// is the claude-sandbox.shadowdir label, where the bridge directory
+	// and the display target live.
+	Clipboard string `json:"-"`
+	ShadowDir string `json:"-"`
 	// Mounts are the container's bind sources ({{.Mounts}} under --no-trunc,
 	// split on ","), read for the peers-root pin (CS-DIR-011). nil on an
 	// older row.
@@ -216,10 +227,12 @@ var psFormat = strings.Join([]string{
 	`{{.Label "` + LabelConfigDir + `"}}`,
 	`{{.Label "` + LabelRegistry + `"}}`,
 	`{{.Label "` + LabelLaunchFlags + `"}}`,
-	`{{.Label "` + LabelResume + `"}}`,   // CS-SESS-065
-	`{{.Label "` + LabelPeerRoot + `"}}`, // CS-DIR-012
-	`{{.Label "` + LabelTerminal + `"}}`, // CS-SESS-091
-	`{{.Label "` + LabelContinue + `"}}`, // CS-LNCH-182
+	`{{.Label "` + LabelResume + `"}}`,    // CS-SESS-065
+	`{{.Label "` + LabelPeerRoot + `"}}`,  // CS-DIR-012
+	`{{.Label "` + LabelTerminal + `"}}`,  // CS-SESS-091
+	`{{.Label "` + LabelContinue + `"}}`,  // CS-LNCH-182
+	`{{.Label "` + LabelClipboard + `"}}`, // CS-LNCH-197
+	`{{.Label "` + LabelShadowDir + `"}}`, // CS-LNCH-197
 	// CS-DIR-011: every bind source, comma-joined; last, so nothing after
 	// it depends on how a source is spelled.
 	"{{.Mounts}}",
@@ -364,6 +377,12 @@ func listAll(r execx.Runner, filter string, count bool) ([]Session, []Session, e
 			// CS-LNCH-182: before Mounts, so a 24-field row (the format
 			// before this label) keeps its terminal label and its mounts.
 			s.Continue = strings.TrimSpace(f[23]) == "1"
+		}
+		if len(f) > 26 {
+			// CS-LNCH-197: before Mounts, so a 25-field row (the format
+			// before these labels) keeps everything else.
+			s.Clipboard = strings.TrimSpace(f[24])
+			s.ShadowDir = f[25]
 		}
 		// An exited container is never a session: every sandbox container
 		// is --rm, so docker is removing it. Only DiscoverForLaunch returns

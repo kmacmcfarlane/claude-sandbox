@@ -99,6 +99,26 @@ var _ = Describe("config cascade", func() {
 		Expect(cfg.SandboxNetwork).To(BeNil())
 	})
 
+	It("CS-LNCH-194: hostClipboard merges like any other scalar and stays out of the hashed JSON", func() {
+		files := writeConfigs(tmp, "hostClipboard: true\n", "hostClipboard: false\n")
+		cfg, err := cascade.Load(files)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.HostClipboard).NotTo(BeNil())
+		Expect(*cfg.HostClipboard).To(BeFalse())
+
+		files = writeConfigs(tmp, "hostClipboard: true\n", "model: opus\n")
+		cfg, err = cascade.Load(files)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(*cfg.HostClipboard).To(BeTrue())
+		raw, _ := json.Marshal(cfg)
+		Expect(string(raw)).NotTo(ContainSubstring("ostClipboard"))
+
+		files = writeConfigs(tmp, "model: opus\n")
+		cfg, err = cascade.Load(files)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.HostClipboard).To(BeNil())
+	})
+
 	It("CS-LNCH-112: oomScoreAdj merges like any other scalar; an explicit 0 is not unset", func() {
 		files := writeConfigs(tmp,
 			"oomScoreAdj: 800\n",

@@ -209,6 +209,9 @@ func reserveContainer(env *Env, in launch.Inputs, wt worktreeChoice, ralph bool,
 		}
 		err = plan.Reserve(env.Runner, in.ProjectDir, env.Err)
 		if err == nil {
+			// CS-LNCH-195: the display target, then the helper, right after
+			// the create, so the helper's first read finds the target.
+			startClipboardBridge(env, plan, in.ClipboardTarget)
 			return plan, nil
 		}
 		var ce *launch.CreateError
@@ -494,6 +497,8 @@ func startDetached(env *Env, plan *launch.Plan, projectDir, home string) error {
 // still mount it (CS-LNCH-057/083/096). It reports whether the container was
 // removed.
 func removeReservation(env *Env, plan *launch.Plan) bool {
+	// CS-LNCH-195: the helper goes with the reservation.
+	stopClipboardHelper(plan)
 	if sessions.RemoveReservation(env.Runner, plan.ContainerName) != nil {
 		return false
 	}

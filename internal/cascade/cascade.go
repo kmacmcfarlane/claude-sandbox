@@ -144,13 +144,20 @@ type Config struct {
 	// Tri-state and json:"-" for SharedPeerRegistry's reasons: a falsy
 	// CLAUDE_SANDBOX_NETWORK must turn an upstream "true" off, and the
 	// APPLIED network is hashed explicitly (CS-LNCH-189).
-	SandboxNetwork *bool      `yaml:"sandboxNetwork" json:"-"`
-	TrackInHost    *bool      `yaml:"trackInHost"`
-	BaseOnly       bool       `yaml:"baseOnly"`
-	DockerfileDir  string     `yaml:"dockerfileDir"`
-	Dockerfile     string     `yaml:"dockerfile"`
-	HostAccess     HostAccess `yaml:"hostAccess"`
-	Mounts         []Mount    `yaml:"mounts"`
+	SandboxNetwork *bool `yaml:"sandboxNetwork" json:"-"`
+	// HostClipboard turns on the write-only host clipboard bridge
+	// (CS-LNCH-194..203). Default ON (operator answer 135); false turns it
+	// off. Tri-state and json:"-" for
+	// SharedPeerRegistry's reasons: a falsy CLAUDE_SANDBOX_HOST_CLIPBOARD
+	// must turn an upstream "true" off, and the WANTED value is hashed
+	// explicitly (CS-LNCH-201).
+	HostClipboard *bool      `yaml:"hostClipboard" json:"-"`
+	TrackInHost   *bool      `yaml:"trackInHost"`
+	BaseOnly      bool       `yaml:"baseOnly"`
+	DockerfileDir string     `yaml:"dockerfileDir"`
+	Dockerfile    string     `yaml:"dockerfile"`
+	HostAccess    HostAccess `yaml:"hostAccess"`
+	Mounts        []Mount    `yaml:"mounts"`
 
 	// DetachKeys overrides the key sequence that detaches from an attached
 	// session. Empty means the built-in default; see defaultDetachKeys.
