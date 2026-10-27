@@ -5,17 +5,25 @@ package imagebuild
 // Dockerfile.dockerignore beside the private Dockerfile, and only a frontend
 // that reads a Dockerfile-specific ignore file honours it. The frontend is
 // whatever the Dockerfile's "syntax" parser directive names; docker/dockerfile
-// 1.0 predates Dockerfile-specific ignore files and sends the whole context
-// (verified in real builds: the 1.0, 1.0-experimental and 1.0.0-experimental
-// pins send .claude-sandbox/env, 1 and 1.1+ do not).
+// 0.9 and 1.0 predate Dockerfile-specific ignore files and send the whole
+// context (verified in real builds: the 0.9, 1.0, 1.0-experimental and
+// 1.0.0-experimental pins send .claude-sandbox/env, 1 and 1.1+ do not).
+//
+// The reading follows BuildKit's parser.DetectSyntax (frontend/dockerfile/
+// parser/directives.go; dockerfile2llb/directives.go before v0.11) and the
+// gateway frontend's image resolution (frontend/gateway/gateway.go), reading
+// wider wherever versions differ or the image a name reaches is uncertain.
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
+	"path"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"unicode"
 
@@ -59,7 +67,13 @@ func directiveLine(line, marker string) (key, value string, ok bool) {
 //     and there the LAST syntax line wins), and returns every syntax value,
 //     so a caller can refuse when any of them is an old frontend;
 //   - it skips a UTF-8 BOM and a "#!" first line, takes CRLF line ends, and
-//     reads "//" directives too.
+//     reads "//" directives too;
+//   - it reads the JSON form BuildKit v0.11 and later fall back to when
+//     neither comment form names a syntax (parser.DetectSyntax): a
+//     Dockerfile that is one JSON object with a "syntax" string member.
+//     Every member whose key equals "syntax" ignoring case counts (v0.11 to
+//     v0.13 decode into a struct field, which matches keys case-insensitively;
+//     later versions match the key exactly).
 //
 // Each value is cut at its first white space: BuildKit takes the frontend
 // image only up to the first space, the rest being the frontend's command
@@ -72,17 +86,57 @@ func SyntaxDirectives(content []byte) []string {
 		lines = lines[1:]
 	}
 	var out []string
+	add := func(value string) {
+		if f := strings.FieldsFunc(value, unicode.IsSpace); len(f) > 0 {
+			out = append(out, f[0])
+		}
+	}
 	for _, marker := range []string{"#", "//"} {
 		for _, line := range lines {
 			key, value, ok := directiveLine(line, marker)
 			if !ok {
 				break
 			}
-			if key != "syntax" {
-				continue
+			if key == "syntax" {
+				add(value)
 			}
-			if f := strings.FieldsFunc(value, unicode.IsSpace); len(f) > 0 {
-				out = append(out, f[0])
+		}
+	}
+	for _, v := range jsonSyntax(content) {
+		add(v)
+	}
+	return out
+}
+
+// jsonSyntax returns the "syntax" string members of a Dockerfile that is one
+// JSON object, BuildKit's last-resort directive form. BuildKit decodes the
+// bytes after a "#!" first line (v0.11 to v0.13 without stripping a UTF-8
+// BOM, later versions with; content arrives BOM-stripped, and a BOM fails
+// to decode anyway), so the content is tried whole and without such a line.
+// Keys match ignoring case, with the Unicode folding encoding/json's struct
+// fields use; values in sorted key order.
+func jsonSyntax(content []byte) []string {
+	candidates := [][]byte{content}
+	if first, rest, _ := bytes.Cut(content, []byte("\n")); bytes.HasPrefix(first, []byte("#!")) {
+		candidates = append(candidates, rest)
+	}
+	var out []string
+	for _, c := range candidates {
+		var m map[string]json.RawMessage
+		if json.Unmarshal(c, &m) != nil {
+			continue
+		}
+		var keys []string
+		for k := range m {
+			if strings.EqualFold(k, "syntax") {
+				keys = append(keys, k)
+			}
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			var v string
+			if json.Unmarshal(m[k], &v) == nil {
+				out = append(out, v)
 			}
 		}
 	}
@@ -94,47 +148,81 @@ type frontendKind int
 
 const (
 	// frontendReadsIgnore: no directive (the builder's own frontend), or
-	// docker/dockerfile at a version that reads Dockerfile.dockerignore.
+	// Docker Hub's docker/dockerfile at a version that reads
+	// Dockerfile.dockerignore.
 	frontendReadsIgnore frontendKind = iota
-	// frontendOld: docker/dockerfile 1.0, which does not.
+	// frontendOld: docker/dockerfile 0.9 or 1.0, which does not.
 	frontendOld
-	// frontendOther: another image, or docker/dockerfile pinned by digest
-	// alone; whether it reads the file is unknown.
+	// frontendOther: another image, or docker/dockerfile pinned by an
+	// unknown digest alone; whether it reads the file is unknown.
 	frontendOther
 )
 
-// classifyFrontend names the frontend a syntax directive selects. The
-// docker.io registry and the docker/ namespace may be written out
-// ("docker.io/docker/dockerfile", "index.docker.io/docker/dockerfile").
+// hubDockerfile are the spellings of Docker Hub's docker/dockerfile that are
+// classified by their tag. Any other spelling counts as another frontend
+// unless it names an old one.
+var hubDockerfile = map[string]bool{
+	"docker/dockerfile":                      true,
+	"docker.io/docker/dockerfile":            true,
+	"index.docker.io/docker/dockerfile":      true,
+	"registry-1.docker.io/docker/dockerfile": true,
+}
+
+// isOldTag reports a tag of the 0.9 or 1.0 family, the docker/dockerfile
+// frontends that predate Dockerfile-specific ignore files (verified in real
+// builds: 0.9, 1.0, 1.0-experimental and 1.0.0-experimental send
+// .claude-sandbox/env, 1 and 1.1 and later do not). Case is ignored, which
+// only refuses more.
+func isOldTag(tag string) bool {
+	t := strings.ToLower(tag)
+	for _, v := range []string{"0", "1.0"} {
+		if t == v || strings.HasPrefix(t, v+".") || strings.HasPrefix(t, v+"-") {
+			return true
+		}
+	}
+	return false
+}
+
+// splitImageRef splits an image reference as the reference grammar does:
+// the digest after the first "@" (its "sha256:" cut, lower-cased), the tag
+// after the last ":" that follows the last "/".
+func splitImageRef(ref string) (name, tag, digest string) {
+	name, digest, _ = strings.Cut(ref, "@")
+	digest = strings.TrimPrefix(strings.ToLower(digest), "sha256:")
+	if i := strings.LastIndex(name, ":"); i > strings.LastIndex(name, "/") {
+		name, tag = name[:i], name[i+1:]
+	}
+	return name, tag, digest
+}
+
+// classifyFrontend names the frontend a syntax directive selects.
+//
+// Old: an image whose last path component is "dockerfile" or
+// "dockerfile-upstream" (case ignored) under ANY registry and path — BuildKit
+// pulls Docker Hub's image through spellings the reference library does not
+// normalise (registry.hub.docker.com/…, registry-1.docker.io:443/…, both
+// verified) and through pull-through mirrors (mirror.gcr.io/docker/…) — with
+// a 0.9 or 1.0 tag, or with a digest of an old image whatever the tag: the
+// digest decides what is pulled.
+//
+// Reads the ignore file: a hubDockerfile spelling with no tag (latest) or
+// another tag, with or without a digest (Docker Hub serves a repository's
+// own manifests only, and every old one is in oldFrontendDigests).
+//
+// Other: everything else, docker/dockerfile by an unknown digest alone
+// included.
 func classifyFrontend(directive string) frontendKind {
 	if directive == "" {
 		return frontendReadsIgnore
 	}
-	ref := directive
-	for _, reg := range []string{"docker.io/", "index.docker.io/", "registry-1.docker.io/"} {
-		ref = strings.TrimPrefix(ref, reg)
-	}
-	const name = "docker/dockerfile"
-	if !strings.HasPrefix(ref, name) {
-		return frontendOther
-	}
-	rest := ref[len(name):]
-	digest := ""
-	if i := strings.Index(rest, "@"); i >= 0 {
-		rest, digest = rest[:i], rest[i:]
-	}
-	switch {
-	case rest == "":
-		if digest != "" {
-			return frontendOther // a digest alone names no version
-		}
-		return frontendReadsIgnore // no tag: latest
-	case !strings.HasPrefix(rest, ":"):
-		return frontendOther // docker/dockerfile-upstream and the like
-	}
-	tag := rest[1:]
-	if tag == "1.0" || strings.HasPrefix(tag, "1.0.") || strings.HasPrefix(tag, "1.0-") {
+	name, tag, digest := splitImageRef(directive)
+	last := strings.ToLower(path.Base(name))
+	if (last == "dockerfile" || last == "dockerfile-upstream") &&
+		(isOldTag(tag) || oldFrontendDigests[digest]) {
 		return frontendOld
+	}
+	if !hubDockerfile[name] || (tag == "" && digest != "") {
+		return frontendOther
 	}
 	return frontendReadsIgnore
 }

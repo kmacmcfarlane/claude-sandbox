@@ -67,7 +67,8 @@ together.
   `.claude-sandbox/env` after the project's own `.dockerignore` rules, so a
   `COPY . …` never bakes the tokens into a layer. It works only through a
   frontend that reads `Dockerfile.dockerignore`: with an env file in the
-  context, a `docker/dockerfile:1.0` pin is refused (exit 2) and any other
+  context, a `docker/dockerfile` 0.9 or 1.0 pin (by tag or digest, under any
+  registry) is refused (exit 2) and any other
   frontend image gets one warning that it may send the file.
 - `timezone`: host (parity: every create gets `-e TZ=<host zone>` unless an
   env file, an explicit value or the image's `ENV TZ` outranks it, headless

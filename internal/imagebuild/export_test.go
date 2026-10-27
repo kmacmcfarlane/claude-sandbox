@@ -31,3 +31,15 @@ func SetEnvWalkMax(n int) (restore func()) {
 	envWalkMax = n
 	return func() { envWalkMax = old }
 }
+
+// ClassifyFrontend exposes CS-IMG-079's frontend classes as "reads", "old"
+// and "other".
+func ClassifyFrontend(directive string) string {
+	switch classifyFrontend(directive) {
+	case frontendOld:
+		return "old"
+	case frontendOther:
+		return "other"
+	}
+	return "reads"
+}

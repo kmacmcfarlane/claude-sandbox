@@ -441,23 +441,35 @@ Feature: Image build lifecycle (CS-IMG)
       (newer BuildKit keeps the first, older the last); each value is cut at
       its first white space (BuildKit takes the frontend image only up to the
       first space, the rest is the frontend's command line); a UTF-8 BOM, a
-      "#!" first line, CRLF line ends and "//" directives are read too
+      "#!" first line, CRLF line ends and "//" directives are read too; so is
+      the JSON form BuildKit falls back to when no comment directive names a
+      syntax — a Dockerfile that is one JSON object (after an optional BOM or
+      "#!" line) whose "syntax" member, the key in any case, is a string
     And the context holds an env file the launch's rules exclude: any
       .claude-sandbox/env below it, its root "env" when the context is a
       .claude-sandbox directory, or a cascade env file under it (the
       resolved context is walked without following symlinks; past 200000
       entries it counts as holding one)
-    Then a directive (any one of them) naming docker/dockerfile (an optional docker.io/,
-      index.docker.io/ or registry-1.docker.io/ prefix) with tag "1.0" or a
-      tag starting "1.0." or "1.0-" — the frontend that does not read
-      Dockerfile.dockerignore — fails the launch with exit 2 before the build
+    Then a directive (any one of them) naming an old docker/dockerfile —
+      an image whose last path component is "dockerfile" or
+      "dockerfile-upstream" (any case, under ANY registry or path: Docker
+      Hub is reachable as registry.hub.docker.com or registry-1.docker.io:443
+      and through mirrors) with a tag of the 0.9 or 1.0 family ("0", "1.0",
+      or one starting "0.", "0-", "1.0." or "1.0-", any case), or with the
+      digest of any manifest behind those tags on Docker Hub whatever tag
+      stands beside it (the digest decides what is pulled) — the frontends
+      that do not read Dockerfile.dockerignore — fails the launch with exit
+      2 before the build
       and before any container is created, naming the Dockerfile, the
       directive, the env file and two remedies: raise the pin to
       docker/dockerfile:1.1 or later (or drop the syntax line), or build
       elsewhere (baseOnly: true, or a dockerfileDir whose build context holds
       no env file)
     And otherwise, a directive naming any other frontend image (another name,
-      docker/dockerfile-upstream, or docker/dockerfile by digest alone) prints
+      docker/dockerfile under any spelling but docker/dockerfile,
+      docker.io/, index.docker.io/ or registry-1.docker.io/docker/dockerfile,
+      docker/dockerfile-upstream, or docker/dockerfile by another digest
+      alone) prints
       one "WARNING:" line naming the Dockerfile and the frontend and saying
       .claude-sandbox/env files are kept out of the build context only if
       that frontend honours Dockerfile.dockerignore, and the build goes on
@@ -475,6 +487,15 @@ Feature: Image build lifecycle (CS-IMG)
     # 1.0-experimental is the old pin for RUN --mount=type=secret, so real
     # projects carry it. The remedy list leaves out "exclude it in your
     # .dockerignore": the launcher does not check such a rule exists.
+    # Also verified: the 0.9 pin sends it; "docker/dockerfile:1.7@sha256:"
+    # + the 1.0 manifest list's digest runs 1.0 and sends it;
+    # registry.hub.docker.com/docker/dockerfile:1.0 and
+    # registry-1.docker.io:443/docker/dockerfile:1.0 pull Docker Hub's 1.0
+    # and send it; a JSON-form Dockerfile naming 1.0 is forwarded to 1.0
+    # (which then fails to parse it before the context is read).
+    # Docker Hub's 0.9/1.0 digests are listed in the code (oldFrontendDigests);
+    # another tag beside any other digest of docker/dockerfile stays silent,
+    # since Docker Hub serves a repository's own manifests only.
 
   # ---- child image staleness ----
 

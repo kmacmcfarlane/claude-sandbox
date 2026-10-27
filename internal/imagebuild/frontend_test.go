@@ -56,6 +56,63 @@ var _ = Describe("the syntax parser directive (CS-IMG-079)", func() {
 		Entry("after a plain comment: a comment", "# my image\n# syntax=docker/dockerfile:1.0\n"),
 		Entry("after an empty line: a comment", "\n# syntax=docker/dockerfile:1.0\n"),
 		Entry("no value", "# syntax=\n"),
+		// BuildKit v0.11 and later fall back to a Dockerfile that is one JSON
+		// object (parser.DetectSyntax); a real build forwards it to the named
+		// frontend.
+		Entry("the JSON form", `{"syntax": "docker/dockerfile:1.0"}`, "docker/dockerfile:1.0"),
+		Entry("the JSON form, its key in another case (v0.11 to v0.13)", `{"SYNTAX": "docker/dockerfile:1.0"}`, "docker/dockerfile:1.0"),
+		Entry("the JSON form, its key folded as encoding/json folds it", "{\"ſyntax\": \"docker/dockerfile:1.0\"}", "docker/dockerfile:1.0"),
+		Entry("the JSON form, its value escaped", `{"syntax": "docker\/dockerfile:1.0"}`, "docker/dockerfile:1.0"),
+		Entry("the JSON form after a #! line", "#!/usr/bin/env buildctl\n{\"syntax\": \"docker/dockerfile:1.0\"}\n", "docker/dockerfile:1.0"),
+		Entry("the JSON form after a UTF-8 BOM", "\xef\xbb\xbf{\"syntax\": \"docker/dockerfile:1.0\"}", "docker/dockerfile:1.0"),
+		Entry("the JSON form, cut at its first space", `{"syntax": "docker/dockerfile:1.0 x"}`, "docker/dockerfile:1.0"),
+		Entry("the JSON form with a non-string value", `{"syntax": 1}`),
+		Entry("JSON that is not an object", `["syntax", "docker/dockerfile:1.0"]`),
+	)
+})
+
+var _ = Describe("the frontend image (CS-IMG-079)", func() {
+	DescribeTable("CS-IMG-079: ClassifyFrontend names what BuildKit would pull, reading old where unsure",
+		func(directive, want string) {
+			Expect(imagebuild.ClassifyFrontend(directive)).To(Equal(want))
+		},
+		// The 0.9 tags predate 1.0 and, like it, ignore Dockerfile.dockerignore
+		// (verified in a real build).
+		Entry("0.9", "docker/dockerfile:0.9", "old"),
+		Entry("0.9.0", "docker/dockerfile:0.9.0", "old"),
+		Entry("0.9-experimental", "docker/dockerfile:0.9-experimental", "old"),
+		Entry("0.9.0-experimental", "docker/dockerfile:0.9.0-experimental", "old"),
+		Entry("1.0", "docker/dockerfile:1.0", "old"),
+		Entry("a tag in upper case", "docker/dockerfile:1.0-EXPERIMENTAL", "old"),
+		// The digest decides what is pulled, whatever the tag (verified).
+		Entry("a new tag beside an old digest", "docker/dockerfile:1.7@sha256:653ad79c9cd2fe8105290b61bc0f261c6f73a9e9cb1780bdb529c396e04f9655", "old"),
+		Entry("an old manifest list digest alone", "docker/dockerfile@sha256:90251afc27ab89c025d205bd3fb9c3e110a653476c26b800ce693de2e6178243", "old"),
+		Entry("an old per-platform manifest digest alone", "docker.io/docker/dockerfile@sha256:9349a3e94e5a58e7ae582e1a3af64f69cdb1a116cf2a299c24fc4d1b22855f0c", "old"),
+		Entry("an old digest in upper case", "docker/dockerfile@SHA256:653AD79C9CD2FE8105290B61BC0F261C6F73A9E9CB1780BDB529C396E04F9655", "old"),
+		// Docker Hub under spellings the reference library does not
+		// normalise (verified), and mirrors of it.
+		Entry("registry.hub.docker.com", "registry.hub.docker.com/docker/dockerfile:1.0", "old"),
+		Entry("registry-1.docker.io:443", "registry-1.docker.io:443/docker/dockerfile:1.0", "old"),
+		Entry("the docker.io host in upper case", "Docker.IO/docker/dockerfile:1.0", "old"),
+		Entry("a pull-through mirror", "mirror.gcr.io/docker/dockerfile:1.0", "old"),
+		Entry("a mirror under a project path", "harbor.example.com/hub-proxy/docker/dockerfile:1.0-experimental", "old"),
+		Entry("a localhost mirror", "localhost:5000/docker/dockerfile:1.0", "old"),
+		Entry("docker/dockerfile-upstream, which carries the same old tags", "docker/dockerfile-upstream:1.0.0", "old"),
+		Entry("the repository in upper case", "DOCKER/DOCKERFILE:1.0", "old"),
+
+		Entry("no directive", "", "reads"),
+		Entry("no tag", "docker/dockerfile", "reads"),
+		Entry("1", "docker/dockerfile:1", "reads"),
+		Entry("1.1", "docker/dockerfile:1.1", "reads"),
+		Entry("10.0", "docker/dockerfile:10.0", "reads"),
+		Entry("experimental (a 1.2 image)", "docker/dockerfile:experimental", "reads"),
+		Entry("a new tag beside a digest that is not an old image's", "docker/dockerfile:1.7@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "reads"),
+		Entry("registry-1.docker.io, 1.7", "registry-1.docker.io/docker/dockerfile:1.7", "reads"),
+
+		Entry("an unknown digest alone", "docker/dockerfile@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "other"),
+		Entry("a mirror at a new tag", "mirror.gcr.io/docker/dockerfile:1.7", "other"),
+		Entry("docker/dockerfile-upstream at master", "docker/dockerfile-upstream:master", "other"),
+		Entry("another name", "registry.example.com/team/frontend:1.0", "other"),
 	)
 })
 
@@ -130,7 +187,15 @@ var _ = Describe("the Dockerfile frontend check (CS-IMG-079)", func() {
 			Entry("after an unknown key", "# author=me\n# syntax=docker/dockerfile:1.0\n"),
 			Entry("the second of two syntax lines", "# syntax=docker/dockerfile:1.1\n# syntax=docker/dockerfile:1.0\n"),
 			Entry("after another frontend's syntax line", "# syntax=registry.example.com/f:2\n# syntax=docker/dockerfile:1.0\n"),
+			Entry("the 0.9 frontend", "# syntax=docker/dockerfile:0.9\n"),
+			Entry("a new tag pinned to an old image's digest", "# syntax=docker/dockerfile:1.7@sha256:653ad79c9cd2fe8105290b61bc0f261c6f73a9e9cb1780bdb529c396e04f9655\n"),
+			Entry("Docker Hub under another host name", "# syntax=registry.hub.docker.com/docker/dockerfile:1.0\n"),
+			Entry("a mirror of Docker Hub", "# syntax=mirror.gcr.io/docker/dockerfile:1.0\n"),
 		)
+
+		It("CS-IMG-079: a Dockerfile in the JSON directive form naming an old pin is refused", func() {
+			refused(ensureContent(`{"syntax": "docker/dockerfile:1.0"}`+"\n", proj))
+		})
 
 		It("CS-IMG-079: two syntax lines with no old pin but another frontend warn once", func() {
 			Expect(ensureContent("# syntax=docker/dockerfile:1.1\n# syntax=registry.example.com/f:2\n"+dockerfileB, proj)).To(Succeed())
