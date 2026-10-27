@@ -398,9 +398,11 @@ Feature: Image build lifecycle (CS-IMG)
       "**/.claude-sandbox/env" always;
       "/env" when the context's base name, lexically or symlink-resolved, is
       .claude-sandbox;
-      "/<path relative to the context>" (pattern characters escaped) for each
-      cascade env file under the context, lexically or with either side
-      symlink-resolved
+      "/<path relative to the context>" (pattern characters escaped: every
+      ASCII punctuation character but "/" gets a backslash, so "|", "^", "{",
+      "}" and "]" are literals too) for each cascade env file under the
+      context, lexically or with either side symlink-resolved, the context
+      made absolute first (a relative dockerfileDir counts as one)
     And so no env file under the context (its root's .claude-sandbox/env, a
       nested project's, or the context root's own env when the context is a
       .claude-sandbox directory) reaches the build context, and a "COPY . ..."

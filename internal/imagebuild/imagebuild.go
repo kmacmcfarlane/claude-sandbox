@@ -1006,6 +1006,12 @@ func envIgnoreRules(context string, envFiles []string) []string {
 			rules = append(rules, r)
 		}
 	}
+	// Absolute first: a relative dockerfileDir leaves the context relative,
+	// so filepath.Rel against the absolute env files would fail, and a "."
+	// or ".." would hide a .claude-sandbox base name.
+	if abs, err := filepath.Abs(context); err == nil {
+		context = abs
+	}
 	ctxs := []string{filepath.Clean(context)}
 	if r, err := filepath.EvalSymlinks(context); err == nil && r != ctxs[0] {
 		ctxs = append(ctxs, r)
@@ -1016,6 +1022,9 @@ func envIgnoreRules(context string, envFiles []string) []string {
 		}
 	}
 	for _, e := range envFiles {
+		if abs, err := filepath.Abs(e); err == nil {
+			e = abs
+		}
 		forms := []string{filepath.Clean(e)}
 		if r, err := filepath.EvalSymlinks(e); err == nil && r != forms[0] {
 			forms = append(forms, r)
@@ -1036,13 +1045,18 @@ func envIgnoreRules(context string, envFiles []string) []string {
 	return rules
 }
 
-// escapeIgnorePattern escapes the characters a .dockerignore pattern treats
-// specially, so a path is matched literally.
+// escapeIgnorePattern backslash-escapes every ASCII punctuation character
+// (every printable ASCII character that is not a letter, digit or space)
+// but "/", so a path is matched literally. Escaping only the glob characters
+// is not enough: once any escape puts BuildKit's pattern matcher into
+// regular-expression mode, "^", "|", "{", "}" and "]" reach the expression
+// raw ("a|b" would match "a" alone). The matcher passes "\x" into the
+// expression as is, where an escaped punctuation character is a literal.
 func escapeIgnorePattern(p string) string {
 	var b strings.Builder
 	for _, r := range p {
-		switch r {
-		case '\\', '*', '?', '[':
+		if r > ' ' && r < 0x7f && r != '/' &&
+			!('a' <= r && r <= 'z' || 'A' <= r && r <= 'Z' || '0' <= r && r <= '9') {
 			b.WriteByte('\\')
 		}
 		b.WriteRune(r)

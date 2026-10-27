@@ -109,7 +109,7 @@ var _ = Describe("the launch-config snapshot (CS-CASC-046, CS-IMG-073/074)", fun
 		writeFile(df, "FROM claude-sandbox\n")
 		writeFile(filepath.Join(f.proj, ".claude-sandbox", "env"), "TOKEN=x\n")
 		seen := childBuild(df, func() {})
-		Expect(seen.ignore).To(Equal("**/.claude-sandbox/env\n/.claude-sandbox/env\n"))
+		Expect(seen.ignore).To(Equal("**/.claude-sandbox/env\n" + `/\.claude\-sandbox/env` + "\n"))
 	})
 
 	It("CS-IMG-078: dockerfileDir naming the .claude-sandbox dir keeps its env (at the context root) out", func() {

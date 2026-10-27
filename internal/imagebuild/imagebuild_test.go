@@ -2579,14 +2579,55 @@ var _ = Describe("image build lifecycle", func() {
 					outside := filepath.Join(filepath.Dir(proj), ".claude-sandbox", "env")
 					o.EnvFiles = []string{outside, filepath.Join(proj, ".claude-sandbox", "env")}
 					ensure(imagebuild.ChildInputs{})
-					Expect(seen.ignore).To(Equal(onlyEnvRule + "/.claude-sandbox/env\n"))
+					Expect(seen.ignore).To(Equal(onlyEnvRule + `/\.claude\-sandbox/env` + "\n"))
 				})
 
-				It("CS-IMG-078: pattern characters in the path are escaped, so it is matched literally", func() {
-					odd := filepath.Join(proj, `we[ir]d*?\dir`, ".claude-sandbox", "env")
-					o.EnvFiles = []string{odd}
-					ensure(imagebuild.ChildInputs{})
-					Expect(seen.ignore).To(Equal(onlyEnvRule + `/we\[ir]d\*\?\\dir/.claude-sandbox/env` + "\n"))
+				DescribeTable("CS-IMG-078: every ASCII punctuation character but / is escaped, so the path is matched literally",
+					func(dir, want string) {
+						o.EnvFiles = []string{filepath.Join(proj, dir, ".claude-sandbox", "env")}
+						ensure(imagebuild.ChildInputs{})
+						Expect(seen.ignore).To(Equal(onlyEnvRule + want + "\n"))
+					},
+					Entry("glob characters and a backslash", `we[ir]d*?\dir`, `/we\[ir\]d\*\?\\dir/\.claude\-sandbox/env`),
+					Entry("an alternation and brackets", `a|b[1]`, `/a\|b\[1\]/\.claude\-sandbox/env`),
+					Entry("a caret and a closing bracket", `c^f]x`, `/c\^f\]x/\.claude\-sandbox/env`),
+					Entry("braces, brackets and a space", `x{2}[a] y`, `/x\{2\}\[a\] y/\.claude\-sandbox/env`),
+					Entry("the rest of the ASCII punctuation", "!\"#$%&'()+,;<=>@_`~",
+						"/\\!\\\"\\#\\$\\%\\&\\'\\(\\)\\+\\,\\;\\<\\=\\>\\@\\_\\`\\~/\\.claude\\-sandbox/env"),
+					Entry("non-ASCII letters stay as they are", "café", `/café/\.claude\-sandbox/env`),
+				)
+
+				Describe("a relative dockerfileDir", func() {
+					chdir := func(dir string) {
+						wd, err := os.Getwd()
+						Expect(err).NotTo(HaveOccurred())
+						Expect(os.Chdir(dir)).To(Succeed())
+						DeferCleanup(func() { Expect(os.Chdir(wd)).To(Succeed()) })
+					}
+
+					It("CS-IMG-078: is made absolute, so the per-file rules and the base-name rule still apply", func() {
+						chdir(proj)
+						o.EnvFiles = []string{filepath.Join(proj, ".claude-sandbox", "env")}
+						spec := ensure(imagebuild.ChildInputs{DockerfileDir: ".claude-sandbox"})
+						Expect(spec.Context).To(Equal(".claude-sandbox"))
+						Expect(seen.ignore).To(Equal(onlyEnvRule + "/env\n"))
+					})
+
+					It("CS-IMG-078: a relative context below the project gets its env files' relative rules", func() {
+						dir := filepath.Join(proj, "docker")
+						writeFileAt(filepath.Join(dir, "Dockerfile"), "FROM claude-sandbox\n")
+						writeFileAt(filepath.Join(dir, "nested", ".claude-sandbox", "env"), "TOKEN=x\n")
+						chdir(proj)
+						o.EnvFiles = []string{filepath.Join(dir, "nested", ".claude-sandbox", "env")}
+						ensure(imagebuild.ChildInputs{DockerfileDir: "docker"})
+						Expect(seen.ignore).To(Equal(onlyEnvRule + `/nested/\.claude\-sandbox/env` + "\n"))
+					})
+
+					It("CS-IMG-078: a \".\" that is the .claude-sandbox dir is seen by its absolute base name", func() {
+						chdir(filepath.Join(proj, ".claude-sandbox"))
+						ensure(imagebuild.ChildInputs{DockerfileDir: "."})
+						Expect(seen.ignore).To(Equal(onlyEnvRule + "/env\n"))
+					})
 				})
 
 				It("CS-IMG-078: an env file reached through a symlink into the context gets its resolved path's rule", func() {
