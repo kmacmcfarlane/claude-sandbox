@@ -368,21 +368,42 @@ Feature: Image build lifecycle (CS-IMG)
 
   Scenario: CS-IMG-073 The child image is built from exactly the checked bytes
     Given a child Dockerfile is in use and the child needs a build
-    Then the build is "docker build -t <tag> <labels> -f - <context>" with the
-      snapshot bytes of CS-IMG-074 on stdin
+    Then the launcher writes the snapshot bytes of CS-IMG-074 0600 into a
+      private temp directory under the same base name, beside a generated
+      "<name>.dockerignore" (CS-IMG-078), builds with
+      "docker build -t <tag> <labels> -f <private dir>/<name> <context>",
+      and removes the directory after the build, whether it succeeded or not
     And a Dockerfile rewritten on disk after the read does not reach the build
-    When a Dockerfile-specific ignore file "<Dockerfile>.dockerignore" exists
-      beside it (stdin carries no file name, so docker could not find it)
-    Then the launcher writes the snapshot bytes 0600 into a private temp
-      directory, beside a copy of that ignore file, builds with
-      "-f <private dir>/<name>", and removes the directory after the build,
-      whether the build succeeded or not
-    And the ignore file is opened like the Dockerfile (non-blocking, regular
+    And an ignore file is opened like the Dockerfile (non-blocking, regular
       files only): a directory, FIFO or other non-regular file there is absent,
-      as BuildKit treats it, and the build uses stdin; only a regular ignore
-      file that cannot be read fails the build naming it
+      as BuildKit treats it; only a regular ignore file that cannot be read
+      fails the build naming it
     # Never the shadow directory (made after the launch lock; builds run
-    # before it) and never the project file.
+    # before it) and never the project file. Always a file, never "-f -":
+    # a Dockerfile on stdin has no name, so BuildKit could find no
+    # Dockerfile-specific ignore file for it, and CS-IMG-078 needs one.
+
+  Scenario: CS-IMG-078 A child build never sends an env file to BuildKit
+    Given a child Dockerfile is in use and the child needs a build
+    Then the generated "<name>.dockerignore" holds the rules BuildKit would
+      otherwise have used — "<Dockerfile>.dockerignore" beside the Dockerfile
+      when it exists, else "<context>/.dockerignore" when it exists, else none
+      — verbatim, then a newline when they do not end in one, then the line
+      "**/.claude-sandbox/env" LAST
+    And so no env file under the context (its root's .claude-sandbox/env or a
+      nested project's) reaches the build context, and a "COPY . ..." cannot
+      bake one into a layer
+    And a "!" rule in the project's ignore file cannot re-include it: the last
+      matching line decides
+    And nothing is refused or printed: the file is excluded, never warned about
+    And the child fingerprint is unchanged: the env file was never an input,
+      and the ignore rules are not hashed (no child rebuilds for this rule)
+    # BuildKit reads a Dockerfile-specific ignore file INSTEAD of the context's
+    # .dockerignore when both exist (docs.docker.com, "Build context" >
+    # ".dockerignore files" > "Filename and location"), which is why the
+    # generated file copies the context's rules when the Dockerfile has none of
+    # its own. "**" matches zero or more directories, so the pattern covers the
+    # context root too.
 
   # ---- child image staleness ----
 
