@@ -6,20 +6,7 @@ Docker-based sandbox for running Claude Code with filesystem isolation and opt-i
 
 ## Principles
 
-Two operator principles (2026-10-22) govern every default and every change; weigh them together.
-
-- **Host parity:** "the behavior is in alignment with what running `claude` outside the sandbox would do". Defaults make a sandboxed claude behave as plain claude on the host would. A parity feature on by default keeps a way to turn it off (answer 135); a deviation from parity is documented.
-- **Isolation is the point:** "consider security/isolation tradeoffs when making it work more like vanilla claude, because after all the point of using a sandbox is to get SOME sort of isolation". Parity is weighed against the isolation the sandbox exists for, not maximised: every parity change states its isolation cost and keeps it bounded.
-- **Corollary, transparent defaults:** any default a user must discover by losing something is the wrong default. Isolation a person would trip over is opt-in for people, default-on only for ralph's unattended loop. One named exception, answer 102 a: `sandboxNetwork` is on by default although a sibling on Docker's default bridge stops being reachable by IP — softened by the `Network:` line every launch on it prints, which names the cost and the fix.
-
-Where today's defaults stand:
-
-- `worktree`: off for interactive launches (transparent: `--resume` sees the repo's history), on for ralph (an unattended run is isolated).
-- `hostClipboard`: on for interactive launches (parity, answer 135; never headless or ralph). Isolation cost: a session can overwrite the host clipboard; bounded by write-only, limits, local displays only.
-- `sandboxNetwork`: on (parity, answer 102 a: containers resolve through the host's per-link split DNS; off with `sandboxNetwork: false` or `CLAUDE_SANDBOX_NETWORK=0`). Parity/reach cost: no reach by IP to siblings on Docker's default bridge (published ports still work); isolation cost: sandboxes can find each other by name (README "Container network and DNS").
-- `dangerous`: off unless the cascade, `--dangerous` or `CLAUDE_SANDBOX_DANGEROUS` turns it on (parity: host claude prompts). In headless it overrides the SDK client's permission mode, and `CLAUDE_SANDBOX_DANGEROUS=0` cannot turn off a cascade `true`.
-- Env allowlists (`launch.HeadlessEnv`, `launch.TerminalEnv`, `launch.awsEnvAllowlist`): isolation exceptions — the host's environment is never passed through wholesale.
-- Refused env keys (`cascade.RefusedEnvKeys`): an isolation exception — an env file never sets loader or shell-startup variables for the root entrypoint.
+The principles that govern every default and change are in [PRINCIPLES.md](PRINCIPLES.md); read it before changing a default. In short (approved 2026-10-22): **host parity** — behave as `claude` outside the sandbox would, and every default-on parity feature keeps an off switch — weighed against **isolation is the point**, with every parity change stating its bounded isolation cost; and **transparent defaults** — a default a user must discover by losing something is wrong, so isolation people would trip over is opt-in, default-on only for ralph (one named exception, `sandboxNetwork`). PRINCIPLES.md also lists where today's defaults stand and the proposed principles (not binding); argue changes against the personas and scenarios in [docs/personas-and-scenarios.md](docs/personas-and-scenarios.md).
 
 ## Key Architecture
 
@@ -96,6 +83,7 @@ spec/                # Gherkin behavioral spec (scenario IDs; the contract for t
 scripts/check-spec-coverage.sh  # CI: every scenario ID must appear in a *_test.go
 scaffold/            # Base bootstrap seed for `init` (config.yaml, env.example, Dockerfile.example) — embedded into the binary
 scaffold-ralph/      # Additional seed for `init-ralph` (agent/ workflow+prompt docs, scripts/ backlog tool)
+PRINCIPLES.md        # Approved security/usability principles + proposed principles (not binding)
 docs/MIGRATION.md    # How to migrate a repo to the consolidated .claude-sandbox/ layout
 docs/personas-and-scenarios.md  # Personas (P1-P10) and usage scenarios (UC-NN) with a concerns matrix; cite ids in plans, reviews and decision cards
 logstream/run-logger.js    # Transparent NDJSON passthrough — captures per-iteration metrics

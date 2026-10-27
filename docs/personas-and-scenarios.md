@@ -6,7 +6,7 @@ in the abstract. It is grounded in what the repo supports today (README,
 CLAUDE.md, `spec/*.feature`, `scaffold/config.yaml`) and in the problems that bug reports
 and work items (kept outside the public repo) show real use running into. It describes; it does not
 decide. The principles that weigh these scenarios against each other live in
-CLAUDE.md's `## Principles` (and, once written, PRINCIPLES.md).
+[PRINCIPLES.md](../PRINCIPLES.md).
 
 Paths and names below are generic examples (`~/work/<org>/<repo>`, the
 instance noun `otter`); none is a real host. Citations are spec scenario ids
