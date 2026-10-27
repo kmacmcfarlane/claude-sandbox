@@ -45,7 +45,7 @@ claude-sandbox --model sonnet            # aliases work too
 # Skip permission prompts:
 claude-sandbox --dangerous
 
-# Force rebuild of base + child images:
+# Force rebuild of every image (base, tools, Claude Code, child, run):
 claude-sandbox --rebuild
 
 # Combine flags:

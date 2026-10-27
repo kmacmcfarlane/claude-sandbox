@@ -13,7 +13,7 @@ Expert guidance for the claude-sandbox project — a Docker-based sandbox for ru
 
 - claude-sandbox lives at `https://github.com/kmacmcfarlane/claude-sandbox`, part of the [claude-kit](https://github.com/kmacmcfarlane/claude-kit) ecosystem
 - The repo `README.md` is the user-facing reference (every flag, key and variable); the project `CLAUDE.md` holds the architecture details — read the relevant section before answering
-- Most defaults can be changed at three levels: config keys cascade, a `CLAUDE_SANDBOX_*` variable overrides one launch, and a CLI flag (where one exists) beats both
+- Most settings are a config key that cascades; many also have a `CLAUDE_SANDBOX_*` variable for one launch and some a CLI flag. Not every key has a variable (`model`, `memoryLimit`, `detachKeys`, `mounts`, `trackInHost` have none) — check README § Environment variables
 - Always check the current state of the sources and config files before giving advice
 - **The CLI is Go, and behavior is spec-driven.** `spec/*.feature` (Gherkin, stable scenario IDs like `CS-INIT-014`) is the contract; every Ginkgo test references the scenario it implements. When changing behavior: **update the spec first**, then the tests, then the code. `scripts/check-spec-coverage.sh` fails if a scenario has no referencing test.
 
@@ -61,6 +61,8 @@ The container sees the project at its real host path. This is critical for `dock
 
 ### Configuration Precedence
 CLI flag > env var > merged `.claude-sandbox/config.yaml` cascade > defaults
+
+Where a level does not exist for a setting, it is skipped: `model` has a flag and a key but no variable; `memoryLimit`, `detachKeys`, `mounts` and `trackInHost` are config-only. `dangerous` is the exception to the order: it is on when **any** of `--dangerous`, `CLAUDE_SANDBOX_DANGEROUS=1` or `dangerous: true` says so, so a falsy variable cannot turn off a config `true` (a more-local `dangerous: false` can).
 
 The project directory is the current directory (or `PROJECT_DIR`), always resolved to its **physical** path: a checkout reached through a symlink is the same project, and the parent search climbs the real checkout's parents (the launcher prints `Project: <physical> (resolved from <logical>)` when they differ). A linked git worktree outside its repository (Paseo's, or `git worktree add` elsewhere) also reads its main checkout's `.claude-sandbox/` files.
 
@@ -130,7 +132,7 @@ A launch never waits on an update. It compares the version pinned in the `claude
 - `--update` — check npm now (ignoring the cache) and build the new CLI image in the foreground before launching; also the way to retry a failed background build at once, and the only way a `headless` launch checks
 - Background build stuck or failing: read `~/.cache/claude-sandbox/cli-prefetch.log`
 - `--no-update-check`, `CLAUDE_SANDBOX_NO_UPDATE_CHECK=1`, or `disableUpdateCheck: true` in config — skip the check entirely
-- `claude-sandbox --rebuild` — force a `--no-cache` rebuild of every image (base, tools, Claude Code CLI, child, run cap), pulling the base, tools and CLI registry parents first; it also discards the shared BuildKit package caches (a `--no-cache` build gets a fresh cache mount)
+- `claude-sandbox --rebuild` — force a rebuild of every image (base, tools, Claude Code CLI, child, run cap), pulling the base, tools and CLI registry parents first. The base, tools and CLI builds use `--no-cache` (which also gives them fresh, empty BuildKit package-cache mounts); the child and the cap are rebuilt with the cache
 - `claude-sandbox --version` — prints the host checkout's version, the tools image's and the Claude Code image's
 
 ### Enabling Host Access
@@ -153,7 +155,7 @@ Options (pick any):
 claude-sandbox --ralph --docker-socket --dangerous --limit 5
 ```
 - Runs Claude in fresh-context iterations (new process each time)
-- The container is named `claude-sandbox-<project-slug>-ralph`, so it never collides with interactive sessions; ralph never prompts about running sessions (its PID lock handles concurrency)
+- The container is named `claude-sandbox-<parent>-<project>-<hash>-ralph`, so it never collides with interactive sessions; ralph never prompts about running sessions (its PID lock handles concurrency)
 - Worktree mode is **on by default for ralph** (off for interactive launches): every iteration reopens `.claude/worktrees/ralph` (branch `worktree-ralph`; `--worktree=NAME` renames it, `--no-worktree` or `worktree: false` uses the shared checkout); the run branch is the deliverable — ralph never merges into `main`, a human fast-forwards it. The agent gets `CLAUDE_SANDBOX_PROJECT_DIR` + `BACKLOG_REPO_ROOT` to reach `.claude-sandbox/` in the main checkout
 - Stop gracefully: `touch .claude-sandbox/ralph/stop`
 - Debug: read `.claude-sandbox/ralph/runlogs/rawlog_*` for full NDJSON streams
@@ -174,6 +176,16 @@ mounts:
 
 Mounts append down the config cascade. To change an upstream mount (e.g. make it writable), re-declare the same `host` + `container` pair locally with the new settings — it overrides the upstream entry instead of duplicating it.
 
+### Passthrough and Resuming
+Launcher flags come first. The first known claude flag (in any spelling claude accepts) starts the passthrough, and `--` forces it; everything after reaches `claude` (or `ralph` with `--ralph`) verbatim. Unknown `--` flags before that are rejected.
+```bash
+claude-sandbox --continue          # newest conversation for this directory, no picker
+claude-sandbox --resume            # claude's picker
+claude-sandbox --resume <id>       # a specific conversation
+claude-sandbox -- <claude args>    # anything else for claude
+```
+The launcher has no resume flag of its own; it composes claude's. A resume or continue that would reopen a conversation already open elsewhere is refused with exit 4 (see Running Several Sessions). Scratchpads survive the container, so a resumed session finds its working files.
+
 ### Worktree Mode
 `--worktree` runs claude in its own Claude Code worktree, `.claude/worktrees/<name>` on branch `worktree-<name>`, named after the container's instance noun (`--worktree=NAME` names it, and reopens an existing one). **Off by default for interactive launches, on for ralph.** A worktree has its own, initially empty transcript history, so `--resume` there would not list the repo's conversations — interactive launches stay in the shared checkout unless asked.
 - Precedence: `--worktree` / `--no-worktree` > `CLAUDE_SANDBOX_WORKTREE` (`1`/`true`/`yes` on, `0`/`false`/`no` an explicit off) > the `worktree:` key (cascades) > the per-kind default
@@ -183,13 +195,13 @@ Mounts append down the config cascade. To change an upstream mount (e.g. make it
 - Conversations started in a worktree are filed under it; `Ctrl+W` in the resume picker shows them
 
 ### Running Several Sessions
-A project can host several sessions, each in its own `--rm` container named with a short **instance noun** (`otter`, `heron`).
+A project can host several sessions, each new session in its own `--rm` container (a join shares one) named with a short **instance noun** (`otter`, `heron`).
 - `claude-sandbox sessions` lists this project's sessions (`--all` every project, `--json` machine-readable); `(OOM)` marks a container where the OOM killer killed something
 - Launching when one already runs offers `[n]` new container, `[b]` branch (fork the newest conversation into a new container), `[j]` join (a second claude in an existing container — cheap, but **unrecoverable** and dies with that container's primary), `[a]` attach, `[q]` quit
 - Skip the prompt with `--new`, `--branch` (claude's picker chooses what to fork; add claude's `--name "x"` to name the fork), `--attach[=NOUN]`, `--join[=NOUN]`, `--no-session-check`
 - **Detach** with `ctrl-q` twice (`detachKeys` in config overrides; Docker's `ctrl-p,ctrl-q` is not used because the TUI binds `ctrl+p`); `claude-sandbox --attach` picks the session back up. `ctrl-d` / `/exit` ends it and the container is removed
 - **`--detach`** starts a new session in the background with no terminal and prints the `--attach` command; it implies `--new`, exits 0 once the container was up 2 s, and is refused with `--ralph`, `--attach`, `--join`, `--branch` and `headless`. A session that dies later takes its output with it — rerun without `--detach` to watch one that keeps dying
-- **Exit codes:** `3` = a choice is needed and no terminal is attached (pass one of the flags above); `4` = the conversation you `--resume <id>` or `--continue` is already open in another live session (another sandbox, a join, or `claude` on the host) — attach to it, or add claude's `--fork-session` after `--`; `2` = any other error
+- **Exit codes:** `2` = a launcher error (bad flags, a refused env file, a build failure); `3` = a choice is needed and no terminal is attached (pass one of the flags above); `4` = for `--resume <id>`, that conversation is already open in another live session (another sandbox, a join, or `claude` on the host); for `--continue`, a live session using the same Claude config dir has a conversation open in this directory — attach to it, add claude's `--fork-session` after `--`, or use `--resume` (claude's picker) instead; `78` = the global-config link could not be made (below). A `--detach` start failure and a refused `global-config` command exit 1, and a session's own exit passes docker's status through (137 for an OOM kill)
 - **Config drift:** `--attach`/`--join` enter a container as it was created (no rebuild, no new mounts). When the config, env files, image or mounts changed since, they ask `[c]` continue / `[n]` new container / `[q]` quit; `--allow-config-drift` skips the check. `--model`, passthrough args, the worktree and the time zone are per-session and never count as drift
 - **JetBrains terminals:** `TERMINAL_EMULATOR` is forwarded into new sessions so wheel scrolling does not move the input field; an attach from a terminal with a different value prints a note (use `--join`, or relaunch)
 
@@ -211,6 +223,11 @@ A project can host several sessions, each in its own `--rm` container named with
 - `memoryLimit` (default `8g`, swap off) caps **each** container; several containers multiply it, joined sessions share it
 - Every container gets `--oom-score-adj 500` so that when the **host** runs out of memory the kernel kills a sandbox process rather than your desktop; `oomScoreAdj` (or `CLAUDE_SANDBOX_OOM_SCORE_ADJ`, -1000..1000) overrides, `0` restores docker's default
 - When an OOM kill ends a session the launcher prints a report naming both possible causes (the container's limit, or the host out of memory); the host's kernel log tells them apart (`Memory cgroup out of memory` = the limit, plain `Out of memory` = the host)
+
+### Other Keys and Webhooks
+- **`sharedPeerRegistry: true`** (off by default; `CLAUDE_SANDBOX_SHARED_PEER_REGISTRY`) bridges `/peers` and messaging between sandboxes whose `CLAUDE_CONFIG_DIR` differs. It replaces each container's registry, so every session to be seen must have it on and be relaunched — README § Shared peer registry
+- **Notifications:** `CLAUDE_NOTIFICATION_WEBHOOK_URL` in `.claude-sandbox/env` makes the built-in Notification hook post a Discord message naming the waiting session (permission prompt or idle) with its attach command; `DISCORD_WEBHOOK_URL` enables the bundled `send_discord_notification` MCP tool — README § Notification hooks, § Discord MCP server
+- **`dockerfileDir` / `dockerfile`** (or `CLAUDE_SANDBOX_DOCKERFILE_DIR` / `CLAUDE_SANDBOX_DOCKERFILE`, which win) point at a child Dockerfile elsewhere; the build context becomes `dockerfileDir` — README § Child Dockerfile
 
 ### Time Zone
 New containers get the host's zone as `-e TZ=<zone>` by default (the image is UTC). Override in `.claude-sandbox/config.yaml` with `timezone: Europe/Berlin` (a zone name, never a path) or turn it off with `timezone: none`; `CLAUDE_SANDBOX_TIMEZONE` does the same for one launch. An env file's `TZ` wins over everything; a child image's `ENV TZ` is kept under the host default (an explicit value beats it). There is no `/etc/localtime` mount: it would overwrite the image's `Etc/UTC` file and Claude Code (Node/Bun) would still show UTC. Inside the sandbox `/etc/timezone` still says UTC — check `echo $TZ` or `date`. Not drift: attach/join keep the container's zone; `[n]` picks up a change.
