@@ -2534,6 +2534,8 @@ go test ./...                       # Ginkgo suites (no Docker, git, or network 
 ./scripts/check-spec-coverage.sh    # every spec scenario must be referenced by a test
 ```
 
+**Principles and personas.** [PRINCIPLES.md](PRINCIPLES.md) holds the security and usability principles every default and change is weighed against; [docs/personas-and-scenarios.md](docs/personas-and-scenarios.md) holds the personas and usage scenarios to argue them with.
+
 **Behavior is specified before it is implemented.** `spec/*.feature` holds Gherkin scenarios with stable IDs (`CS-INIT-014`, `CS-LNCH-007`, …); each Ginkgo `It` description starts with the ID it implements, and the coverage script fails if a scenario has no test. The order for any behavior change is: **spec → test → implementation**. Tags mark `@new` behavior and `@changed` divergence from earlier behavior, with the rationale in a comment.
 
 Tests stay hermetic through two seams: every external command (`docker`, `git`, `claude`, `node`) goes through `execx.Runner`, and every interactive prompt through `prompt.Prompter`. Tests inject `execx.Fake` and `prompt.Scripted`, so the suite runs anywhere in about a second. Scenarios that genuinely need a real subprocess or tty are marked for the manual smoke checklist instead.
