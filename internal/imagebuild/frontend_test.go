@@ -9,9 +9,11 @@ package imagebuild_test
 import (
 	"bytes"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -133,6 +135,7 @@ var _ = Describe("the frontend image (CS-IMG-079)", func() {
 		Entry("an unknown tag", "docker/dockerfile:nightly", "other"),
 		Entry("a 2.x tag nobody has published", "docker/dockerfile:2", "other"),
 		Entry("10.0", "docker/dockerfile:10.0", "other"),
+		Entry("1.01, a minor with a leading zero", "docker/dockerfile:1.01", "other"),
 		Entry("a release candidate", "docker/dockerfile-upstream:1.2.0-rc1", "other"),
 		Entry("an upstream commit tag", "docker/dockerfile-upstream:20190619-ssh", "other"),
 		Entry("master on docker/dockerfile, where it does not exist", "docker/dockerfile:master", "other"),
@@ -143,8 +146,17 @@ var _ = Describe("the frontend image (CS-IMG-079)", func() {
 	)
 })
 
+// noSuchImage is docker image inspect of an image the daemon does not hold.
+func noSuchImage(c execx.Cmd) (string, error) {
+	if c.Stderr != nil {
+		io.WriteString(c.Stderr, "Error response from daemon: No such image: "+c.Args[len(c.Args)-1]+"\n")
+	}
+	return "", execx.Fail(1)
+}
+
 var _ = Describe("the Dockerfile frontend check (CS-IMG-079)", func() {
 	var (
+		localImage  func(execx.Cmd) (string, error)
 		fake        *execx.Fake
 		out, errw   *bytes.Buffer
 		o           imagebuild.Options
@@ -156,6 +168,11 @@ var _ = Describe("the Dockerfile frontend check (CS-IMG-079)", func() {
 
 	BeforeEach(func() {
 		fake = &execx.Fake{}
+		// The frontend image's local copy: none, unless a test says otherwise.
+		localImage = noSuchImage
+		fake.OnFunc("docker image inspect --format {{json .RepoDigests}}", func(c execx.Cmd) (string, error) {
+			return localImage(c)
+		})
 		fake.On("docker image inspect", "", execx.Fail(1)) // no image: build
 		builds = 0
 		fake.OnFunc("docker build -t ", func(execx.Cmd) (string, error) { builds++; return "", nil })
@@ -325,6 +342,94 @@ var _ = Describe("the Dockerfile frontend check (CS-IMG-079)", func() {
 					Expect(l).NotTo(ContainSubstring("--build-arg"))
 				}
 			}
+		})
+	})
+
+	Context("the daemon's local copy of a silent-class frontend (BuildKit prefers it)", func() {
+		const oldList = "653ad79c9cd2fe8105290b61bc0f261c6f73a9e9cb1780bdb529c396e04f9655"
+		const modern = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+		inspects := func() int {
+			n := 0
+			for _, l := range fake.CommandLines() {
+				if strings.Contains(l, "docker image inspect --format {{json .RepoDigests}}") {
+					n++
+				}
+			}
+			return n
+		}
+
+		Context("with .claude-sandbox/env in the context", func() {
+			BeforeEach(func() { write(envFile, "TOKEN=secret\n") })
+
+			It("CS-IMG-079: a local copy holding an old image's digest is refused as an old pin", func() {
+				localImage = func(c execx.Cmd) (string, error) {
+					Expect(c.Args[len(c.Args)-1]).To(Equal("docker/dockerfile:latest"))
+					return `["docker/dockerfile@sha256:` + oldList + `"]` + "\n", nil
+				}
+				err := ensure("docker/dockerfile:latest", proj)
+				refused(err)
+				Expect(err.Error()).To(ContainSubstring(`"docker/dockerfile:latest"`))
+			})
+
+			It("CS-IMG-079: no local copy stays silent (BuildKit pulls what the registry names)", func() {
+				Expect(ensure("docker/dockerfile:experimental", proj)).To(Succeed())
+				Expect(builds).To(Equal(1))
+				Expect(errw.String()).To(BeEmpty())
+				Expect(inspects()).To(Equal(1))
+			})
+
+			It("CS-IMG-079: a local copy with only modern digests stays silent", func() {
+				localImage = func(execx.Cmd) (string, error) {
+					return `["docker/dockerfile@sha256:` + modern + `","mirror.example/docker/dockerfile@sha256:` + modern + `"]`, nil
+				}
+				Expect(ensure("docker/dockerfile:1.7", proj)).To(Succeed())
+				Expect(builds).To(Equal(1))
+				Expect(errw.String()).To(BeEmpty())
+			})
+
+			DescribeTable("CS-IMG-079: an inspect that cannot tell warns, never silent",
+				func(answer func(execx.Cmd) (string, error)) {
+					localImage = answer
+					Expect(ensure("docker/dockerfile:1.7", proj)).To(Succeed())
+					Expect(builds).To(Equal(1))
+					Expect(strings.Count(errw.String(), "WARNING:")).To(Equal(1))
+					Expect(errw.String()).To(ContainSubstring(`"docker/dockerfile:1.7"`))
+				},
+				Entry("an inspect error", func(c execx.Cmd) (string, error) {
+					io.WriteString(c.Stderr, "Cannot connect to the Docker daemon\n")
+					return "", execx.Fail(1)
+				}),
+				Entry("an error with no stderr", func(execx.Cmd) (string, error) { return "", execx.Fail(1) }),
+				Entry("no repo digest (a local build or tag)", func(execx.Cmd) (string, error) { return "[]\n", nil }),
+				Entry("null", func(execx.Cmd) (string, error) { return "null\n", nil }),
+				Entry("unreadable output", func(execx.Cmd) (string, error) { return "garbage", nil }),
+			)
+
+			It("CS-IMG-079: an inspect that hangs is cut at its bound and warns", func() {
+				defer imagebuild.SetFrontendInspectTimeout(50 * time.Millisecond)()
+				fake.OnHang("docker image inspect --format {{json .RepoDigests}}")
+				Expect(ensure("docker/dockerfile:1.7", proj)).To(Succeed())
+				Expect(strings.Count(errw.String(), "WARNING:")).To(Equal(1))
+			})
+
+			It("CS-IMG-079: an old pin refuses without asking the daemon", func() {
+				refused(ensure("docker/dockerfile:1.0", proj))
+				Expect(inspects()).To(Equal(0))
+			})
+
+			It("CS-IMG-079: another frontend is not inspected", func() {
+				Expect(ensure("registry.example.com/team/frontend:2", proj)).To(Succeed())
+				Expect(inspects()).To(Equal(0))
+			})
+		})
+
+		It("CS-IMG-079: with no env file in the context the daemon is not asked", func() {
+			localImage = func(execx.Cmd) (string, error) {
+				return `["docker/dockerfile@sha256:` + oldList + `"]`, nil
+			}
+			Expect(ensure("docker/dockerfile:latest", proj)).To(Succeed())
+			Expect(errw.String()).To(BeEmpty())
+			Expect(inspects()).To(Equal(0))
 		})
 	})
 

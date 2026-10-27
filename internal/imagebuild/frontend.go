@@ -25,6 +25,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
@@ -160,9 +161,10 @@ const (
 )
 
 // hubRepos are the spellings of Docker Hub's docker/dockerfile and
-// docker/dockerfile-upstream whose tags can be trusted to name what Docker
-// publishes; the value is the repository. Any other registry or path is
-// another frontend unless it names an old one.
+// docker/dockerfile-upstream whose tags name what Docker publishes on the
+// registry; the value is the repository. A daemon's local copy of such a
+// tag may be an older pull, so checkFrontend checks it (localFrontend). Any
+// other registry or path is another frontend unless it names an old one.
 var hubRepos = map[string]string{}
 
 func init() {
@@ -230,6 +232,9 @@ func splitImageRef(ref string) (name, tag, digest string) {
 // Reads the ignore file (an allowlist): a hubRepos spelling with NO digest
 // and either no tag (latest) or a tag modernTagRe (or, for
 // docker/dockerfile-upstream, upstreamTagRe) accepts, exactly, in its case.
+// That reads the NAME only; with an env file in the context checkFrontend
+// also checks the daemon's local copy of it (localFrontend), which BuildKit
+// prefers on the classic image store.
 //
 // Other: everything else. That includes any digest not listed as old, even
 // beside a modern tag: the digest decides what is pulled, and
@@ -258,6 +263,46 @@ func classifyFrontend(directive string) frontendKind {
 		return frontendReadsIgnore
 	}
 	return frontendOther
+}
+
+// frontendInspectTimeout bounds localFrontend's docker image inspect.
+var frontendInspectTimeout = 5 * time.Second
+
+// localFrontend checks the local copy of a frontend image classifyFrontend
+// let through silently. BuildKit resolves a gateway frontend "prefer local"
+// on the classic image store, so a daemon still holding a 2019 pull of
+// docker/dockerfile:latest or :experimental (1.0-era then) runs it. One
+// bounded `docker image inspect --format '{{json .RepoDigests}}' <ref>`:
+// a repo digest in oldFrontendDigests = old; "No such image" = nothing local,
+// BuildKit pulls what the registry names today = still silent; a local copy
+// whose repo digests are all unlisted = silent; no repo digest at all (a
+// local build or tag), a failure, a timeout or unparsable output = other
+// (a warning, never silence).
+func localFrontend(o Options, ref string) frontendKind {
+	var stderr bytes.Buffer
+	out, err := execx.Bounded(o.Runner, frontendInspectTimeout, execx.Cmd{
+		Name:   "docker",
+		Args:   []string{"image", "inspect", "--format", "{{json .RepoDigests}}", ref},
+		Stderr: &stderr,
+	})
+	if err != nil {
+		var te *execx.TimeoutError
+		var se *execx.StartError
+		if !errors.As(err, &te) && !errors.As(err, &se) && strings.Contains(stderr.String(), "No such image") {
+			return frontendReadsIgnore
+		}
+		return frontendOther
+	}
+	var digests []string
+	if json.Unmarshal([]byte(strings.TrimSpace(out)), &digests) != nil || len(digests) == 0 {
+		return frontendOther
+	}
+	for _, d := range digests {
+		if _, _, dg := splitImageRef(d); oldFrontendDigests[dg] {
+			return frontendOld
+		}
+	}
+	return frontendReadsIgnore
 }
 
 // envWalkMax bounds the context walk for env files: past it the context is
@@ -327,23 +372,43 @@ func envFileInContext(context string, envFiles []string) (found string, limited 
 func checkFrontend(o Options, spec ChildSpec) error {
 	// Every syntax value counts (SyntaxDirectives over-reads): any old pin
 	// refuses; otherwise any other frontend warns.
-	kind, directive := frontendReadsIgnore, ""
-	for _, d := range SyntaxDirectives(spec.Content) {
-		switch k := classifyFrontend(d); {
-		case k == frontendOld:
-			kind, directive = k, d
-		case k == frontendOther && kind == frontendReadsIgnore:
-			kind, directive = k, d
-		}
-		if kind == frontendOld {
-			break
-		}
+	directives := SyntaxDirectives(spec.Content)
+	kinds := make([]frontendKind, len(directives))
+	for i, d := range directives {
+		kinds[i] = classifyFrontend(d)
 	}
-	if kind == frontendReadsIgnore {
-		return nil
+	worst := func() (frontendKind, string) {
+		kind, directive := frontendReadsIgnore, ""
+		for i, k := range kinds {
+			switch {
+			case k == frontendOld:
+				return k, directives[i]
+			case k == frontendOther && kind == frontendReadsIgnore:
+				kind, directive = k, directives[i]
+			}
+		}
+		return kind, directive
+	}
+	if len(directives) == 0 {
+		return nil // the builder's own frontend
 	}
 	found, limited := envFileInContext(spec.Context, o.EnvFiles)
 	if found == "" && !limited {
+		return nil
+	}
+	// A silent-class name is only as good as the image it reaches: BuildKit
+	// prefers a local copy on the classic image store, which may be an old
+	// pull of a tag that has moved since (CS-IMG-079). Checked only when it
+	// could matter: an env file is in the context and nothing is old yet.
+	if kind, _ := worst(); kind != frontendOld {
+		for i, k := range kinds {
+			if k == frontendReadsIgnore {
+				kinds[i] = localFrontend(o, directives[i])
+			}
+		}
+	}
+	kind, directive := worst()
+	if kind == frontendReadsIgnore {
 		return nil
 	}
 	// Paths and the directive come from session-writable files and names:

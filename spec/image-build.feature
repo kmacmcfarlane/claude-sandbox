@@ -472,7 +472,17 @@ Feature: Image build lifecycle (CS-IMG)
       Dockerfile.dockerignore, matched exactly: "1", or "1.N" / "1.N.x" with
       N >= 1, each optionally followed by "-labs" or "-experimental"; or
       "latest", "labs", "experimental"; and, for docker/dockerfile-upstream
-      only, "master", "master-labs", "master-experimental"
+      only, "master", "master-labs", "master-experimental" — the name only:
+      BuildKit resolves a frontend "prefer local" on the classic image
+      store, and a daemon may still hold an old pull of a tag that has moved
+      (a 2019 "latest" or "experimental" was 1.0-era), so with an env file in
+      the context each such directive also gets one bounded (5 s)
+      "docker image inspect --format '{{json .RepoDigests}}' <ref>": a repo
+      digest on the old list refuses as an old pin; "No such image" stays
+      silent (BuildKit pulls what the registry names today); a local copy
+      whose repo digests are all unlisted stays silent; no repo digest (a
+      local build or tag), any other failure, a timeout or unreadable output
+      warns as another frontend below — never silent
     And otherwise, a directive naming any other frontend image prints one
       "WARNING:" line naming the Dockerfile and the frontend and saying
       .claude-sandbox/env files are kept out of the build context only if
