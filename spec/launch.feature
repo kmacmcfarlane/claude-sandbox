@@ -2736,7 +2736,7 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
   @new
   Scenario: CS-LNCH-188 The network is on by default; sandboxNetwork: false or CLAUDE_SANDBOX_NETWORK=0 turns it off
     # Operator answer 102 a (2026-10-22), superseding answer 93 b's opt-in:
-    # host parity (CLAUDE.md ## Principles) — host claude resolves through
+    # host parity (PRINCIPLES.md) — host claude resolves through
     # the host's per-link split DNS, and a sandbox on the default bridge does
     # not. The isolation cost: a sibling started with a plain docker run on
     # Docker's default bridge is not reachable by IP (published ports still
