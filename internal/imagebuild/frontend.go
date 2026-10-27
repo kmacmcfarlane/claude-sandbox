@@ -268,41 +268,66 @@ func classifyFrontend(directive string) frontendKind {
 // frontendInspectTimeout bounds localFrontend's docker image inspect.
 var frontendInspectTimeout = 5 * time.Second
 
+// frontendCapsLabel is the label every docker/dockerfile image from 1.2 on
+// carries (today's latest, 1, labs and experimental included) and none
+// before it: 0.9 and 1.0 have no labels, 1.0-experimental and 1.1 only
+// moby.buildkit.frontend.network.none (read from the registry's image
+// configs).
+const frontendCapsLabel = "moby.buildkit.frontend.caps"
+
+// frontendInspectFormat is localFrontend's inspect template: the repo
+// digests as JSON, a unit separator, the caps label ("" when absent —
+// verified against a real daemon, as is the separator).
+const frontendInspectFormat = "{{json .RepoDigests}}\x1f{{index .Config.Labels \"" + frontendCapsLabel + "\"}}"
+
 // localFrontend checks the local copy of a frontend image classifyFrontend
 // let through silently. BuildKit resolves a gateway frontend "prefer local"
 // on the classic image store, so a daemon still holding a 2019 pull of
 // docker/dockerfile:latest or :experimental (1.0-era then) runs it. One
-// bounded `docker image inspect --format '{{json .RepoDigests}}' <ref>`:
-// a repo digest in oldFrontendDigests = old; "No such image" = nothing local,
-// BuildKit pulls what the registry names today = still silent; a local copy
-// whose repo digests are all unlisted = silent; no repo digest at all (a
-// local build or tag), a failure, a timeout or unparsable output = other
-// (a warning, never silence).
-func localFrontend(o Options, ref string) frontendKind {
+// bounded `docker image inspect --format frontendInspectFormat <ref>`:
+//   - "No such image": nothing local, BuildKit pulls what the registry names
+//     today — silent;
+//   - a repo digest in oldFrontendDigests: old (local reports it, for the
+//     refusal's wording);
+//   - otherwise repo digests that are all unlisted plus a non-empty caps
+//     label: a 1.2-or-later image — silent;
+//   - anything else — unlisted digests with no caps label (an old pull whose
+//     manifest no tag names any more looks like that; so does a local 1.1,
+//     which is accepted), no repo digest at all (a local build or tag), a
+//     failure, a timeout, unparsable output: other (a warning, never
+//     silence).
+func localFrontend(o Options, ref string) (kind frontendKind, local bool) {
 	var stderr bytes.Buffer
 	out, err := execx.Bounded(o.Runner, frontendInspectTimeout, execx.Cmd{
 		Name:   "docker",
-		Args:   []string{"image", "inspect", "--format", "{{json .RepoDigests}}", ref},
+		Args:   []string{"image", "inspect", "--format", frontendInspectFormat, ref},
 		Stderr: &stderr,
 	})
 	if err != nil {
 		var te *execx.TimeoutError
 		var se *execx.StartError
 		if !errors.As(err, &te) && !errors.As(err, &se) && strings.Contains(stderr.String(), "No such image") {
-			return frontendReadsIgnore
+			return frontendReadsIgnore, false
 		}
-		return frontendOther
+		return frontendOther, false
+	}
+	digestsJSON, caps, ok := strings.Cut(strings.TrimRight(out, "\r\n"), "\x1f")
+	if !ok {
+		return frontendOther, false
 	}
 	var digests []string
-	if json.Unmarshal([]byte(strings.TrimSpace(out)), &digests) != nil || len(digests) == 0 {
-		return frontendOther
+	if json.Unmarshal([]byte(strings.TrimSpace(digestsJSON)), &digests) != nil || len(digests) == 0 {
+		return frontendOther, false
 	}
 	for _, d := range digests {
 		if _, _, dg := splitImageRef(d); oldFrontendDigests[dg] {
-			return frontendOld
+			return frontendOld, true
 		}
 	}
-	return frontendReadsIgnore
+	if strings.TrimSpace(caps) == "" {
+		return frontendOther, false
+	}
+	return frontendReadsIgnore, false
 }
 
 // envWalkMax bounds the context walk for env files: past it the context is
@@ -377,17 +402,18 @@ func checkFrontend(o Options, spec ChildSpec) error {
 	for i, d := range directives {
 		kinds[i] = classifyFrontend(d)
 	}
-	worst := func() (frontendKind, string) {
-		kind, directive := frontendReadsIgnore, ""
+	localOld := make([]bool, len(directives)) // old by the daemon's copy
+	worst := func() (kind frontendKind, directive string, local bool) {
+		kind = frontendReadsIgnore
 		for i, k := range kinds {
 			switch {
 			case k == frontendOld:
-				return k, directives[i]
+				return k, directives[i], localOld[i]
 			case k == frontendOther && kind == frontendReadsIgnore:
 				kind, directive = k, directives[i]
 			}
 		}
-		return kind, directive
+		return kind, directive, false
 	}
 	if len(directives) == 0 {
 		return nil // the builder's own frontend
@@ -400,14 +426,26 @@ func checkFrontend(o Options, spec ChildSpec) error {
 	// prefers a local copy on the classic image store, which may be an old
 	// pull of a tag that has moved since (CS-IMG-079). Checked only when it
 	// could matter: an env file is in the context and nothing is old yet.
-	if kind, _ := worst(); kind != frontendOld {
+	// Each distinct ref is inspected once.
+	if kind, _, _ := worst(); kind != frontendOld {
+		type answer struct {
+			kind  frontendKind
+			local bool
+		}
+		seen := map[string]answer{}
 		for i, k := range kinds {
-			if k == frontendReadsIgnore {
-				kinds[i] = localFrontend(o, directives[i])
+			if k != frontendReadsIgnore {
+				continue
 			}
+			a, ok := seen[directives[i]]
+			if !ok {
+				a.kind, a.local = localFrontend(o, directives[i])
+				seen[directives[i]] = a
+			}
+			kinds[i], localOld[i] = a.kind, a.local
 		}
 	}
-	kind, directive := worst()
+	kind, directive, local := worst()
 	if kind == frontendReadsIgnore {
 		return nil
 	}
@@ -424,6 +462,20 @@ func checkFrontend(o Options, spec ChildSpec) error {
 		fmt.Fprintf(o.Err, "WARNING: %s selects the frontend %q (# syntax=); .claude-sandbox/env files are kept out of the build context only if that frontend honours Dockerfile.dockerignore (context %s holds %s).\n",
 			dockerfile, shown, context, what)
 		return nil
+	}
+	if local {
+		// The name passed the allowlist, so it holds only reference
+		// characters: safe to print in a command.
+		return &execx.CodeError{Code: 2, Msg: fmt.Sprintf(
+			"Error: %s selects the Dockerfile frontend %q (# syntax=), and this Docker daemon holds an old copy of %s under that tag\n"+
+				"  (docker/dockerfile 0.9 or 1.0, which does not read Dockerfile.dockerignore). BuildKit prefers the local copy,\n"+
+				"  so the build would send %s from the build context %s to BuildKit. Not building.\n"+
+				"  Fix one of:\n"+
+				"    - docker pull %s   (fetches what the tag names today);\n"+
+				"    - docker image rm %s   (BuildKit then pulls it).\n"+
+				"  On the containerd image store or a docker-container buildx builder BuildKit may not use the\n"+
+				"  daemon's copy, so this refusal can be over-cautious; either command clears it.",
+			dockerfile, shown, shown, what, context, shown, shown)}
 	}
 	return &execx.CodeError{Code: 2, Msg: fmt.Sprintf(
 		"Error: %s pins the Dockerfile frontend %q (# syntax=), which does not read Dockerfile.dockerignore,\n"+

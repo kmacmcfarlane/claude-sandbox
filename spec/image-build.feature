@@ -476,13 +476,25 @@ Feature: Image build lifecycle (CS-IMG)
       BuildKit resolves a frontend "prefer local" on the classic image
       store, and a daemon may still hold an old pull of a tag that has moved
       (a 2019 "latest" or "experimental" was 1.0-era), so with an env file in
-      the context each such directive also gets one bounded (5 s)
-      "docker image inspect --format '{{json .RepoDigests}}' <ref>": a repo
-      digest on the old list refuses as an old pin; "No such image" stays
-      silent (BuildKit pulls what the registry names today); a local copy
-      whose repo digests are all unlisted stays silent; no repo digest (a
-      local build or tag), any other failure, a timeout or unreadable output
-      warns as another frontend below — never silent
+      the context each distinct such directive also gets one bounded (5 s)
+      "docker image inspect --format '{{json .RepoDigests}}<US>{{index
+      .Config.Labels "moby.buildkit.frontend.caps"}}' <ref>" (US = the unit
+      separator, 0x1f): a repo digest on the old list refuses; "No such
+      image" stays silent (BuildKit pulls what the registry names today);
+      repo digests that are all unlisted plus a non-empty
+      moby.buildkit.frontend.caps label stay silent (every docker/dockerfile
+      from 1.2 on carries it, none before: 0.9 and 1.0 have no labels,
+      1.0-experimental and 1.1 only moby.buildkit.frontend.network.none);
+      unlisted digests with no caps label (an old pull whose manifest no tag
+      names any more; a local 1.1 too, accepted), no repo digest (a local
+      build or tag), any other failure, a timeout or unreadable output warn
+      as another frontend below — never silent
+    And a refusal for the daemon's local copy says the daemon holds an old
+      copy of <ref> under that tag (not that the Dockerfile pins one) and
+      names the remedies "docker pull <ref>" and "docker image rm <ref>",
+      noting that on the containerd image store or a docker-container buildx
+      builder BuildKit may not use the local copy, so the refusal can be
+      over-cautious
     And otherwise, a directive naming any other frontend image prints one
       "WARNING:" line naming the Dockerfile and the frontend and saying
       .claude-sandbox/env files are kept out of the build context only if

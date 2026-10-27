@@ -361,14 +361,46 @@ var _ = Describe("the Dockerfile frontend check (CS-IMG-079)", func() {
 		Context("with .claude-sandbox/env in the context", func() {
 			BeforeEach(func() { write(envFile, "TOKEN=secret\n") })
 
-			It("CS-IMG-079: a local copy holding an old image's digest is refused as an old pin", func() {
+			It("CS-IMG-079: the inspect asks for the repo digests and the caps label, unit-separated", func() {
+				Expect(ensure("docker/dockerfile:1.7", proj)).To(Succeed())
+				var args []string
+				for _, c := range fake.Calls {
+					if len(c.Args) > 3 && c.Args[0] == "image" && strings.HasPrefix(c.Args[3], "{{json .RepoDigests}}") {
+						args = c.Args
+					}
+				}
+				Expect(args).To(Equal([]string{"image", "inspect", "--format",
+					"{{json .RepoDigests}}\x1f{{index .Config.Labels \"moby.buildkit.frontend.caps\"}}", "docker/dockerfile:1.7"}))
+			})
+
+			It("CS-IMG-079: a local copy holding an old image's digest is refused, naming the local copy and its remedies", func() {
 				localImage = func(c execx.Cmd) (string, error) {
 					Expect(c.Args[len(c.Args)-1]).To(Equal("docker/dockerfile:latest"))
-					return `["docker/dockerfile@sha256:` + oldList + `"]` + "\n", nil
+					return `["docker/dockerfile@sha256:` + oldList + `"]` + "\x1f\n", nil
 				}
 				err := ensure("docker/dockerfile:latest", proj)
 				refused(err)
-				Expect(err.Error()).To(ContainSubstring(`"docker/dockerfile:latest"`))
+				msg := err.Error()
+				Expect(msg).To(ContainSubstring(`"docker/dockerfile:latest"`))
+				Expect(msg).To(ContainSubstring("this Docker daemon holds an old copy of docker/dockerfile:latest under that tag"))
+				Expect(msg).To(ContainSubstring("docker pull docker/dockerfile:latest"))
+				Expect(msg).To(ContainSubstring("docker image rm docker/dockerfile:latest"))
+				Expect(msg).To(ContainSubstring("containerd image store or a docker-container buildx builder"))
+				Expect(msg).To(ContainSubstring(envFile))
+				Expect(msg).NotTo(ContainSubstring("pins the Dockerfile frontend"))
+				Expect(msg).NotTo(ContainSubstring("raise the pin"))
+			})
+
+			It("CS-IMG-079: an old pin's refusal still says to raise the pin", func() {
+				err := ensure("docker/dockerfile:1.0", proj)
+				refused(err)
+				Expect(err.Error()).To(ContainSubstring("pins the Dockerfile frontend"))
+				Expect(err.Error()).NotTo(ContainSubstring("docker image rm"))
+			})
+
+			It("CS-IMG-079: a ref named twice is inspected once", func() {
+				Expect(ensureContent("# syntax=docker/dockerfile:1.7\n# syntax=docker/dockerfile:1.7\n"+dockerfileB, proj)).To(Succeed())
+				Expect(inspects()).To(Equal(1))
 			})
 
 			It("CS-IMG-079: no local copy stays silent (BuildKit pulls what the registry names)", func() {
@@ -378,9 +410,10 @@ var _ = Describe("the Dockerfile frontend check (CS-IMG-079)", func() {
 				Expect(inspects()).To(Equal(1))
 			})
 
-			It("CS-IMG-079: a local copy with only modern digests stays silent", func() {
+			It("CS-IMG-079: a local copy with unlisted digests and the caps label (1.2 or later) stays silent", func() {
 				localImage = func(execx.Cmd) (string, error) {
-					return `["docker/dockerfile@sha256:` + modern + `","mirror.example/docker/dockerfile@sha256:` + modern + `"]`, nil
+					return `["docker/dockerfile@sha256:` + modern + `","mirror.example/docker/dockerfile@sha256:` + modern + `"]` +
+						"\x1fmoby.buildkit.frontend.inputs,moby.buildkit.frontend.subrequests\n", nil
 				}
 				Expect(ensure("docker/dockerfile:1.7", proj)).To(Succeed())
 				Expect(builds).To(Equal(1))
@@ -400,8 +433,21 @@ var _ = Describe("the Dockerfile frontend check (CS-IMG-079)", func() {
 					return "", execx.Fail(1)
 				}),
 				Entry("an error with no stderr", func(execx.Cmd) (string, error) { return "", execx.Fail(1) }),
-				Entry("no repo digest (a local build or tag)", func(execx.Cmd) (string, error) { return "[]\n", nil }),
-				Entry("null", func(execx.Cmd) (string, error) { return "null\n", nil }),
+				// An old pull whose manifest no tag names any more: its digest
+				// is not on the list, and it has no caps label.
+				Entry("an unlisted digest with no caps label", func(execx.Cmd) (string, error) {
+					return `["docker/dockerfile@sha256:` + modern + `"]` + "\x1f\n", nil
+				}),
+				Entry("an unlisted digest with a blank caps label", func(execx.Cmd) (string, error) {
+					return `["docker/dockerfile@sha256:` + modern + `"]` + "\x1f  \n", nil
+				}),
+				Entry("no repo digest (a local build or tag), even with the caps label", func(execx.Cmd) (string, error) {
+					return "[]\x1fmoby.buildkit.frontend.inputs\n", nil
+				}),
+				Entry("null", func(execx.Cmd) (string, error) { return "null\x1fx\n", nil }),
+				Entry("no separator", func(execx.Cmd) (string, error) {
+					return `["docker/dockerfile@sha256:` + modern + `"]` + "\n", nil
+				}),
 				Entry("unreadable output", func(execx.Cmd) (string, error) { return "garbage", nil }),
 			)
 
@@ -425,7 +471,7 @@ var _ = Describe("the Dockerfile frontend check (CS-IMG-079)", func() {
 
 		It("CS-IMG-079: with no env file in the context the daemon is not asked", func() {
 			localImage = func(execx.Cmd) (string, error) {
-				return `["docker/dockerfile@sha256:` + oldList + `"]`, nil
+				return `["docker/dockerfile@sha256:` + oldList + `"]` + "\x1f\n", nil
 			}
 			Expect(ensure("docker/dockerfile:latest", proj)).To(Succeed())
 			Expect(errw.String()).To(BeEmpty())
