@@ -1219,7 +1219,7 @@ claude-sandbox --ralph --docker-socket --dangerous --limit 5
 touch .claude-sandbox/ralph/stop
 ```
 
-The container runs under a separate name (`claude-sandbox-ralph`) so it won't conflict with an interactive `claude-sandbox` session.
+The container runs under a separate name, `ralph` in place of an instance noun (`claude-sandbox-<parent>-<project>-<hash>-ralph`, e.g. `claude-sandbox-kmacmcfarlane-myproj-1de77a-ralph`), so it won't conflict with an interactive `claude-sandbox` session.
 
 #### Ralph and worktrees
 
