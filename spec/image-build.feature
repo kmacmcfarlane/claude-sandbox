@@ -406,7 +406,8 @@ Feature: Image build lifecycle (CS-IMG)
     And so no env file under the context (its root's .claude-sandbox/env, a
       nested project's, or the context root's own env when the context is a
       .claude-sandbox directory) reaches the build context, and a "COPY . ..."
-      cannot bake one into a layer
+      cannot bake one into a layer — through a frontend that reads
+      Dockerfile.dockerignore; CS-IMG-079 covers the ones that do not
     And the context is a .claude-sandbox directory when dockerfileDir (or
       CLAUDE_SANDBOX_DOCKERFILE_DIR) names one, or when the parent walk finds
       "dockerfile: .claude-sandbox/Dockerfile" in an upper level
@@ -426,6 +427,49 @@ Feature: Image build lifecycle (CS-IMG)
     # leaves them out. A path holding a newline, or white space at either end
     # (BuildKit trims pattern lines), gets no per-file rule; the first two
     # still apply.
+
+  Scenario: CS-IMG-079 A frontend that ignores Dockerfile.dockerignore never gets an env file silently
+    Given a child Dockerfile is in use and the child needs a build
+    When its bytes (CS-IMG-074) begin with a "syntax" parser directive, read
+      as the Dockerfile reference's "Parser directives" section says: comment
+      lines "# key=value" at the very top only; the key in any case; non
+      line-breaking white space around the key, the "=" and the value; the
+      block ends at the first line that is not a known directive (syntax,
+      escape, check) — an empty line, any other comment, an unknown key or an
+      instruction; the first syntax line counts; a UTF-8 BOM, a "#!" first
+      line, CRLF line ends and "//" directives are read too
+    And the context holds an env file the launch's rules exclude: any
+      .claude-sandbox/env below it, its root "env" when the context is a
+      .claude-sandbox directory, or a cascade env file under it (the
+      resolved context is walked without following symlinks; past 200000
+      entries it counts as holding one)
+    Then a directive naming docker/dockerfile (an optional docker.io/,
+      index.docker.io/ or registry-1.docker.io/ prefix) with tag "1.0" or a
+      tag starting "1.0." or "1.0-" — the frontend that does not read
+      Dockerfile.dockerignore — fails the launch with exit 2 before the build
+      and before any container is created, naming the Dockerfile, the
+      directive, the env file and two remedies: raise the pin to
+      docker/dockerfile:1.1 or later (or drop the syntax line), or build
+      elsewhere (baseOnly: true, or a dockerfileDir whose build context holds
+      no env file)
+    And a directive naming any other frontend image (another name,
+      docker/dockerfile-upstream, or docker/dockerfile by digest alone) prints
+      one "WARNING:" line naming the Dockerfile and the frontend and saying
+      .claude-sandbox/env files are kept out of the build context only if
+      that frontend honours Dockerfile.dockerignore, and the build goes on
+    And no directive, or docker/dockerfile at any other tag (1, 1.1 and later,
+      none), builds as CS-IMG-078 says, silently
+    And with no such env file in the context nothing is printed and nothing
+      is refused, whatever the directive
+    And the frontend is never overridden: no build argument or flag replaces
+      the one the Dockerfile names
+    And a frontend name is printed with control and bidi characters removed
+    # Verified in real BuildKit builds: the docker/dockerfile 1.0,
+    # 1.0-experimental and 1.0.0-experimental pins send .claude-sandbox/env
+    # despite the generated ignore file; 1 and 1.1+ leave it out.
+    # 1.0-experimental is the old pin for RUN --mount=type=secret, so real
+    # projects carry it. The remedy list leaves out "exclude it in your
+    # .dockerignore": the launcher does not check such a rule exists.
 
   # ---- child image staleness ----
 

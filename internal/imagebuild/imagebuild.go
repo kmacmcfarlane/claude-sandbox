@@ -944,6 +944,11 @@ func buildChild(o Options, spec ChildSpec, fp string) error {
 	if err != nil {
 		return fmt.Errorf("building %s: %w", spec.ImageName, err)
 	}
+	// CS-IMG-079: the generated ignore file works only through a frontend
+	// that reads it.
+	if err := checkFrontend(o, spec); err != nil {
+		return err
+	}
 	dir, err := os.MkdirTemp(privateTempRoot(o.TempRoot), "claude-sandbox-child-")
 	if err != nil {
 		return fmt.Errorf("building %s: private Dockerfile directory: %w", spec.ImageName, err)
@@ -1006,41 +1011,20 @@ func envIgnoreRules(context string, envFiles []string) []string {
 			rules = append(rules, r)
 		}
 	}
-	// Absolute first: a relative dockerfileDir leaves the context relative,
-	// so filepath.Rel against the absolute env files would fail, and a "."
-	// or ".." would hide a .claude-sandbox base name.
-	if abs, err := filepath.Abs(context); err == nil {
-		context = abs
-	}
-	ctxs := []string{filepath.Clean(context)}
-	if r, err := filepath.EvalSymlinks(context); err == nil && r != ctxs[0] {
-		ctxs = append(ctxs, r)
-	}
+	// Absolute first (contextForms): a relative dockerfileDir leaves the
+	// context relative, so filepath.Rel against the absolute env files would
+	// fail, and a "." or ".." would hide a .claude-sandbox base name.
+	ctxs := contextForms(context)
 	for _, c := range ctxs {
 		if filepath.Base(c) == paths.SandboxDir("") {
 			add("/" + paths.Env)
 		}
 	}
-	for _, e := range envFiles {
-		if abs, err := filepath.Abs(e); err == nil {
-			e = abs
+	for _, rel := range cascadeRels(ctxs, envFiles) {
+		if strings.ContainsAny(rel, "\n\r") || strings.TrimSpace(rel) != rel {
+			continue
 		}
-		forms := []string{filepath.Clean(e)}
-		if r, err := filepath.EvalSymlinks(e); err == nil && r != forms[0] {
-			forms = append(forms, r)
-		}
-		for _, c := range ctxs {
-			for _, f := range forms {
-				rel, err := filepath.Rel(c, f)
-				if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, "../") || filepath.IsAbs(rel) {
-					continue
-				}
-				if strings.ContainsAny(rel, "\n\r") || strings.TrimSpace(rel) != rel {
-					continue
-				}
-				add("/" + escapeIgnorePattern(filepath.ToSlash(rel)))
-			}
-		}
+		add("/" + escapeIgnorePattern(rel))
 	}
 	return rules
 }

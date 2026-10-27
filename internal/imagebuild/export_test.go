@@ -23,3 +23,11 @@ func PreSnapshotChildInputs(spec ChildSpec, baseID string) string {
 func BaseInputs(repoRoot string) string          { return baseInputs(repoRoot) }
 func ToolsInputs(repoRoot string) (string, bool) { return toolsInputs(repoRoot) }
 func CLIInputs(repoRoot string) string           { return cliInputs(repoRoot) }
+
+// SetEnvWalkMax lowers CS-IMG-079's context walk bound for a test and
+// returns the restore.
+func SetEnvWalkMax(n int) (restore func()) {
+	old := envWalkMax
+	envWalkMax = n
+	return func() { envWalkMax = old }
+}

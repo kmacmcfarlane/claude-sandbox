@@ -112,6 +112,22 @@ var _ = Describe("the launch-config snapshot (CS-CASC-046, CS-IMG-073/074)", fun
 		Expect(seen.ignore).To(Equal("**/.claude-sandbox/env\n" + `/\.claude\-sandbox/env` + "\n"))
 	})
 
+	It("CS-IMG-079: an old docker/dockerfile pin with an env file in the context fails the launch, exit 2, before any build or create", func() {
+		df := filepath.Join(f.proj, ".claude-sandbox", "Dockerfile")
+		writeFile(df, "# syntax=docker/dockerfile:1.0-experimental\nFROM claude-sandbox\nCOPY . /src\n")
+		writeFile(filepath.Join(f.proj, ".claude-sandbox", "env"), "TOKEN=x\n")
+		delete(f.envmap, "CLAUDE_SANDBOX_BASE_ONLY")
+		tag := "claude-sandbox-" + imagebuild.ImageSlug(df, f.proj)
+		f.fake.On("image inspect "+tag, "", execx.Fail(1))
+		Expect(f.run()).To(Equal(2))
+		Expect(f.errw.String()).To(ContainSubstring(`"docker/dockerfile:1.0-experimental"`))
+		Expect(f.errw.String()).To(ContainSubstring("raise the pin to docker/dockerfile:1.1 or later"))
+		for _, l := range f.fake.CommandLines() {
+			Expect(l).NotTo(HavePrefix("docker build -t " + tag))
+		}
+		Expect(createdAny(f)).To(BeFalse())
+	})
+
 	It("CS-IMG-078: dockerfileDir naming the .claude-sandbox dir keeps its env (at the context root) out", func() {
 		sbx := filepath.Join(f.proj, ".claude-sandbox")
 		df := filepath.Join(sbx, "Dockerfile")
