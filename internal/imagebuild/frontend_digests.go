@@ -9,6 +9,19 @@ package imagebuild
 // images). A digest decides which image BuildKit pulls whatever tag stands
 // beside it, so "docker/dockerfile:1.7@sha256:<one of these>" runs the old
 // frontend (CS-IMG-079; verified in a real build).
+//
+// Method: for each tag, an anonymous token from
+// auth.docker.io/token?service=registry.docker.io&scope=repository:docker/dockerfile:pull,
+// then GET https://registry-1.docker.io/v2/docker/dockerfile/manifests/<tag>
+// with the manifest-list, OCI-index and image-manifest media types in
+// Accept; the response's Docker-Content-Digest header (the list) plus every
+// .manifests[].digest (the per-platform manifests). The same requests
+// against docker/dockerfile-upstream returned the same digests.
+//
+// It covers only manifests those tags name TODAY. An old manifest no tag
+// names any more is not here, which is why classifyFrontend treats every
+// unlisted digest as unknown (a warning), never as modern. Regenerate the
+// list if those tags ever move.
 var oldFrontendDigests = map[string]bool{
 	"03606bee94db0823c7b0d10f8e9ce8218601c8c6d9655de0d2d86e1b6b870c4e": true,
 	"0ae875f15b184c2e8cb6310d009588ef82302268d790e6497a2dba5a8ef85f16": true,

@@ -100,18 +100,45 @@ var _ = Describe("the frontend image (CS-IMG-079)", func() {
 		Entry("docker/dockerfile-upstream, which carries the same old tags", "docker/dockerfile-upstream:1.0.0", "old"),
 		Entry("the repository in upper case", "DOCKER/DOCKERFILE:1.0", "old"),
 
+		// The allowlist: no digest, a tag known to read Dockerfile.dockerignore.
 		Entry("no directive", "", "reads"),
 		Entry("no tag", "docker/dockerfile", "reads"),
+		Entry("latest", "docker/dockerfile:latest", "reads"),
 		Entry("1", "docker/dockerfile:1", "reads"),
+		Entry("1-labs", "docker/dockerfile:1-labs", "reads"),
+		Entry("1-experimental", "docker/dockerfile:1-experimental", "reads"),
 		Entry("1.1", "docker/dockerfile:1.1", "reads"),
-		Entry("10.0", "docker/dockerfile:10.0", "reads"),
+		Entry("1.7", "docker/dockerfile:1.7", "reads"),
+		Entry("1.10", "docker/dockerfile:1.10", "reads"),
+		Entry("1.1.0", "docker/dockerfile:1.1.0", "reads"),
+		Entry("1.7.1", "docker/dockerfile:1.7.1", "reads"),
+		Entry("1.7-labs", "docker/dockerfile:1.7-labs", "reads"),
+		Entry("1.7.1-labs", "docker/dockerfile:1.7.1-labs", "reads"),
+		Entry("1.1-experimental", "docker/dockerfile:1.1-experimental", "reads"),
+		Entry("1.1.7-experimental", "docker/dockerfile:1.1.7-experimental", "reads"),
+		Entry("labs", "docker/dockerfile:labs", "reads"),
 		Entry("experimental (a 1.2 image)", "docker/dockerfile:experimental", "reads"),
-		Entry("a new tag beside a digest that is not an old image's", "docker/dockerfile:1.7@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "reads"),
+		Entry("docker.io, 1.7", "docker.io/docker/dockerfile:1.7", "reads"),
+		Entry("index.docker.io, 1.7", "index.docker.io/docker/dockerfile:1.7", "reads"),
 		Entry("registry-1.docker.io, 1.7", "registry-1.docker.io/docker/dockerfile:1.7", "reads"),
+		Entry("docker/dockerfile-upstream, 1.7", "docker/dockerfile-upstream:1.7", "reads"),
+		Entry("docker/dockerfile-upstream at master", "docker/dockerfile-upstream:master", "reads"),
+		Entry("docker/dockerfile-upstream at master-labs", "docker/dockerfile-upstream:master-labs", "reads"),
+		Entry("docker/dockerfile-upstream at master-experimental", "docker/dockerfile-upstream:master-experimental", "reads"),
 
-		Entry("an unknown digest alone", "docker/dockerfile@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "other"),
-		Entry("a mirror at a new tag", "mirror.gcr.io/docker/dockerfile:1.7", "other"),
-		Entry("docker/dockerfile-upstream at master", "docker/dockerfile-upstream:master", "other"),
+		// Everything else is unknown: one warning with an env file in the context.
+		Entry("an unlisted digest beside 1.7 (an untagged old manifest looks the same)", "docker/dockerfile:1.7@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "other"),
+		Entry("an unlisted digest alone", "docker/dockerfile@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "other"),
+		Entry("an unlisted digest beside latest", "docker.io/docker/dockerfile:latest@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "other"),
+		Entry("an unknown tag", "docker/dockerfile:nightly", "other"),
+		Entry("a 2.x tag nobody has published", "docker/dockerfile:2", "other"),
+		Entry("10.0", "docker/dockerfile:10.0", "other"),
+		Entry("a release candidate", "docker/dockerfile-upstream:1.2.0-rc1", "other"),
+		Entry("an upstream commit tag", "docker/dockerfile-upstream:20190619-ssh", "other"),
+		Entry("master on docker/dockerfile, where it does not exist", "docker/dockerfile:master", "other"),
+		Entry("a modern tag in another case", "docker/dockerfile:1-LABS", "other"),
+		Entry("an empty tag", "docker/dockerfile:", "other"),
+		Entry("a mirror at a modern tag", "mirror.gcr.io/docker/dockerfile:1.7", "other"),
 		Entry("another name", "registry.example.com/team/frontend:1.0", "other"),
 	)
 })
@@ -260,6 +287,9 @@ var _ = Describe("the Dockerfile frontend check (CS-IMG-079)", func() {
 			Entry("1.1-experimental", "docker/dockerfile:1.1-experimental"),
 			Entry("no tag", "docker/dockerfile"),
 			Entry("docker.io, 1.7", "docker.io/docker/dockerfile:1.7"),
+			Entry("1.7-labs", "docker/dockerfile:1.7-labs"),
+			Entry("labs", "docker/dockerfile:labs"),
+			Entry("docker/dockerfile-upstream at master", "docker/dockerfile-upstream:master"),
 		)
 
 		DescribeTable("CS-IMG-079: any other frontend gets one WARNING line, and the build goes on",
@@ -273,8 +303,12 @@ var _ = Describe("the Dockerfile frontend check (CS-IMG-079)", func() {
 				Expect(lines[0]).To(ContainSubstring(".claude-sandbox/env files are kept out of the build context only if that frontend honours Dockerfile.dockerignore"))
 			},
 			Entry("another registry", "registry.example.com/team/frontend:2"),
-			Entry("docker/dockerfile-upstream", "docker/dockerfile-upstream:master"),
+			Entry("docker/dockerfile-upstream at a commit tag", "docker/dockerfile-upstream:20190619-ssh"),
 			Entry("docker/dockerfile by digest alone", "docker/dockerfile@sha256:0123456789abcdef"),
+			// A digest decides what is pulled and only today's old manifests
+			// are listed, so an unlisted one may be an untagged old image.
+			Entry("docker/dockerfile:1.7 beside an unlisted digest", "docker/dockerfile:1.7@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+			Entry("docker/dockerfile at an unknown tag", "docker/dockerfile:nightly"),
 		)
 
 		It("CS-IMG-079: a control character in another frontend's name never reaches the terminal", func() {

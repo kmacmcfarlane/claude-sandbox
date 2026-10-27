@@ -153,20 +153,42 @@ const (
 	frontendReadsIgnore frontendKind = iota
 	// frontendOld: docker/dockerfile 0.9 or 1.0, which does not.
 	frontendOld
-	// frontendOther: another image, or docker/dockerfile pinned by an
-	// unknown digest alone; whether it reads the file is unknown.
+	// frontendOther: another image, docker/dockerfile pinned by any digest
+	// not listed as old, or at a tag not known to read the file; whether it
+	// reads the file is unknown.
 	frontendOther
 )
 
-// hubDockerfile are the spellings of Docker Hub's docker/dockerfile that are
-// classified by their tag. Any other spelling counts as another frontend
-// unless it names an old one.
-var hubDockerfile = map[string]bool{
-	"docker/dockerfile":                      true,
-	"docker.io/docker/dockerfile":            true,
-	"index.docker.io/docker/dockerfile":      true,
-	"registry-1.docker.io/docker/dockerfile": true,
+// hubRepos are the spellings of Docker Hub's docker/dockerfile and
+// docker/dockerfile-upstream whose tags can be trusted to name what Docker
+// publishes; the value is the repository. Any other registry or path is
+// another frontend unless it names an old one.
+var hubRepos = map[string]string{}
+
+func init() {
+	for _, repo := range []string{"docker/dockerfile", "docker/dockerfile-upstream"} {
+		for _, reg := range []string{"", "docker.io/", "index.docker.io/", "registry-1.docker.io/"} {
+			hubRepos[reg+repo] = repo
+		}
+	}
 }
+
+// modernTagRe is the allowlist of docker/dockerfile tags that read
+// Dockerfile.dockerignore (the 1.1 frontend added Dockerfile-specific
+// ignore files; verified in real builds for 1, 1.1 and later). The shape:
+// "1", or "1.N" / "1.N.x" with N >= 1, optionally followed by "-labs" or
+// "-experimental"; the floating "latest", "labs" and "experimental". On
+// Docker Hub (October 2026) these are 1, 1-labs, 1-experimental, 1.1 to
+// 1.N with their .x patch, -labs and -experimental forms, latest and labs
+// (both current 1.x), and experimental and 1-experimental (both last pushed
+// in 2020, a 1.2-era image). Release candidates ("-rcN") and anything else
+// are left out: they are unknown, so they warn.
+var modernTagRe = regexp.MustCompile(`^(1(\.[1-9][0-9]*(\.[0-9]+)?)?(-(labs|experimental))?|latest|labs|experimental)$`)
+
+// upstreamTagRe adds docker/dockerfile-upstream's floating master tags
+// (master, master-labs and master-experimental, the last pushed in 2020
+// as a 1.2-era image).
+var upstreamTagRe = regexp.MustCompile(`^master(-(labs|experimental))?$`)
 
 // isOldTag reports a tag of the 0.9 or 1.0 family, the docker/dockerfile
 // frontends that predate Dockerfile-specific ignore files (verified in real
@@ -205,12 +227,16 @@ func splitImageRef(ref string) (name, tag, digest string) {
 // a 0.9 or 1.0 tag, or with a digest of an old image whatever the tag: the
 // digest decides what is pulled.
 //
-// Reads the ignore file: a hubDockerfile spelling with no tag (latest) or
-// another tag, with or without a digest (Docker Hub serves a repository's
-// own manifests only, and every old one is in oldFrontendDigests).
+// Reads the ignore file (an allowlist): a hubRepos spelling with NO digest
+// and either no tag (latest) or a tag modernTagRe (or, for
+// docker/dockerfile-upstream, upstreamTagRe) accepts, exactly, in its case.
 //
-// Other: everything else, docker/dockerfile by an unknown digest alone
-// included.
+// Other: everything else. That includes any digest not listed as old, even
+// beside a modern tag: the digest decides what is pulled, and
+// oldFrontendDigests covers only the manifests Docker Hub tags today, so an
+// old manifest that lost its tag cannot be told from a modern one. A
+// digest-pinned docker/dockerfile therefore gets one WARNING per child build
+// while an env file is in the context.
 func classifyFrontend(directive string) frontendKind {
 	if directive == "" {
 		return frontendReadsIgnore
@@ -221,10 +247,17 @@ func classifyFrontend(directive string) frontendKind {
 		(isOldTag(tag) || oldFrontendDigests[digest]) {
 		return frontendOld
 	}
-	if !hubDockerfile[name] || (tag == "" && digest != "") {
+	repo, hub := hubRepos[name]
+	switch {
+	case !hub || digest != "" || strings.Contains(directive, "@") ||
+		tag == "" && strings.HasSuffix(directive, ":"):
 		return frontendOther
+	case tag == "" || modernTagRe.MatchString(tag):
+		return frontendReadsIgnore
+	case repo == "docker/dockerfile-upstream" && upstreamTagRe.MatchString(tag):
+		return frontendReadsIgnore
 	}
-	return frontendReadsIgnore
+	return frontendOther
 }
 
 // envWalkMax bounds the context walk for env files: past it the context is

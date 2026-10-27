@@ -465,16 +465,25 @@ Feature: Image build lifecycle (CS-IMG)
       docker/dockerfile:1.1 or later (or drop the syntax line), or build
       elsewhere (baseOnly: true, or a dockerfileDir whose build context holds
       no env file)
-    And otherwise, a directive naming any other frontend image (another name,
-      docker/dockerfile under any spelling but docker/dockerfile,
-      docker.io/, index.docker.io/ or registry-1.docker.io/docker/dockerfile,
-      docker/dockerfile-upstream, or docker/dockerfile by another digest
-      alone) prints
-      one "WARNING:" line naming the Dockerfile and the frontend and saying
+    And no directive, or an allowlisted one, builds as CS-IMG-078 says,
+      silently: docker/dockerfile or docker/dockerfile-upstream (no registry,
+      or docker.io/, index.docker.io/ or registry-1.docker.io/) with NO
+      digest and either no tag or a tag known to read
+      Dockerfile.dockerignore, matched exactly: "1", or "1.N" / "1.N.x" with
+      N >= 1, each optionally followed by "-labs" or "-experimental"; or
+      "latest", "labs", "experimental"; and, for docker/dockerfile-upstream
+      only, "master", "master-labs", "master-experimental"
+    And otherwise, a directive naming any other frontend image prints one
+      "WARNING:" line naming the Dockerfile and the frontend and saying
       .claude-sandbox/env files are kept out of the build context only if
-      that frontend honours Dockerfile.dockerignore, and the build goes on
-    And no directive, or docker/dockerfile at any other tag (1, 1.1 and later,
-      none), builds as CS-IMG-078 says, silently
+      that frontend honours Dockerfile.dockerignore, and the build goes on.
+      That includes another name or registry, an unknown tag (a release
+      candidate, a commit tag, a future "2"), and ANY digest pin of
+      docker/dockerfile not listed as old, even beside a modern tag: the
+      digest decides what is pulled, the old list covers only the manifests
+      Docker Hub tags today, and an old manifest that lost its tag cannot be
+      told from a modern one — so a digest-pinned docker/dockerfile warns
+      once per child build while an env file is in the context
     And with no such env file in the context nothing is printed and nothing
       is refused, whatever the directive
     And the frontend is never overridden: no build argument or flag replaces
@@ -493,9 +502,11 @@ Feature: Image build lifecycle (CS-IMG)
     # registry-1.docker.io:443/docker/dockerfile:1.0 pull Docker Hub's 1.0
     # and send it; a JSON-form Dockerfile naming 1.0 is forwarded to 1.0
     # (which then fails to parse it before the context is read).
-    # Docker Hub's 0.9/1.0 digests are listed in the code (oldFrontendDigests);
-    # another tag beside any other digest of docker/dockerfile stays silent,
-    # since Docker Hub serves a repository's own manifests only.
+    # Docker Hub's 0.9/1.0 digests are listed in the code (oldFrontendDigests).
+    # On Docker Hub (October 2026) "experimental", "1-experimental" and
+    # upstream's "master-experimental" were last pushed in 2020 (1.2-era
+    # images); "latest", "labs", "1", "1-labs" and upstream's "master" are
+    # current 1.x; docker/dockerfile has no "master" or "-rc" tags.
 
   # ---- child image staleness ----
 
