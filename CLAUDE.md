@@ -97,7 +97,7 @@ scripts/check-spec-coverage.sh  # CI: every scenario ID must appear in a *_test.
 scaffold/            # Base bootstrap seed for `init` (config.yaml, env.example, Dockerfile.example) — embedded into the binary
 scaffold-ralph/      # Additional seed for `init-ralph` (agent/ workflow+prompt docs, scripts/ backlog tool)
 docs/MIGRATION.md    # How to migrate a repo to the consolidated .claude-sandbox/ layout
-docs/personas-and-scenarios.md  # Personas (P1-P9) and usage scenarios (UC-NN) with a concerns matrix; cite ids in plans, reviews and decision cards
+docs/personas-and-scenarios.md  # Personas (P1-P10) and usage scenarios (UC-NN) with a concerns matrix; cite ids in plans, reviews and decision cards
 logstream/run-logger.js    # Transparent NDJSON passthrough — captures per-iteration metrics
 logstream/console-output.js # Converts Claude NDJSON stream output to human-readable text
 logstream/exit-on-result.js    # Pipeline terminator — exits on result event to tear down stuck processes
