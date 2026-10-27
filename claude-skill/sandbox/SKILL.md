@@ -62,7 +62,7 @@ The container sees the project at its real host path. This is critical for `dock
 ### Configuration Precedence
 CLI flag > env var > merged `.claude-sandbox/config.yaml` cascade > defaults
 
-Where a level does not exist for a setting, it is skipped: `model` has a flag and a key but no variable; `memoryLimit`, `detachKeys`, `mounts` and `trackInHost` are config-only. `dangerous` is the exception to the order: it is on when **any** of `--dangerous`, `CLAUDE_SANDBOX_DANGEROUS=1` or `dangerous: true` says so, so a falsy variable cannot turn off a config `true` (a more-local `dangerous: false` can).
+Where a level does not exist for a setting, it is skipped: `model` has a flag and a key but no variable; `memoryLimit`, `detachKeys`, `mounts` and `trackInHost` are config-only. Most on/off switches are one-way: `dangerous`, every `hostAccess.*` setting, `baseOnly` and `disableUpdateCheck` are on when **any** source says so (flag, `1`/`true`/`yes` variable, or config `true`), so a falsy variable cannot turn off a config `true` — only a more-local config `false` can. Only `worktree`, `sharedPeerRegistry`, `sandboxNetwork` and `hostClipboard` take `0`/`false`/`no` in their variable as an explicit off over the config, and `timezone` takes `none`/`off`/`false`/`0`/`no` in `CLAUDE_SANDBOX_TIMEZONE`.
 
 The project directory is the current directory (or `PROJECT_DIR`), always resolved to its **physical** path: a checkout reached through a symlink is the same project, and the parent search climbs the real checkout's parents (the launcher prints `Project: <physical> (resolved from <logical>)` when they differ). A linked git worktree outside its repository (Paseo's, or `git worktree add` elsewhere) also reads its main checkout's `.claude-sandbox/` files.
 
@@ -147,7 +147,7 @@ Options (pick any):
     ssh:
       enabled: true
   ```
-- Precedence: CLI flag > env var > YAML. All are off by default.
+- Precedence: CLI flag > env var > YAML, but a flag or variable can turn one on, never off (only a more-local config `enabled: false` overrides an upstream `true`). All are off by default.
 - Always on, no key: a sandbox-only pre-commit cache (`~/.cache/claude-sandbox/pre-commit`, as `PRE_COMMIT_HOME`), because hook environments are bound to the image's Python, not the host's. An env file that sets `PRE_COMMIT_HOME` wins.
 
 ### Running Ralph (Loop Runner)
@@ -161,7 +161,7 @@ claude-sandbox --ralph --docker-socket --dangerous --limit 5
 - Debug: read `.claude-sandbox/ralph/runlogs/rawlog_*` for full NDJSON streams
 - Metrics: `.claude-sandbox/ralph/runlog.json` — each iteration's `outcome` is one of `ok`, `quota_exhausted`, `rate_limit`, `watchdog_timeout`, `iteration_timeout`, `error`, `oom`
 - An OOM-killed iteration (claude exits 137 and the cgroup's `oom_kill` counter rose) is retried once after 60 s; a second one in a row stops the loop with exit 137. The message names the cause (`oomCause`: the container's `memoryLimit`, or the host running out of memory)
-- Ralph's own flags (`--interactive`, `--watchdog-timeout`, `--iteration-timeout`, `--max-retries`, `--quota-pause`, …) pass through after `--ralph`; see README § Ralph flags
+- Ralph's own flags (`--interactive`, `--watchdog-timeout`, `--iteration-timeout`, `--max-retries`, `--quota-pause`, …) pass through after `--ralph`; see README § Ralph flags and § Quota retry flags
 
 ### Adding Extra Volume Mounts
 In `.claude-sandbox/config.yaml`:

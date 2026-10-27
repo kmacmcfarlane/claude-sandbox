@@ -101,7 +101,7 @@ These flags are consumed by the launcher and control the container environment. 
 | `--host-access-package-caches-enabled` | `--package-caches` | Keep go/npm/pip downloads made inside sessions in `~/.cache/claude-sandbox/` on the host |
 | `--model MODEL` | | Model to use (alias like `opus` or full ID like `claude-opus-4-8`) |
 | `--dangerous` | | Pass `--dangerously-skip-permissions` to claude/ralph and `--join` sessions (durable alternatives: `dangerous: true` in config.yaml, or `CLAUDE_SANDBOX_DANGEROUS=1`) |
-| `--rebuild` | | Force rebuild of every image — base, tools, Claude Code, child, run (uses `--no-cache`; `docker pull`s the base, tools and CLI registry parents first) |
+| `--rebuild` | | Force rebuild of every image — base, tools, Claude Code, child, run (base, tools and CLI with `--no-cache`; `docker pull`s the base, tools and CLI registry parents first) |
 | `--update` | | Check npm for a Claude Code update now and build it in the foreground before launching (only the CLI image; without it an update builds in the background for the next launch) |
 | `--no-update-check` | | Skip Claude Code version check at launch |
 | `--ralph` | | Launch the ralph loop runner instead of interactive claude |
@@ -2538,7 +2538,7 @@ The background build (`claude-sandbox cli-prefetch <version>`, a hidden subcomma
 
 If a background build fails, launches keep using the current CLI image and print one warning naming the log until the image reaches that version or a later one (`--update` records its own success, so the warning stops right after it). The same version is not retried in the background for 6 hours. `--update` checks npm right away (ignoring the cache) and builds the new CLI image in the foreground before launching. A `headless` launch runs the check only with `--update`, but like any launch it picks up a CLI image another launch built in the background. Skip the check with `--no-update-check`, `CLAUDE_SANDBOX_NO_UPDATE_CHECK=1` or `disableUpdateCheck: true`. Only an exact release (`X.Y.Z`) from npm counts: a pre-release answer such as `2.2.0-beta.1` is treated like no answer, never as the unreleased `2.2.0`. If npm is unreachable, or its latest is not a release, when the CLI image has to be built, it is built with `latest` and a warning saying which. An image whose version reads as a pre-release counts as older than that release and newer than every earlier one. A launcher run *inside* a sandbox keeps the version cache, the lock and the log in that container's own `~/.cache/claude-sandbox` rather than the host's, and a background build it starts stops when that container exits.
 
-**Force rebuild:** Use `--rebuild` to rebuild everything — base, tools image, CLI image, child and cap — with `--no-cache`:
+**Force rebuild:** Use `--rebuild` to rebuild everything — base, tools image, CLI image, child and cap; the base, tools and CLI with `--no-cache`:
 
 ```bash
 claude-sandbox --rebuild
