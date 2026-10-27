@@ -87,7 +87,12 @@ func fileExists(p string) bool {
 	return err == nil && !fi.IsDir()
 }
 
-// Mount is one extra volume mount.
+// Mount is one extra volume mount. Container is optional in a config file:
+// absent, null or "" means the same path as Host (CS-CASC-048). The default
+// is applied by LoadSnapshot before the dedupe, so dedupe, Validate, mount
+// assembly, the same-path cover checks and the drift fingerprint all see the
+// filled-in value: an omitted container and an explicit same-path one are
+// one entry with one argv.
 type Mount struct {
 	Host      string `yaml:"host"`
 	Container string `yaml:"container"`
@@ -241,7 +246,7 @@ func LoadSnapshot(snap []ConfigFile) (*Config, error) {
 		merged = mergeMaps(merged, doc)
 	}
 	if mounts, ok := merged["mounts"].([]any); ok {
-		merged["mounts"] = dedupeMounts(mounts)
+		merged["mounts"] = dedupeMounts(defaultMountContainers(mounts))
 	}
 	out, err := yaml.Marshal(merged)
 	if err != nil {
@@ -279,6 +284,34 @@ func mergeMaps(dst, src map[string]any) map[string]any {
 	return dst
 }
 
+// defaultMountContainers fills in an absent, null or empty "container" with
+// the entry's "host" (CS-CASC-048). The launcher applies no normalization to
+// host (no ~ expansion, no cleaning: it reaches -v verbatim), so the default
+// is that string as written. An entry without a string host is left alone
+// for Validate to name.
+func defaultMountContainers(mounts []any) []any {
+	for i, m := range mounts {
+		mm, ok := m.(map[string]any)
+		if !ok {
+			continue
+		}
+		h, ok := mm["host"].(string)
+		if !ok || h == "" {
+			continue
+		}
+		c := mm["container"]
+		if cs, isStr := c.(string); c == nil || (isStr && cs == "") {
+			cp := make(map[string]any, len(mm)+1)
+			for k, v := range mm {
+				cp[k] = v
+			}
+			cp["container"] = h
+			mounts[i] = cp
+		}
+	}
+	return mounts
+}
+
 // dedupeMounts keeps, for each host+container pair, only the LAST (most
 // local) entry, at its last position — matching the yq
 // `reverse | unique_by(host+"|"+container) | reverse` pipeline.
@@ -310,8 +343,14 @@ func dedupeMounts(mounts []any) []any {
 // Validate checks structural requirements of the merged config.
 func (c *Config) Validate(files []string) error {
 	for i, m := range c.Mounts {
-		if m.Host == "" || m.Container == "" {
-			return fmt.Errorf("mounts[%d] in the merged sandbox config requires both 'host' and 'container' fields (cascade: %v)", i, files)
+		if m.Host == "" {
+			return fmt.Errorf("mounts[%d] in the merged sandbox config requires 'host' (cascade: %v)", i, files)
+		}
+		// Docker refuses a bind target that is not absolute; say so before
+		// any image work. With container omitted it is host itself
+		// (CS-CASC-048), so a relative or ~ host lands here.
+		if !filepath.IsAbs(m.Container) {
+			return fmt.Errorf("mounts[%d] in the merged sandbox config: container path '%s' is not absolute (an omitted 'container' is the same path as 'host') (cascade: %v)", i, m.Container, files)
 		}
 	}
 	return nil

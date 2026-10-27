@@ -75,12 +75,12 @@
 # Extra volume mounts. Appended to any upstream mounts; re-declare an upstream
 # host+container pair here to override it (e.g. make it writable).
 # Each mount entry has:
-#   host:      absolute path on the host (required)
-#   container: absolute path inside the container (required)
+#   host:      absolute path on the host (required; ~ is not expanded)
+#   container: absolute path inside the container (optional; omitted = same
+#              path as host, and the same entry as an explicit same-path one)
 #   writable:  boolean, default false (mounts :ro unless true)
 # mounts:
-#   - host: /home/user/shared-libs
-#     container: /home/user/shared-libs
+#   - host: /home/user/shared-libs     # same path inside the container
 #   - host: /data/datasets
 #     container: /mnt/data
 #     writable: true

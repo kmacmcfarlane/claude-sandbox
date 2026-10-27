@@ -115,10 +115,34 @@ Feature: Config cascade and env stacking (CS-CASC)
     Then the only --env-file flag is /ws/.claude-sandbox/env, so TOKEN=upstream reaches the container
     And env.example is not linted and not listed in the cascade report
 
-  Scenario: CS-CASC-011 Mount entries must define host and container
-    Given a merged config with a mount missing "container"
+  Scenario: CS-CASC-011 Mount entries must define host
+    Given a merged config with a mount missing "host"
     When the launcher validates mounts
-    Then it exits with an error naming the offending mount index and the cascade files
+    Then it exits with an error saying the mount requires 'host', naming the
+      offending mount index and the cascade files
+    # "container" is optional (CS-CASC-048).
+    When a mount's container path (given, or defaulted from host) is not absolute
+    Then it exits with an error naming the index and the path
+    # docker refuses a relative bind target at create; this says so first.
+
+  @new
+  Scenario: CS-CASC-048 An omitted container means the same path as host
+    Given a config with mounts:
+      | host    | container   | writable |
+      | /data/a | (absent)    | false    |
+      | /data/b | ""          | true     |
+    When the cascade is merged
+    Then the effective mounts are /data/a:/data/a and /data/b:/data/b (writable)
+    And the launcher adds "-v /data/a:/data/a:ro" and "-v /data/b:/data/b"
+    # host is not normalized by the launcher (no ~ expansion, no cleaning; it
+    # reaches -v as written), so the default is host's string as written.
+    And the default is applied in the merge, before the dedupe: a root
+      "{host: /data/a}" and a local "{host: /data/a, container: /data/a,
+      writable: true}" are ONE entry (CS-CASC-005), the more-local winning
+    And validation, mount assembly, the same-path cover checks and the drift
+      fingerprint all see the filled-in container, so an omitted container and
+      an explicit same-path entry give identical argv and an identical
+      fingerprint (no drift for existing configs)
 
   Scenario: CS-CASC-012 Recognized top-level keys
     Given a merged config setting every supported key
