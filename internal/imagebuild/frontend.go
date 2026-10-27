@@ -287,15 +287,18 @@ const frontendInspectFormat = "{{json .RepoDigests}}\x1f{{index .Config.Labels \
 // bounded `docker image inspect --format frontendInspectFormat <ref>`:
 //   - "No such image": nothing local, BuildKit pulls what the registry names
 //     today — silent;
-//   - a repo digest in oldFrontendDigests: old (local reports it, for the
-//     refusal's wording);
+//   - a repo digest in oldFrontendDigests: old;
 //   - otherwise repo digests that are all unlisted plus a non-empty caps
 //     label: a 1.2-or-later image — silent;
-//   - anything else — unlisted digests with no caps label (an old pull whose
-//     manifest no tag names any more looks like that; so does a local 1.1,
-//     which is accepted), no repo digest at all (a local build or tag), a
-//     failure, a timeout, unparsable output: other (a warning, never
-//     silence).
+//   - an unconfirmed local copy — unlisted digests with no caps label (an old
+//     pull whose manifest no tag names any more looks like that; so does a
+//     local 1.1, which is accepted) or no repo digest at all (a local build
+//     or tag): other;
+//   - a failure, a timeout, unparsable output: other.
+//
+// Other is a warning, never silence. local is true when the answer comes
+// from a local copy that exists (old or unconfirmed), for the messages'
+// wording and remedies.
 func localFrontend(o Options, ref string) (kind frontendKind, local bool) {
 	var stderr bytes.Buffer
 	out, err := execx.Bounded(o.Runner, frontendInspectTimeout, execx.Cmd{
@@ -316,8 +319,11 @@ func localFrontend(o Options, ref string) (kind frontendKind, local bool) {
 		return frontendOther, false
 	}
 	var digests []string
-	if json.Unmarshal([]byte(strings.TrimSpace(digestsJSON)), &digests) != nil || len(digests) == 0 {
+	if json.Unmarshal([]byte(strings.TrimSpace(digestsJSON)), &digests) != nil {
 		return frontendOther, false
+	}
+	if len(digests) == 0 {
+		return frontendOther, true // a local build or tag: unconfirmed
 	}
 	for _, d := range digests {
 		if _, _, dg := splitImageRef(d); oldFrontendDigests[dg] {
@@ -325,7 +331,7 @@ func localFrontend(o Options, ref string) (kind frontendKind, local bool) {
 		}
 	}
 	if strings.TrimSpace(caps) == "" {
-		return frontendOther, false
+		return frontendOther, true // unconfirmed
 	}
 	return frontendReadsIgnore, false
 }
@@ -402,18 +408,18 @@ func checkFrontend(o Options, spec ChildSpec) error {
 	for i, d := range directives {
 		kinds[i] = classifyFrontend(d)
 	}
-	localOld := make([]bool, len(directives)) // old by the daemon's copy
+	localCopy := make([]bool, len(directives)) // judged by the daemon's copy
 	worst := func() (kind frontendKind, directive string, local bool) {
 		kind = frontendReadsIgnore
 		for i, k := range kinds {
 			switch {
 			case k == frontendOld:
-				return k, directives[i], localOld[i]
+				return k, directives[i], localCopy[i]
 			case k == frontendOther && kind == frontendReadsIgnore:
-				kind, directive = k, directives[i]
+				kind, directive, local = k, directives[i], localCopy[i]
 			}
 		}
-		return kind, directive, false
+		return kind, directive, local
 	}
 	if len(directives) == 0 {
 		return nil // the builder's own frontend
@@ -442,7 +448,7 @@ func checkFrontend(o Options, spec ChildSpec) error {
 				a.kind, a.local = localFrontend(o, directives[i])
 				seen[directives[i]] = a
 			}
-			kinds[i], localOld[i] = a.kind, a.local
+			kinds[i], localCopy[i] = a.kind, a.local
 		}
 	}
 	kind, directive, local := worst()
@@ -457,6 +463,13 @@ func checkFrontend(o Options, spec ChildSpec) error {
 	what := registry.Printable(found)
 	if limited {
 		what = fmt.Sprintf("any .claude-sandbox/env (the context has more than %d entries to check)", envWalkMax)
+	}
+	if kind == frontendOther && local {
+		// The name passed the allowlist, so it holds only reference
+		// characters: safe to print in a command.
+		fmt.Fprintf(o.Err, "WARNING: %s selects the frontend %q (# syntax=): this Docker daemon holds a local copy of %s whose version could not be confirmed; BuildKit prefers it, and if it predates docker/dockerfile 1.1 the build sends %s (context %s). `docker pull %s` or `docker image rm %s` clears this.\n",
+			dockerfile, shown, shown, what, context, shown, shown)
+		return nil
 	}
 	if kind == frontendOther {
 		fmt.Fprintf(o.Err, "WARNING: %s selects the frontend %q (# syntax=); .claude-sandbox/env files are kept out of the build context only if that frontend honours Dockerfile.dockerignore (context %s holds %s).\n",

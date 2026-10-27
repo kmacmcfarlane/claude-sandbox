@@ -451,6 +451,34 @@ var _ = Describe("the Dockerfile frontend check (CS-IMG-079)", func() {
 				Entry("unreadable output", func(execx.Cmd) (string, error) { return "garbage", nil }),
 			)
 
+			DescribeTable("CS-IMG-079: an unconfirmed local copy warns about the copy, with its remedies",
+				func(answer func(execx.Cmd) (string, error)) {
+					localImage = answer
+					Expect(ensure("docker/dockerfile:1.7", proj)).To(Succeed())
+					Expect(builds).To(Equal(1))
+					w := errw.String()
+					Expect(strings.Count(w, "WARNING:")).To(Equal(1))
+					Expect(w).To(ContainSubstring("this Docker daemon holds a local copy of docker/dockerfile:1.7 whose version could not be confirmed; BuildKit prefers it, and if it predates docker/dockerfile 1.1 the build sends " + envFile))
+					Expect(w).To(ContainSubstring("`docker pull docker/dockerfile:1.7` or `docker image rm docker/dockerfile:1.7` clears this."))
+					Expect(w).NotTo(ContainSubstring("only if that frontend honours"))
+				},
+				Entry("unlisted digests, no caps label", func(execx.Cmd) (string, error) {
+					return `["docker/dockerfile@sha256:` + modern + `"]` + "\x1f\n", nil
+				}),
+				Entry("no repo digest", func(execx.Cmd) (string, error) { return "[]\x1fx\n", nil }),
+			)
+
+			DescribeTable("CS-IMG-079: an inspect that fails keeps the generic warning, with no local-copy remedy",
+				func(answer func(execx.Cmd) (string, error)) {
+					localImage = answer
+					Expect(ensure("docker/dockerfile:1.7", proj)).To(Succeed())
+					Expect(errw.String()).To(ContainSubstring("only if that frontend honours Dockerfile.dockerignore"))
+					Expect(errw.String()).NotTo(ContainSubstring("docker image rm"))
+				},
+				Entry("an error", func(execx.Cmd) (string, error) { return "", execx.Fail(1) }),
+				Entry("unreadable output", func(execx.Cmd) (string, error) { return "garbage", nil }),
+			)
+
 			It("CS-IMG-079: an inspect that hangs is cut at its bound and warns", func() {
 				defer imagebuild.SetFrontendInspectTimeout(50 * time.Millisecond)()
 				fake.OnHang("docker image inspect --format {{json .RepoDigests}}")

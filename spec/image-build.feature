@@ -485,10 +485,15 @@ Feature: Image build lifecycle (CS-IMG)
       moby.buildkit.frontend.caps label stay silent (every docker/dockerfile
       from 1.2 on carries it, none before: 0.9 and 1.0 have no labels,
       1.0-experimental and 1.1 only moby.buildkit.frontend.network.none);
-      unlisted digests with no caps label (an old pull whose manifest no tag
-      names any more; a local 1.1 too, accepted), no repo digest (a local
-      build or tag), any other failure, a timeout or unreadable output warn
-      as another frontend below — never silent
+      an unconfirmed local copy — unlisted digests with no caps label (an old
+      pull whose manifest no tag names any more; a local 1.1 too, accepted)
+      or no repo digest (a local build or tag) — prints one "WARNING:" line
+      saying this Docker daemon holds a local copy of <ref> whose version
+      could not be confirmed, BuildKit prefers it, and if it predates
+      docker/dockerfile 1.1 the build sends the env file, and that
+      "docker pull <ref>" or "docker image rm <ref>" clears this; any other
+      failure, a timeout or unreadable output warns as another frontend
+      below — never silent
     And a refusal for the daemon's local copy says the daemon holds an old
       copy of <ref> under that tag (not that the Dockerfile pins one) and
       names the remedies "docker pull <ref>" and "docker image rm <ref>",
