@@ -21,14 +21,25 @@ import (
 )
 
 var _ = Describe("the syntax parser directive (CS-IMG-079)", func() {
-	DescribeTable("CS-IMG-079: SyntaxDirective reads the directive block as BuildKit does",
-		func(content, want string) {
-			Expect(imagebuild.SyntaxDirective([]byte(content))).To(Equal(want))
+	DescribeTable("CS-IMG-079: SyntaxDirectives reads the directive block as BuildKit does, over-reading where versions differ",
+		func(content string, want ...string) {
+			got := imagebuild.SyntaxDirectives([]byte(content))
+			if len(want) == 0 {
+				Expect(got).To(BeEmpty())
+				return
+			}
+			Expect(got).To(Equal(want))
 		},
 		Entry("the usual form", "# syntax=docker/dockerfile:1.0\nFROM x\n", "docker/dockerfile:1.0"),
 		Entry("no space", "#syntax=docker/dockerfile:1.0\nFROM x\n", "docker/dockerfile:1.0"),
 		Entry("spaces around the key and the =", "# syntax = docker/dockerfile:1.0 \nFROM x\n", "docker/dockerfile:1.0"),
 		Entry("a tab", "#\tsyntax=docker/dockerfile:1.0\n", "docker/dockerfile:1.0"),
+		Entry("NBSP after the marker", "#\u00a0syntax=docker/dockerfile:1.0\n", "docker/dockerfile:1.0"),
+		Entry("VT after the marker", "#\vsyntax=docker/dockerfile:1.0\n", "docker/dockerfile:1.0"),
+		Entry("FF after the marker", "#\fsyntax=docker/dockerfile:1.0\n", "docker/dockerfile:1.0"),
+		Entry("a trailing FF on the value", "# syntax=docker/dockerfile:1.0\f\n", "docker/dockerfile:1.0"),
+		Entry("the value cut at its first space", "# syntax=docker/dockerfile:1.0 x\n", "docker/dockerfile:1.0"),
+		Entry("the value cut before a trailing comment", "# syntax=docker/dockerfile:1.0-experimental # comment\n", "docker/dockerfile:1.0-experimental"),
 		Entry("the key in any case", "#  SyNtAx=docker/dockerfile:1.0\n", "docker/dockerfile:1.0"),
 		Entry("after another known directive", "# escape=`\n# syntax=docker/dockerfile:1.0\n", "docker/dockerfile:1.0"),
 		Entry("after a check directive", "# check=skip=JSONArgsRecommended\n# syntax=a/b\n", "a/b"),
@@ -36,14 +47,15 @@ var _ = Describe("the syntax parser directive (CS-IMG-079)", func() {
 		Entry("a UTF-8 BOM", "\xef\xbb\xbf# syntax=docker/dockerfile:1.0\n", "docker/dockerfile:1.0"),
 		Entry("a #! first line", "#!/usr/bin/env buildctl\n# syntax=docker/dockerfile:1.0\n", "docker/dockerfile:1.0"),
 		Entry("a // directive", "//syntax=docker/dockerfile:1.0\n", "docker/dockerfile:1.0"),
-		Entry("only the first of two", "# syntax=a/first\n# syntax=b/second\n", "a/first"),
-		Entry("none", "FROM x\n", ""),
-		Entry("empty", "", ""),
-		Entry("after an instruction: a comment", "FROM x\n# syntax=docker/dockerfile:1.0\n", ""),
-		Entry("after a comment: a comment", "# my image\n# syntax=docker/dockerfile:1.0\n", ""),
-		Entry("after an empty line: a comment", "\n# syntax=docker/dockerfile:1.0\n", ""),
-		Entry("after an unknown directive: a comment", "# unknown=1\n# syntax=docker/dockerfile:1.0\n", ""),
-		Entry("no value", "# syntax=\n", ""),
+		Entry("past an unknown key (BuildKit before v0.11)", "# author=me\n# syntax=docker/dockerfile:1.0\n", "docker/dockerfile:1.0"),
+		Entry("every one of two", "# syntax=docker/dockerfile:1.1\n# syntax=docker/dockerfile:1.0\n",
+			"docker/dockerfile:1.1", "docker/dockerfile:1.0"),
+		Entry("none", "FROM x\n"),
+		Entry("empty", ""),
+		Entry("after an instruction: a comment", "FROM x\n# syntax=docker/dockerfile:1.0\n"),
+		Entry("after a plain comment: a comment", "# my image\n# syntax=docker/dockerfile:1.0\n"),
+		Entry("after an empty line: a comment", "\n# syntax=docker/dockerfile:1.0\n"),
+		Entry("no value", "# syntax=\n"),
 	)
 })
 
@@ -79,6 +91,13 @@ var _ = Describe("the Dockerfile frontend check (CS-IMG-079)", func() {
 		Expect(os.MkdirAll(filepath.Dir(p), 0o755)).To(Succeed())
 		Expect(os.WriteFile(p, []byte(s), 0o644)).To(Succeed())
 	}
+	// ensureContent builds a child from df holding content, with context.
+	ensureContent := func(content, context string) error {
+		write(df, content)
+		spec := imagebuild.ChildSpec{Use: true, Dockerfile: df, Context: context, ImageName: "claude-sandbox-proj", Content: []byte(content)}
+		_, _, err := imagebuild.EnsureChild(o, spec, false, false)
+		return err
+	}
 	// ensure builds a child from df with the given directive line (if any)
 	// and context.
 	ensure := func(directive, context string) error {
@@ -86,10 +105,7 @@ var _ = Describe("the Dockerfile frontend check (CS-IMG-079)", func() {
 		if directive != "" {
 			content = "# syntax=" + directive + "\n" + content
 		}
-		write(df, content)
-		spec := imagebuild.ChildSpec{Use: true, Dockerfile: df, Context: context, ImageName: "claude-sandbox-proj", Content: []byte(content)}
-		_, _, err := imagebuild.EnsureChild(o, spec, false, false)
-		return err
+		return ensureContent(content, context)
 	}
 	refused := func(err error) {
 		var ce *execx.CodeError
@@ -97,6 +113,50 @@ var _ = Describe("the Dockerfile frontend check (CS-IMG-079)", func() {
 		Expect(ce.Code).To(Equal(2))
 		Expect(builds).To(Equal(0), "nothing was built")
 	}
+
+	Context("with .claude-sandbox/env in the context: directive blocks BuildKit reads in ways the first reader missed", func() {
+		BeforeEach(func() { write(envFile, "TOKEN=secret\n") })
+
+		DescribeTable("CS-IMG-079: an old pin anywhere in the over-read block is refused",
+			func(header string) {
+				refused(ensureContent(header+dockerfileB, proj))
+			},
+			Entry("the value followed by frontend arguments", "# syntax=docker/dockerfile:1.0 x\n"),
+			Entry("the value followed by a comment", "# syntax=docker/dockerfile:1.0-experimental # comment\n"),
+			Entry("NBSP after the marker", "#\u00a0syntax=docker/dockerfile:1.0\n"),
+			Entry("VT after the marker", "#\vsyntax=docker/dockerfile:1.0\n"),
+			Entry("FF after the marker", "#\fsyntax=docker/dockerfile:1.0\n"),
+			Entry("a trailing FF on the value", "# syntax=docker/dockerfile:1.0\f\n"),
+			Entry("after an unknown key", "# author=me\n# syntax=docker/dockerfile:1.0\n"),
+			Entry("the second of two syntax lines", "# syntax=docker/dockerfile:1.1\n# syntax=docker/dockerfile:1.0\n"),
+			Entry("after another frontend's syntax line", "# syntax=registry.example.com/f:2\n# syntax=docker/dockerfile:1.0\n"),
+		)
+
+		It("CS-IMG-079: two syntax lines with no old pin but another frontend warn once", func() {
+			Expect(ensureContent("# syntax=docker/dockerfile:1.1\n# syntax=registry.example.com/f:2\n"+dockerfileB, proj)).To(Succeed())
+			Expect(builds).To(Equal(1))
+			Expect(strings.Count(errw.String(), "WARNING:")).To(Equal(1))
+			Expect(errw.String()).To(ContainSubstring(`"registry.example.com/f:2"`))
+		})
+	})
+
+	Context("paths in the messages", func() {
+		It("CS-IMG-079: a control character in the env file's path or the context's never reaches the terminal", func() {
+			ctx := filepath.Join(proj, "ctx\x1b[31m")
+			nested := filepath.Join(ctx, "sub\x1b]0;t\x07", ".claude-sandbox", "env")
+			write(nested, "TOKEN=x\n")
+			err := ensureContent("# syntax=docker/dockerfile:1.0\n"+dockerfileB, ctx)
+			refused(err)
+			Expect(err.Error()).NotTo(ContainSubstring("\x1b"))
+			Expect(err.Error()).NotTo(ContainSubstring("\x07"))
+
+			builds = 0
+			Expect(ensureContent("# syntax=registry.example.com/f:2\n"+dockerfileB, ctx)).To(Succeed())
+			Expect(errw.String()).To(ContainSubstring("WARNING:"))
+			Expect(errw.String()).NotTo(ContainSubstring("\x1b"))
+			Expect(errw.String()).NotTo(ContainSubstring("\x07"))
+		})
+	})
 
 	Context("with .claude-sandbox/env in the context", func() {
 		BeforeEach(func() { write(envFile, "TOKEN=secret\n") })

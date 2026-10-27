@@ -17,55 +17,76 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"unicode"
 
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/paths"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/registry"
 )
 
-// directiveRes match one parser directive line: "#", optional non-line-breaking
-// white space, a key, "=", the value (white space around both trimmed).
-// Leading white space before "#" is accepted too: detecting more directives
-// can only refuse more, never send more.
-var directiveRes = []*regexp.Regexp{
-	regexp.MustCompile(`^[ \t]*#[ \t]*([a-zA-Z][a-zA-Z0-9]*)[ \t]*=[ \t]*(.+?)[ \t]*$`),
-	regexp.MustCompile(`^[ \t]*//[ \t]*([a-zA-Z][a-zA-Z0-9]*)[ \t]*=[ \t]*(.+?)[ \t]*$`),
+// directiveRe is BuildKit's parser-directive pattern, applied after the
+// comment marker is cut and the white space after it trimmed.
+var directiveRe = regexp.MustCompile(`^([a-zA-Z][a-zA-Z0-9]*)\s*=\s*(.+?)\s*$`)
+
+// directiveLine reads one line as a parser directive behind marker ("#" or
+// "//"), as BuildKit does: cut the marker (blanks before it are tolerated —
+// reading wider only refuses more), trim ANY white space after it
+// (unicode.IsSpace), then directiveRe. ok is false for a line of another
+// shape.
+func directiveLine(line, marker string) (key, value string, ok bool) {
+	rest, found := strings.CutPrefix(strings.TrimLeft(line, " \t"), marker)
+	if !found {
+		return "", "", false
+	}
+	rest = strings.TrimLeftFunc(rest, unicode.IsSpace)
+	m := directiveRe.FindStringSubmatch(rest)
+	if m == nil {
+		return "", "", false
+	}
+	return strings.ToLower(m[1]), m[2], true
 }
 
-// knownDirectives are the parser directives BuildKit recognises. An unknown
-// key ends the directive block: BuildKit treats it as a comment.
-var knownDirectives = map[string]bool{"syntax": true, "escape": true, "check": true}
-
-// SyntaxDirective returns the value of a Dockerfile's "syntax" parser
-// directive, "" when it has none. It follows the Dockerfile reference's
-// "Parser directives" rules: directives are comments of the form
-// "# directive=value" at the very top; keys are not case-sensitive; non
-// line-breaking white space is permitted around the key, the "=" and the
-// value; once a comment, an empty line or an instruction has been processed
-// no further line is a directive, and an unrecognised key is such a comment.
-// A single directive may be used only once, so the first syntax line counts.
-// It also skips a UTF-8 BOM and a "#!" first line and accepts "//"-prefixed
-// directives, forms BuildKit's syntax detection handles too; reading more
-// lines as directives can only refuse more builds, never send an env file.
-func SyntaxDirective(content []byte) string {
+// SyntaxDirectives returns the frontend image of every "syntax" parser
+// directive at the top of a Dockerfile, in order; none when it has none.
+// It follows the Dockerfile reference's "Parser directives" rules —
+// directives are comments "# directive=value" at the very top, keys are not
+// case-sensitive, white space is permitted around the key, the "=" and the
+// value, and the block ends at the first line of another shape (an
+// instruction, an empty line, a plain comment) — but reads WIDER than any
+// one BuildKit version, since reading more can only refuse more builds,
+// never send an env file:
+//   - it goes on past unknown "# key=value" keys (BuildKit before v0.11 did,
+//     and there the LAST syntax line wins), and returns every syntax value,
+//     so a caller can refuse when any of them is an old frontend;
+//   - it skips a UTF-8 BOM and a "#!" first line, takes CRLF line ends, and
+//     reads "//" directives too.
+//
+// Each value is cut at its first white space: BuildKit takes the frontend
+// image only up to the first space, the rest being the frontend's command
+// line.
+func SyntaxDirectives(content []byte) []string {
 	content = bytes.TrimPrefix(content, []byte("\xef\xbb\xbf"))
 	text := strings.ReplaceAll(string(content), "\r\n", "\n")
 	lines := strings.Split(text, "\n")
 	if len(lines) > 0 && strings.HasPrefix(lines[0], "#!") {
 		lines = lines[1:]
 	}
-	for _, re := range directiveRes {
+	var out []string
+	for _, marker := range []string{"#", "//"} {
 		for _, line := range lines {
-			m := re.FindStringSubmatch(line)
-			if m == nil || !knownDirectives[strings.ToLower(m[1])] {
+			key, value, ok := directiveLine(line, marker)
+			if !ok {
 				break
 			}
-			if strings.ToLower(m[1]) == "syntax" {
-				return m[2]
+			if key != "syntax" {
+				continue
+			}
+			if f := strings.FieldsFunc(value, unicode.IsSpace); len(f) > 0 {
+				out = append(out, f[0])
 			}
 		}
 	}
-	return ""
+	return out
 }
 
 // frontendKind classifies a syntax directive's frontend image.
@@ -183,8 +204,20 @@ func envFileInContext(context string, envFiles []string) (found string, limited 
 // other frontend gets one warning; without one nothing is printed. The
 // frontend itself is never changed.
 func checkFrontend(o Options, spec ChildSpec) error {
-	directive := SyntaxDirective(spec.Content)
-	kind := classifyFrontend(directive)
+	// Every syntax value counts (SyntaxDirectives over-reads): any old pin
+	// refuses; otherwise any other frontend warns.
+	kind, directive := frontendReadsIgnore, ""
+	for _, d := range SyntaxDirectives(spec.Content) {
+		switch k := classifyFrontend(d); {
+		case k == frontendOld:
+			kind, directive = k, d
+		case k == frontendOther && kind == frontendReadsIgnore:
+			kind, directive = k, d
+		}
+		if kind == frontendOld {
+			break
+		}
+	}
 	if kind == frontendReadsIgnore {
 		return nil
 	}
@@ -192,14 +225,18 @@ func checkFrontend(o Options, spec ChildSpec) error {
 	if found == "" && !limited {
 		return nil
 	}
+	// Paths and the directive come from session-writable files and names:
+	// printed through registry.Printable, never raw.
 	shown := registry.Printable(directive)
-	what := found
+	dockerfile := registry.Printable(spec.Dockerfile)
+	context := registry.Printable(spec.Context)
+	what := registry.Printable(found)
 	if limited {
 		what = fmt.Sprintf("any .claude-sandbox/env (the context has more than %d entries to check)", envWalkMax)
 	}
 	if kind == frontendOther {
 		fmt.Fprintf(o.Err, "WARNING: %s selects the frontend %q (# syntax=); .claude-sandbox/env files are kept out of the build context only if that frontend honours Dockerfile.dockerignore (context %s holds %s).\n",
-			spec.Dockerfile, shown, spec.Context, what)
+			dockerfile, shown, context, what)
 		return nil
 	}
 	return &execx.CodeError{Code: 2, Msg: fmt.Sprintf(
@@ -208,7 +245,7 @@ func checkFrontend(o Options, spec ChildSpec) error {
 			"  Fix one of:\n"+
 			"    - raise the pin to docker/dockerfile:1.1 or later, or drop the syntax line;\n"+
 			"    - build elsewhere: baseOnly: true, or a dockerfileDir whose build context holds no env file.",
-		spec.Dockerfile, shown, what, spec.Context)}
+		dockerfile, shown, what, context)}
 }
 
 // contextForms is the context made absolute, then its symlink-resolved form
