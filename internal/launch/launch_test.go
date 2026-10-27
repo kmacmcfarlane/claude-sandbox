@@ -2221,6 +2221,29 @@ var _ = Describe("launch.Build", func() {
 		Expect(out.String()).To(ContainSubstring("duplicates project directory mount"))
 	})
 
+	It("CS-CASC-048: an omitted container gives the same -v, argv and fingerprint as an explicit same-path entry", func() {
+		load := func(body string) *cascade.Config {
+			dir := filepath.Join(GinkgoT().TempDir(), ".claude-sandbox")
+			mkdir(dir)
+			f := filepath.Join(dir, "config.yaml")
+			Expect(os.WriteFile(f, []byte(body), 0o644)).To(Succeed())
+			cfg, err := cascade.Load([]string{f})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.Validate([]string{f})).To(Succeed())
+			return cfg
+		}
+		in.Cfg = load("mounts:\n  - host: /data/ro\n  - host: /data/rw\n    container: \"\"\n    writable: true\n")
+		omitted := build()
+		Expect(omitted.Volumes).To(ContainElement("/data/ro:/data/ro:ro"))
+		Expect(omitted.Volumes).To(ContainElement("/data/rw:/data/rw"))
+
+		in.Cfg = load("mounts:\n  - host: /data/ro\n    container: /data/ro\n  - host: /data/rw\n    container: /data/rw\n    writable: true\n")
+		explicit := build()
+		Expect(omitted.Volumes).To(Equal(explicit.Volumes))
+		Expect(omitted.CreateArgs(proj)).To(Equal(explicit.CreateArgs(proj)))
+		Expect(omitted.ConfigHash).To(Equal(explicit.ConfigHash))
+	})
+
 	It("CS-LNCH-022: sets --memory and --memory-swap to the configured memoryLimit, default 8g", func() {
 		p := build()
 		Expect(p.MemoryLimit).To(Equal("8g"))

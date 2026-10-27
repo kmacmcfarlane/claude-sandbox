@@ -1144,7 +1144,8 @@ Merge rules:
 - **Scalars and maps** (`model`, `memoryLimit`, `hostAccess.*`, `trackInHost`, …): the
   more-local value wins.
 - **`mounts`**: entries append down the cascade; an entry with the **same `host` +
-  `container`** as an upstream one overrides it (e.g. flip `writable: true` locally).
+  `container`** as an upstream one overrides it (e.g. flip `writable: true` locally). An
+  omitted `container` counts as the same path as `host`.
 - **`env` files**: layered in cascade order — a variable set in a more-local `env`
   overrides the upstream value; upstream-only variables still apply. So an edit to an
   upstream key has no effect while a more-local `env` still defines it; the launcher
@@ -1907,8 +1908,7 @@ Add extra volume mounts to the container for shared libraries, data directories,
 
 ```yaml
 mounts:
-  - host: /home/user/shared-libs
-    container: /home/user/shared-libs
+  - host: /home/user/shared-libs    # same path inside the container
 
   - host: /data/datasets
     container: /mnt/data
@@ -1916,9 +1916,11 @@ mounts:
 ```
 
 Each mount entry has:
-- `host` — absolute path on the host (required)
-- `container` — absolute path inside the container (required)
+- `host` — absolute path on the host (required). It is passed to `-v` as written: `~` is not expanded.
+- `container` — absolute path inside the container (optional; omitted or empty means the same path as `host`). `{host: X}` and `{host: X, container: X}` are the same entry: they override each other across the cascade and give the same `-v` and the same configuration hash.
 - `writable` — boolean, default `false` (mounts `:ro` unless set to `true`)
+
+A container path that is not absolute (given, or a relative `host` with `container` omitted) stops the launch with an error naming the entry.
 
 #### Child Dockerfile
 

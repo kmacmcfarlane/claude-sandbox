@@ -236,20 +236,73 @@ var _ = Describe("config cascade", func() {
 
 	// CS-CASC-010 is launcher --env-file assembly; covered by the launch suite.
 
-	It("CS-CASC-011: mount entries must define host and container", func() {
+	It("CS-CASC-011: mount entries must define host", func() {
 		files := writeConfigs(tmp,
-			"mounts:\n  - host: /data/a\n",
+			"mounts:\n  - container: /data/a\n",
 		)
 		cfg, err := cascade.Load(files)
 		Expect(err).NotTo(HaveOccurred())
 
 		err = cfg.Validate(files)
 		Expect(err).To(MatchError(ContainSubstring("mounts[0]")))
+		Expect(err).To(MatchError(ContainSubstring("requires 'host'")))
 		Expect(err).To(MatchError(ContainSubstring(files[0])))
+
+		// A container path that is not absolute — given, or defaulted from
+		// a relative or ~ host — is refused naming it.
+		for _, body := range []string{
+			"mounts:\n  - host: /data/a\n    container: rel\n",
+			"mounts:\n  - host: ~/data\n",
+		} {
+			files := writeConfigs(tmp, body)
+			cfg, err := cascade.Load(files)
+			Expect(err).NotTo(HaveOccurred())
+			err = cfg.Validate(files)
+			Expect(err).To(MatchError(ContainSubstring("mounts[0]")))
+			Expect(err).To(MatchError(ContainSubstring("is not absolute")))
+		}
 
 		// A complete mount validates cleanly.
 		ok := &cascade.Config{Mounts: []cascade.Mount{{Host: "/a", Container: "/b"}}}
 		Expect(ok.Validate(files)).To(Succeed())
+	})
+
+	It("CS-CASC-048: an absent, null or empty container means the same path as host", func() {
+		files := writeConfigs(tmp,
+			"mounts:\n  - host: /data/a\n  - host: /data/b\n    container: \"\"\n    writable: true\n  - host: /data/c\n    container:\n  - host: /data/d\n    container: /mnt/d\n",
+		)
+		cfg, err := cascade.Load(files)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.Validate(files)).To(Succeed())
+		Expect(cfg.Mounts).To(Equal([]cascade.Mount{
+			{Host: "/data/a", Container: "/data/a"},
+			{Host: "/data/b", Container: "/data/b", Writable: true},
+			{Host: "/data/c", Container: "/data/c"},
+			{Host: "/data/d", Container: "/mnt/d"},
+		}))
+	})
+
+	It("CS-CASC-048: an omitted container and an explicit same-path entry dedupe as one, more-local wins", func() {
+		files := writeConfigs(tmp,
+			"mounts:\n  - host: /data/a\n",
+			"mounts:\n  - host: /data/a\n    container: /data/a\n    writable: true\n",
+		)
+		cfg, err := cascade.Load(files)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.Mounts).To(Equal([]cascade.Mount{
+			{Host: "/data/a", Container: "/data/a", Writable: true},
+		}))
+
+		// And the other way round: the local entry omits it.
+		files = writeConfigs(tmp,
+			"mounts:\n  - host: /data/a\n    container: /data/a\n    writable: true\n",
+			"mounts:\n  - host: /data/a\n",
+		)
+		cfg, err = cascade.Load(files)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.Mounts).To(Equal([]cascade.Mount{
+			{Host: "/data/a", Container: "/data/a"},
+		}))
 	})
 
 	It("CS-CASC-012: recognized top-level keys", func() {
