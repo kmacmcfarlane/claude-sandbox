@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -71,6 +72,24 @@ var _ = Describe("the host's time zone (CS-LNCH-213..217)", func() {
 		delete(g.envmap, launch.TimezoneEnv)
 		tzHostLink(g, "Europe/Berlin")
 		Expect(g.run("--ralph")).To(Equal(0), g.errw.String())
+		Expect(tzEnvFlags(g)).To(Equal([]string{"TZ=Europe/Berlin"}))
+	})
+
+	It("CS-LNCH-213: --detach and --branch get it too", func() {
+		saved := detachedSettle
+		detachedSettle = 20 * time.Millisecond
+		DeferCleanup(func() { detachedSettle = saved })
+		tzHostLink(f, "Europe/Berlin")
+		f.fake.On("docker inspect --type container", "running 2026-09-24T00:00:00Z\n", nil)
+		Expect(f.run("--detach")).To(Equal(0), f.errw.String())
+		Expect(tzEnvFlags(f)).To(Equal([]string{"TZ=Europe/Berlin"}))
+
+		g := newCLIFixture()
+		delete(g.envmap, launch.TimezoneEnv)
+		tzHostLink(g, "Europe/Berlin")
+		g.fake.On("docker ps", psRow("cs-a", "Up 1 hour", g.proj, "otter")+"\n", nil)
+		g.fake.On("docker top", "PID  COMMAND\n1  claude\n", nil)
+		Expect(g.run("--branch")).To(Equal(0), g.errw.String())
 		Expect(tzEnvFlags(g)).To(Equal([]string{"TZ=Europe/Berlin"}))
 	})
 

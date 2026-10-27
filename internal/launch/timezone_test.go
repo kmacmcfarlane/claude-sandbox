@@ -87,6 +87,8 @@ var _ = Describe("host time zone (CS-LNCH-213..217)", func() {
 			"/etc/localtime":    "tz/localtime",
 			"/etc/tz/localtime": "/usr/share/zoneinfo/Africa/Lagos",
 		}}, "Africa/Lagos", 2),
+		Entry("a relative text naming zoneinfo only once joined",
+			&tzHost{links: map[string]string{"/etc/localtime": "zoneinfo/Europe/Oslo"}}, "Europe/Oslo", 1),
 		Entry("empty TZ counts as unset", &tzHost{env: map[string]string{"TZ": ""}, links: map[string]string{"/etc/localtime": "/usr/share/zoneinfo/Etc/UTC"}}, "Etc/UTC", 1),
 		Entry("regular /etc/localtime: /etc/timezone's first line", &tzHost{etc: "  Europe/Lisbon  \nignored\n", hasEtc: true}, "Europe/Lisbon", 1),
 	)

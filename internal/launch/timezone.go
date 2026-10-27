@@ -290,7 +290,13 @@ func zoneFromPath(p string, readlink func(string) (string, error)) (string, bool
 			return n, true
 		}
 		if !filepath.IsAbs(t) {
+			// A relative text like "zoneinfo/Europe/Oslo" holds no
+			// "/zoneinfo/" until it is joined; the joined path is a
+			// regular file, which a Readlink would only fail on.
 			t = filepath.Join(filepath.Dir(cur), t)
+			if n, ok := zoneName(t); ok {
+				return n, true
+			}
 		}
 		cur = t
 	}
