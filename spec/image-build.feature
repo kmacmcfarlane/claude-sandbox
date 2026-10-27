@@ -369,10 +369,13 @@ Feature: Image build lifecycle (CS-IMG)
   Scenario: CS-IMG-073 The child image is built from exactly the checked bytes
     Given a child Dockerfile is in use and the child needs a build
     Then the launcher writes the snapshot bytes of CS-IMG-074 0600 into a
-      private temp directory under the same base name, beside a generated
-      "<name>.dockerignore" (CS-IMG-078), builds with
-      "docker build -t <tag> <labels> -f <private dir>/<name> <context>",
+      private temp directory as "Dockerfile", beside a generated
+      "Dockerfile.dockerignore" (CS-IMG-078), builds with
+      "docker build -t <tag> <labels> -f <private dir>/Dockerfile <context>",
       and removes the directory after the build, whether it succeeded or not
+    And the private name is "Dockerfile" whatever the project's file is
+      called: a name holding "[" or "\" builds, and a name near the file-name
+      length limit still leaves room for the ".dockerignore" suffix
     And a Dockerfile rewritten on disk after the read does not reach the build
     And an ignore file is opened like the Dockerfile (non-blocking, regular
       files only): a directory, FIFO or other non-regular file there is absent,
@@ -382,17 +385,29 @@ Feature: Image build lifecycle (CS-IMG)
     # before it) and never the project file. Always a file, never "-f -":
     # a Dockerfile on stdin has no name, so BuildKit could find no
     # Dockerfile-specific ignore file for it, and CS-IMG-078 needs one.
+    # BuildKit reads the -f name as a pattern when it looks for that ignore
+    # file, so the project's own name is never reused.
 
   Scenario: CS-IMG-078 A child build never sends an env file to BuildKit
     Given a child Dockerfile is in use and the child needs a build
-    Then the generated "<name>.dockerignore" holds the rules BuildKit would
+    Then the generated "Dockerfile.dockerignore" holds the rules BuildKit would
       otherwise have used — "<Dockerfile>.dockerignore" beside the Dockerfile
       when it exists, else "<context>/.dockerignore" when it exists, else none
-      — verbatim, then a newline when they do not end in one, then the line
-      "**/.claude-sandbox/env" LAST
-    And so no env file under the context (its root's .claude-sandbox/env or a
-      nested project's) reaches the build context, and a "COPY . ..." cannot
-      bake one into a layer
+      — verbatim, then a newline when they do not end in one, then the env
+      rules LAST, each once, in this order:
+      "**/.claude-sandbox/env" always;
+      "/env" when the context's base name, lexically or symlink-resolved, is
+      .claude-sandbox;
+      "/<path relative to the context>" (pattern characters escaped) for each
+      cascade env file under the context, lexically or with either side
+      symlink-resolved
+    And so no env file under the context (its root's .claude-sandbox/env, a
+      nested project's, or the context root's own env when the context is a
+      .claude-sandbox directory) reaches the build context, and a "COPY . ..."
+      cannot bake one into a layer
+    And the context is a .claude-sandbox directory when dockerfileDir (or
+      CLAUDE_SANDBOX_DOCKERFILE_DIR) names one, or when the parent walk finds
+      "dockerfile: .claude-sandbox/Dockerfile" in an upper level
     And a "!" rule in the project's ignore file cannot re-include it: the last
       matching line decides
     And nothing is refused or printed: the file is excluded, never warned about
@@ -402,8 +417,13 @@ Feature: Image build lifecycle (CS-IMG)
     # .dockerignore when both exist (docs.docker.com, "Build context" >
     # ".dockerignore files" > "Filename and location"), which is why the
     # generated file copies the context's rules when the Dockerfile has none of
-    # its own. "**" matches zero or more directories, so the pattern covers the
-    # context root too.
+    # its own. "**" matches zero or more directories, so the first rule covers
+    # the context root too. The first two rules need no list and cover every
+    # place the layout puts an env file; the per-file rules name the files the
+    # launch actually passes, so a context the first two do not foresee still
+    # leaves them out. A path holding a newline, or white space at either end
+    # (BuildKit trims pattern lines), gets no per-file rule; the first two
+    # still apply.
 
   # ---- child image staleness ----
 
