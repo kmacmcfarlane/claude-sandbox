@@ -5,18 +5,27 @@ package imagebuild
 // Dockerfile.dockerignore beside the private Dockerfile, and only a frontend
 // that reads a Dockerfile-specific ignore file honours it. The frontend is
 // whatever the Dockerfile's "syntax" parser directive names; docker/dockerfile
-// 1.0 predates Dockerfile-specific ignore files and sends the whole context
-// (verified in real builds: the 1.0, 1.0-experimental and 1.0.0-experimental
-// pins send .claude-sandbox/env, 1 and 1.1+ do not).
+// 0.9 and 1.0 predate Dockerfile-specific ignore files and send the whole
+// context (verified in real builds: the 0.9, 1.0, 1.0-experimental and
+// 1.0.0-experimental pins send .claude-sandbox/env, 1 and 1.1+ do not).
+//
+// The reading follows BuildKit's parser.DetectSyntax (frontend/dockerfile/
+// parser/directives.go; dockerfile2llb/directives.go before v0.11) and the
+// gateway frontend's image resolution (frontend/gateway/gateway.go), reading
+// wider wherever versions differ or the image a name reaches is uncertain.
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
+	"path"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
@@ -59,7 +68,13 @@ func directiveLine(line, marker string) (key, value string, ok bool) {
 //     and there the LAST syntax line wins), and returns every syntax value,
 //     so a caller can refuse when any of them is an old frontend;
 //   - it skips a UTF-8 BOM and a "#!" first line, takes CRLF line ends, and
-//     reads "//" directives too.
+//     reads "//" directives too;
+//   - it reads the JSON form BuildKit v0.11 and later fall back to when
+//     neither comment form names a syntax (parser.DetectSyntax): a
+//     Dockerfile that is one JSON object with a "syntax" string member.
+//     Every member whose key equals "syntax" ignoring case counts (v0.11 to
+//     v0.13 decode into a struct field, which matches keys case-insensitively;
+//     later versions match the key exactly).
 //
 // Each value is cut at its first white space: BuildKit takes the frontend
 // image only up to the first space, the rest being the frontend's command
@@ -72,17 +87,57 @@ func SyntaxDirectives(content []byte) []string {
 		lines = lines[1:]
 	}
 	var out []string
+	add := func(value string) {
+		if f := strings.FieldsFunc(value, unicode.IsSpace); len(f) > 0 {
+			out = append(out, f[0])
+		}
+	}
 	for _, marker := range []string{"#", "//"} {
 		for _, line := range lines {
 			key, value, ok := directiveLine(line, marker)
 			if !ok {
 				break
 			}
-			if key != "syntax" {
-				continue
+			if key == "syntax" {
+				add(value)
 			}
-			if f := strings.FieldsFunc(value, unicode.IsSpace); len(f) > 0 {
-				out = append(out, f[0])
+		}
+	}
+	for _, v := range jsonSyntax(content) {
+		add(v)
+	}
+	return out
+}
+
+// jsonSyntax returns the "syntax" string members of a Dockerfile that is one
+// JSON object, BuildKit's last-resort directive form. BuildKit decodes the
+// bytes after a "#!" first line (v0.11 to v0.13 without stripping a UTF-8
+// BOM, later versions with; content arrives BOM-stripped, and a BOM fails
+// to decode anyway), so the content is tried whole and without such a line.
+// Keys match ignoring case, with the Unicode folding encoding/json's struct
+// fields use; values in sorted key order.
+func jsonSyntax(content []byte) []string {
+	candidates := [][]byte{content}
+	if first, rest, _ := bytes.Cut(content, []byte("\n")); bytes.HasPrefix(first, []byte("#!")) {
+		candidates = append(candidates, rest)
+	}
+	var out []string
+	for _, c := range candidates {
+		var m map[string]json.RawMessage
+		if json.Unmarshal(c, &m) != nil {
+			continue
+		}
+		var keys []string
+		for k := range m {
+			if strings.EqualFold(k, "syntax") {
+				keys = append(keys, k)
+			}
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			var v string
+			if json.Unmarshal(m[k], &v) == nil {
+				out = append(out, v)
 			}
 		}
 	}
@@ -94,49 +149,191 @@ type frontendKind int
 
 const (
 	// frontendReadsIgnore: no directive (the builder's own frontend), or
-	// docker/dockerfile at a version that reads Dockerfile.dockerignore.
+	// Docker Hub's docker/dockerfile at a version that reads
+	// Dockerfile.dockerignore.
 	frontendReadsIgnore frontendKind = iota
-	// frontendOld: docker/dockerfile 1.0, which does not.
+	// frontendOld: docker/dockerfile 0.9 or 1.0, which does not.
 	frontendOld
-	// frontendOther: another image, or docker/dockerfile pinned by digest
-	// alone; whether it reads the file is unknown.
+	// frontendOther: another image, docker/dockerfile pinned by any digest
+	// not listed as old, or at a tag not known to read the file; whether it
+	// reads the file is unknown.
 	frontendOther
 )
 
-// classifyFrontend names the frontend a syntax directive selects. The
-// docker.io registry and the docker/ namespace may be written out
-// ("docker.io/docker/dockerfile", "index.docker.io/docker/dockerfile").
+// hubRepos are the spellings of Docker Hub's docker/dockerfile and
+// docker/dockerfile-upstream whose tags name what Docker publishes on the
+// registry; the value is the repository. A daemon's local copy of such a
+// tag may be an older pull, so checkFrontend checks it (localFrontend). Any
+// other registry or path is another frontend unless it names an old one.
+var hubRepos = map[string]string{}
+
+func init() {
+	for _, repo := range []string{"docker/dockerfile", "docker/dockerfile-upstream"} {
+		for _, reg := range []string{"", "docker.io/", "index.docker.io/", "registry-1.docker.io/"} {
+			hubRepos[reg+repo] = repo
+		}
+	}
+}
+
+// modernTagRe is the allowlist of docker/dockerfile tags that read
+// Dockerfile.dockerignore (the 1.1 frontend added Dockerfile-specific
+// ignore files; verified in real builds for 1, 1.1 and later). The shape:
+// "1", or "1.N" / "1.N.x" with N >= 1, optionally followed by "-labs" or
+// "-experimental"; the floating "latest", "labs" and "experimental". On
+// Docker Hub (October 2026) these are 1, 1-labs, 1-experimental, 1.1 to
+// 1.N with their .x patch, -labs and -experimental forms, latest and labs
+// (both current 1.x), and experimental and 1-experimental (both last pushed
+// in 2020, a 1.2-era image). Release candidates ("-rcN") and anything else
+// are left out: they are unknown, so they warn.
+var modernTagRe = regexp.MustCompile(`^(1(\.[1-9][0-9]*(\.[0-9]+)?)?(-(labs|experimental))?|latest|labs|experimental)$`)
+
+// upstreamTagRe adds docker/dockerfile-upstream's floating master tags
+// (master, master-labs and master-experimental, the last pushed in 2020
+// as a 1.2-era image).
+var upstreamTagRe = regexp.MustCompile(`^master(-(labs|experimental))?$`)
+
+// isOldTag reports a tag of the 0.9 or 1.0 family, the docker/dockerfile
+// frontends that predate Dockerfile-specific ignore files (verified in real
+// builds: 0.9, 1.0, 1.0-experimental and 1.0.0-experimental send
+// .claude-sandbox/env, 1 and 1.1 and later do not). Case is ignored, which
+// only refuses more.
+func isOldTag(tag string) bool {
+	t := strings.ToLower(tag)
+	for _, v := range []string{"0", "1.0"} {
+		if t == v || strings.HasPrefix(t, v+".") || strings.HasPrefix(t, v+"-") {
+			return true
+		}
+	}
+	return false
+}
+
+// splitImageRef splits an image reference as the reference grammar does:
+// the digest after the first "@" (its "sha256:" cut, lower-cased), the tag
+// after the last ":" that follows the last "/".
+func splitImageRef(ref string) (name, tag, digest string) {
+	name, digest, _ = strings.Cut(ref, "@")
+	digest = strings.TrimPrefix(strings.ToLower(digest), "sha256:")
+	if i := strings.LastIndex(name, ":"); i > strings.LastIndex(name, "/") {
+		name, tag = name[:i], name[i+1:]
+	}
+	return name, tag, digest
+}
+
+// classifyFrontend names the frontend a syntax directive selects.
+//
+// Old: an image whose last path component is "dockerfile" or
+// "dockerfile-upstream" (case ignored) under ANY registry and path — BuildKit
+// pulls Docker Hub's image through spellings the reference library does not
+// normalise (registry.hub.docker.com/…, registry-1.docker.io:443/…, both
+// verified) and through pull-through mirrors (mirror.gcr.io/docker/…) — with
+// a 0.9 or 1.0 tag, or with a digest of an old image whatever the tag: the
+// digest decides what is pulled.
+//
+// Reads the ignore file (an allowlist): a hubRepos spelling with NO digest
+// and either no tag (latest) or a tag modernTagRe (or, for
+// docker/dockerfile-upstream, upstreamTagRe) accepts, exactly, in its case.
+// That reads the NAME only; with an env file in the context checkFrontend
+// also checks the daemon's local copy of it (localFrontend), which BuildKit
+// prefers on the classic image store.
+//
+// Other: everything else. That includes any digest not listed as old, even
+// beside a modern tag: the digest decides what is pulled, and
+// oldFrontendDigests covers only the manifests Docker Hub tags today, so an
+// old manifest that lost its tag cannot be told from a modern one. A
+// digest-pinned docker/dockerfile therefore gets one WARNING per child build
+// while an env file is in the context.
 func classifyFrontend(directive string) frontendKind {
 	if directive == "" {
 		return frontendReadsIgnore
 	}
-	ref := directive
-	for _, reg := range []string{"docker.io/", "index.docker.io/", "registry-1.docker.io/"} {
-		ref = strings.TrimPrefix(ref, reg)
-	}
-	const name = "docker/dockerfile"
-	if !strings.HasPrefix(ref, name) {
-		return frontendOther
-	}
-	rest := ref[len(name):]
-	digest := ""
-	if i := strings.Index(rest, "@"); i >= 0 {
-		rest, digest = rest[:i], rest[i:]
-	}
-	switch {
-	case rest == "":
-		if digest != "" {
-			return frontendOther // a digest alone names no version
-		}
-		return frontendReadsIgnore // no tag: latest
-	case !strings.HasPrefix(rest, ":"):
-		return frontendOther // docker/dockerfile-upstream and the like
-	}
-	tag := rest[1:]
-	if tag == "1.0" || strings.HasPrefix(tag, "1.0.") || strings.HasPrefix(tag, "1.0-") {
+	name, tag, digest := splitImageRef(directive)
+	last := strings.ToLower(path.Base(name))
+	if (last == "dockerfile" || last == "dockerfile-upstream") &&
+		(isOldTag(tag) || oldFrontendDigests[digest]) {
 		return frontendOld
 	}
-	return frontendReadsIgnore
+	repo, hub := hubRepos[name]
+	switch {
+	case !hub || digest != "" || strings.Contains(directive, "@") ||
+		tag == "" && strings.HasSuffix(directive, ":"):
+		return frontendOther
+	case tag == "" || modernTagRe.MatchString(tag):
+		return frontendReadsIgnore
+	case repo == "docker/dockerfile-upstream" && upstreamTagRe.MatchString(tag):
+		return frontendReadsIgnore
+	}
+	return frontendOther
+}
+
+// frontendInspectTimeout bounds localFrontend's docker image inspect.
+var frontendInspectTimeout = 5 * time.Second
+
+// frontendCapsLabel is the label every docker/dockerfile image from 1.2 on
+// carries (today's latest, 1, labs and experimental included) and none
+// before it: 0.9 and 1.0 have no labels, 1.0-experimental and 1.1 only
+// moby.buildkit.frontend.network.none (read from the registry's image
+// configs).
+const frontendCapsLabel = "moby.buildkit.frontend.caps"
+
+// frontendInspectFormat is localFrontend's inspect template: the repo
+// digests as JSON, a unit separator, the caps label ("" when absent —
+// verified against a real daemon, as is the separator).
+const frontendInspectFormat = "{{json .RepoDigests}}\x1f{{index .Config.Labels \"" + frontendCapsLabel + "\"}}"
+
+// localFrontend checks the local copy of a frontend image classifyFrontend
+// let through silently. BuildKit resolves a gateway frontend "prefer local"
+// on the classic image store, so a daemon still holding a 2019 pull of
+// docker/dockerfile:latest or :experimental (1.0-era then) runs it. One
+// bounded `docker image inspect --format frontendInspectFormat <ref>`:
+//   - "No such image": nothing local, BuildKit pulls what the registry names
+//     today — silent;
+//   - a repo digest in oldFrontendDigests: old;
+//   - otherwise repo digests that are all unlisted plus a non-empty caps
+//     label: a 1.2-or-later image — silent;
+//   - an unconfirmed local copy — unlisted digests with no caps label (an old
+//     pull whose manifest no tag names any more looks like that; so does a
+//     local 1.1, which is accepted) or no repo digest at all (a local build
+//     or tag): other;
+//   - a failure, a timeout, unparsable output: other.
+//
+// Other is a warning, never silence. local is true when the answer comes
+// from a local copy that exists (old or unconfirmed), for the messages'
+// wording and remedies.
+func localFrontend(o Options, ref string) (kind frontendKind, local bool) {
+	var stderr bytes.Buffer
+	out, err := execx.Bounded(o.Runner, frontendInspectTimeout, execx.Cmd{
+		Name:   "docker",
+		Args:   []string{"image", "inspect", "--format", frontendInspectFormat, ref},
+		Stderr: &stderr,
+	})
+	if err != nil {
+		var te *execx.TimeoutError
+		var se *execx.StartError
+		if !errors.As(err, &te) && !errors.As(err, &se) && strings.Contains(stderr.String(), "No such image") {
+			return frontendReadsIgnore, false
+		}
+		return frontendOther, false
+	}
+	digestsJSON, caps, ok := strings.Cut(strings.TrimRight(out, "\r\n"), "\x1f")
+	if !ok {
+		return frontendOther, false
+	}
+	var digests []string
+	if json.Unmarshal([]byte(strings.TrimSpace(digestsJSON)), &digests) != nil {
+		return frontendOther, false
+	}
+	if len(digests) == 0 {
+		return frontendOther, true // a local build or tag: unconfirmed
+	}
+	for _, d := range digests {
+		if _, _, dg := splitImageRef(d); oldFrontendDigests[dg] {
+			return frontendOld, true
+		}
+	}
+	if strings.TrimSpace(caps) == "" {
+		return frontendOther, true // unconfirmed
+	}
+	return frontendReadsIgnore, false
 }
 
 // envWalkMax bounds the context walk for env files: past it the context is
@@ -206,23 +403,56 @@ func envFileInContext(context string, envFiles []string) (found string, limited 
 func checkFrontend(o Options, spec ChildSpec) error {
 	// Every syntax value counts (SyntaxDirectives over-reads): any old pin
 	// refuses; otherwise any other frontend warns.
-	kind, directive := frontendReadsIgnore, ""
-	for _, d := range SyntaxDirectives(spec.Content) {
-		switch k := classifyFrontend(d); {
-		case k == frontendOld:
-			kind, directive = k, d
-		case k == frontendOther && kind == frontendReadsIgnore:
-			kind, directive = k, d
-		}
-		if kind == frontendOld {
-			break
-		}
+	directives := SyntaxDirectives(spec.Content)
+	kinds := make([]frontendKind, len(directives))
+	for i, d := range directives {
+		kinds[i] = classifyFrontend(d)
 	}
-	if kind == frontendReadsIgnore {
-		return nil
+	localCopy := make([]bool, len(directives)) // judged by the daemon's copy
+	worst := func() (kind frontendKind, directive string, local bool) {
+		kind = frontendReadsIgnore
+		for i, k := range kinds {
+			switch {
+			case k == frontendOld:
+				return k, directives[i], localCopy[i]
+			case k == frontendOther && kind == frontendReadsIgnore:
+				kind, directive, local = k, directives[i], localCopy[i]
+			}
+		}
+		return kind, directive, local
+	}
+	if len(directives) == 0 {
+		return nil // the builder's own frontend
 	}
 	found, limited := envFileInContext(spec.Context, o.EnvFiles)
 	if found == "" && !limited {
+		return nil
+	}
+	// A silent-class name is only as good as the image it reaches: BuildKit
+	// prefers a local copy on the classic image store, which may be an old
+	// pull of a tag that has moved since (CS-IMG-079). Checked only when it
+	// could matter: an env file is in the context and nothing is old yet.
+	// Each distinct ref is inspected once.
+	if kind, _, _ := worst(); kind != frontendOld {
+		type answer struct {
+			kind  frontendKind
+			local bool
+		}
+		seen := map[string]answer{}
+		for i, k := range kinds {
+			if k != frontendReadsIgnore {
+				continue
+			}
+			a, ok := seen[directives[i]]
+			if !ok {
+				a.kind, a.local = localFrontend(o, directives[i])
+				seen[directives[i]] = a
+			}
+			kinds[i], localCopy[i] = a.kind, a.local
+		}
+	}
+	kind, directive, local := worst()
+	if kind == frontendReadsIgnore {
 		return nil
 	}
 	// Paths and the directive come from session-writable files and names:
@@ -234,10 +464,31 @@ func checkFrontend(o Options, spec ChildSpec) error {
 	if limited {
 		what = fmt.Sprintf("any .claude-sandbox/env (the context has more than %d entries to check)", envWalkMax)
 	}
+	if kind == frontendOther && local {
+		// The name passed the allowlist, so it holds only reference
+		// characters: safe to print in a command.
+		fmt.Fprintf(o.Err, "WARNING: %s selects the frontend %q (# syntax=): this Docker daemon holds a local copy of %s whose version could not be confirmed; BuildKit prefers it, and if it predates docker/dockerfile 1.1 the build sends %s (context %s). `docker pull %s` or `docker image rm %s` clears this.\n",
+			dockerfile, shown, shown, what, context, shown, shown)
+		return nil
+	}
 	if kind == frontendOther {
 		fmt.Fprintf(o.Err, "WARNING: %s selects the frontend %q (# syntax=); .claude-sandbox/env files are kept out of the build context only if that frontend honours Dockerfile.dockerignore (context %s holds %s).\n",
 			dockerfile, shown, context, what)
 		return nil
+	}
+	if local {
+		// The name passed the allowlist, so it holds only reference
+		// characters: safe to print in a command.
+		return &execx.CodeError{Code: 2, Msg: fmt.Sprintf(
+			"Error: %s selects the Dockerfile frontend %q (# syntax=), and this Docker daemon holds an old copy of %s under that tag\n"+
+				"  (docker/dockerfile 0.9 or 1.0, which does not read Dockerfile.dockerignore). BuildKit prefers the local copy,\n"+
+				"  so the build would send %s from the build context %s to BuildKit. Not building.\n"+
+				"  Fix one of:\n"+
+				"    - docker pull %s   (fetches what the tag names today);\n"+
+				"    - docker image rm %s   (BuildKit then pulls it).\n"+
+				"  On the containerd image store or a docker-container buildx builder BuildKit may not use the\n"+
+				"  daemon's copy, so this refusal can be over-cautious; either command clears it.",
+			dockerfile, shown, shown, what, context, shown, shown)}
 	}
 	return &execx.CodeError{Code: 2, Msg: fmt.Sprintf(
 		"Error: %s pins the Dockerfile frontend %q (# syntax=), which does not read Dockerfile.dockerignore,\n"+

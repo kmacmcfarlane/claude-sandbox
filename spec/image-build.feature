@@ -441,28 +441,76 @@ Feature: Image build lifecycle (CS-IMG)
       (newer BuildKit keeps the first, older the last); each value is cut at
       its first white space (BuildKit takes the frontend image only up to the
       first space, the rest is the frontend's command line); a UTF-8 BOM, a
-      "#!" first line, CRLF line ends and "//" directives are read too
+      "#!" first line, CRLF line ends and "//" directives are read too; so is
+      the JSON form BuildKit falls back to when no comment directive names a
+      syntax — a Dockerfile that is one JSON object (after an optional BOM or
+      "#!" line) whose "syntax" member, the key in any case, is a string
     And the context holds an env file the launch's rules exclude: any
       .claude-sandbox/env below it, its root "env" when the context is a
       .claude-sandbox directory, or a cascade env file under it (the
       resolved context is walked without following symlinks; past 200000
       entries it counts as holding one)
-    Then a directive (any one of them) naming docker/dockerfile (an optional docker.io/,
-      index.docker.io/ or registry-1.docker.io/ prefix) with tag "1.0" or a
-      tag starting "1.0." or "1.0-" — the frontend that does not read
-      Dockerfile.dockerignore — fails the launch with exit 2 before the build
+    Then a directive (any one of them) naming an old docker/dockerfile —
+      an image whose last path component is "dockerfile" or
+      "dockerfile-upstream" (any case, under ANY registry or path: Docker
+      Hub is reachable as registry.hub.docker.com or registry-1.docker.io:443
+      and through mirrors) with a tag of the 0.9 or 1.0 family ("0", "1.0",
+      or one starting "0.", "0-", "1.0." or "1.0-", any case), or with the
+      digest of any manifest behind those tags on Docker Hub whatever tag
+      stands beside it (the digest decides what is pulled) — the frontends
+      that do not read Dockerfile.dockerignore — fails the launch with exit
+      2 before the build
       and before any container is created, naming the Dockerfile, the
       directive, the env file and two remedies: raise the pin to
       docker/dockerfile:1.1 or later (or drop the syntax line), or build
       elsewhere (baseOnly: true, or a dockerfileDir whose build context holds
       no env file)
-    And otherwise, a directive naming any other frontend image (another name,
-      docker/dockerfile-upstream, or docker/dockerfile by digest alone) prints
-      one "WARNING:" line naming the Dockerfile and the frontend and saying
+    And no directive, or an allowlisted one, builds as CS-IMG-078 says,
+      silently: docker/dockerfile or docker/dockerfile-upstream (no registry,
+      or docker.io/, index.docker.io/ or registry-1.docker.io/) with NO
+      digest and either no tag or a tag known to read
+      Dockerfile.dockerignore, matched exactly: "1", or "1.N" / "1.N.x" with
+      N >= 1, each optionally followed by "-labs" or "-experimental"; or
+      "latest", "labs", "experimental"; and, for docker/dockerfile-upstream
+      only, "master", "master-labs", "master-experimental" — the name only:
+      BuildKit resolves a frontend "prefer local" on the classic image
+      store, and a daemon may still hold an old pull of a tag that has moved
+      (a 2019 "latest" or "experimental" was 1.0-era), so with an env file in
+      the context each distinct such directive also gets one bounded (5 s)
+      "docker image inspect --format '{{json .RepoDigests}}<US>{{index
+      .Config.Labels "moby.buildkit.frontend.caps"}}' <ref>" (US = the unit
+      separator, 0x1f): a repo digest on the old list refuses; "No such
+      image" stays silent (BuildKit pulls what the registry names today);
+      repo digests that are all unlisted plus a non-empty
+      moby.buildkit.frontend.caps label stay silent (every docker/dockerfile
+      from 1.2 on carries it, none before: 0.9 and 1.0 have no labels,
+      1.0-experimental and 1.1 only moby.buildkit.frontend.network.none);
+      an unconfirmed local copy — unlisted digests with no caps label (an old
+      pull whose manifest no tag names any more; a local 1.1 too, accepted)
+      or no repo digest (a local build or tag) — prints one "WARNING:" line
+      saying this Docker daemon holds a local copy of <ref> whose version
+      could not be confirmed, BuildKit prefers it, and if it predates
+      docker/dockerfile 1.1 the build sends the env file, and that
+      "docker pull <ref>" or "docker image rm <ref>" clears this; any other
+      failure, a timeout or unreadable output warns as another frontend
+      below — never silent
+    And a refusal for the daemon's local copy says the daemon holds an old
+      copy of <ref> under that tag (not that the Dockerfile pins one) and
+      names the remedies "docker pull <ref>" and "docker image rm <ref>",
+      noting that on the containerd image store or a docker-container buildx
+      builder BuildKit may not use the local copy, so the refusal can be
+      over-cautious
+    And otherwise, a directive naming any other frontend image prints one
+      "WARNING:" line naming the Dockerfile and the frontend and saying
       .claude-sandbox/env files are kept out of the build context only if
-      that frontend honours Dockerfile.dockerignore, and the build goes on
-    And no directive, or docker/dockerfile at any other tag (1, 1.1 and later,
-      none), builds as CS-IMG-078 says, silently
+      that frontend honours Dockerfile.dockerignore, and the build goes on.
+      That includes another name or registry, an unknown tag (a release
+      candidate, a commit tag, a future "2"), and ANY digest pin of
+      docker/dockerfile not listed as old, even beside a modern tag: the
+      digest decides what is pulled, the old list covers only the manifests
+      Docker Hub tags today, and an old manifest that lost its tag cannot be
+      told from a modern one — so a digest-pinned docker/dockerfile warns
+      once per child build while an env file is in the context
     And with no such env file in the context nothing is printed and nothing
       is refused, whatever the directive
     And the frontend is never overridden: no build argument or flag replaces
@@ -475,6 +523,17 @@ Feature: Image build lifecycle (CS-IMG)
     # 1.0-experimental is the old pin for RUN --mount=type=secret, so real
     # projects carry it. The remedy list leaves out "exclude it in your
     # .dockerignore": the launcher does not check such a rule exists.
+    # Also verified: the 0.9 pin sends it; "docker/dockerfile:1.7@sha256:"
+    # + the 1.0 manifest list's digest runs 1.0 and sends it;
+    # registry.hub.docker.com/docker/dockerfile:1.0 and
+    # registry-1.docker.io:443/docker/dockerfile:1.0 pull Docker Hub's 1.0
+    # and send it; a JSON-form Dockerfile naming 1.0 is forwarded to 1.0
+    # (which then fails to parse it before the context is read).
+    # Docker Hub's 0.9/1.0 digests are listed in the code (oldFrontendDigests).
+    # On Docker Hub (October 2026) "experimental", "1-experimental" and
+    # upstream's "master-experimental" were last pushed in 2020 (1.2-era
+    # images); "latest", "labs", "1", "1-labs" and upstream's "master" are
+    # current 1.x; docker/dockerfile has no "master" or "-rc" tags.
 
   # ---- child image staleness ----
 

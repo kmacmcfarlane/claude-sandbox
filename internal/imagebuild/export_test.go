@@ -2,6 +2,8 @@ package imagebuild
 
 // Test-only exports for the external imagebuild_test package.
 
+import "time"
+
 // PreSnapshotChildInputs is childInputs exactly as it was before the child
 // Dockerfile was snapshotted (CS-IMG-074): it read the file at spec.Dockerfile.
 // A test pins the snapshot form to this value, so the change rebuilds no image.
@@ -30,4 +32,24 @@ func SetEnvWalkMax(n int) (restore func()) {
 	old := envWalkMax
 	envWalkMax = n
 	return func() { envWalkMax = old }
+}
+
+// SetFrontendInspectTimeout shortens CS-IMG-079's local-image inspect bound
+// for a test and returns the restore.
+func SetFrontendInspectTimeout(d time.Duration) (restore func()) {
+	old := frontendInspectTimeout
+	frontendInspectTimeout = d
+	return func() { frontendInspectTimeout = old }
+}
+
+// ClassifyFrontend exposes CS-IMG-079's frontend classes as "reads", "old"
+// and "other".
+func ClassifyFrontend(directive string) string {
+	switch classifyFrontend(directive) {
+	case frontendOld:
+		return "old"
+	case frontendOther:
+		return "other"
+	}
+	return "reads"
 }

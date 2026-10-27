@@ -9,9 +9,11 @@ package imagebuild_test
 import (
 	"bytes"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -56,11 +58,105 @@ var _ = Describe("the syntax parser directive (CS-IMG-079)", func() {
 		Entry("after a plain comment: a comment", "# my image\n# syntax=docker/dockerfile:1.0\n"),
 		Entry("after an empty line: a comment", "\n# syntax=docker/dockerfile:1.0\n"),
 		Entry("no value", "# syntax=\n"),
+		// BuildKit v0.11 and later fall back to a Dockerfile that is one JSON
+		// object (parser.DetectSyntax); a real build forwards it to the named
+		// frontend.
+		Entry("the JSON form", `{"syntax": "docker/dockerfile:1.0"}`, "docker/dockerfile:1.0"),
+		Entry("the JSON form, its key in another case (v0.11 to v0.13)", `{"SYNTAX": "docker/dockerfile:1.0"}`, "docker/dockerfile:1.0"),
+		Entry("the JSON form, its key folded as encoding/json folds it", "{\"ſyntax\": \"docker/dockerfile:1.0\"}", "docker/dockerfile:1.0"),
+		Entry("the JSON form, its value escaped", `{"syntax": "docker\/dockerfile:1.0"}`, "docker/dockerfile:1.0"),
+		Entry("the JSON form after a #! line", "#!/usr/bin/env buildctl\n{\"syntax\": \"docker/dockerfile:1.0\"}\n", "docker/dockerfile:1.0"),
+		Entry("the JSON form after a UTF-8 BOM", "\xef\xbb\xbf{\"syntax\": \"docker/dockerfile:1.0\"}", "docker/dockerfile:1.0"),
+		Entry("the JSON form, cut at its first space", `{"syntax": "docker/dockerfile:1.0 x"}`, "docker/dockerfile:1.0"),
+		Entry("the JSON form with a non-string value", `{"syntax": 1}`),
+		Entry("JSON that is not an object", `["syntax", "docker/dockerfile:1.0"]`),
 	)
 })
 
+var _ = Describe("the frontend image (CS-IMG-079)", func() {
+	DescribeTable("CS-IMG-079: ClassifyFrontend names what BuildKit would pull, reading old where unsure",
+		func(directive, want string) {
+			Expect(imagebuild.ClassifyFrontend(directive)).To(Equal(want))
+		},
+		// The 0.9 tags predate 1.0 and, like it, ignore Dockerfile.dockerignore
+		// (verified in a real build).
+		Entry("0.9", "docker/dockerfile:0.9", "old"),
+		Entry("0.9.0", "docker/dockerfile:0.9.0", "old"),
+		Entry("0.9-experimental", "docker/dockerfile:0.9-experimental", "old"),
+		Entry("0.9.0-experimental", "docker/dockerfile:0.9.0-experimental", "old"),
+		Entry("1.0", "docker/dockerfile:1.0", "old"),
+		Entry("a tag in upper case", "docker/dockerfile:1.0-EXPERIMENTAL", "old"),
+		// The digest decides what is pulled, whatever the tag (verified).
+		Entry("a new tag beside an old digest", "docker/dockerfile:1.7@sha256:653ad79c9cd2fe8105290b61bc0f261c6f73a9e9cb1780bdb529c396e04f9655", "old"),
+		Entry("an old manifest list digest alone", "docker/dockerfile@sha256:90251afc27ab89c025d205bd3fb9c3e110a653476c26b800ce693de2e6178243", "old"),
+		Entry("an old per-platform manifest digest alone", "docker.io/docker/dockerfile@sha256:9349a3e94e5a58e7ae582e1a3af64f69cdb1a116cf2a299c24fc4d1b22855f0c", "old"),
+		Entry("an old digest in upper case", "docker/dockerfile@SHA256:653AD79C9CD2FE8105290B61BC0F261C6F73A9E9CB1780BDB529C396E04F9655", "old"),
+		// Docker Hub under spellings the reference library does not
+		// normalise (verified), and mirrors of it.
+		Entry("registry.hub.docker.com", "registry.hub.docker.com/docker/dockerfile:1.0", "old"),
+		Entry("registry-1.docker.io:443", "registry-1.docker.io:443/docker/dockerfile:1.0", "old"),
+		Entry("the docker.io host in upper case", "Docker.IO/docker/dockerfile:1.0", "old"),
+		Entry("a pull-through mirror", "mirror.gcr.io/docker/dockerfile:1.0", "old"),
+		Entry("a mirror under a project path", "harbor.example.com/hub-proxy/docker/dockerfile:1.0-experimental", "old"),
+		Entry("a localhost mirror", "localhost:5000/docker/dockerfile:1.0", "old"),
+		Entry("docker/dockerfile-upstream, which carries the same old tags", "docker/dockerfile-upstream:1.0.0", "old"),
+		Entry("the repository in upper case", "DOCKER/DOCKERFILE:1.0", "old"),
+
+		// The allowlist: no digest, a tag known to read Dockerfile.dockerignore.
+		Entry("no directive", "", "reads"),
+		Entry("no tag", "docker/dockerfile", "reads"),
+		Entry("latest", "docker/dockerfile:latest", "reads"),
+		Entry("1", "docker/dockerfile:1", "reads"),
+		Entry("1-labs", "docker/dockerfile:1-labs", "reads"),
+		Entry("1-experimental", "docker/dockerfile:1-experimental", "reads"),
+		Entry("1.1", "docker/dockerfile:1.1", "reads"),
+		Entry("1.7", "docker/dockerfile:1.7", "reads"),
+		Entry("1.10", "docker/dockerfile:1.10", "reads"),
+		Entry("1.1.0", "docker/dockerfile:1.1.0", "reads"),
+		Entry("1.7.1", "docker/dockerfile:1.7.1", "reads"),
+		Entry("1.7-labs", "docker/dockerfile:1.7-labs", "reads"),
+		Entry("1.7.1-labs", "docker/dockerfile:1.7.1-labs", "reads"),
+		Entry("1.1-experimental", "docker/dockerfile:1.1-experimental", "reads"),
+		Entry("1.1.7-experimental", "docker/dockerfile:1.1.7-experimental", "reads"),
+		Entry("labs", "docker/dockerfile:labs", "reads"),
+		Entry("experimental (a 1.2 image)", "docker/dockerfile:experimental", "reads"),
+		Entry("docker.io, 1.7", "docker.io/docker/dockerfile:1.7", "reads"),
+		Entry("index.docker.io, 1.7", "index.docker.io/docker/dockerfile:1.7", "reads"),
+		Entry("registry-1.docker.io, 1.7", "registry-1.docker.io/docker/dockerfile:1.7", "reads"),
+		Entry("docker/dockerfile-upstream, 1.7", "docker/dockerfile-upstream:1.7", "reads"),
+		Entry("docker/dockerfile-upstream at master", "docker/dockerfile-upstream:master", "reads"),
+		Entry("docker/dockerfile-upstream at master-labs", "docker/dockerfile-upstream:master-labs", "reads"),
+		Entry("docker/dockerfile-upstream at master-experimental", "docker/dockerfile-upstream:master-experimental", "reads"),
+
+		// Everything else is unknown: one warning with an env file in the context.
+		Entry("an unlisted digest beside 1.7 (an untagged old manifest looks the same)", "docker/dockerfile:1.7@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "other"),
+		Entry("an unlisted digest alone", "docker/dockerfile@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "other"),
+		Entry("an unlisted digest beside latest", "docker.io/docker/dockerfile:latest@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "other"),
+		Entry("an unknown tag", "docker/dockerfile:nightly", "other"),
+		Entry("a 2.x tag nobody has published", "docker/dockerfile:2", "other"),
+		Entry("10.0", "docker/dockerfile:10.0", "other"),
+		Entry("1.01, a minor with a leading zero", "docker/dockerfile:1.01", "other"),
+		Entry("a release candidate", "docker/dockerfile-upstream:1.2.0-rc1", "other"),
+		Entry("an upstream commit tag", "docker/dockerfile-upstream:20190619-ssh", "other"),
+		Entry("master on docker/dockerfile, where it does not exist", "docker/dockerfile:master", "other"),
+		Entry("a modern tag in another case", "docker/dockerfile:1-LABS", "other"),
+		Entry("an empty tag", "docker/dockerfile:", "other"),
+		Entry("a mirror at a modern tag", "mirror.gcr.io/docker/dockerfile:1.7", "other"),
+		Entry("another name", "registry.example.com/team/frontend:1.0", "other"),
+	)
+})
+
+// noSuchImage is docker image inspect of an image the daemon does not hold.
+func noSuchImage(c execx.Cmd) (string, error) {
+	if c.Stderr != nil {
+		io.WriteString(c.Stderr, "Error response from daemon: No such image: "+c.Args[len(c.Args)-1]+"\n")
+	}
+	return "", execx.Fail(1)
+}
+
 var _ = Describe("the Dockerfile frontend check (CS-IMG-079)", func() {
 	var (
+		localImage  func(execx.Cmd) (string, error)
 		fake        *execx.Fake
 		out, errw   *bytes.Buffer
 		o           imagebuild.Options
@@ -72,6 +168,11 @@ var _ = Describe("the Dockerfile frontend check (CS-IMG-079)", func() {
 
 	BeforeEach(func() {
 		fake = &execx.Fake{}
+		// The frontend image's local copy: none, unless a test says otherwise.
+		localImage = noSuchImage
+		fake.OnFunc("docker image inspect --format {{json .RepoDigests}}", func(c execx.Cmd) (string, error) {
+			return localImage(c)
+		})
 		fake.On("docker image inspect", "", execx.Fail(1)) // no image: build
 		builds = 0
 		fake.OnFunc("docker build -t ", func(execx.Cmd) (string, error) { builds++; return "", nil })
@@ -130,7 +231,15 @@ var _ = Describe("the Dockerfile frontend check (CS-IMG-079)", func() {
 			Entry("after an unknown key", "# author=me\n# syntax=docker/dockerfile:1.0\n"),
 			Entry("the second of two syntax lines", "# syntax=docker/dockerfile:1.1\n# syntax=docker/dockerfile:1.0\n"),
 			Entry("after another frontend's syntax line", "# syntax=registry.example.com/f:2\n# syntax=docker/dockerfile:1.0\n"),
+			Entry("the 0.9 frontend", "# syntax=docker/dockerfile:0.9\n"),
+			Entry("a new tag pinned to an old image's digest", "# syntax=docker/dockerfile:1.7@sha256:653ad79c9cd2fe8105290b61bc0f261c6f73a9e9cb1780bdb529c396e04f9655\n"),
+			Entry("Docker Hub under another host name", "# syntax=registry.hub.docker.com/docker/dockerfile:1.0\n"),
+			Entry("a mirror of Docker Hub", "# syntax=mirror.gcr.io/docker/dockerfile:1.0\n"),
 		)
+
+		It("CS-IMG-079: a Dockerfile in the JSON directive form naming an old pin is refused", func() {
+			refused(ensureContent(`{"syntax": "docker/dockerfile:1.0"}`+"\n", proj))
+		})
 
 		It("CS-IMG-079: two syntax lines with no old pin but another frontend warn once", func() {
 			Expect(ensureContent("# syntax=docker/dockerfile:1.1\n# syntax=registry.example.com/f:2\n"+dockerfileB, proj)).To(Succeed())
@@ -195,6 +304,9 @@ var _ = Describe("the Dockerfile frontend check (CS-IMG-079)", func() {
 			Entry("1.1-experimental", "docker/dockerfile:1.1-experimental"),
 			Entry("no tag", "docker/dockerfile"),
 			Entry("docker.io, 1.7", "docker.io/docker/dockerfile:1.7"),
+			Entry("1.7-labs", "docker/dockerfile:1.7-labs"),
+			Entry("labs", "docker/dockerfile:labs"),
+			Entry("docker/dockerfile-upstream at master", "docker/dockerfile-upstream:master"),
 		)
 
 		DescribeTable("CS-IMG-079: any other frontend gets one WARNING line, and the build goes on",
@@ -208,8 +320,12 @@ var _ = Describe("the Dockerfile frontend check (CS-IMG-079)", func() {
 				Expect(lines[0]).To(ContainSubstring(".claude-sandbox/env files are kept out of the build context only if that frontend honours Dockerfile.dockerignore"))
 			},
 			Entry("another registry", "registry.example.com/team/frontend:2"),
-			Entry("docker/dockerfile-upstream", "docker/dockerfile-upstream:master"),
+			Entry("docker/dockerfile-upstream at a commit tag", "docker/dockerfile-upstream:20190619-ssh"),
 			Entry("docker/dockerfile by digest alone", "docker/dockerfile@sha256:0123456789abcdef"),
+			// A digest decides what is pulled and only today's old manifests
+			// are listed, so an unlisted one may be an untagged old image.
+			Entry("docker/dockerfile:1.7 beside an unlisted digest", "docker/dockerfile:1.7@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+			Entry("docker/dockerfile at an unknown tag", "docker/dockerfile:nightly"),
 		)
 
 		It("CS-IMG-079: a control character in another frontend's name never reaches the terminal", func() {
@@ -226,6 +342,168 @@ var _ = Describe("the Dockerfile frontend check (CS-IMG-079)", func() {
 					Expect(l).NotTo(ContainSubstring("--build-arg"))
 				}
 			}
+		})
+	})
+
+	Context("the daemon's local copy of a silent-class frontend (BuildKit prefers it)", func() {
+		const oldList = "653ad79c9cd2fe8105290b61bc0f261c6f73a9e9cb1780bdb529c396e04f9655"
+		const modern = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+		inspects := func() int {
+			n := 0
+			for _, l := range fake.CommandLines() {
+				if strings.Contains(l, "docker image inspect --format {{json .RepoDigests}}") {
+					n++
+				}
+			}
+			return n
+		}
+
+		Context("with .claude-sandbox/env in the context", func() {
+			BeforeEach(func() { write(envFile, "TOKEN=secret\n") })
+
+			It("CS-IMG-079: the inspect asks for the repo digests and the caps label, unit-separated", func() {
+				Expect(ensure("docker/dockerfile:1.7", proj)).To(Succeed())
+				var args []string
+				for _, c := range fake.Calls {
+					if len(c.Args) > 3 && c.Args[0] == "image" && strings.HasPrefix(c.Args[3], "{{json .RepoDigests}}") {
+						args = c.Args
+					}
+				}
+				Expect(args).To(Equal([]string{"image", "inspect", "--format",
+					"{{json .RepoDigests}}\x1f{{index .Config.Labels \"moby.buildkit.frontend.caps\"}}", "docker/dockerfile:1.7"}))
+			})
+
+			It("CS-IMG-079: a local copy holding an old image's digest is refused, naming the local copy and its remedies", func() {
+				localImage = func(c execx.Cmd) (string, error) {
+					Expect(c.Args[len(c.Args)-1]).To(Equal("docker/dockerfile:latest"))
+					return `["docker/dockerfile@sha256:` + oldList + `"]` + "\x1f\n", nil
+				}
+				err := ensure("docker/dockerfile:latest", proj)
+				refused(err)
+				msg := err.Error()
+				Expect(msg).To(ContainSubstring(`"docker/dockerfile:latest"`))
+				Expect(msg).To(ContainSubstring("this Docker daemon holds an old copy of docker/dockerfile:latest under that tag"))
+				Expect(msg).To(ContainSubstring("docker pull docker/dockerfile:latest"))
+				Expect(msg).To(ContainSubstring("docker image rm docker/dockerfile:latest"))
+				Expect(msg).To(ContainSubstring("containerd image store or a docker-container buildx builder"))
+				Expect(msg).To(ContainSubstring(envFile))
+				Expect(msg).NotTo(ContainSubstring("pins the Dockerfile frontend"))
+				Expect(msg).NotTo(ContainSubstring("raise the pin"))
+			})
+
+			It("CS-IMG-079: an old pin's refusal still says to raise the pin", func() {
+				err := ensure("docker/dockerfile:1.0", proj)
+				refused(err)
+				Expect(err.Error()).To(ContainSubstring("pins the Dockerfile frontend"))
+				Expect(err.Error()).NotTo(ContainSubstring("docker image rm"))
+			})
+
+			It("CS-IMG-079: a ref named twice is inspected once", func() {
+				Expect(ensureContent("# syntax=docker/dockerfile:1.7\n# syntax=docker/dockerfile:1.7\n"+dockerfileB, proj)).To(Succeed())
+				Expect(inspects()).To(Equal(1))
+			})
+
+			It("CS-IMG-079: no local copy stays silent (BuildKit pulls what the registry names)", func() {
+				Expect(ensure("docker/dockerfile:experimental", proj)).To(Succeed())
+				Expect(builds).To(Equal(1))
+				Expect(errw.String()).To(BeEmpty())
+				Expect(inspects()).To(Equal(1))
+			})
+
+			It("CS-IMG-079: a local copy with unlisted digests and the caps label (1.2 or later) stays silent", func() {
+				localImage = func(execx.Cmd) (string, error) {
+					return `["docker/dockerfile@sha256:` + modern + `","mirror.example/docker/dockerfile@sha256:` + modern + `"]` +
+						"\x1fmoby.buildkit.frontend.inputs,moby.buildkit.frontend.subrequests\n", nil
+				}
+				Expect(ensure("docker/dockerfile:1.7", proj)).To(Succeed())
+				Expect(builds).To(Equal(1))
+				Expect(errw.String()).To(BeEmpty())
+			})
+
+			DescribeTable("CS-IMG-079: an inspect that cannot tell warns, never silent",
+				func(answer func(execx.Cmd) (string, error)) {
+					localImage = answer
+					Expect(ensure("docker/dockerfile:1.7", proj)).To(Succeed())
+					Expect(builds).To(Equal(1))
+					Expect(strings.Count(errw.String(), "WARNING:")).To(Equal(1))
+					Expect(errw.String()).To(ContainSubstring(`"docker/dockerfile:1.7"`))
+				},
+				Entry("an inspect error", func(c execx.Cmd) (string, error) {
+					io.WriteString(c.Stderr, "Cannot connect to the Docker daemon\n")
+					return "", execx.Fail(1)
+				}),
+				Entry("an error with no stderr", func(execx.Cmd) (string, error) { return "", execx.Fail(1) }),
+				// An old pull whose manifest no tag names any more: its digest
+				// is not on the list, and it has no caps label.
+				Entry("an unlisted digest with no caps label", func(execx.Cmd) (string, error) {
+					return `["docker/dockerfile@sha256:` + modern + `"]` + "\x1f\n", nil
+				}),
+				Entry("an unlisted digest with a blank caps label", func(execx.Cmd) (string, error) {
+					return `["docker/dockerfile@sha256:` + modern + `"]` + "\x1f  \n", nil
+				}),
+				Entry("no repo digest (a local build or tag), even with the caps label", func(execx.Cmd) (string, error) {
+					return "[]\x1fmoby.buildkit.frontend.inputs\n", nil
+				}),
+				Entry("null", func(execx.Cmd) (string, error) { return "null\x1fx\n", nil }),
+				Entry("no separator", func(execx.Cmd) (string, error) {
+					return `["docker/dockerfile@sha256:` + modern + `"]` + "\n", nil
+				}),
+				Entry("unreadable output", func(execx.Cmd) (string, error) { return "garbage", nil }),
+			)
+
+			DescribeTable("CS-IMG-079: an unconfirmed local copy warns about the copy, with its remedies",
+				func(answer func(execx.Cmd) (string, error)) {
+					localImage = answer
+					Expect(ensure("docker/dockerfile:1.7", proj)).To(Succeed())
+					Expect(builds).To(Equal(1))
+					w := errw.String()
+					Expect(strings.Count(w, "WARNING:")).To(Equal(1))
+					Expect(w).To(ContainSubstring("this Docker daemon holds a local copy of docker/dockerfile:1.7 whose version could not be confirmed; BuildKit prefers it, and if it predates docker/dockerfile 1.1 the build sends " + envFile))
+					Expect(w).To(ContainSubstring("`docker pull docker/dockerfile:1.7` or `docker image rm docker/dockerfile:1.7` clears this."))
+					Expect(w).NotTo(ContainSubstring("only if that frontend honours"))
+				},
+				Entry("unlisted digests, no caps label", func(execx.Cmd) (string, error) {
+					return `["docker/dockerfile@sha256:` + modern + `"]` + "\x1f\n", nil
+				}),
+				Entry("no repo digest", func(execx.Cmd) (string, error) { return "[]\x1fx\n", nil }),
+			)
+
+			DescribeTable("CS-IMG-079: an inspect that fails keeps the generic warning, with no local-copy remedy",
+				func(answer func(execx.Cmd) (string, error)) {
+					localImage = answer
+					Expect(ensure("docker/dockerfile:1.7", proj)).To(Succeed())
+					Expect(errw.String()).To(ContainSubstring("only if that frontend honours Dockerfile.dockerignore"))
+					Expect(errw.String()).NotTo(ContainSubstring("docker image rm"))
+				},
+				Entry("an error", func(execx.Cmd) (string, error) { return "", execx.Fail(1) }),
+				Entry("unreadable output", func(execx.Cmd) (string, error) { return "garbage", nil }),
+			)
+
+			It("CS-IMG-079: an inspect that hangs is cut at its bound and warns", func() {
+				defer imagebuild.SetFrontendInspectTimeout(50 * time.Millisecond)()
+				fake.OnHang("docker image inspect --format {{json .RepoDigests}}")
+				Expect(ensure("docker/dockerfile:1.7", proj)).To(Succeed())
+				Expect(strings.Count(errw.String(), "WARNING:")).To(Equal(1))
+			})
+
+			It("CS-IMG-079: an old pin refuses without asking the daemon", func() {
+				refused(ensure("docker/dockerfile:1.0", proj))
+				Expect(inspects()).To(Equal(0))
+			})
+
+			It("CS-IMG-079: another frontend is not inspected", func() {
+				Expect(ensure("registry.example.com/team/frontend:2", proj)).To(Succeed())
+				Expect(inspects()).To(Equal(0))
+			})
+		})
+
+		It("CS-IMG-079: with no env file in the context the daemon is not asked", func() {
+			localImage = func(execx.Cmd) (string, error) {
+				return `["docker/dockerfile@sha256:` + oldList + `"]` + "\x1f\n", nil
+			}
+			Expect(ensure("docker/dockerfile:latest", proj)).To(Succeed())
+			Expect(errw.String()).To(BeEmpty())
+			Expect(inspects()).To(Equal(0))
 		})
 	})
 
