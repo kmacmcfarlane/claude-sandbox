@@ -169,6 +169,15 @@ type Inputs struct {
 	// out-of-band rebuild registers as drift (CS-SESS-023).
 	ImageID string
 
+	// Timezone is the "-e TZ=" value ("" passes none) and TimezoneLabel the
+	// claude-sandbox.timezone label ("" renders as none), both resolved ONCE
+	// by the caller (launch.ResolveTimezone, CS-LNCH-216). Build only renders
+	// them (CS-LNCH-217): it reads no host file, so a drift check's would-be
+	// build (which leaves both empty) and a re-pick's re-Build stay silent.
+	// Neither is hashed.
+	Timezone      string
+	TimezoneLabel string
+
 	// CLI host-access overrides (nil = not passed).
 	CLISSH, CLIGit, CLIDockerSocket, CLIAWS *bool
 	CLIPackageCaches                        *bool
@@ -240,7 +249,9 @@ const LabelContinue = "claude-sandbox.continue"
 // HeadlessEnv is the exact list of variables a headless launch forwards from
 // its own environment (CS-LNCH-063): what the Claude Agent SDK and Paseo set
 // for the claude process they spawn. It is a list of names, never a prefix: a
-// Paseo daemon's environment can hold PASEO_PASSWORD.
+// Paseo daemon's environment can hold PASEO_PASSWORD. It governs forwarded
+// names only: a value the launcher resolves itself, such as "-e TZ=<zone>"
+// (CS-LNCH-213), is not forwarded from the environment.
 var HeadlessEnv = []string{
 	"CLAUDE_CODE_ENTRYPOINT",
 	"CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING",
@@ -847,6 +858,17 @@ func Build(in Inputs) (*Plan, error) {
 	p.EnvFlags = append(p.EnvFlags, term.CreateEnv(passive)...)
 	p.Terminal = term.Label(passive)
 	p.Labels = append(p.Labels, LabelTerminal+"="+p.Terminal)
+
+	// CS-LNCH-213/217: the container's time zone, resolved by the caller.
+	// After the fingerprint, and neither EnvFlags nor labels are hashed.
+	if in.Timezone != "" {
+		p.EnvFlags = append(p.EnvFlags, TimezoneVar+"="+in.Timezone)
+	}
+	tzLabel := in.TimezoneLabel
+	if tzLabel == "" {
+		tzLabel = TimezoneLabelNone
+	}
+	p.Labels = append(p.Labels, LabelTimezone+"="+tzLabel)
 
 	return p, nil
 }

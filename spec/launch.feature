@@ -1838,7 +1838,9 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
   Scenario: CS-LNCH-063 Headless forwards an exact env allowlist, never a wildcard
     # The daemon's env can hold secrets such as PASEO_PASSWORD, so no prefix
     # (PASEO_*, CLAUDE_*) is ever forwarded. Bare "-e NAME" keeps values out
-    # of argv; docker reads them from the launcher's environment.
+    # of argv; docker reads them from the launcher's environment. The list
+    # governs forwarded NAMES only: a resolved value the launcher computes
+    # itself, such as "-e TZ=<zone>" (CS-LNCH-213), is not a forwarded name.
     When a headless launch runs
     Then each of CLAUDE_CODE_ENTRYPOINT, CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING,
       CLAUDE_AGENT_SDK_VERSION, CLAUDE_AGENT_SDK_CLIENT_APP,
@@ -3212,3 +3214,96 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       sees the docker client
     And --detach takes no lease: nobody is attached
     And inside a sandbox nothing is written (its state root is container-local)
+
+  # ---- host time zone (plan host-timezone 00..02; work item
+  # sandboxes-inherit-the-host-s-timezone-by-5dbe) ----
+  # Host parity: host claude reads the host's zone, while the base image is
+  # UTC (/etc/localtime -> Etc/UTC), so a US evening session saw tomorrow's
+  # date, +0000 commits and UTC logs. Isolation cost: the host's zone becomes
+  # visible to the session (a small fingerprinting detail), bounded by the off
+  # switch; no host file or path is mounted.
+
+  Scenario: CS-LNCH-213 Every create path gets -e TZ=<host zone>, never a zone file mount
+    Given the host's zone resolves (CS-LNCH-214) and nothing outranks it (CS-LNCH-216)
+    When any launch creates a container (interactive, [n], --detach, --branch,
+      [b], headless, ralph, a tmux restore resume)
+    Then its docker create carries "-e TZ=<value>", a resolved value (never a
+      bare forwarded name, so headless's CS-LNCH-063 allowlist is unchanged)
+    And no -v ever names /etc/localtime or /etc/timezone
+    # runc resolves the destination link inside the rootfs, so a bind of the
+    # host's /etc/localtime lands on /usr/share/zoneinfo/Etc/UTC and corrupts
+    # UTC for every program, while Node/Bun (Claude Code) read the link name
+    # and still show UTC (measured 2026-10-27).
+
+  Scenario: CS-LNCH-214 The host's zone is resolved in a fixed order without a subprocess
+    When the host default applies
+    Then the launcher's TZ, when set and non-empty, is used first:
+      | TZ                                     | value                 |
+      | Europe/Berlin                          | Europe/Berlin         |
+      | :America/Chicago                       | America/Chicago       |
+      | CST6CDT,M3.2.0,M11.1.0                 | CST6CDT,M3.2.0,M11.1.0 |
+      | :/usr/share/zoneinfo/Europe/Berlin     | Europe/Berlin (nothing read) |
+      | /usr/share/zoneinfo/posix/Asia/Tokyo   | Asia/Tokyo            |
+      | :/etc/localtime                        | the link walk's name  |
+    And a path TZ (/... or :/..., the colon dropped) is taken from its text when
+      it contains /zoneinfo/ (the part after the last one, a leading posix/ or
+      right/ stripped); else the link walk runs on it: Readlink, a text
+      containing /zoneinfo/ names the zone, else a relative text is resolved
+      against the link's directory and read next, at most 4 Readlinks; a
+      non-link, a read error or the cap leaves it unresolved
+    And an unresolved /etc/localtime path goes on to /etc/timezone; any other
+      unresolved path is unknown
+    When TZ is unset or empty
+    Then the link walk runs on /etc/localtime (Fedora's relative link, Debian,
+      macOS /var/db/timezone/zoneinfo/X, NixOS /etc/zoneinfo/X in one hop,
+      Ubuntu Core's two hops)
+    And else the first line of /etc/timezone, read as a regular file only
+    And else the zone is unknown: no -e TZ, label "unknown", and one
+      "Note: could not tell the host's time zone (<why>); the sandbox runs in
+      UTC. Set timezone: <Area/City> in .claude-sandbox/config.yaml."
+
+  Scenario: CS-LNCH-215 Every value is shape-checked; a bad key or env value exits 2
+    Then a value must be ASCII [A-Za-z0-9_+-/:.,<>], at most 128 bytes, with no
+      ".." component and no leading "-"; the zone's existence is not checked
+      (a bogus name breaks the sandbox as it breaks host claude)
+    And a host value that fails is unknown, with the Note naming it printably
+    And a timezone key or CLAUDE_SANDBOX_TIMEZONE value that fails, or names a
+      path (/... or :/...), exits 2 naming the variable or the key's file,
+      before any image work (the CS-LNCH-112 precedent)
+
+  Scenario: CS-LNCH-216 Precedence, the off set and the Notes
+    Then the choice is CLAUDE_SANDBOX_TIMEZONE > the timezone key > host, with
+      "host" also accepted explicitly, and none / off / false / 0 / no (any
+      case) meaning off; there is no CLI flag
+    And what the container gets is decided in this order:
+      | 1 | an env file defining TZ (the CS-LNCH-108 reader; a bare TZ line counts when the launcher has TZ) | no -e; label env-file |
+      | 2 | an explicit value (key or env)                                                                 | -e TZ=<value>          |
+      | 3 | the run image's Config.Env defining TZ (only for the host default)                             | no -e; label image     |
+      | 4 | the host's zone (CS-LNCH-214)                                                                   | -e TZ=<host zone>      |
+    And off passes nothing (label none), keeping the image's own zone
+    And an explicit value that an env file outranks prints one
+      "Note: timezone: <v> (<source>) is overridden by TZ in <env file>; the sandbox uses that."
+    And an explicit value over an image TZ prints one
+      "Note: timezone: <v> (<source>) overrides TZ set by the image."
+    And the host default under an env-file or image TZ is silent, as is off
+      under an image TZ
+    And the choice is validated in launchWith before any image work; the
+      image's TZ is read in the run-image inspect that already gives the
+      image ID (no extra docker call); the zone is resolved once, right after
+      that inspect, and every Note prints there once (stderr for headless)
+
+  Scenario: CS-LNCH-217 The zone is not drift; the label records what the container got
+    Then neither the value nor the key is hashed: the value is derived from the
+      launcher's environment (whoever launches, from which shell), the
+      terminal identity's reason (CS-LNCH-181), so a key edit or a zone change
+      is not reported on attach or join; [n] applies it
+    And every container carries "claude-sandbox.timezone=<v>", one of: the
+      value passed, none (off), env-file, image or unknown; a container that
+      predates this has none
+    And Build only renders Inputs.Timezone and Inputs.TimezoneLabel (it reads
+      no file and prints nothing, so a re-pick's re-Build gives the same argv),
+      and the drift check's would-be build resolves nothing
+    And a join adds no TZ (it inherits the container's); an attach changes
+      nothing; headless and ralph get the value like any create
+    And a container created before this drifts once on attach or join, through
+      the shadow CLAUDE.md's new static time zone bullet; [n] clears it

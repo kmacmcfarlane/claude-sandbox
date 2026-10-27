@@ -1307,7 +1307,7 @@ Override the path with `--runlog-file <path>`.
 
 #### Raw logs (`.claude-sandbox/ralph/runlogs/`)
 
-Every NDJSON line from Claude is written verbatim to `.claude-sandbox/ralph/runlogs/rawlog_<YYYYMMDDHHmmSS>_iter<N>`. A new file is created for each iteration, so data from watchdog-killed or timed-out iterations is preserved for debugging.
+Every NDJSON line from Claude is written verbatim to `.claude-sandbox/ralph/runlogs/rawlog_<YYYYMMDDHHmmSS>_iter<N>`; the timestamp is UTC, whatever the container's [time zone](#time-zone) (like `runlog.json`, so names never repeat or sort out of order across a DST change). A new file is created for each iteration, so data from watchdog-killed or timed-out iterations is preserved for debugging.
 
 Lines are flushed synchronously, so the raw log is complete even if the process is interrupted.
 
@@ -1830,6 +1830,51 @@ copy, an `npm` postinstall). It cannot read the clipboard, reach a display, or c
 - Existing containers drift once after upgrading: the tools image (it gains the `wl-copy` link)
   and the config hash (`hostClipboard=on`) change.
 
+#### Time zone
+
+**The host's zone by default**, so dates, logs and commits match `claude` run outside the sandbox
+(the image itself is UTC: a US evening session used to see tomorrow's date and `+0000` commits).
+Every new container (interactive, `--detach`, `--branch`, headless, ralph, a restore) gets one
+`-e TZ=<zone>`. The launcher reads the zone without a subprocess: your `TZ` when it is set (a
+name, a POSIX string such as `CST6CDT`, or a path such as `:/etc/localtime` or
+`:/usr/share/zoneinfo/Europe/Berlin`, which is turned into its zone name), else the name the
+`/etc/localtime` link points at (Fedora, Debian/Ubuntu, Arch, macOS, NixOS; a few links are
+followed), else `/etc/timezone`. When none of them names a zone, the launch prints one `Note:` and
+the sandbox stays UTC.
+
+```yaml
+timezone: host          # the default
+timezone: Europe/Berlin # a fixed zone (UTC, a POSIX string) — a name, never a file path
+timezone: none          # pass nothing: the image's own zone (also off/false/0/no)
+```
+
+`CLAUDE_SANDBOX_TIMEZONE` takes the same values for one launch and beats the key. What wins:
+
+1. an env file defining `TZ` (docker's `--env-file`, so the launcher adds no `-e`);
+2. an explicit `timezone:` or `CLAUDE_SANDBOX_TIMEZONE` value;
+3. a child image's `ENV TZ=…` (read in the image inspect the launch already makes);
+4. the host's zone.
+
+An explicit value that loses to an env file, or beats an image's `ENV TZ`, prints one `Note:`.
+A child Dockerfile's `RUN ln -sf /usr/share/zoneinfo/X /etc/localtime` cannot be seen and `TZ`
+overrides it: set `timezone: none` (keep the image's file) or `timezone: X`.
+
+- **No `/etc/localtime` mount.** Bind-mounting the host's file is wrong in two ways: docker lands
+  it on the image's `/usr/share/zoneinfo/Etc/UTC` (the link target), which corrupts UTC for every
+  program, and Node/Bun — Claude Code — read the link's name and still show UTC.
+- **`/etc/timezone` and the `/etc/localtime` link still say UTC** inside the sandbox; `TZ` wins
+  over both for glibc, Go, Python, git and Node. Check with `echo $TZ` or `date`.
+- **Angle-bracket POSIX strings** (`<+0530>-5:30`) are honoured by glibc but not by ICU, so Claude
+  Code's own zone differs from `date`'s there — exactly as for `claude` on the host.
+- **Not drift.** The value comes from whoever launches (their shell's `TZ`, their host), so it is
+  not hashed: a key edit or a zone change is not reported on `--attach`/`--join`, and a join or
+  attach keeps the container's zone. `[n]` applies the new one. The container carries
+  `claude-sandbox.timezone=<zone>` (or `none`, `env-file`, `image`, `unknown`) for `docker inspect`.
+- **One drift per running container** after upgrading: the shadow `CLAUDE.md` gains a short time
+  zone note. `[n]` clears it, and the new container gets the zone.
+- **Isolation cost:** the host's zone becomes visible to the session and anything it sends out (a
+  small fingerprinting detail). No host file or path is mounted; `timezone: none` turns it off.
+
 #### Host access
 
 Control which host resources are mounted into the container. Each can be enabled via CLI flags, environment variables, or YAML. Precedence: CLI flag > env var > YAML.
@@ -2067,6 +2112,7 @@ If no `.claude-sandbox/Dockerfile` is found anywhere up to `/`, the launcher war
 | `CLAUDE_SANDBOX_HOST_CLIPBOARD` | (unset: on) | `0`/`false`/`no` turns the [host clipboard bridge](#host-clipboard-bridge) off for one launch (as `hostClipboard: false`); `1`/`true`/`yes` turns it on over a config `false` |
 | `CLAUDE_SANDBOX_CLIPBOARD_DISPLAY` | (unset) | the bridge's display target from this shell: `none`, `x:<DISPLAY>` or `<DISPLAY>`, `wayland:<name or socket>` (read from the launching shell only, never an env file) |
 | `CLAUDE_SANDBOX_NETWORK` | (unset: on) | New containers join the `claude-sandbox` Docker network by default, whose DNS goes through the host's resolver (see [Container network and DNS](#container-network-and-dns)); `0`/`false`/`no` turns it off for the launch (overriding a config `true` or the default, like `sandboxNetwork: false`); `1`/`true`/`yes` overrides a config `false` |
+| `CLAUDE_SANDBOX_TIMEZONE` | (unset: `timezone`, else `host`) | The containers' `TZ` (see [Time zone](#time-zone)): `host`, a zone such as `UTC` or `Europe/Berlin`, or `none`/`off`/`false`/`0`/`no` to pass nothing; overrides a config `timezone` key; an env file's `TZ` still wins |
 | `CLAUDE_SANDBOX_OOM_SCORE_ADJ` | (unset: `oomScoreAdj`, else 500) | The containers' `--oom-score-adj`, -1000..1000; overrides a config `oomScoreAdj` key (see [When the host runs out of memory](#when-the-host-runs-out-of-memory)) |
 | `CLAUDE_SANDBOX_BASE_ONLY` | (unset) | Set to `1` or `true` to skip child Dockerfile and use base image only |
 | `CLAUDE_SANDBOX_NO_UPDATE_CHECK` | (unset) | Set to `1` or `true` to skip Claude Code version check at launch |

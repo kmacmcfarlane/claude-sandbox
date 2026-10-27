@@ -128,6 +128,12 @@ Feature: Ralph loop lifecycle (CS-RLP)
   Scenario: CS-RLP-014 Per-iteration raw log naming
     Then each iteration writes <raw-log-base>_<YYYYMMDDHHmmSS>_iter<N>
 
+  Scenario: CS-RLP-032 Raw-log names are UTC whatever TZ holds
+    Given the container's TZ is the host's zone (CS-LNCH-213)
+    Then the <YYYYMMDDHHmmSS> of a raw-log name is the loop clock's time in UTC
+      (rawLogName formats now.UTC()), as runlog.json's times already are
+    # Local names would repeat and sort out of order across the autumn DST hour.
+
   Scenario: CS-RLP-015 Hard iteration timeout wraps each iteration
     Then the iteration is killed with TERM (KILL after 30s grace) after
       --iteration-timeout seconds (default 7200)

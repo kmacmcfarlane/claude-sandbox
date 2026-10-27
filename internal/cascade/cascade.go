@@ -175,6 +175,13 @@ type Config struct {
 	// the APPLIED value is hashed explicitly by the drift fingerprint, so an
 	// unset key and an explicit default hash alike.
 	OOMScoreAdj *int `yaml:"oomScoreAdj" json:"-"`
+
+	// Timezone is the container's TZ (CS-LNCH-213..217, CS-CASC-050): nil or
+	// "host" passes the host's zone, the off set (none/off/false/0/no) passes
+	// nothing, any other value is an explicit TZ. Text, so yaml's false/no
+	// arrive as words (the merge's map round trip). json:"-": the value is
+	// derived from the launcher's environment and never hashed (CS-LNCH-217).
+	Timezone *string `yaml:"timezone" json:"-"`
 }
 
 // ConfigFile is one config.yaml as read at launch (CS-CASC-046): the launch

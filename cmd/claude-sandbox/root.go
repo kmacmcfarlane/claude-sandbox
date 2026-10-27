@@ -110,6 +110,13 @@ type Env struct {
 	// os.Hostname, likewise panicking under go test.
 	ClipboardLookPath func(string) (string, error)
 	Hostname          func() (string, error)
+	// Readlink and EtcTimezonePath are the host's time zone reads
+	// (CS-LNCH-214): the link walk from /etc/localtime (or a path TZ) and
+	// /etc/timezone. nil / "" mean os.Readlink and /etc/timezone, and panic
+	// under go test when a resolution reaches them (a path TZ can name any
+	// file; the MachineIDPath rule). Fixtures point both at scratch.
+	Readlink        func(string) (string, error)
+	EtcTimezonePath string
 
 	// restore is set only on the Env copy a "tmux restore" resumes with
 	// (CS-TMUX-058, plan 10 § 5.2): the pane's pending row to put back and
@@ -160,6 +167,35 @@ func (e *Env) stateDir() string {
 	}
 	_, _, _, home := hostIdentity(e.Getenv)
 	return hostdirs.StateRoot(home, e.Getenv)
+}
+
+// timezoneSources wires ResolveTimezone's host reads (CS-LNCH-214) from the
+// Env: the launcher's environment, Readlink and /etc/timezone. The seams are
+// resolved lazily, so a launch whose zone needs no host file never touches
+// them.
+func (e *Env) timezoneSources() launch.TimezoneSources {
+	return launch.TimezoneSources{
+		LookupEnv: e.lookupEnv,
+		Readlink: func(p string) (string, error) {
+			if e.Readlink != nil {
+				return e.Readlink(p)
+			}
+			if testing.Testing() {
+				panic("a test resolved the host's time zone through the real os.Readlink; set Env.Readlink (or CLAUDE_SANDBOX_TIMEZONE=none)")
+			}
+			return os.Readlink(p)
+		},
+		ReadEtcTimezone: func() ([]byte, error) {
+			p := e.EtcTimezonePath
+			if p == "" {
+				if testing.Testing() {
+					panic("a test read the real /etc/timezone; set Env.EtcTimezonePath to a scratch file (or CLAUDE_SANDBOX_TIMEZONE=none)")
+				}
+				p = "/etc/timezone"
+			}
+			return cascade.ReadRegularFile(p)
+		},
+	}
 }
 
 // lookupEnv is Env.LookupEnv with the Getenv fallback.
@@ -1109,6 +1145,13 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 	if err != nil {
 		return exitErr(2, "Error: %v", err)
 	}
+	// CS-LNCH-215: the timezone key and CLAUDE_SANDBOX_TIMEZONE are checked
+	// here, before any image work, as oomScoreAdj is; nothing of the host is
+	// read until the zone is resolved after the run-image inspect.
+	tzChoice, err := launch.TimezoneChoice(env.Getenv, cfg, cascade.KeySourceOf(configSnap, "timezone"))
+	if err != nil {
+		return exitErr(2, "Error: %v", err)
+	}
 	if adj < 0 {
 		fmt.Fprintf(env.Err, "WARNING: oomScoreAdj %d is below 0: this sandbox is shielded from the host's OOM killer, which will prefer host processes (the desktop) over it.\n", adj)
 	}
@@ -1264,6 +1307,14 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 	uid, gid, uname, home := hostIdentity(env.Getenv)
 	// CS-TMUX-013: what a restore would replay, and what it would only name.
 	rec := launchRecord(env, f)
+	// CS-LNCH-216: the run-image inspect that gives the image ID also says
+	// whether the image's Config.Env sets TZ (one docker call, as before);
+	// the zone is resolved once, here, and its Note printed once.
+	imageID, imageTZ := imagebuild.ImageIdentity(env.Runner, image)
+	tz := launch.ResolveTimezone(tzChoice, envSnap, imageTZ, env.timezoneSources())
+	if tz.Note != "" {
+		fmt.Fprintln(env.Out, tz.Note)
+	}
 	in := launch.Inputs{
 		ProjectDir: projectDir, Home: home,
 		HostUID: uid, HostGID: gid, HostUser: uname,
@@ -1273,7 +1324,9 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 		CLISSH: f.SSH, CLIGit: f.Git, CLIDockerSocket: f.DockerSocket, CLIAWS: f.AWS,
 		CLIPackageCaches: f.PackageCaches,
 		Cfg:              cfg, EnvFiles: envFiles, Env: envSnap, ImageName: image,
-		ImageID:  imagebuild.ImageID(env.Runner, image),
+		ImageID: imageID,
+		// CS-LNCH-213/217: rendered by Build, never hashed.
+		Timezone: tz.Value, TimezoneLabel: tz.Label,
 		Instance: instance,
 		Worktree: worktree,
 		Linked:   linked,

@@ -136,6 +136,11 @@ older `.claude-sandbox/agent/LSP_TOOLS.md`) tells you to run it, run the
   interpreter that built them. The first hook run in a fresh cache installs
   its environments; that is expected, not a failure. Do not point
   `PRE_COMMIT_HOME` back at `~/.cache/pre-commit`.
+- **Time zone.** The zone comes from `TZ`: the host's by default, or the
+  project's `timezone:` or env-file `TZ`. With `TZ` unset, the zone is the
+  image's own (UTC unless a child image set one). `/etc/timezone` and the name
+  of the `/etc/localtime` link keep the image's value, so read `echo $TZ` or
+  `date`, not those files.
 - `/home/claude` is symlinked to the host user's home directory (e.g. `/home/rt`). Both paths work. Build-time files from the Dockerfile are relocated here automatically.
 - **The scratchpad survives the container.** The launcher points
   `CLAUDE_CODE_TMPDIR` inside the host-mounted Claude config directory, so the

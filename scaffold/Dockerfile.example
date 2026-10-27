@@ -31,6 +31,13 @@
 #   /home/claude/.claude, which the entrypoint moves into ~/.claude, and the
 #   cap's COPY --link onto /home/claude/.local replaces your install anyway.
 #
+# TIME ZONE:
+#   The launcher passes the host's zone as TZ (timezone: in config.yaml). An
+#   "ENV TZ=..." here is kept under that default; a
+#   "RUN ln -sf /usr/share/zoneinfo/X /etc/localtime" is NOT seen and TZ
+#   overrides it: set "timezone: none" (keep this image's file) or
+#   "timezone: X" in config.yaml instead.
+#
 # CACHE MOUNTS — share the base image's download caches:
 #   The base declares BuildKit cache mounts with fixed ids. Reuse the same ids
 #   here and your apt/pip/npm/go downloads are served from the same cache

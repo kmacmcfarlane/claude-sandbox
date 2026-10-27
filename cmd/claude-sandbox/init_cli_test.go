@@ -41,6 +41,10 @@ func newInitCLI(vars map[string]string) *initCLI {
 		// Key-off, as newCLIFixture (the network is on by default, CS-LNCH-188).
 		c.vars["CLAUDE_SANDBOX_NETWORK"] = "0"
 	}
+	if _, ok := c.vars["CLAUDE_SANDBOX_TIMEZONE"]; !ok {
+		// Off, as newCLIFixture (the host's zone is passed by default, CS-LNCH-213).
+		c.vars["CLAUDE_SANDBOX_TIMEZONE"] = "none"
+	}
 	c.env = &Env{
 		Runner: c.fake, Prompter: c.prompter, Out: &c.out, Err: &c.err,
 		Getenv: func(k string) string { return c.vars[k] },
@@ -55,6 +59,9 @@ func newInitCLI(vars map[string]string) *initCLI {
 		// Nor the real state root (CS-DIR-007).
 		StateDir:   GinkgoT().TempDir(),
 		Executable: func() (string, error) { return "/fake/claude-sandbox", nil },
+		// Nor the real /etc/localtime or /etc/timezone (CS-LNCH-214).
+		Readlink:        func(string) (string, error) { return "", os.ErrInvalid },
+		EtcTimezonePath: filepath.Join(GinkgoT().TempDir(), "no-etc-timezone"),
 	}
 	return c
 }
