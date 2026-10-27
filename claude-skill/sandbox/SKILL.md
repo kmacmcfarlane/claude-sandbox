@@ -161,6 +161,9 @@ mounts:
 ```
 Mounts append down the config cascade. To change an upstream mount (e.g. make it writable), re-declare the same `host` + `container` pair locally with the new settings — it overrides the upstream entry instead of duplicating it.
 
+### Time Zone
+New containers get the host's zone as `-e TZ=<zone>` by default (the image is UTC). Override in `.claude-sandbox/config.yaml` with `timezone: Europe/Berlin` (a zone name, never a path) or turn it off with `timezone: none`; `CLAUDE_SANDBOX_TIMEZONE` does the same for one launch. An env file's `TZ` wins over everything; a child image's `ENV TZ` is kept under the host default (an explicit value beats it). There is no `/etc/localtime` mount: it would overwrite the image's `Etc/UTC` file and Claude Code (Node/Bun) would still show UTC. Inside the sandbox `/etc/timezone` still says UTC — check `echo $TZ` or `date`. Not drift: attach/join keep the container's zone; `[n]` picks up a change.
+
 ### Modifying claude-sandbox itself
 Work spec-first:
 

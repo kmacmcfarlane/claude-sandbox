@@ -159,6 +159,17 @@
 # here, or for one launch with CLAUDE_SANDBOX_HOST_CLIPBOARD=0.
 # hostClipboard: false
 
+# The container's time zone (default: host), passed as TZ so dates, logs and
+# commits match claude outside the sandbox. host = the host's zone (TZ, else
+# /etc/localtime); none (or off/false/0/no) passes nothing, keeping the
+# image's own zone (UTC, or a child image's); any other value is the TZ to
+# use, e.g. UTC or Europe/Berlin (a zone name, not a file path).
+# CLAUDE_SANDBOX_TIMEZONE overrides it for one launch; an env file's TZ wins
+# over both. A child image's ENV TZ is kept under the host default. A child
+# Dockerfile's `ln -sf … /etc/localtime` is overridden by TZ: set none or the
+# zone here.
+# timezone: host
+
 # Disable the Claude Code version check at launch.
 # Also controllable via --no-update-check flag or CLAUDE_SANDBOX_NO_UPDATE_CHECK=1.
 # disableUpdateCheck: false

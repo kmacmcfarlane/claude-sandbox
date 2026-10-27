@@ -68,6 +68,7 @@ type Options struct {
 
 	// Seams (defaulted when nil).
 	Sleep       func(time.Duration)
+	Now         func() time.Time            // the loop clock (raw-log names, CS-RLP-032)
 	Notify      func(msg string)            // Discord; best-effort
 	RunIter     func(l *Loop, iter int) int // runs one iteration, returns exit code
 	Interrupted func() bool                 // polled after each iteration
@@ -99,6 +100,14 @@ type Loop struct {
 	// ReserveClass replaces the pid-class burn before each iteration's claude
 	// (CS-PID-006); nil means the real one.
 	ReserveClass func()
+}
+
+// now is the loop clock: Options.Now, else time.Now.
+func (o *Options) now() time.Time {
+	if o.Now != nil {
+		return o.Now()
+	}
+	return time.Now()
 }
 
 func (o *Options) withDefaults() error {

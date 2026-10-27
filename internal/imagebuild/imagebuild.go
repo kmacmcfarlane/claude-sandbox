@@ -1286,6 +1286,38 @@ func ImageID(r execx.Runner, name string) string {
 	return strings.TrimSpace(out)
 }
 
+// imageIdentitySep separates the ID from the Config.Env lines in
+// ImageIdentity's template.
+const imageIdentitySep = "\x1f"
+
+// ImageIdentity is ImageID plus whether the image's Config.Env defines TZ
+// (CS-LNCH-216), from the SAME single inspect, so a launch (headless probes
+// included) pays no extra docker call. The env values are never kept. The id
+// is the trimmed text before the first separator; output without one is all
+// id, with imageTZ false; an inspect error gives ("", false). The drift check
+// keeps ImageID.
+func ImageIdentity(r execx.Runner, name string) (id string, imageTZ bool) {
+	out, err := r.Output(execx.Cmd{
+		Name:   "docker",
+		Args:   []string{"image", "inspect", "-f", "{{.Id}}" + imageIdentitySep + "{{range .Config.Env}}{{println .}}{{end}}", name},
+		Stderr: io.Discard,
+	})
+	if err != nil {
+		return "", false
+	}
+	head, env, found := strings.Cut(out, imageIdentitySep)
+	if !found {
+		return strings.TrimSpace(out), false
+	}
+	for _, line := range strings.Split(env, "\n") {
+		if strings.HasPrefix(line, "TZ=") {
+			imageTZ = true
+			break
+		}
+	}
+	return strings.TrimSpace(head), imageTZ
+}
+
 // ---- build-input fingerprints (CS-IMG-032..036) ----
 
 // fingerprintVersion prefixes every fingerprint so a change to what one covers

@@ -98,6 +98,10 @@ func newCLIFixture() *cliFixture {
 		// fixture pins it off, and network_cli_test.go deletes this key to
 		// test the default.
 		"CLAUDE_SANDBOX_NETWORK": "0",
+		// The host's time zone is passed by default (CS-LNCH-213); the
+		// fixture pins it off so every other test keeps its argv, and
+		// timezone_cli_test.go deletes this key to test the default.
+		"CLAUDE_SANDBOX_TIMEZONE": "none",
 	}
 	// Never the real /proc (the guards' host check reads it): a scratch tree
 	// with only this namespace's link; a test needing more sets its own.
@@ -119,6 +123,10 @@ func newCLIFixture() *cliFixture {
 		TempRoot:      f.tmp,
 		MachineIDPath: filepath.Join(f.tmp, "no-machine-id"),
 		ProcRoot:      proc,
+		// Nor the real /etc/localtime or /etc/timezone (CS-LNCH-214): no
+		// link and no file, unless a test says otherwise.
+		Readlink:        func(string) (string, error) { return "", os.ErrInvalid },
+		EtcTimezonePath: filepath.Join(f.tmp, "no-etc-timezone"),
 		// Nor the real mountinfo (CS-LNCH-162): no mounts, so an explicit
 		// nested TMPDIR is trusted unless a test says otherwise.
 		MountInfo: func() (string, error) { return "", nil },

@@ -54,6 +54,14 @@ func (l *Loop) reserveClass() {
 // Terminate TERMs the current iteration's process tree (interrupt path).
 func Terminate() { tracker.signal(syscall.SIGTERM) }
 
+// rawLogName is an iteration's raw NDJSON log path (CS-RLP-014): the base,
+// the loop clock's time IN UTC, the iteration. CS-RLP-032: the container's TZ
+// is the host's zone (CS-LNCH-213), and local names would repeat and sort out
+// of order across the autumn DST hour; runlog.json's times are UTC already.
+func rawLogName(base string, now time.Time, iter int) string {
+	return fmt.Sprintf("%s_%s_iter%d", base, now.UTC().Format("20060102150405"), iter)
+}
+
 // runIterationReal launches claude piped through the logstream stages
 // (CS-RLP-011..015) and returns the pipeline exit code (pipefail semantics,
 // 124 on hard timeout).
@@ -75,7 +83,7 @@ func (l *Loop) runIterationReal(iter int, resume bool) int {
 	}
 	defer stderrF.Close()
 
-	rawLog := fmt.Sprintf("%s_%s_iter%d", l.RawLogBase, time.Now().Format("20060102150405"), iter)
+	rawLog := rawLogName(l.RawLogBase, l.now(), iter)
 	ls := filepath.Join(l.RepoRoot, "logstream")
 
 	cmds := []*exec.Cmd{exec.Command(l.ClaudeBin, args...)}

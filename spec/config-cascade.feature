@@ -144,6 +144,16 @@ Feature: Config cascade and env stacking (CS-CASC)
       an explicit same-path entry give identical argv and an identical
       fingerprint (no drift for existing configs)
 
+  Scenario: CS-CASC-050 timezone merges as a scalar and stays out of the config hash
+    Given configs setting "timezone" at more than one level
+    When the cascade is merged (cascade.LoadSnapshot)
+    Then the more-local value wins, as for any scalar
+    And yaml's booleans and numbers arrive as text: unquoted false, FALSE, no,
+      off, none and the quoted "0" all read as the off set (CS-LNCH-216), and
+      UTC or Europe/Berlin keep their text and case
+    And the key is json:"-": it is not part of the merged config the drift
+      fingerprint hashes (CS-LNCH-217)
+
   Scenario: CS-CASC-012 Recognized top-level keys
     Given a merged config setting every supported key
     Then the launcher reads: model, memoryLimit, disableUpdateCheck,

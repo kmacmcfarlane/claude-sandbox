@@ -62,6 +62,12 @@ together.
   never passed through wholesale.
 - Refused env keys (`cascade.RefusedEnvKeys`): an isolation exception — an env
   file never sets loader or shell-startup variables for the root entrypoint.
+- `timezone`: host (parity: every create gets `-e TZ=<host zone>` unless an
+  env file, an explicit value or the image's `ENV TZ` outranks it, headless
+  and ralph included; off with `timezone: none` or
+  `CLAUDE_SANDBOX_TIMEZONE=0`). Isolation cost: the host's zone is visible to
+  the session (a fingerprinting detail); no host file or path is mounted
+  (added 2026-10-27 with the host-timezone feature).
 
 ## Proposed (awaiting operator approval)
 
