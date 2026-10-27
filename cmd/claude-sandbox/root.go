@@ -1218,8 +1218,10 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 		// External parents are pulled at most once per launch, each
 		// outcome kept (CS-IMG-055/056).
 		Pulls: imagebuild.NewPulls(),
-		// CS-IMG-073's fallback makes a private directory here.
+		// CS-IMG-073's child build makes a private directory here.
 		TempRoot: env.TempRoot,
+		// CS-IMG-078: a child build keeps these out of its context.
+		EnvFiles: envFiles,
 	}
 	if err := imagebuild.EnsureBuildKit(imgOpts); err != nil {
 		return exitErr(2, "%s", err.Error())

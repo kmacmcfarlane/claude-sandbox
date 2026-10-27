@@ -368,21 +368,113 @@ Feature: Image build lifecycle (CS-IMG)
 
   Scenario: CS-IMG-073 The child image is built from exactly the checked bytes
     Given a child Dockerfile is in use and the child needs a build
-    Then the build is "docker build -t <tag> <labels> -f - <context>" with the
-      snapshot bytes of CS-IMG-074 on stdin
+    Then the launcher writes the snapshot bytes of CS-IMG-074 0600 into a
+      private temp directory as "Dockerfile", beside a generated
+      "Dockerfile.dockerignore" (CS-IMG-078), builds with
+      "docker build -t <tag> <labels> -f <private dir>/Dockerfile <context>",
+      and removes the directory after the build, whether it succeeded or not
+    And the private name is "Dockerfile" whatever the project's file is
+      called: a name holding "[" or "\" builds, and a name near the file-name
+      length limit still leaves room for the ".dockerignore" suffix
     And a Dockerfile rewritten on disk after the read does not reach the build
-    When a Dockerfile-specific ignore file "<Dockerfile>.dockerignore" exists
-      beside it (stdin carries no file name, so docker could not find it)
-    Then the launcher writes the snapshot bytes 0600 into a private temp
-      directory, beside a copy of that ignore file, builds with
-      "-f <private dir>/<name>", and removes the directory after the build,
-      whether the build succeeded or not
-    And the ignore file is opened like the Dockerfile (non-blocking, regular
+    And an ignore file is opened like the Dockerfile (non-blocking, regular
       files only): a directory, FIFO or other non-regular file there is absent,
-      as BuildKit treats it, and the build uses stdin; only a regular ignore
-      file that cannot be read fails the build naming it
+      as BuildKit treats it; only a regular ignore file that cannot be read
+      fails the build naming it
     # Never the shadow directory (made after the launch lock; builds run
-    # before it) and never the project file.
+    # before it) and never the project file. Always a file, never "-f -":
+    # a Dockerfile on stdin has no name, so BuildKit could find no
+    # Dockerfile-specific ignore file for it, and CS-IMG-078 needs one.
+    # BuildKit reads the -f name as a pattern when it looks for that ignore
+    # file, so the project's own name is never reused.
+
+  Scenario: CS-IMG-078 A child build never sends an env file to BuildKit
+    Given a child Dockerfile is in use and the child needs a build
+    Then the generated "Dockerfile.dockerignore" holds the rules BuildKit would
+      otherwise have used — "<Dockerfile>.dockerignore" beside the Dockerfile
+      when it exists, else "<context>/.dockerignore" when it exists, else none
+      — verbatim, then a newline when they do not end in one, then the env
+      rules LAST, each once, in this order:
+      "**/.claude-sandbox/env" always;
+      "/env" when the context's base name, lexically or symlink-resolved, is
+      .claude-sandbox;
+      "/<path relative to the context>" (pattern characters escaped: every
+      ASCII punctuation character but "/" gets a backslash, so "|", "^", "{",
+      "}" and "]" are literals too) for each cascade env file under the
+      context, lexically or with either side symlink-resolved, the context
+      made absolute first (a relative dockerfileDir counts as one)
+    And so no env file under the context (its root's .claude-sandbox/env, a
+      nested project's, or the context root's own env when the context is a
+      .claude-sandbox directory) reaches the build context, and a "COPY . ..."
+      cannot bake one into a layer — through a frontend that reads
+      Dockerfile.dockerignore; CS-IMG-079 covers the ones that do not
+    And the context is a .claude-sandbox directory when dockerfileDir (or
+      CLAUDE_SANDBOX_DOCKERFILE_DIR) names one, or when the parent walk finds
+      "dockerfile: .claude-sandbox/Dockerfile" in an upper level
+    And a "!" rule in the project's ignore file cannot re-include it: the last
+      matching line decides
+    And nothing is refused or printed: the file is excluded, never warned about
+    And the child fingerprint is unchanged: the env file was never an input,
+      and the ignore rules are not hashed (no child rebuilds for this rule)
+    # BuildKit reads a Dockerfile-specific ignore file INSTEAD of the context's
+    # .dockerignore when both exist (docs.docker.com, "Build context" >
+    # ".dockerignore files" > "Filename and location"), which is why the
+    # generated file copies the context's rules when the Dockerfile has none of
+    # its own. "**" matches zero or more directories, so the first rule covers
+    # the context root too. The first two rules need no list and cover every
+    # place the layout puts an env file; the per-file rules name the files the
+    # launch actually passes, so a context the first two do not foresee still
+    # leaves them out. A path holding a newline, or white space at either end
+    # (BuildKit trims pattern lines), gets no per-file rule; the first two
+    # still apply.
+
+  Scenario: CS-IMG-079 A frontend that ignores Dockerfile.dockerignore never gets an env file silently
+    Given a child Dockerfile is in use and the child needs a build
+    When its bytes (CS-IMG-074) begin with "syntax" parser directives, read
+      as BuildKit reads them and wider where its versions differ: comment
+      lines at the very top only; per line the "#" (or "//") marker is cut
+      (blanks before it tolerated), ANY white space after the marker is
+      trimmed (NBSP, VT and FF included), then "key\s*=\s*value\s*" with the
+      key in any case; the block ends at the first line of another shape (an
+      empty line, a plain comment, an instruction) but goes on past unknown
+      "key=value" keys, as BuildKit before v0.11 did; EVERY syntax line counts
+      (newer BuildKit keeps the first, older the last); each value is cut at
+      its first white space (BuildKit takes the frontend image only up to the
+      first space, the rest is the frontend's command line); a UTF-8 BOM, a
+      "#!" first line, CRLF line ends and "//" directives are read too
+    And the context holds an env file the launch's rules exclude: any
+      .claude-sandbox/env below it, its root "env" when the context is a
+      .claude-sandbox directory, or a cascade env file under it (the
+      resolved context is walked without following symlinks; past 200000
+      entries it counts as holding one)
+    Then a directive (any one of them) naming docker/dockerfile (an optional docker.io/,
+      index.docker.io/ or registry-1.docker.io/ prefix) with tag "1.0" or a
+      tag starting "1.0." or "1.0-" — the frontend that does not read
+      Dockerfile.dockerignore — fails the launch with exit 2 before the build
+      and before any container is created, naming the Dockerfile, the
+      directive, the env file and two remedies: raise the pin to
+      docker/dockerfile:1.1 or later (or drop the syntax line), or build
+      elsewhere (baseOnly: true, or a dockerfileDir whose build context holds
+      no env file)
+    And otherwise, a directive naming any other frontend image (another name,
+      docker/dockerfile-upstream, or docker/dockerfile by digest alone) prints
+      one "WARNING:" line naming the Dockerfile and the frontend and saying
+      .claude-sandbox/env files are kept out of the build context only if
+      that frontend honours Dockerfile.dockerignore, and the build goes on
+    And no directive, or docker/dockerfile at any other tag (1, 1.1 and later,
+      none), builds as CS-IMG-078 says, silently
+    And with no such env file in the context nothing is printed and nothing
+      is refused, whatever the directive
+    And the frontend is never overridden: no build argument or flag replaces
+      the one the Dockerfile names
+    And the frontend name, the Dockerfile, the env file and the context are
+      printed with control and bidi characters removed
+    # Verified in real BuildKit builds: the docker/dockerfile 1.0,
+    # 1.0-experimental and 1.0.0-experimental pins send .claude-sandbox/env
+    # despite the generated ignore file; 1 and 1.1+ leave it out.
+    # 1.0-experimental is the old pin for RUN --mount=type=secret, so real
+    # projects carry it. The remedy list leaves out "exclude it in your
+    # .dockerignore": the launcher does not check such a rule exists.
 
   # ---- child image staleness ----
 

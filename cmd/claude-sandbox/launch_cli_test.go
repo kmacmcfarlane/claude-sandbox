@@ -784,7 +784,9 @@ var _ = Describe("launcher CLI (end-to-end argv)", func() {
 		tag := "claude-sandbox-" + imagebuild.ImageSlug(filepath.Join(dirB, "Dockerfile"), dirB)
 		f.fake.On("image inspect "+tag, "", execx.Fail(1)) // force the child build
 		Expect(f.run()).To(Equal(0))
-		Expect(f.fake.CommandLines()).To(ContainElement(
-			"docker build -t " + tag + " -f - " + dirB)) // CS-IMG-073: the bytes ride stdin
+		// CS-IMG-073: the bytes go through a private file under the fixture's TempRoot.
+		Expect(f.fake.CommandLines()).To(ContainElement(MatchRegexp(
+			`^docker build -t ` + regexp.QuoteMeta(tag) + ` .*-f ` + regexp.QuoteMeta(f.env.TempRoot) +
+				`/claude-sandbox-child-\d+/Dockerfile ` + regexp.QuoteMeta(dirB) + `$`)))
 	})
 })

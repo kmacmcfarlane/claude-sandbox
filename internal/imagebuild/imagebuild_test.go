@@ -172,6 +172,7 @@ var _ = Describe("image build lifecycle", func() {
 		o = imagebuild.Options{
 			Runner: fake, Out: out, Err: errw,
 			RepoRoot: repo, Version: "v1.2.3",
+			TempRoot: GinkgoT().TempDir(), // every child build makes a private dir (CS-IMG-073)
 		}
 	})
 
@@ -2121,8 +2122,9 @@ var _ = Describe("image build lifecycle", func() {
 				Expect(err).NotTo(HaveOccurred())
 				Expect(built).To(BeTrue())
 				Expect(img).To(Equal("claude-sandbox-proj"))
-				Expect(buildLines(fake)).To(ContainElement(
-					"docker build -t claude-sandbox-proj -f - " + proj))
+				// The bytes go through a private file (CS-IMG-073).
+				Expect(buildLines(fake)).To(ContainElement(MatchRegexp(
+					`^docker build -t claude-sandbox-proj -f \S+/claude-sandbox-child-\d+/Dockerfile ` + regexp.QuoteMeta(proj) + `$`)))
 			},
 			Entry("the child image does not exist", func() {}, false),
 			Entry("the base was rebuilt this launch", func() {
@@ -2161,6 +2163,10 @@ var _ = Describe("image build lifecycle", func() {
 
 	Describe("child Dockerfile snapshot", func() {
 		var proj, scratch string
+		// seen is what the child build saw in its private directory, read
+		// while the build runs (the directory is removed after it).
+		var seen struct{ file, dockerfile, ignore string }
+		var failBuild bool
 
 		BeforeEach(func() {
 			base, err := filepath.EvalSymlinks(GinkgoT().TempDir())
@@ -2171,6 +2177,23 @@ var _ = Describe("image build lifecycle", func() {
 			Expect(os.MkdirAll(scratch, 0o755)).To(Succeed())
 			o.TempRoot = scratch
 			images["claude-sandbox"] = &imgState{created: imgT, id: "sha256:base1"}
+			seen = struct{ file, dockerfile, ignore string }{}
+			failBuild = false
+			fake.OnFunc("docker build -t claude-sandbox-proj ", func(c execx.Cmd) (string, error) {
+				for i, a := range c.Args {
+					if a == "-f" && i+1 < len(c.Args) {
+						seen.file = c.Args[i+1]
+					}
+				}
+				raw, _ := os.ReadFile(seen.file)
+				seen.dockerfile = string(raw)
+				raw, _ = os.ReadFile(seen.file + ".dockerignore")
+				seen.ignore = string(raw)
+				if failBuild {
+					return "", execx.Fail(1)
+				}
+				return "", nil
+			})
 		})
 
 		resolve := func(in imagebuild.ChildInputs) (imagebuild.ChildSpec, error) {
@@ -2189,11 +2212,18 @@ var _ = Describe("image build lifecycle", func() {
 			Fail("no child build ran")
 			return execx.Cmd{}
 		}
-		stdinOf := func(c execx.Cmd) string {
-			Expect(c.Stdin).NotTo(BeNil())
-			raw, err := io.ReadAll(c.Stdin)
+		// onlyEnvRule is the generated ignore file when the project has none.
+		const onlyEnvRule = imagebuild.EnvIgnorePattern + "\n"
+		// privateBuild asserts the child was built from a file in the
+		// private directory, never from stdin or the project file.
+		privateBuild := func() {
+			Expect(seen.file).To(HavePrefix(scratch + string(filepath.Separator)))
+			c := childBuild()
+			Expect(c.Stdin).To(BeNil())
+			Expect(buildLines(fake)).To(ContainElement("docker build -t claude-sandbox-proj -f " + seen.file + " " + proj))
+			entries, err := os.ReadDir(scratch)
 			Expect(err).NotTo(HaveOccurred())
-			return string(raw)
+			Expect(entries).To(BeEmpty(), "the private directory is removed")
 		}
 
 		It("CS-IMG-074: the resolved spec carries the Dockerfile's bytes, read once", func() {
@@ -2287,7 +2317,8 @@ var _ = Describe("image build lifecycle", func() {
 			_, built, err := imagebuild.EnsureChild(o, spec, false, false)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(built).To(BeTrue())
-			Expect(stdinOf(childBuild())).To(BeEmpty())
+			privateBuild()
+			Expect(seen.dockerfile).To(BeEmpty())
 		})
 
 		It("CS-IMG-074: the child fingerprint value is unchanged for the same content, so nothing rebuilds", func() {
@@ -2324,7 +2355,7 @@ var _ = Describe("image build lifecycle", func() {
 			Expect(stampOf(fake, "claude-sandbox-proj")).To(Equal(want))
 		})
 
-		It("CS-IMG-073: the child builds from the checked bytes on stdin, even when the file changed after the read", func() {
+		It("CS-IMG-073: the child builds from the checked bytes in a private file, even when the file changed after the read", func() {
 			df := filepath.Join(proj, ".claude-sandbox", "Dockerfile")
 			writeFileAt(df, "FROM claude-sandbox\nRUN echo checked\n")
 			spec, err := resolve(imagebuild.ChildInputs{})
@@ -2334,8 +2365,9 @@ var _ = Describe("image build lifecycle", func() {
 			_, built, err := imagebuild.EnsureChild(o, spec, false, false)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(built).To(BeTrue())
-			Expect(buildLines(fake)).To(ContainElement("docker build -t claude-sandbox-proj -f - " + proj))
-			Expect(stdinOf(childBuild())).To(Equal("FROM claude-sandbox\nRUN echo checked\n"))
+			privateBuild()
+			Expect(filepath.Base(seen.file)).To(Equal("Dockerfile"))
+			Expect(seen.dockerfile).To(Equal("FROM claude-sandbox\nRUN echo checked\n"))
 			Expect(strings.Join(buildLines(fake), "\n")).NotTo(ContainSubstring(df), "the file is never handed to docker")
 		})
 
@@ -2349,7 +2381,7 @@ var _ = Describe("image build lifecycle", func() {
 			Expect(spec.Context).To(Equal(filepath.Join(ws, "sub")))
 		})
 
-		DescribeTable("CS-IMG-073: a non-regular Dockerfile.dockerignore is absent, as BuildKit treats it: stdin build, no hang",
+		DescribeTable("CS-IMG-073: a non-regular Dockerfile.dockerignore is absent, as BuildKit treats it: no hang",
 			func(plant func(p string)) {
 				df := filepath.Join(proj, ".claude-sandbox", "Dockerfile")
 				writeFileAt(df, "FROM claude-sandbox\n")
@@ -2360,8 +2392,9 @@ var _ = Describe("image build lifecycle", func() {
 				done := make(chan error, 1)
 				go func() { _, _, err := imagebuild.EnsureChild(o, spec, false, false); done <- err }()
 				Eventually(done, 5*time.Second).Should(Receive(BeNil()))
-				Expect(buildLines(fake)).To(ContainElement("docker build -t claude-sandbox-proj -f - " + proj))
-				Expect(stdinOf(childBuild())).To(Equal("FROM claude-sandbox\n"))
+				privateBuild()
+				Expect(seen.dockerfile).To(Equal("FROM claude-sandbox\n"))
+				Expect(seen.ignore).To(Equal(onlyEnvRule))
 			},
 			Entry("a FIFO", func(p string) { Expect(syscall.Mkfifo(p, 0o644)).To(Succeed()) }),
 			Entry("a directory", func(p string) { Expect(os.MkdirAll(p, 0o755)).To(Succeed()) }),
@@ -2383,33 +2416,17 @@ var _ = Describe("image build lifecycle", func() {
 			Expect(buildLines(fake)).To(BeEmpty())
 		})
 
-		Describe("the private-temp-dir fallback", func() {
+		Describe("the private temp dir", func() {
 			var df string
-			var seen struct{ file, dockerfile, ignore string }
 
 			BeforeEach(func() {
 				df = filepath.Join(proj, ".claude-sandbox", "Dockerfile")
 				writeFileAt(df, "FROM claude-sandbox\nCOPY . /src\n")
 				writeFileAt(df+".dockerignore", "secrets/\n")
-				seen = struct{ file, dockerfile, ignore string }{}
 			})
 
 			build := func(fail bool) error {
-				fake.OnFunc("docker build -t claude-sandbox-proj", func(c execx.Cmd) (string, error) {
-					for i, a := range c.Args {
-						if a == "-f" && i+1 < len(c.Args) {
-							seen.file = c.Args[i+1]
-						}
-					}
-					raw, _ := os.ReadFile(seen.file)
-					seen.dockerfile = string(raw)
-					raw, _ = os.ReadFile(seen.file + ".dockerignore")
-					seen.ignore = string(raw)
-					if fail {
-						return "", execx.Fail(1)
-					}
-					return "", nil
-				})
+				failBuild = fail
 				spec, err := resolve(imagebuild.ChildInputs{})
 				Expect(err).NotTo(HaveOccurred())
 				spec.ImageName = "claude-sandbox-proj"
@@ -2418,18 +2435,14 @@ var _ = Describe("image build lifecycle", func() {
 				return err
 			}
 
-			It("CS-IMG-073: a Dockerfile-specific ignore file sends the checked bytes through a private temp dir, removed after the build", func() {
+			It("CS-IMG-073: the checked bytes go through a private temp dir beside the ignore rules, removed after the build", func() {
 				Expect(build(false)).To(Succeed())
-				Expect(seen.file).To(HavePrefix(scratch + string(filepath.Separator)))
+				privateBuild()
 				Expect(filepath.Base(seen.file)).To(Equal("Dockerfile"))
 				Expect(seen.dockerfile).To(Equal("FROM claude-sandbox\nCOPY . /src\n"), "the checked bytes, not the rewritten file")
-				Expect(seen.ignore).To(Equal("secrets/\n"))
+				Expect(seen.ignore).To(Equal("secrets/\n" + onlyEnvRule))
 				c := childBuild()
-				Expect(c.Stdin).To(BeNil())
 				Expect(c.Args[len(c.Args)-1]).To(Equal(proj), "the context stays the project")
-				entries, err := os.ReadDir(scratch)
-				Expect(err).NotTo(HaveOccurred())
-				Expect(entries).To(BeEmpty(), "the private directory is removed")
 			})
 
 			It("CS-IMG-073: the private temp dir is removed after a failed build too", func() {
@@ -2438,6 +2451,243 @@ var _ = Describe("image build lifecycle", func() {
 				entries, err := os.ReadDir(scratch)
 				Expect(err).NotTo(HaveOccurred())
 				Expect(entries).To(BeEmpty())
+			})
+		})
+
+		Describe("the env file is excluded from the build context (CS-IMG-078)", func() {
+			var df string
+
+			BeforeEach(func() {
+				df = filepath.Join(proj, ".claude-sandbox", "Dockerfile")
+				writeFileAt(df, "FROM claude-sandbox\nCOPY . /src\n")
+				writeFileAt(filepath.Join(proj, ".claude-sandbox", "env"), "API_TOKEN=secret\n")
+			})
+
+			ensure := func(in imagebuild.ChildInputs) imagebuild.ChildSpec {
+				spec, err := resolve(in)
+				Expect(err).NotTo(HaveOccurred())
+				spec.ImageName = "claude-sandbox-proj"
+				_, built, err := imagebuild.EnsureChild(o, spec, false, false)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(built).To(BeTrue())
+				return spec
+			}
+
+			It("CS-IMG-078: with no ignore file anywhere, the generated one is the env rule alone", func() {
+				ensure(imagebuild.ChildInputs{})
+				privateBuild()
+				Expect(seen.ignore).To(Equal("**/.claude-sandbox/env\n"))
+				Expect(imagebuild.EnvIgnorePattern).To(Equal("**/.claude-sandbox/env"))
+			})
+
+			It("CS-IMG-078: the context's .dockerignore is kept verbatim, the env rule appended last", func() {
+				writeFileAt(filepath.Join(proj, ".dockerignore"), "node_modules\n*.log\n")
+				ensure(imagebuild.ChildInputs{})
+				Expect(seen.ignore).To(Equal("node_modules\n*.log\n" + onlyEnvRule))
+			})
+
+			It("CS-IMG-078: a missing final newline is added before the env rule", func() {
+				writeFileAt(filepath.Join(proj, ".dockerignore"), "node_modules")
+				ensure(imagebuild.ChildInputs{})
+				Expect(seen.ignore).To(Equal("node_modules\n" + onlyEnvRule))
+			})
+
+			It("CS-IMG-078: a Dockerfile-specific ignore file wins over the context's, as BuildKit reads it", func() {
+				writeFileAt(filepath.Join(proj, ".dockerignore"), "from-context\n")
+				writeFileAt(df+".dockerignore", "from-dockerfile\n")
+				ensure(imagebuild.ChildInputs{})
+				Expect(seen.ignore).To(Equal("from-dockerfile\n" + onlyEnvRule))
+				Expect(seen.ignore).NotTo(ContainSubstring("from-context"))
+			})
+
+			It("CS-IMG-078: a '!' rule re-including the env file cannot win: the env rule is the last line", func() {
+				writeFileAt(filepath.Join(proj, ".dockerignore"), "*\n!.claude-sandbox/env\n!**/.claude-sandbox/env\n")
+				ensure(imagebuild.ChildInputs{})
+				lines := strings.Split(strings.TrimRight(seen.ignore, "\n"), "\n")
+				Expect(lines[len(lines)-1]).To(Equal(imagebuild.EnvIgnorePattern))
+				Expect(lines[:len(lines)-1]).To(Equal([]string{"*", "!.claude-sandbox/env", "!**/.claude-sandbox/env"}))
+			})
+
+			It("CS-IMG-078: an override context's own .dockerignore is the one carried", func() {
+				dir := filepath.Join(proj, "docker")
+				writeFileAt(filepath.Join(dir, "Dockerfile.sandbox"), "FROM claude-sandbox\n")
+				writeFileAt(filepath.Join(dir, ".dockerignore"), "from-override\n")
+				writeFileAt(filepath.Join(proj, ".dockerignore"), "from-project\n")
+				spec := ensure(imagebuild.ChildInputs{DockerfileDir: dir, Dockerfile: "Dockerfile.sandbox"})
+				Expect(spec.Context).To(Equal(dir))
+				Expect(seen.ignore).To(Equal("from-override\n" + onlyEnvRule))
+				Expect(filepath.Base(seen.file)).To(Equal("Dockerfile"), "the private copy is always named Dockerfile (CS-IMG-073)")
+			})
+
+			DescribeTable("CS-IMG-073: the private copy is named Dockerfile whatever the project's name, so BuildKit never reads the name as a pattern",
+				func(name string) {
+					dir := filepath.Join(proj, "docker")
+					writeFileAt(filepath.Join(dir, name), "FROM claude-sandbox\nRUN echo odd\n")
+					writeFileAt(filepath.Join(dir, name+".dockerignore"), "from-dockerfile\n")
+					ensure(imagebuild.ChildInputs{DockerfileDir: dir, Dockerfile: name})
+					Expect(seen.file).To(Equal(filepath.Join(filepath.Dir(seen.file), "Dockerfile")))
+					Expect(filepath.Dir(filepath.Dir(seen.file))).To(Equal(scratch))
+					Expect(buildLines(fake)).To(ContainElement("docker build -t claude-sandbox-proj -f " + seen.file + " " + dir))
+					Expect(seen.dockerfile).To(Equal("FROM claude-sandbox\nRUN echo odd\n"))
+					Expect(seen.ignore).To(Equal("from-dockerfile\n"+onlyEnvRule), "the project's own ignore file is still found and carried")
+				},
+				Entry("brackets", "Dockerfile[dev]"),
+				Entry("a backslash", `Dockerfile\x`),
+				Entry("a name 13 bytes short of NAME_MAX", strings.Repeat("D", 242)),
+			)
+
+			Describe("a context that is itself a .claude-sandbox directory", func() {
+				const both = onlyEnvRule + "/env\n"
+
+				It("CS-IMG-078: dockerfileDir naming the .claude-sandbox dir gets a root-anchored /env rule", func() {
+					sbx := filepath.Join(proj, ".claude-sandbox")
+					spec := ensure(imagebuild.ChildInputs{DockerfileDir: sbx})
+					Expect(spec.Context).To(Equal(sbx))
+					Expect(seen.ignore).To(Equal(both))
+				})
+
+				It("CS-IMG-078: the parent walk finding dockerfile: .claude-sandbox/Dockerfile gets it too", func() {
+					ws := filepath.Dir(proj)
+					writeFileAt(filepath.Join(ws, ".claude-sandbox", "Dockerfile"), "FROM claude-sandbox\n")
+					writeFileAt(filepath.Join(ws, ".claude-sandbox", "env"), "TOKEN=x\n")
+					Expect(os.Remove(df)).To(Succeed())
+					// Not in the project: the walk goes up for the exact name.
+					Expect(os.RemoveAll(filepath.Join(proj, ".claude-sandbox"))).To(Succeed())
+					spec := ensure(imagebuild.ChildInputs{Dockerfile: ".claude-sandbox/Dockerfile"})
+					Expect(spec.Context).To(Equal(filepath.Join(ws, ".claude-sandbox")))
+					Expect(seen.ignore).To(Equal(both))
+				})
+
+				It("CS-IMG-078: a context reaching the .claude-sandbox dir through a symlink gets it, by the resolved name", func() {
+					link := filepath.Join(proj, "sbx")
+					Expect(os.Symlink(filepath.Join(proj, ".claude-sandbox"), link)).To(Succeed())
+					spec := ensure(imagebuild.ChildInputs{DockerfileDir: link})
+					Expect(spec.Context).To(Equal(link))
+					Expect(seen.ignore).To(Equal(both))
+				})
+
+				It("CS-IMG-078: with the cascade's env file named, the per-file rule is the same /env, written once", func() {
+					sbx := filepath.Join(proj, ".claude-sandbox")
+					o.EnvFiles = []string{filepath.Join(sbx, "env")}
+					ensure(imagebuild.ChildInputs{DockerfileDir: sbx})
+					Expect(seen.ignore).To(Equal(both))
+				})
+			})
+
+			Describe("a rule per cascade env file under the context", func() {
+				It("CS-IMG-078: an env file under the context gets its context-relative rule; one outside it gets none", func() {
+					outside := filepath.Join(filepath.Dir(proj), ".claude-sandbox", "env")
+					o.EnvFiles = []string{outside, filepath.Join(proj, ".claude-sandbox", "env")}
+					ensure(imagebuild.ChildInputs{})
+					Expect(seen.ignore).To(Equal(onlyEnvRule + `/\.claude\-sandbox/env` + "\n"))
+				})
+
+				DescribeTable("CS-IMG-078: every ASCII punctuation character but / is escaped, so the path is matched literally",
+					func(dir, want string) {
+						o.EnvFiles = []string{filepath.Join(proj, dir, ".claude-sandbox", "env")}
+						ensure(imagebuild.ChildInputs{})
+						Expect(seen.ignore).To(Equal(onlyEnvRule + want + "\n"))
+					},
+					Entry("glob characters and a backslash", `we[ir]d*?\dir`, `/we\[ir\]d\*\?\\dir/\.claude\-sandbox/env`),
+					Entry("an alternation and brackets", `a|b[1]`, `/a\|b\[1\]/\.claude\-sandbox/env`),
+					Entry("a caret and a closing bracket", `c^f]x`, `/c\^f\]x/\.claude\-sandbox/env`),
+					Entry("braces, brackets and a space", `x{2}[a] y`, `/x\{2\}\[a\] y/\.claude\-sandbox/env`),
+					Entry("the rest of the ASCII punctuation", "!\"#$%&'()+,;<=>@_`~",
+						"/\\!\\\"\\#\\$\\%\\&\\'\\(\\)\\+\\,\\;\\<\\=\\>\\@\\_\\`\\~/\\.claude\\-sandbox/env"),
+					Entry("non-ASCII letters stay as they are", "café", `/café/\.claude\-sandbox/env`),
+				)
+
+				Describe("a relative dockerfileDir", func() {
+					chdir := func(dir string) {
+						wd, err := os.Getwd()
+						Expect(err).NotTo(HaveOccurred())
+						Expect(os.Chdir(dir)).To(Succeed())
+						DeferCleanup(func() { Expect(os.Chdir(wd)).To(Succeed()) })
+					}
+
+					It("CS-IMG-078: is made absolute, so the per-file rules and the base-name rule still apply", func() {
+						chdir(proj)
+						o.EnvFiles = []string{filepath.Join(proj, ".claude-sandbox", "env")}
+						spec := ensure(imagebuild.ChildInputs{DockerfileDir: ".claude-sandbox"})
+						Expect(spec.Context).To(Equal(".claude-sandbox"))
+						Expect(seen.ignore).To(Equal(onlyEnvRule + "/env\n"))
+					})
+
+					It("CS-IMG-078: a relative context below the project gets its env files' relative rules", func() {
+						dir := filepath.Join(proj, "docker")
+						writeFileAt(filepath.Join(dir, "Dockerfile"), "FROM claude-sandbox\n")
+						writeFileAt(filepath.Join(dir, "nested", ".claude-sandbox", "env"), "TOKEN=x\n")
+						chdir(proj)
+						o.EnvFiles = []string{filepath.Join(dir, "nested", ".claude-sandbox", "env")}
+						ensure(imagebuild.ChildInputs{DockerfileDir: "docker"})
+						Expect(seen.ignore).To(Equal(onlyEnvRule + `/nested/\.claude\-sandbox/env` + "\n"))
+					})
+
+					It("CS-IMG-078: a \".\" that is the .claude-sandbox dir is seen by its absolute base name", func() {
+						chdir(filepath.Join(proj, ".claude-sandbox"))
+						ensure(imagebuild.ChildInputs{DockerfileDir: "."})
+						Expect(seen.ignore).To(Equal(onlyEnvRule + "/env\n"))
+					})
+				})
+
+				It("CS-IMG-078: an env file reached through a symlink into the context gets its resolved path's rule", func() {
+					real := filepath.Join(proj, "shared", "secrets")
+					writeFileAt(filepath.Join(real, "env"), "TOKEN=x\n")
+					elsewhere := filepath.Join(filepath.Dir(scratch), "elsewhere")
+					Expect(os.Symlink(real, elsewhere)).To(Succeed())
+					o.EnvFiles = []string{filepath.Join(elsewhere, "env")}
+					ensure(imagebuild.ChildInputs{})
+					Expect(seen.ignore).To(Equal(onlyEnvRule + "/shared/secrets/env\n"))
+				})
+
+				It("CS-IMG-078: a path BuildKit would trim or split gets no per-file rule; the general rules stay", func() {
+					o.EnvFiles = []string{
+						filepath.Join(proj, "a\nb", ".claude-sandbox", "env"),
+						filepath.Join(proj, " lead", ".claude-sandbox", "env"),
+					}
+					ensure(imagebuild.ChildInputs{})
+					Expect(seen.ignore).To(Equal(onlyEnvRule))
+				})
+			})
+
+			DescribeTable("CS-IMG-078: a non-regular context .dockerignore is absent: no hang, the env rule alone",
+				func(plant func(p string)) {
+					plant(filepath.Join(proj, ".dockerignore"))
+					spec, err := resolve(imagebuild.ChildInputs{})
+					Expect(err).NotTo(HaveOccurred())
+					spec.ImageName = "claude-sandbox-proj"
+					done := make(chan error, 1)
+					go func() { _, _, err := imagebuild.EnsureChild(o, spec, false, false); done <- err }()
+					Eventually(done, 5*time.Second).Should(Receive(BeNil()))
+					Expect(seen.ignore).To(Equal(onlyEnvRule))
+				},
+				Entry("a FIFO", func(p string) { Expect(syscall.Mkfifo(p, 0o644)).To(Succeed()) }),
+				Entry("a directory", func(p string) { Expect(os.MkdirAll(p, 0o755)).To(Succeed()) }),
+			)
+
+			It("CS-IMG-078: an unreadable regular context .dockerignore fails the build naming it", func() {
+				if os.Geteuid() == 0 {
+					Skip("root reads unreadable files")
+				}
+				ign := filepath.Join(proj, ".dockerignore")
+				writeFileAt(ign, "x\n")
+				Expect(os.Chmod(ign, 0o000)).To(Succeed())
+				spec, err := resolve(imagebuild.ChildInputs{})
+				Expect(err).NotTo(HaveOccurred())
+				spec.ImageName = "claude-sandbox-proj"
+				_, _, err = imagebuild.EnsureChild(o, spec, false, false)
+				Expect(err).To(MatchError(ContainSubstring(ign)))
+				Expect(buildLines(fake)).To(BeEmpty())
+			})
+
+			It("CS-IMG-078: nothing is printed about it, and the fingerprint is the same as without the rule", func() {
+				spec, err := resolve(imagebuild.ChildInputs{})
+				Expect(err).NotTo(HaveOccurred())
+				want := imagebuild.PreSnapshotChildInputs(spec, "sha256:base1")
+				writeFileAt(filepath.Join(proj, ".dockerignore"), "node_modules\n")
+				ensure(imagebuild.ChildInputs{})
+				Expect(stampOf(fake, "claude-sandbox-proj")).To(Equal(want))
+				Expect(out.String() + errw.String()).NotTo(ContainSubstring("env"))
 			})
 		})
 	})

@@ -14,7 +14,6 @@ package imagebuild
 
 import (
 	"bufio"
-	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -126,11 +125,16 @@ type Options struct {
 	// nothing.
 	Pulls *Pulls
 
-	// TempRoot is where CS-IMG-073's fallback makes its private directory
+	// TempRoot is where CS-IMG-073's child build makes its private directory
 	// ("" = os.TempDir(); under go test "" panics, so a test never writes
 	// to the real temp root). The docker CLIENT reads "-f <file>", so a
 	// container-local directory is fine for a nested launcher.
 	TempRoot string
+
+	// EnvFiles are the launch's cascade env files. A child build ignores
+	// each one that lies under its context by its context-relative path
+	// (CS-IMG-078), beside the rules that need no list.
+	EnvFiles []string
 }
 
 // BakedSources are the paths (relative to RepoRoot) Dockerfile.tools COPYs
@@ -911,54 +915,144 @@ func EnsureChild(o Options, spec ChildSpec, baseRebuilt bool, baseOnly bool) (im
 	return spec.ImageName, true, nil
 }
 
+// EnvIgnorePattern is the ignore rule every child build ends with
+// (CS-IMG-078): env files hold secrets and are never a build input. "**/"
+// matches zero or more directories, so the context root's
+// .claude-sandbox/env and any nested one are both kept out of the context.
+const EnvIgnorePattern = "**/.claude-sandbox/env"
+
 // buildChild runs the child build from spec.Content, never from the file
-// (CS-IMG-073): "-f -" with the bytes on stdin. stdin carries no file name,
-// so a Dockerfile-specific ignore file ("<Dockerfile>.dockerignore") could
-// not be found; when one exists the bytes go into a private temp directory
-// beside a copy of it instead, and that directory is removed after the build.
+// (CS-IMG-073): the bytes go 0600 into a private temp directory as
+// "Dockerfile" beside a generated "Dockerfile.dockerignore", the build runs
+// with "-f" pointing there, and the directory is removed after the build.
+// The private name is fixed, never the project's base name: BuildKit reads
+// the -f name as a pattern when it looks for the ignore file, so a name
+// holding "[" or "\" would fail, and a name near NAME_MAX would leave no room
+// for the ".dockerignore" suffix. BuildKit reads a Dockerfile-specific ignore
+// file INSTEAD of the context's .dockerignore, so the generated file holds
+// the rules BuildKit would have used — the Dockerfile's own
+// "<Dockerfile>.dockerignore" when it exists, else the context's
+// ".dockerignore" — followed by the env rules (CS-IMG-078, envIgnoreRules).
+// The last matching line decides, so no "!" rule above them can re-include
+// an env file.
 func buildChild(o Options, spec ChildSpec, fp string) error {
 	args := append([]string{"build", "-t", spec.ImageName}, labelArgs(fp)...)
 	ignore, found, err := readDockerignore(spec.Dockerfile + ".dockerignore")
-	switch {
-	case err != nil:
-		return fmt.Errorf("building %s: %w", spec.ImageName, err)
-	case found:
-		dir, err := os.MkdirTemp(privateTempRoot(o.TempRoot), "claude-sandbox-child-")
-		if err != nil {
-			return fmt.Errorf("building %s: private Dockerfile directory: %w", spec.ImageName, err)
-		}
-		defer os.RemoveAll(dir)
-		name := filepath.Base(spec.Dockerfile)
-		df := filepath.Join(dir, name)
-		if err := os.WriteFile(df, spec.Content, 0o600); err != nil {
-			return fmt.Errorf("building %s: writing %s: %w", spec.ImageName, df, err)
-		}
-		if err := os.WriteFile(df+".dockerignore", ignore, 0o600); err != nil {
-			return fmt.Errorf("building %s: writing %s.dockerignore: %w", spec.ImageName, df, err)
-		}
-		return o.Runner.Run(execx.Cmd{
-			Name:   "docker",
-			Args:   append(args, "-f", df, spec.Context),
-			Env:    buildEnv,
-			Stdout: o.Out, Stderr: o.Err,
-		})
-	default:
-		return o.Runner.Run(execx.Cmd{
-			Name:   "docker",
-			Args:   append(args, "-f", "-", spec.Context),
-			Env:    buildEnv,
-			Stdin:  bytes.NewReader(spec.Content),
-			Stdout: o.Out, Stderr: o.Err,
-		})
+	if err == nil && !found {
+		ignore, _, err = readDockerignore(filepath.Join(spec.Context, ".dockerignore"))
 	}
+	if err != nil {
+		return fmt.Errorf("building %s: %w", spec.ImageName, err)
+	}
+	// CS-IMG-079: the generated ignore file works only through a frontend
+	// that reads it.
+	if err := checkFrontend(o, spec); err != nil {
+		return err
+	}
+	dir, err := os.MkdirTemp(privateTempRoot(o.TempRoot), "claude-sandbox-child-")
+	if err != nil {
+		return fmt.Errorf("building %s: private Dockerfile directory: %w", spec.ImageName, err)
+	}
+	defer os.RemoveAll(dir)
+	df := filepath.Join(dir, "Dockerfile")
+	if err := os.WriteFile(df, spec.Content, 0o600); err != nil {
+		return fmt.Errorf("building %s: writing %s: %w", spec.ImageName, df, err)
+	}
+	rules := envIgnoreRules(spec.Context, o.EnvFiles)
+	if err := os.WriteFile(df+".dockerignore", childIgnore(ignore, rules), 0o600); err != nil {
+		return fmt.Errorf("building %s: writing %s.dockerignore: %w", spec.ImageName, df, err)
+	}
+	return o.Runner.Run(execx.Cmd{
+		Name:   "docker",
+		Args:   append(args, "-f", df, spec.Context),
+		Env:    buildEnv,
+		Stdout: o.Out, Stderr: o.Err,
+	})
 }
 
-// readDockerignore reads a Dockerfile-specific ignore file for CS-IMG-073's
-// fallback. Like readChild it opens non-blocking and reads only a regular
-// file, so a FIFO planted at the path cannot hang the launch. Anything that
-// is not a regular file (missing, a directory, a FIFO) is absent, as BuildKit
-// treats it: the build then uses stdin and the context's own .dockerignore.
-// Only a regular file that cannot be read is an error.
+// childIgnore is the project's ignore rules with the env rules appended as
+// the last lines (CS-IMG-078).
+func childIgnore(project []byte, rules []string) []byte {
+	out := append([]byte(nil), project...)
+	if len(out) > 0 && out[len(out)-1] != '\n' {
+		out = append(out, '\n')
+	}
+	for _, r := range rules {
+		out = append(out, r+"\n"...)
+	}
+	return out
+}
+
+// envIgnoreRules are the rules that keep env files out of a child build
+// context (CS-IMG-078), in order, without duplicates:
+//
+//   - EnvIgnorePattern, for a .claude-sandbox/env at any depth;
+//   - "/env" when the context itself is a .claude-sandbox directory
+//     (its base name, lexically or symlink-resolved): there the env file sits
+//     at the context root as plain "env", which EnvIgnorePattern cannot match
+//     (an override dockerfileDir naming the dir, or a "dockerfile:
+//     .claude-sandbox/Dockerfile" found by the parent walk);
+//   - one root-anchored rule per cascade env file that lies under the
+//     context, lexically or with either side symlink-resolved, its path
+//     relative to the context with the pattern characters escaped.
+//
+// The first two cover every place the layout puts an env file without
+// knowing which files the cascade found; the third names the files the
+// launch actually passes, so a context the first two do not foresee still
+// leaves them out. A path holding a newline, or one BuildKit's reader would
+// trim (leading or trailing white space), cannot be written as one pattern
+// line and gets no third rule; the first two still apply.
+func envIgnoreRules(context string, envFiles []string) []string {
+	rules := []string{EnvIgnorePattern}
+	seen := map[string]bool{EnvIgnorePattern: true}
+	add := func(r string) {
+		if !seen[r] {
+			seen[r] = true
+			rules = append(rules, r)
+		}
+	}
+	// Absolute first (contextForms): a relative dockerfileDir leaves the
+	// context relative, so filepath.Rel against the absolute env files would
+	// fail, and a "." or ".." would hide a .claude-sandbox base name.
+	ctxs := contextForms(context)
+	for _, c := range ctxs {
+		if filepath.Base(c) == paths.SandboxDir("") {
+			add("/" + paths.Env)
+		}
+	}
+	for _, rel := range cascadeRels(ctxs, envFiles) {
+		if strings.ContainsAny(rel, "\n\r") || strings.TrimSpace(rel) != rel {
+			continue
+		}
+		add("/" + escapeIgnorePattern(rel))
+	}
+	return rules
+}
+
+// escapeIgnorePattern backslash-escapes every ASCII punctuation character
+// (every printable ASCII character that is not a letter, digit or space)
+// but "/", so a path is matched literally. Escaping only the glob characters
+// is not enough: once any escape puts BuildKit's pattern matcher into
+// regular-expression mode, "^", "|", "{", "}" and "]" reach the expression
+// raw ("a|b" would match "a" alone). The matcher passes "\x" into the
+// expression as is, where an escaped punctuation character is a literal.
+func escapeIgnorePattern(p string) string {
+	var b strings.Builder
+	for _, r := range p {
+		if r > ' ' && r < 0x7f && r != '/' &&
+			!('a' <= r && r <= 'z' || 'A' <= r && r <= 'Z' || '0' <= r && r <= '9') {
+			b.WriteByte('\\')
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// readDockerignore reads one ignore file for buildChild (CS-IMG-073/078).
+// Like readChild it opens non-blocking and reads only a regular file, so a
+// FIFO planted at the path cannot hang the launch. Anything that is not a
+// regular file (missing, a directory, a FIFO) is absent, as BuildKit treats
+// it. Only a regular file that cannot be read is an error.
 func readDockerignore(path string) (content []byte, found bool, err error) {
 	raw, err := cascade.ReadRegularFile(path)
 	if err != nil {

@@ -62,6 +62,13 @@ together.
   never passed through wholesale.
 - Refused env keys (`cascade.RefusedEnvKeys`): an isolation exception — an env
   file never sets loader or shell-startup variables for the root entrypoint.
+- Env files kept out of child build contexts (CS-IMG-078/079): an isolation
+  exception with no off switch — every child build ignores
+  `.claude-sandbox/env` after the project's own `.dockerignore` rules, so a
+  `COPY . …` never bakes the tokens into a layer. It works only through a
+  frontend that reads `Dockerfile.dockerignore`: with an env file in the
+  context, a `docker/dockerfile:1.0` pin is refused (exit 2) and any other
+  frontend image gets one warning that it may send the file.
 - `timezone`: host (parity: every create gets `-e TZ=<host zone>` unless an
   env file, an explicit value or the image's `ENV TZ` outranks it, headless
   and ralph included; off with `timezone: none` or
@@ -119,11 +126,11 @@ then, into the Approved section with its date.*
    only by file or by bare env name, never as a docker or curl argument, never
    into a notification, log or runlog, and never into an image layer or build
    context. *Evidence:* P5, P6, P9; UC-14, UC-25, UC-41, UC-24. *Would
-   change:* a child Dockerfile whose `COPY`/`ADD` covers
-   `.claude-sandbox/env` (e.g. `COPY . /src`) with no `.dockerignore`
-   excluding it (UC-14) would have it excluded, or be refused, instead of
-   baking the tokens into a layer. No current child build copies it, so this
-   is a guard, not a fix.
+   change:* child build contexts already exclude `.claude-sandbox/env`
+   (CS-IMG-078; a frontend that cannot honour the exclusion is refused or
+   warned about, CS-IMG-079), so the image half holds today; what remains is
+   keeping tokens and webhook URLs out of docker and curl argv,
+   notifications, logs and runlogs.
 
 5. **Name the threat model, and every cost of a default against it, where the
    default is documented.** The model is accidental damage, not an adversarial

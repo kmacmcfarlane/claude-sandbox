@@ -6,7 +6,6 @@ package main
 // that read reaches nothing in the launch.
 
 import (
-	"io"
 	"os"
 	"path/filepath"
 
@@ -50,29 +49,103 @@ var _ = Describe("the launch-config snapshot (CS-CASC-046, CS-IMG-073/074)", fun
 		Expect(createdAny(f)).To(BeFalse())
 	})
 
-	It("CS-IMG-073: the child image is built from the bytes the launch read, on stdin, even if the file changed after", func() {
-		df := filepath.Join(f.proj, ".claude-sandbox", "Dockerfile")
-		writeFile(df, "FROM claude-sandbox\nRUN echo checked\n")
+	// childBuild forces the child build for df and records what the build saw
+	// in its private directory (removed after the build, CS-IMG-073).
+	type childSeen struct {
+		args               []string
+		dockerfile, ignore string
+	}
+	childBuild := func(df string, rewrite func()) *childSeen {
 		delete(f.envmap, "CLAUDE_SANDBOX_BASE_ONLY")
 		tag := "claude-sandbox-" + imagebuild.ImageSlug(df, f.proj)
 		// The child's existence check runs after the read and before the
-		// build: rewrite the file there, and report the image missing.
+		// build: rewrite there, and report the image missing.
 		f.fake.OnFunc("image inspect "+tag, func(execx.Cmd) (string, error) {
-			Expect(os.WriteFile(df, []byte("FROM claude-sandbox\nENV LD_PRELOAD=/planted.so\n"), 0o644)).To(Succeed())
+			rewrite()
 			return "", execx.Fail(1)
 		})
-		Expect(f.run()).To(Equal(0))
-		var build *execx.Cmd
-		for i, c := range f.fake.Calls {
-			if c.Name == "docker" && len(c.Args) > 2 && c.Args[0] == "build" && c.Args[2] == tag {
-				build = &f.fake.Calls[i]
+		var seen *childSeen
+		f.fake.OnFunc("docker build -t "+tag+" ", func(c execx.Cmd) (string, error) {
+			seen = &childSeen{args: c.Args}
+			for i, a := range c.Args {
+				if a == "-f" && i+1 < len(c.Args) {
+					raw, _ := os.ReadFile(c.Args[i+1])
+					seen.dockerfile = string(raw)
+					raw, _ = os.ReadFile(c.Args[i+1] + ".dockerignore")
+					seen.ignore = string(raw)
+				}
 			}
+			Expect(c.Stdin).To(BeNil())
+			return "", nil
+		})
+		Expect(f.run()).To(Equal(0))
+		Expect(seen).NotTo(BeNil(), "the child build ran")
+		return seen
+	}
+
+	It("CS-IMG-073: the child image is built from the bytes the launch read, through a private file, even if the file changed after", func() {
+		df := filepath.Join(f.proj, ".claude-sandbox", "Dockerfile")
+		writeFile(df, "FROM claude-sandbox\nRUN echo checked\n")
+		seen := childBuild(df, func() {
+			Expect(os.WriteFile(df, []byte("FROM claude-sandbox\nENV LD_PRELOAD=/planted.so\n"), 0o644)).To(Succeed())
+		})
+		n := len(seen.args)
+		Expect(seen.args[n-3]).To(Equal("-f"))
+		Expect(seen.args[n-2]).To(HavePrefix(f.env.TempRoot + string(filepath.Separator)))
+		Expect(seen.args[n-1]).To(Equal(f.proj))
+		Expect(seen.dockerfile).To(Equal("FROM claude-sandbox\nRUN echo checked\n"))
+	})
+
+	It("CS-IMG-078: the env file is excluded from the child build context, after the project's own rules", func() {
+		df := filepath.Join(f.proj, ".claude-sandbox", "Dockerfile")
+		writeFile(df, "FROM claude-sandbox\nCOPY . /src\n")
+		writeFile(filepath.Join(f.proj, ".dockerignore"), "*.log\n!.claude-sandbox/env\n")
+		seen := childBuild(df, func() {})
+		Expect(seen.ignore).To(Equal("*.log\n!.claude-sandbox/env\n**/.claude-sandbox/env\n"))
+	})
+
+	It("CS-IMG-078: the launch's cascade env files reach the build as context-relative rules", func() {
+		df := filepath.Join(f.proj, ".claude-sandbox", "Dockerfile")
+		writeFile(df, "FROM claude-sandbox\n")
+		writeFile(filepath.Join(f.proj, ".claude-sandbox", "env"), "TOKEN=x\n")
+		seen := childBuild(df, func() {})
+		Expect(seen.ignore).To(Equal("**/.claude-sandbox/env\n" + `/\.claude\-sandbox/env` + "\n"))
+	})
+
+	It("CS-IMG-079: an old docker/dockerfile pin with an env file in the context fails the launch, exit 2, before any build or create", func() {
+		df := filepath.Join(f.proj, ".claude-sandbox", "Dockerfile")
+		writeFile(df, "# syntax=docker/dockerfile:1.0-experimental\nFROM claude-sandbox\nCOPY . /src\n")
+		writeFile(filepath.Join(f.proj, ".claude-sandbox", "env"), "TOKEN=x\n")
+		delete(f.envmap, "CLAUDE_SANDBOX_BASE_ONLY")
+		tag := "claude-sandbox-" + imagebuild.ImageSlug(df, f.proj)
+		f.fake.On("image inspect "+tag, "", execx.Fail(1))
+		Expect(f.run()).To(Equal(2))
+		Expect(f.errw.String()).To(ContainSubstring(`"docker/dockerfile:1.0-experimental"`))
+		Expect(f.errw.String()).To(ContainSubstring("raise the pin to docker/dockerfile:1.1 or later"))
+		for _, l := range f.fake.CommandLines() {
+			Expect(l).NotTo(HavePrefix("docker build -t " + tag))
 		}
-		Expect(build).NotTo(BeNil(), "the child build ran")
-		Expect(build.Args[len(build.Args)-3:]).To(Equal([]string{"-f", "-", f.proj}))
-		raw, err := io.ReadAll(build.Stdin)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(string(raw)).To(Equal("FROM claude-sandbox\nRUN echo checked\n"))
+		Expect(createdAny(f)).To(BeFalse())
+	})
+
+	It("CS-IMG-078: dockerfileDir naming the .claude-sandbox dir keeps its env (at the context root) out", func() {
+		sbx := filepath.Join(f.proj, ".claude-sandbox")
+		df := filepath.Join(sbx, "Dockerfile")
+		writeFile(df, "FROM claude-sandbox\n")
+		writeFile(filepath.Join(sbx, "env"), "TOKEN=x\n")
+		f.envmap["CLAUDE_SANDBOX_DOCKERFILE_DIR"] = sbx
+		delete(f.envmap, "CLAUDE_SANDBOX_BASE_ONLY")
+		tag := "claude-sandbox-" + imagebuild.ImageSlug(df, sbx)
+		f.fake.On("image inspect "+tag, "", execx.Fail(1))
+		var ignore string
+		f.fake.OnFunc("docker build -t "+tag+" ", func(c execx.Cmd) (string, error) {
+			Expect(c.Args[len(c.Args)-1]).To(Equal(sbx))
+			raw, _ := os.ReadFile(c.Args[len(c.Args)-2] + ".dockerignore")
+			ignore = string(raw)
+			return "", nil
+		})
+		Expect(f.run()).To(Equal(0))
+		Expect(ignore).To(Equal("**/.claude-sandbox/env\n/env\n"))
 	})
 
 	It("CS-IMG-074: an unreadable child Dockerfile fails the launch naming it, before anything is created", func() {
