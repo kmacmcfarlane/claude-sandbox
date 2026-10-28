@@ -82,6 +82,11 @@ type Inputs struct {
 	// the host (CS-DIR-019). The refusals of an existing directory still
 	// stand the bridge down, as they would the launch.
 	NoCreatePeerDirs bool
+	// DriftOnly marks the attach/join drift check's would-be build: it
+	// creates nothing, so Build skips the label and mount value checks
+	// (CS-LNCH-226) — a value that went bad since the container was created
+	// must not fail the check or read as drift.
+	DriftOnly bool
 
 	// Chmod restricts a launcher-owned peer-registry directory (CS-LNCH-051).
 	// Nil means fchmod on the descriptor hostdirs.EnsureOwnedDir checked;
@@ -753,9 +758,10 @@ func Build(in Inputs) (*Plan, error) {
 		// CS-LNCH-044: empty when off, so `sessions` and attach can tell.
 		"claude-sandbox.worktree="+in.Worktree,
 	)
-	if in.Instance != "" {
-		p.Labels = append(p.Labels, "claude-sandbox.instance="+in.Instance)
-	}
+	// CS-SESS-120: every label discovery reads is written, empty when unset:
+	// docker copies an image LABEL for a key the create does not set, so an
+	// omitted label could be chosen by the image.
+	p.Labels = append(p.Labels, "claude-sandbox.instance="+in.Instance)
 	if in.Detached {
 		p.Labels = append(p.Labels, LabelDetached+"=1") // CS-LNCH-118
 	}
@@ -791,8 +797,8 @@ func Build(in Inputs) (*Plan, error) {
 	// CS-LNCH-039: the pid class rides a label (for allocation) and an env
 	// var (for the in-container helper). EnvFlags are not fingerprinted, and
 	// the label is not either, so a fresh class is never drift (CS-LNCH-040).
+	p.Labels = append(p.Labels, "claude-sandbox.pidclass="+in.PIDClass) // CS-SESS-120
 	if in.PIDClass != "" {
-		p.Labels = append(p.Labels, "claude-sandbox.pidclass="+in.PIDClass)
 		p.EnvFlags = append(p.EnvFlags, "CLAUDE_SANDBOX_PID_CLASS="+in.PIDClass)
 	}
 	// CS-LNCH-093: the memory limit and its source, for the OOM report of a
@@ -808,10 +814,8 @@ func Build(in Inputs) (*Plan, error) {
 		"CLAUDE_SANDBOX_MEMORY_LIMIT_SOURCE="+p.MemoryLimitSource)
 	// CS-LNCH-080: name the shadow directory, so a later launch's sweep knows
 	// this container still uses it. Labels are outside the config hash.
-	if in.TempDir != "" {
-		p.ShadowDir = in.TempDir
-		p.Labels = append(p.Labels, LabelShadowDir+"="+in.TempDir)
-	}
+	p.ShadowDir = in.TempDir
+	p.Labels = append(p.Labels, LabelShadowDir+"="+in.TempDir) // CS-SESS-120
 
 	// CS-LNCH-109: what an attach or join needs for its tmux pane mark
 	// (CS-TMUX-012), and the same values on the plan for a new container's
@@ -836,14 +840,14 @@ func Build(in Inputs) (*Plan, error) {
 	)
 	// CS-LNCH-110: the resume guard's reservation marker, visible to the next
 	// launch's discovery as soon as docker create returns.
-	if in.Resume != "" {
-		p.Labels = append(p.Labels, LabelResume+"="+in.Resume)
-	}
+	p.Labels = append(p.Labels, LabelResume+"="+in.Resume) // CS-SESS-120
 	p.Resume = in.Resume
 	// CS-LNCH-182: the continue guard's reservation marker, the same way.
+	continueLabel := ""
 	if in.Continue {
-		p.Labels = append(p.Labels, LabelContinue+"=1")
+		continueLabel = "1"
 	}
+	p.Labels = append(p.Labels, LabelContinue+"="+continueLabel) // CS-SESS-120
 	p.Continue = in.Continue
 
 	// CS-LNCH-178..181: the terminal identity. After the fingerprint, and
@@ -874,8 +878,16 @@ func Build(in Inputs) (*Plan, error) {
 	// (discovery splits each docker ps row on a control character,
 	// CS-SESS-118). The configured values were refused with their source
 	// before any image work (CS-LNCH-224); this is the backstop.
-	if err := CheckLabels(p.Labels); err != nil {
-		return nil, err
+	// The same for every bind mount's source and destination (the settings
+	// target, the git common dir, cascade mounts): docker prints bind
+	// sources raw in {{.Mounts}}, which discovery reads.
+	if !in.DriftOnly {
+		if err := CheckLabels(p.Labels); err != nil {
+			return nil, err
+		}
+		if err := CheckMounts(p.Volumes, p.ClipboardDir); err != nil {
+			return nil, err
+		}
 	}
 	return p, nil
 }

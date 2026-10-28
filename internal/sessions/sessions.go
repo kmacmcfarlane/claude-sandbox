@@ -199,70 +199,91 @@ func (s Session) Reserved() bool {
 	return strings.HasPrefix(s.Status, "Created")
 }
 
-// fieldSep separates --format fields. Label values are arbitrary text (the
-// inputs label is JSON containing commas, quotes and braces), so the separator
-// has to be something no path, status or JSON payload contains.
+// fieldSep separates --format fields. Every field is rendered as JSON
+// (CS-SESS-118), which escapes every control character, so neither this
+// separator nor a newline can occur inside a field: each container is exactly
+// one line with exactly psFields fields, whatever its labels or bind sources
+// hold.
 const fieldSep = "\x1f"
 
+// jsonField renders one --format field as a JSON string.
+func jsonField(expr string) string { return "{{json " + expr + "}}" }
+
+// jsonLabel renders one label as a JSON string ("" when the container has no
+// such label). docker ps's {{.Labels}} is one comma-joined string, ambiguous
+// when a value holds a comma, so each label is its own field.
+func jsonLabel(key string) string {
+	ReadLabels = append(ReadLabels, key)
+	return jsonField(`(.Label "` + key + `")`)
+}
+
+// ReadLabels is every label key discovery reads, in format order. Every
+// launch writes each of them, empty when unset (CS-SESS-120): docker copies
+// an image LABEL for a key the create does not set.
+var ReadLabels []string
+
 var psFormat = strings.Join([]string{
-	"{{.Names}}",
-	"{{.Status}}",
-	`{{.Label "` + LabelProject + `"}}`,
-	`{{.Label "` + LabelMode + `"}}`,
-	`{{.Label "` + LabelInstance + `"}}`,
-	`{{.Label "` + LabelVersion + `"}}`,
-	`{{.Label "` + LabelModel + `"}}`,
-	`{{.Label "` + LabelConfigHash + `"}}`,
-	`{{.Label "` + LabelInputs + `"}}`,
-	`{{.Label "` + LabelPIDClass + `"}}`,
-	`{{.Label "` + LabelWorktree + `"}}`,
-	// Optional trailing fields (CS-SESS-050/052, CS-SESS-063): rows without
-	// them still parse.
-	"{{.State}}",
-	"{{.CreatedAt}}",
-	`{{.Label "` + LabelMemoryLimit + `"}}`,
-	`{{.Label "` + LabelMemoryLimitSource + `"}}`,
-	// An empty field: the slot of a retired label (claude-sandbox.keep,
-	// written by no launcher), kept so the fields after it keep their index.
-	"",
+	jsonField(".Names"),
+	jsonField(".Status"),
+	jsonLabel(LabelProject),
+	jsonLabel(LabelMode),
+	jsonLabel(LabelInstance),
+	jsonLabel(LabelVersion),
+	jsonLabel(LabelModel),
+	jsonLabel(LabelConfigHash),
+	jsonLabel(LabelInputs),
+	jsonLabel(LabelPIDClass),
+	jsonLabel(LabelWorktree),
+	jsonField(".State"),     // CS-SESS-050
+	jsonField(".CreatedAt"), // CS-SESS-052
+	jsonLabel(LabelMemoryLimit),
+	jsonLabel(LabelMemoryLimitSource),
+	// The slot of a retired label (claude-sandbox.keep, written by no
+	// launcher): an empty JSON string, so the fields after it keep their
+	// index.
+	`""`,
 	// CS-TMUX-012 / CS-LNCH-109: the full id (the list runs with --no-trunc)
 	// and what an attach's pane mark needs.
-	"{{.ID}}",
-	`{{.Label "` + LabelConfigDir + `"}}`,
-	`{{.Label "` + LabelRegistry + `"}}`,
-	`{{.Label "` + LabelLaunchFlags + `"}}`,
-	`{{.Label "` + LabelResume + `"}}`,    // CS-SESS-065
-	`{{.Label "` + LabelPeerRoot + `"}}`,  // CS-DIR-012
-	`{{.Label "` + LabelTerminal + `"}}`,  // CS-SESS-091
-	`{{.Label "` + LabelContinue + `"}}`,  // CS-LNCH-182
-	`{{.Label "` + LabelClipboard + `"}}`, // CS-LNCH-197
-	`{{.Label "` + LabelShadowDir + `"}}`, // CS-LNCH-197
-	// CS-DIR-011: every bind source, comma-joined; last, so nothing after
-	// it depends on how a source is spelled.
-	"{{.Mounts}}",
+	jsonField(".ID"),
+	jsonLabel(LabelConfigDir),
+	jsonLabel(LabelRegistry),
+	jsonLabel(LabelLaunchFlags),
+	jsonLabel(LabelResume),    // CS-SESS-065
+	jsonLabel(LabelPeerRoot),  // CS-DIR-012
+	jsonLabel(LabelTerminal),  // CS-SESS-091
+	jsonLabel(LabelContinue),  // CS-LNCH-182
+	jsonLabel(LabelClipboard), // CS-LNCH-197
+	jsonLabel(LabelShadowDir), // CS-LNCH-197
+	// CS-DIR-011: every bind source, comma-joined; last. docker prints a
+	// source raw, so a path holding a newline would have cut the row in two
+	// before this field was JSON.
+	jsonField(".Mounts"),
 }, fieldSep)
 
-// psFields is the number of fields psFormat produces: docker renders every
-// placeholder for every container (an absent label is an empty field), so a
-// row of this format has exactly this many fields. A label value holding the
-// separator would add fields and shift every later one (CS-SESS-118);
-// launchers refuse to write one (CS-LNCH-224), and discovery drops any row
-// that is not one of the known shapes. {{.Mounts}} is last and may hold
-// commas but never the separator, so the count is exact.
+// psFields is the number of fields psFormat produces. docker renders the
+// whole format for every container (an absent label is ""), and no JSON
+// field can hold the separator or a newline, so a real row has exactly this
+// many fields. Any other count did not come from this format and is never
+// read (CS-SESS-118): there is no "older shape" to accept, since the format
+// is this binary's own.
 var psFields = strings.Count(psFormat, fieldSep) + 1
 
-// psEarlierShapes are the field counts of the formats before the current
-// one (the base 11, +State/CreatedAt 13, +memory 15, +the retired keep label
-// 16, +ID/configdir/registry/launchflags 20, +resume 21, +peerroot/Mounts
-// 23, +terminal 24, +continue 25). This format never yields them: docker
-// output only ever has psFields fields, and an injected separator only adds
-// fields, never removes one, so accepting them can never read a shifted
-// row. Each is read with exactly the fields that shape had and validated
-// like a current row (CS-SESS-118/119).
-var psEarlierShapes = map[int]bool{11: true, 13: true, 15: true, 16: true, 20: true, 21: true, 23: true, 24: true, 25: true}
-
-// knownShape reports whether n fields is the current format or an earlier one.
-func knownShape(n int) bool { return n == psFields || psEarlierShapes[n] }
+// decodeRow splits one line into its fields and decodes each from JSON.
+// ok is false when the count is not psFields or a field is not a JSON
+// string; f then holds the raw fields, for the warning.
+func decodeRow(line string) (f []string, ok bool) {
+	f = strings.Split(line, fieldSep)
+	if len(f) != psFields {
+		return f, false
+	}
+	out := make([]string, len(f))
+	for i, raw := range f {
+		if err := json.Unmarshal([]byte(raw), &out[i]); err != nil {
+			return f, false
+		}
+	}
+	return out, true
+}
 
 // WarnOut receives discovery's warnings about rows it drops (CS-SESS-118).
 // stderr, so a headless launch's stdout stays claude's alone; tests replace it.
@@ -272,14 +293,22 @@ var WarnOut io.Writer = os.Stderr
 // some docker listings print).
 var containerNameRe = regexp.MustCompile(`^/?[A-Za-z0-9][A-Za-z0-9_.-]*$`)
 
+// ValidContainerName reports whether s follows docker's container name rule.
+func ValidContainerName(s string) bool { return containerNameRe.MatchString(s) }
+
 // dropRow warns once about a row discovery will not interpret, naming the
-// container when the row's first field is a valid container name. The name
-// comes before every label field and cannot hold the separator, so the first
-// field is the name even in a shifted row; nothing else is printed.
+// container when the row's first field decodes to a valid container name;
+// nothing else of the row is printed.
 func dropRow(f []string, why string) {
 	who := "a container"
-	if len(f) > 0 && containerNameRe.MatchString(f[0]) {
-		who = "container " + strings.TrimPrefix(f[0], "/")
+	if len(f) > 0 {
+		var name string
+		if json.Unmarshal([]byte(f[0]), &name) != nil {
+			name = f[0]
+		}
+		if containerNameRe.MatchString(name) {
+			who = "container " + strings.TrimPrefix(name, "/")
+		}
 	}
 	fmt.Fprintf(WarnOut, "WARNING: ignoring %s in the sandbox listing (%s); it is left out of discovery.\n", who, why)
 }
@@ -295,9 +324,9 @@ var (
 	uuidRe   = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 )
 
-// rowProblem validates the fields of a parsed row whose shape is known
-// (CS-SESS-119): every field with a fixed form must have it (the continue
-// label stays "1" or not, as CS-LNCH-182 reads it). "" = valid.
+// rowProblem validates the fields of a decoded row (CS-SESS-119): every
+// field with a fixed form must have it (the continue label stays "1" or not,
+// as CS-LNCH-182 reads it). "" = valid.
 func rowProblem(s Session) string {
 	switch {
 	case !containerNameRe.MatchString(s.Name):
@@ -418,51 +447,34 @@ func listAll(r execx.Runner, filter string, count bool) ([]Session, []Session, e
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		f := strings.Split(line, fieldSep)
-		if !knownShape(len(f)) {
-			// CS-SESS-118: never interpreted. A label value holding the
-			// separator shifts every later field, so a session could
-			// otherwise choose the state, id, registry or resume label
-			// discovery reads.
-			dropRow(f, fmt.Sprintf("%d fields, not %d", len(f), psFields))
+		f, ok := decodeRow(line)
+		if !ok {
+			// CS-SESS-118: never interpreted. Only a row that did not come
+			// from this format can fail here, and reading it by index would
+			// let whoever forged it choose the state, id, registry or
+			// resume label discovery reads.
+			why := "not a row of the listing's format"
+			if len(f) != psFields {
+				why = fmt.Sprintf("%d fields, not %d", len(f), psFields)
+			}
+			dropRow(f, why)
 			continue
 		}
 		s := Session{
-			Name: f[0], Status: f[1], Project: f[2], Mode: f[3],
+			Name: strings.TrimPrefix(f[0], "/"), Status: f[1], Project: f[2], Mode: f[3],
 			Instance: f[4], Version: f[5], Model: f[6], ConfigHash: f[7],
 			Inputs: launch.DecodeInputs(f[8]), PIDClass: f[9], Worktree: f[10],
-		}
-		n := len(f)
-		if n >= 13 {
-			s.State = strings.TrimSpace(f[11])
-			s.CreatedAt = parseCreatedAt(f[12])
-		}
-		if n >= 15 {
-			s.MemoryLimit, s.MemoryLimitSource = f[13], f[14]
-		}
-		if n >= 20 {
-			s.ID = strings.TrimSpace(f[16])
-			s.ConfigDirEnv, s.RegistryDir, s.LaunchFlags = f[17], f[18], f[19]
-		}
-		if n >= 21 {
-			s.Resume = strings.TrimSpace(f[20])
-		}
-		if n >= 23 {
-			s.PeerRoot = strings.TrimSpace(f[21])
-			// Mounts is always the LAST field (CS-SESS-091), so every shape
-			// from 23 fields on keeps its bind sources and the peers pin.
-			s.Mounts = launch.SplitMounts(f[n-1])
-		}
-		if n >= 24 {
-			s.Terminal = strings.TrimSpace(f[22])
-		}
-		if n >= 25 {
-			s.Continue = strings.TrimSpace(f[23]) == "1" // CS-LNCH-182
-		}
-		if n >= 27 {
+			State: strings.TrimSpace(f[11]), CreatedAt: parseCreatedAt(f[12]),
+			MemoryLimit: f[13], MemoryLimitSource: f[14],
+			ID:           strings.TrimSpace(f[16]),
+			ConfigDirEnv: f[17], RegistryDir: f[18], LaunchFlags: f[19],
+			Resume:   strings.TrimSpace(f[20]),
+			PeerRoot: strings.TrimSpace(f[21]),
+			Terminal: strings.TrimSpace(f[22]),
+			Continue: strings.TrimSpace(f[23]) == "1", // CS-LNCH-182
 			// CS-LNCH-197
-			s.Clipboard = strings.TrimSpace(f[24])
-			s.ShadowDir = f[25]
+			Clipboard: strings.TrimSpace(f[24]), ShadowDir: f[25],
+			Mounts: launch.SplitMounts(f[26]),
 		}
 		if why := rowProblem(s); why != "" {
 			dropRow(f, why)
@@ -620,9 +632,16 @@ func MarkOOM(r execx.Runner, all []Session) {
 	if len(all) == 0 {
 		return
 	}
-	args := []string{"inspect", "--type", "container", "--format", oomFormat}
+	args := []string{"inspect", "--type", "container", "--format", oomFormat, "--"}
 	for _, s := range all {
-		args = append(args, s.Name)
+		// Discovery admits only valid names (CS-SESS-119); checked again
+		// here, since a name that is not one never reaches docker's argv.
+		if containerNameRe.MatchString(s.Name) {
+			args = append(args, s.Name)
+		}
+	}
+	if args[len(args)-1] == "--" {
+		return
 	}
 	out, _ := r.Output(execx.Cmd{Name: "docker", Args: args, Stderr: io.Discard})
 	killed := map[string]bool{}
@@ -764,22 +783,27 @@ type Container struct {
 // ErrNoSuchContainer is an inspect of a container docker does not know.
 var ErrNoSuchContainer = errors.New("no such container")
 
-// inspectSep separates InspectContainer's fields: a label value may hold a
-// space or a tab, never this.
+// inspectSep separates InspectContainer's fields. Each field is rendered as
+// JSON, which escapes every control character, so a label value can hold
+// neither this nor a newline (CS-SESS-118).
 const inspectSep = "\x1f"
+
+// InspectFormat is InspectContainer's -f format: name, state, creation time
+// and the project, instance and mode labels, each a JSON string.
+var InspectFormat = strings.Join([]string{jsonField(".Name"), jsonField(".State.Status"), jsonField(".Created"),
+	inspectLabel(LabelProject), inspectLabel(LabelInstance), inspectLabel(LabelMode)}, inspectSep)
+
+func inspectLabel(k string) string { return jsonField(`(index .Config.Labels "` + k + `")`) }
 
 // InspectContainer is one "docker inspect --type container" of idOrName
 // (CS-TMUX-051). ErrNoSuchContainer when docker reports that the container
 // does not exist; any other failure is returned as it is, so a caller can
 // tell "gone" from "cannot tell".
 func InspectContainer(r execx.Runner, idOrName string) (Container, error) {
-	label := func(k string) string { return `{{index .Config.Labels "` + k + `"}}` }
-	format := strings.Join([]string{"{{.Name}}", "{{.State.Status}}", "{{.Created}}",
-		label(LabelProject), label(LabelInstance), label(LabelMode)}, inspectSep)
 	var stderr strings.Builder
 	out, err := r.Output(execx.Cmd{
 		Name:   "docker",
-		Args:   []string{"inspect", "--type", "container", "-f", format, idOrName},
+		Args:   []string{"inspect", "--type", "container", "-f", InspectFormat, "--", idOrName},
 		Stderr: &stderr,
 	})
 	if err != nil {
@@ -791,13 +815,14 @@ func InspectContainer(r execx.Runner, idOrName string) (Container, error) {
 		}
 		return Container{}, fmt.Errorf("docker inspect: %v", err)
 	}
-	f := strings.Split(strings.TrimRight(out, "\r\n"), inspectSep)
-	if len(f) != 6 {
+	raw := strings.Split(strings.TrimRight(out, "\r\n"), inspectSep)
+	if len(raw) != 6 {
 		return Container{}, fmt.Errorf("docker inspect: unexpected output")
 	}
-	for i := range f {
-		if f[i] == "<no value>" {
-			f[i] = ""
+	f := make([]string, len(raw))
+	for i := range raw {
+		if json.Unmarshal([]byte(raw[i]), &f[i]) != nil {
+			return Container{}, fmt.Errorf("docker inspect: unexpected output")
 		}
 	}
 	c := Container{Name: strings.TrimPrefix(f[0], "/"), State: f[1], Project: f[3], Instance: f[4], Mode: f[5]}

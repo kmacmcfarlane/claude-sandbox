@@ -21,6 +21,7 @@ import (
 
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/prompt"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/sessions/sessionstest"
 )
 
 // contRow is a 25-field discovery row: every label through the continue one,
@@ -48,9 +49,9 @@ func (r contRow) String() string {
 	if r.hash != "" {
 		inputs = "[]"
 	}
-	return strings.Join([]string{r.name, status, r.project, mode, r.instance, "v1", "", r.hash, inputs, r.class, "",
+	return sessionstest.Row(r.name, status, r.project, mode, r.instance, "v1", "", r.hash, inputs, r.class, "",
 		r.state, r.created.Format("2006-01-02 15:04:05 -0700 MST"), "8g", "default", "",
-		strings.Repeat("a", 64), "", r.registry, "", r.resume, "none", "none", c, ""}, psSep)
+		strings.Repeat("a", 64), "", r.registry, "", r.resume, "none", "none", c, "")
 }
 
 // allFilter is the docker ps of a host-wide discovery (the pre-build check,
@@ -92,7 +93,7 @@ var _ = Describe("the continue guard (CS-LNCH-182, CS-SESS-093..096)", func() {
 			all := creates(f)
 			Expect(all).To(HaveLen(2))
 			plain, cont := labelsOf(all[0]), labelsOf(all[1])
-			Expect(plain).NotTo(HaveKey("claude-sandbox.continue"))
+			Expect(plain).To(HaveKeyWithValue("claude-sandbox.continue", ""))
 			Expect(cont).To(HaveKeyWithValue("claude-sandbox.continue", "1"))
 			Expect(cont["claude-sandbox.confighash"]).To(Equal(plain["claude-sandbox.confighash"]))
 			Expect(cont["claude-sandbox.inputs"]).To(Equal(plain["claude-sandbox.inputs"]))
@@ -128,7 +129,7 @@ var _ = Describe("the continue guard (CS-LNCH-182, CS-SESS-093..096)", func() {
 			} {
 				g := newCLIFixture()
 				Expect(g.run(args...)).To(Equal(0), "%v: %s", args, g.errw.String())
-				Expect(labelsOf(g.launched().Args)).NotTo(HaveKey("claude-sandbox.continue"), "%v", args)
+				Expect(labelsOf(g.launched().Args)).To(HaveKeyWithValue("claude-sandbox.continue", ""), "%v", args)
 			}
 		})
 
@@ -139,7 +140,7 @@ var _ = Describe("the continue guard (CS-LNCH-182, CS-SESS-093..096)", func() {
 			f.env.Prompter = &prompt.Scripted{IsTTY: true, Answers: []string{"b"}}
 			Expect(f.run("--", "--continue")).To(Equal(0), f.errw.String())
 			Expect(f.launchLine()).To(ContainSubstring(" claude --continue --fork-session --continue"))
-			Expect(labelsOf(f.launched().Args)).NotTo(HaveKey("claude-sandbox.continue"))
+			Expect(labelsOf(f.launched().Args)).To(HaveKeyWithValue("claude-sandbox.continue", ""))
 
 			g := newCLIFixture()
 			g.fake.On("docker ps", holder(g, g.proj), nil)

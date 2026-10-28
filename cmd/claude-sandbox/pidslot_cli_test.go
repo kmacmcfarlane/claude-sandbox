@@ -15,11 +15,12 @@ import (
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/pidslot"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/sessions"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/sessions/sessionstest"
 )
 
 // classRow is a docker ps row for another project carrying a pid class.
 func classRow(name, class string) string {
-	return strings.Join([]string{name, "Up 1h", "/elsewhere", "claude", "otter", "v1", "", "", "", class, ""}, psSep)
+	return sessionstest.Row(name, "Up 1h", "/elsewhere", "claude", "otter", "v1", "", "", "", class, "")
 }
 
 var _ = Describe("pid classes (CS-PID, CS-LNCH-039)", func() {

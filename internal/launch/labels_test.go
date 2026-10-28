@@ -15,6 +15,7 @@ import (
 
 	"github.com/kmacmcfarlane/claude-sandbox/internal/cascade"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/launch"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/sessions"
 )
 
 var _ = Describe("label values (CS-LNCH-224, CS-LNCH-226)", func() {
@@ -70,6 +71,55 @@ var _ = Describe("label values (CS-LNCH-224, CS-LNCH-226)", func() {
 			i.MemoryLimitSource = "/w/\rconfig.yaml"
 		}, "claude-sandbox.memorylimitsource", "U+000D"),
 	)
+
+	It("CS-LNCH-226: Build escapes a bidi control in an input path in the inputs label", func() {
+		dir := filepath.Join(proj, "a\u202eb")
+		mkdir(dir)
+		ef := filepath.Join(dir, "env")
+		Expect(os.WriteFile(ef, []byte("X=1\n"), 0o600)).To(Succeed())
+		in.EnvFiles = []string{ef}
+		in.Env = []cascade.EnvFile{{Path: ef, Content: []byte("X=1\n")}}
+		p, err := build()
+		Expect(err).NotTo(HaveOccurred())
+		var inputs string
+		for _, l := range p.Labels {
+			if v, ok := strings.CutPrefix(l, "claude-sandbox.inputs="); ok {
+				inputs = v
+			}
+		}
+		Expect(inputs).To(ContainSubstring(`a\u202eb`))
+		Expect(strings.ContainsRune(inputs, '\u202e')).To(BeFalse())
+		Expect(launch.DecodeInputs(inputs)).To(ContainElement(HaveField("Path", ef)))
+	})
+
+	It("CS-LNCH-226: Build refuses a bind mount whose path holds a control character", func() {
+		in.Cfg = &cascade.Config{Mounts: []cascade.Mount{{Host: "/tmp/x\n" + strings.Repeat("y", 3), Container: "/tmp/x"}}}
+		_, err := build()
+		Expect(err).To(MatchError(ContainSubstring("a bind mount's path holds a control character (U+000A)")))
+	})
+
+	It("CS-LNCH-226: the drift check's build (DriftOnly) skips the value checks", func() {
+		in.Cfg = &cascade.Config{Model: "opus\x1fx", Mounts: []cascade.Mount{{Host: "/tmp/x\ny", Container: "/tmp/x"}}}
+		in.DriftOnly = true
+		p, err := build()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(p.ConfigHash).NotTo(BeEmpty())
+	})
+
+	It("CS-SESS-120: every label discovery reads is written, empty when unset", func() {
+		p, err := build()
+		Expect(err).NotTo(HaveOccurred())
+		keys := map[string]bool{}
+		for _, l := range p.Labels {
+			k, _, _ := strings.Cut(l, "=")
+			keys[k] = true
+		}
+		for _, k := range sessions.ReadLabels {
+			Expect(keys).To(HaveKey(k), "an image LABEL %s would otherwise reach discovery", k)
+		}
+		Expect(p.Labels).To(ContainElement("claude-sandbox.resume="))
+		Expect(p.Labels).To(ContainElement("claude-sandbox.continue="))
+	})
 
 	It("CS-LNCH-224: CheckConfiguredLabels names the value and its source, never the value", func() {
 		err := launch.CheckConfiguredLabels([]launch.ConfiguredLabelValue{

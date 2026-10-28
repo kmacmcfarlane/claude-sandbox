@@ -17,6 +17,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/sessions/sessionstest"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/tmuxpane"
 )
 
@@ -249,7 +250,7 @@ var _ = Describe("tmux restore, read-only (CS-TMUX-045..051)", func() {
 			Expect(f.out.String()).To(ContainSubstring("Pane main:1.0, from its own pending mark:\n  decision (row 4): a ralph run was here"))
 
 			f.out.Reset()
-			f.fake.On("docker inspect", "/"+mark(nil).Container+"\x1frunning\x1f2026-09-29T12:00:00Z\x1f"+f.proj+"\x1fheron\x1fclaude\n", nil)
+			f.fake.On("docker inspect", sessionstest.InspectRow("/"+mark(nil).Container, "running", "2026-09-29T12:00:00Z", f.proj, "heron", "claude")+"\n", nil)
 			Expect(f.run("tmux", "restore", "--dry-run", "--from", at(0))).To(Equal(0), f.errw.String())
 			Expect(f.out.String()).To(ContainSubstring("Pane main:1.0, from save " + at(0) + " in " + dir))
 			Expect(f.out.String()).To(ContainSubstring("decision (row 9): 'fix the build' still runs in " + mark(nil).Container + "; attach to it"))
@@ -289,7 +290,7 @@ var _ = Describe("tmux restore, read-only (CS-TMUX-045..051)", func() {
 				"%2\twork\t4\t0\tclaude-sandbox\t" + active.JSON(),
 				"%3\tmain\t5\t0\tzsh\t" + crashed.JSON(),
 			}, "\n")+"\n", nil)
-			f.fake.On("docker inspect", "/"+active.Container+"\x1frunning\x1f2026-09-29T12:00:00Z\x1f"+f.proj+"\x1fheron\x1fclaude\n", nil)
+			f.fake.On("docker inspect", sessionstest.InspectRow("/"+active.Container, "running", "2026-09-29T12:00:00Z", f.proj, "heron", "claude")+"\n", nil)
 			bad := mark(func(m *tmuxpane.Mark) { m.Project = "relative"; m.Name = "evil\x1b[2J" })
 			save(at(0), &tmuxpane.Sidecar{Server: srv(1), Panes: []tmuxpane.Row{
 				{Session: "main", Window: 1, Pane: 0, Mark: mark(nil)},
@@ -321,8 +322,8 @@ var _ = Describe("tmux restore, read-only (CS-TMUX-045..051)", func() {
 		It("CS-TMUX-051: the guard's discovery is uncounted: no docker top per running sandbox", func() {
 			f.fake.On("tmux list-panes", "", execx.Fail(1))
 			f.fake.On("docker inspect", "", execx.Fail(1))
-			f.fake.On("docker ps", strings.Join([]string{"claude-sandbox-other-x", "Up 5 minutes", "/srv/other", "claude", "murre",
-				"", "", "", "", "", ""}, "\x1f")+"\n", nil)
+			f.fake.On("docker ps", sessionstest.Row("claude-sandbox-other-x", "Up 5 minutes", "/srv/other", "claude", "murre",
+				"", "", "", "", "", "")+"\n", nil)
 			save(at(0), &tmuxpane.Sidecar{Panes: []tmuxpane.Row{
 				{Session: "main", Window: 1, Pane: 0, Mark: mark(func(m *tmuxpane.Mark) { m.ContainerID = "" })},
 			}})

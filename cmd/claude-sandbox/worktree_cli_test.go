@@ -19,6 +19,7 @@ import (
 	"github.com/kmacmcfarlane/claude-sandbox/internal/imagebuild"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/prompt"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/sessions"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/sessions/sessionstest"
 )
 
 // gitProject makes the fixture's project directory count as a git work tree.
@@ -28,7 +29,7 @@ func gitProject(f *cliFixture) {
 
 // psRowWorktree builds a ps row for a session running in the named worktree.
 func psRowWorktree(name, status, project, instance, worktree string) string {
-	return strings.Join([]string{name, status, project, "claude", instance, "v1", "", "", "", "", worktree}, psSep)
+	return sessionstest.Row(name, status, project, "claude", instance, "v1", "", "", "", "", worktree)
 }
 
 var _ = Describe("worktree mode (CS-LNCH-041..047, CS-SESS-045..047)", func() {

@@ -57,6 +57,19 @@ func CheckLabels(labels []string) error {
 	return nil
 }
 
+// CheckMounts is the mount half of Build's backstop (CS-LNCH-226): no -v
+// spec (source and destination) and no --mount source may hold a control or
+// bidi character. Discovery JSON-decodes {{.Mounts}}, so this is defence in
+// depth, and it keeps such a path out of every listing that prints mounts.
+func CheckMounts(volumes []string, extra ...string) error {
+	for _, v := range append(append([]string{}, volumes...), extra...) {
+		if why := LabelValueProblem(v); why != "" {
+			return fmt.Errorf("refusing to create the container: a bind mount's path holds %s", why)
+		}
+	}
+	return nil
+}
+
 // ConfiguredLabelValue is one launch value that becomes a label and whose
 // source the operator controls, with that source named for the message.
 type ConfiguredLabelValue struct {

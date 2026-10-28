@@ -27,6 +27,7 @@ import (
 	"github.com/kmacmcfarlane/claude-sandbox/internal/clients"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/sessions"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/sessions/sessionstest"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/tmuxpane"
 )
 
@@ -154,8 +155,8 @@ var _ = Describe("tmux restore, one pane (CS-TMUX-052..063)", func() {
 	}
 	inspectRunning := func(state string) {
 		f.fake.OnFunc("docker inspect", func(c execx.Cmd) (string, error) {
-			if strings.Contains(strings.Join(c.Args, " "), "{{.Name}}") {
-				return "/claude-sandbox-x-proj-abc123-heron\x1f" + state + "\x1f2026-09-29T12:00:00Z\x1f" + f.proj + "\x1fheron\x1fclaude\n", nil
+			if strings.Contains(strings.Join(c.Args, " "), "{{json .Name}}") {
+				return sessionstest.InspectRow("/claude-sandbox-x-proj-abc123-heron", state, "2026-09-29T12:00:00Z", f.proj, "heron", "claude") + "\n", nil
 			}
 			return state + "\n", nil
 		})
@@ -335,7 +336,7 @@ var _ = Describe("tmux restore, one pane (CS-TMUX-052..063)", func() {
 			fields := strings.Split(psRowMark("claude-sandbox-x-proj-abc123-heron", f.proj, "claude", "heron", "", "37", "",
 				"2026-09-18 12:34:56 +0000 UTC", markID, cfgDir, cfgDir+"/sessions", ""), psSep)
 			enc, _ := json.Marshal(offInputs)
-			fields[7], fields[8] = off, string(enc)
+			fields[7], fields[8] = sessionstest.Raw(off), sessionstest.Raw(string(enc))
 			f.fake.On("docker ps", strings.Join(fields, psSep)+"\n", nil)
 			streamEvents(f.fake, dockerEvent("die", "0"))
 			done := make(chan int, 1)
@@ -352,9 +353,9 @@ var _ = Describe("tmux restore, one pane (CS-TMUX-052..063)", func() {
 		Describe("CS-SESS-091: the terminal note before a restore attach", func() {
 			// termRow is psRowMark carried through the terminal label and Mounts.
 			termRow := func(terminal string) string {
-				return psRowMark("claude-sandbox-x-proj-abc123-heron", f.proj, "claude", "heron", "", "37", "",
-					"2026-09-18 12:34:56 +0000 UTC", markID, cfgDir, cfgDir+"/sessions", "") +
-					psSep + "" + psSep + "none" + psSep + terminal + psSep + ""
+				return sessionstest.Row("claude-sandbox-x-proj-abc123-heron", "Up 1 hour", f.proj, "claude", "heron", "v1", "", "", "", "37", "",
+					"running", "2026-09-18 12:34:56 +0000 UTC", "8g", "default", "", markID, cfgDir, cfgDir+"/sessions", "",
+					"", "none", terminal)
 			}
 			attachWith := func(terminal string) (errAtAttach string) {
 				pane(withID().JSON())

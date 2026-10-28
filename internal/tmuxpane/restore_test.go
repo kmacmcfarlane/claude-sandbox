@@ -15,6 +15,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/sessions/sessionstest"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/tmuxpane"
 )
 
@@ -312,7 +313,7 @@ var _ = Describe("tmux restore: the decision (CS-TMUX-051)", func() {
 			_, err := (&tmuxpane.ReadProbes{Runner: fake}).Inspect(cid)
 			Expect(err).To(MatchError(tmuxpane.ErrNoContainer))
 			fake2 := &execx.Fake{}
-			fake2.On("docker inspect", "/claude-sandbox-x\x1frunning\x1f2026-09-29T12:00:00.1Z\x1f/srv/proj\x1fheron\x1fclaude\n", nil)
+			fake2.On("docker inspect", sessionstest.InspectRow("/claude-sandbox-x", "running", "2026-09-29T12:00:00.1Z", "/srv/proj", "heron", "claude")+"\n", nil)
 			info, err := (&tmuxpane.ReadProbes{Runner: fake2}).Inspect(cid)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(info).To(Equal(tmuxpane.ContainerInfo{State: "running", Name: "claude-sandbox-x", Project: "/srv/proj", Instance: "heron"}))

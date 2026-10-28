@@ -1266,28 +1266,51 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
     And the name is never part of a shell command the launcher prints
 
   # ---- discovery rows (field injection) ----
+  # Several label values come from session-writable inputs, and docker prints
+  # bind sources raw in {{.Mounts}}. Read by index from a separator-joined
+  # line, a value holding the separator would shift the later fields, and one
+  # holding a newline would end the row and forge the next.
 
-  Scenario: CS-SESS-118 A docker ps row whose field count is not a known shape is dropped with a warning
-    Given discovery's docker ps format joins its fields with the unit separator
-    Then docker renders every placeholder for every container (an absent label
-      is an empty field), and {{.Mounts}} is last and holds commas but never
-      the separator, so a row of the current format has exactly as many
-      fields as the format
-    And a row with any other count is never interpreted: it is dropped, with
-      one stderr warning naming the container when the row's first field is a
-      valid container name (the name precedes every label, so a shifted row
-      still starts with it), else "a container"
-    And the earlier formats' exact counts (11, 13, 15, 16, 20, 21, 23, 24 and
-      25 fields) are still read, each with exactly the fields that shape had:
-      this format never produces them, and an injected separator only adds
-      fields, so they can never be a shifted current row
-    And the other rows of the listing are returned as before
+  Scenario: CS-SESS-118 Every discovery field is JSON, and only the exact field count is read
+    Given discovery's docker ps format
+    Then every field is rendered as JSON: each label as {{json (.Label "k")}}
+      (docker ps's {{.Labels}} is one comma-joined string, ambiguous when a
+      value holds a comma), {{json .Names}}, .Status, .State, .CreatedAt, .ID
+      and {{json .Mounts}}, and the retired slot as ""
+    And JSON escapes every control character, so neither the unit separator
+      nor a newline occurs inside a field: each container is exactly one line
+      of exactly the format's field count, whatever its labels or bind sources
+      hold
+    And a line is read only when it has exactly that count and every field
+      decodes as a JSON string; any other line is dropped, with one stderr
+      warning naming the container when its first field decodes to a valid
+      container name, else "a container"
+    And no other count is accepted, earlier formats' included: docker always
+      renders the whole format, which is this binary's own, so any other
+      count did not come from it
+    And the other lines of the listing are returned as before
+    And InspectContainer's fields are JSON the same way, and the global-config
+      container check lists {{json .Names}} and {{json .Mounts}}: a line it
+      cannot decode fails the listing (refused unless --force), and a name
+      that is not a container name is never passed to docker inspect
+    And every docker inspect given names from a listing ends its flags with "--"
 
   Scenario: CS-SESS-119 Fields with a fixed form are validated
-    Given a row of a known shape
+    Given a decoded row
     Then the row is dropped with the same warning when its name is not a
       container name, its State is not a docker container state, its ID is not
       12 to 64 lowercase hex characters, its pid class is not a decimal 0..255,
       or its resume label is not a lowercase UUID; empty values pass
     And the continue label stays as CS-LNCH-182 reads it: "1" sets it,
       anything else does not
+
+  Scenario: CS-SESS-120 Every label discovery reads is written at create, empty when unset
+    Given docker copies an image's LABEL for every key the create does not set
+    Then every launch writes every label discovery reads (sessions.ReadLabels:
+      project, mode, instance, version, model, confighash, inputs, pidclass,
+      worktree, memorylimit, memorylimitsource, configdir, registry,
+      launchflags, resume, peerroot, terminal, continue, clipboard, shadowdir),
+      with an empty value when unset — instance for ralph, resume and continue
+      for a launch that neither resumes nor continues
+    And so an image defining claude-sandbox.resume (or any of them) cannot make
+      a container read as resuming, continuing or holding a pid class

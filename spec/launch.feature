@@ -3309,20 +3309,24 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       the shadow CLAUDE.md's new static time zone bullet; [n] clears it
 
   # ---- label values (discovery field injection) ----
-  # Discovery reads every label from one docker ps row whose fields are joined
-  # by the unit separator (CS-SESS-118). A label value holding it would shift
-  # every later field, so no label the launcher writes may hold a control
-  # character (Cc: the separator, newline, CR and tab among them) or one of
-  # the twelve Bidi_Control characters.
+  # Discovery reads every label, and every bind source, from one docker ps
+  # line; it renders each field as JSON (CS-SESS-118), so a control character
+  # can no longer shift or forge a row. As defence in depth, no label the
+  # launcher writes and no bind mount path may hold a control character (Cc:
+  # the separator, newline, CR and tab among them) or one of the twelve
+  # Bidi_Control characters.
 
   Scenario: CS-LNCH-224 A configured label value with a control or bidi character is refused before any image work
     Given a launch that would create a container
     And one of the configured values that become labels holds a control or
       bidi character: the cascade "model" key, the cascade "memoryLimit" key,
-      the project directory's path, or CLAUDE_CONFIG_DIR
+      a cascade "mounts" entry's host or container, the project directory's
+      path, or CLAUDE_CONFIG_DIR
     Then the launch exits 2 before any image build or docker create
     And the message names the value and its source: the config.yaml that set
-      the key (cascade.KeySourceOf), "environment" for CLAUDE_CONFIG_DIR, and
+      the key (cascade.KeySourceOf; for a mount, the config.yaml whose own
+      mounts list holds it, as "mounts[i] host"), "environment" for
+      CLAUDE_CONFIG_DIR, and
       the character as U+XXXX; the value itself is never printed
     And an attach or join, which creates nothing, is not refused
     And the worktree name needs no new check: --worktree=NAME is already
@@ -3342,6 +3346,13 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       create): the backstop for the values the launcher derives — the
       version, the memoryLimit source path, the shadow directory, the registry
       and peers root paths
+    And every -v spec (source and destination: cascade mounts, the
+      settings.json target, the linked worktree's git common dir, caches,
+      shadows) and the clipboard --mount source are checked the same way: a
+      bad one fails Build ("a bind mount's path holds ...")
+    And the attach/join drift check's would-be build (Inputs.DriftOnly)
+      skips both checks: it creates nothing, so a value that went bad since
+      the container was created neither fails the check nor reads as drift
     And the launchflags label writes only flag names FromLabel would read back
       (an unknown passthrough flag's typed name is dropped, not refused)
     And the inputs label escapes a Bidi_Control character in a path as \uXXXX

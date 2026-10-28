@@ -1,6 +1,8 @@
 package main
 
 import (
+	"fmt"
+
 	"github.com/kmacmcfarlane/claude-sandbox/internal/cascade"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/launch"
 )
@@ -37,9 +39,42 @@ func configuredLabelValues(env *Env, f *launchFlags, cfg *cascade.Config, snap [
 	if cfg.MemoryLimit != "" {
 		out = append(out, launch.ConfiguredLabelValue{What: "memoryLimit", Source: keySource("memoryLimit"), Value: cfg.MemoryLimit})
 	}
+	// Cascade mounts are not labels, but docker prints their sources in
+	// {{.Mounts}}, which discovery reads (CS-LNCH-224): each is named with
+	// the config.yaml whose own mounts list holds it.
+	for i, m := range cfg.Mounts {
+		for _, side := range []struct{ what, v string }{{"host", m.Host}, {"container", m.Container}} {
+			if launch.LabelValueProblem(side.v) == "" {
+				continue
+			}
+			out = append(out, launch.ConfiguredLabelValue{
+				What:   fmt.Sprintf("mounts[%d] %s", i, side.what),
+				Source: mountSource(snap, m), Value: side.v,
+			})
+		}
+	}
 	out = append(out,
 		launch.ConfiguredLabelValue{What: "the project directory's path", Value: projectDir},
 		launch.ConfiguredLabelValue{What: "CLAUDE_CONFIG_DIR", Source: "environment", Value: env.Getenv("CLAUDE_CONFIG_DIR")},
 	)
 	return out
+}
+
+// mountSource names the most-local config.yaml whose own mounts list holds
+// m (mounts append across the cascade, so the key's last setter may not be
+// it); "the sandbox config" when none parses to it.
+func mountSource(snap []cascade.ConfigFile, m cascade.Mount) string {
+	src := "the sandbox config"
+	for _, f := range snap {
+		one, err := cascade.LoadSnapshot([]cascade.ConfigFile{f})
+		if err != nil {
+			continue
+		}
+		for _, o := range one.Mounts {
+			if o.Host == m.Host && o.Container == m.Container {
+				src = f.Path
+			}
+		}
+	}
+	return src
 }
