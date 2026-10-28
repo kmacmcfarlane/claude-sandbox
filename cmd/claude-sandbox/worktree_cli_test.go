@@ -362,8 +362,8 @@ var _ = Describe("worktree mode (CS-LNCH-041..047, CS-SESS-045..047)", func() {
 			Expect(f.run("sessions")).To(Equal(0))
 			out := f.out.String()
 			Expect(out).To(ContainSubstring("WORKTREE"))
-			Expect(out).To(MatchRegexp(`(?m)^otter\s+otter\s+cs-a`))
-			Expect(out).To(MatchRegexp(`(?m)^heron\s+-\s+cs-b`))
+			Expect(out).To(MatchRegexp(`(?m)^otter\s+-\s+otter\s+cs-a`))
+			Expect(out).To(MatchRegexp(`(?m)^heron\s+-\s+-\s+cs-b`))
 
 			f.out.Reset()
 			Expect(f.run("sessions", "--json")).To(Equal(0))

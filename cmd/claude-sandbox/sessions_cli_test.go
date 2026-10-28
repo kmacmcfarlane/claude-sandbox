@@ -732,9 +732,9 @@ var _ = Describe("container states in the sessions listing (CS-SESS-070, 074)", 
 		f.fake.On("docker top", "PID  COMMAND\n1  claude\n", nil)
 		Expect(f.run("sessions")).To(Equal(0), f.errw.String())
 		out := f.out.String()
-		Expect(out).To(MatchRegexp(`INSTANCE\s+WORKTREE\s+NAME\s+MODE\s+STATE\s+UP\s+SESSIONS`))
-		Expect(out).To(MatchRegexp(`heron\s+-\s+cs-a\s+claude\s+running\s+1 hour\s+1`))
-		Expect(out).To(MatchRegexp(`otter\s+-\s+cs-p\s+claude\s+paused\s+1 hour\s+1`))
+		Expect(out).To(MatchRegexp(`INSTANCE\s+NAME\s+WORKTREE\s+CONTAINER\s+MODE\s+STATE\s+UP\s+SESSIONS`))
+		Expect(out).To(MatchRegexp(`heron\s+-\s+-\s+cs-a\s+claude\s+running\s+1 hour\s+1`))
+		Expect(out).To(MatchRegexp(`otter\s+-\s+-\s+cs-p\s+claude\s+paused\s+1 hour\s+1`))
 		Expect(out).NotTo(ContainSubstring("wren"))
 		for _, l := range f.fake.CommandLines() {
 			Expect(l).NotTo(HavePrefix("docker top cs-gone"), "CS-SESS-071: nothing to count in an exited container")
@@ -745,7 +745,7 @@ var _ = Describe("container states in the sessions listing (CS-SESS-070, 074)", 
 		f.fake.On("docker ps", psRow("cs-a", "Up 2 hours", f.proj, "otter")+"\n", nil)
 		f.fake.On("docker top", "PID  COMMAND\n1  claude\n", nil)
 		Expect(f.run("sessions")).To(Equal(0))
-		Expect(f.out.String()).To(MatchRegexp(`otter\s+-\s+cs-a\s+claude\s+-\s+2 hours\s+1`))
+		Expect(f.out.String()).To(MatchRegexp(`otter\s+-\s+-\s+cs-a\s+claude\s+-\s+2 hours\s+1`))
 	})
 
 	It("CS-SESS-074: --json carries state, and no keep field", func() {

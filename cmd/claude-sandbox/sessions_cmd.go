@@ -5,11 +5,14 @@ package main
 // to one, or stop. Spec: spec/sessions.feature (CS-SESS).
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 
@@ -20,6 +23,7 @@ import (
 	"github.com/kmacmcfarlane/claude-sandbox/internal/imagebuild"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/launch"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/oomreport"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/resumeguard"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/sessions"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/tmuxpane"
 )
@@ -61,8 +65,10 @@ func newSessionsCmd(env *Env) *cobra.Command {
 			// One batched inspect for State.OOMKilled, which docker ps cannot
 			// read; a failure just leaves the rows unmarked (CS-SESS-061/062).
 			sessions.MarkOOM(env.Runner, found)
+			// The friendly names (CS-SESS-114/116): one read per registry dir.
+			names := sessionNames(env, found)
 			if asJSON {
-				b, merr := sessions.MarshalJSON(found)
+				b, merr := marshalSessionsJSON(found, names)
 				if merr != nil {
 					return merr
 				}
@@ -79,7 +85,7 @@ func newSessionsCmd(env *Env) *cobra.Command {
 				}
 				return nil
 			}
-			printSessionTable(env, found, all, projectDir)
+			printSessionTable(env, found, all, projectDir, names)
 			return nil
 		},
 	}
@@ -89,8 +95,10 @@ func newSessionsCmd(env *Env) *cobra.Command {
 }
 
 // printSessionTable renders the human-readable listing (CS-SESS-010/011/074).
-func printSessionTable(env *Env, found []sessions.Session, all bool, projectDir string) {
-	header := []string{"INSTANCE", "WORKTREE", "NAME", "MODE", "STATE", "UP", "SESSIONS"}
+// NAME is the session's friendly name, CONTAINER the docker container name
+// (CS-SESS-116).
+func printSessionTable(env *Env, found []sessions.Session, all bool, projectDir string, names map[string]string) {
+	header := []string{"INSTANCE", "NAME", "WORKTREE", "CONTAINER", "MODE", "STATE", "UP", "SESSIONS"}
 	if all {
 		header = append(header, "PROJECT")
 	}
@@ -120,17 +128,22 @@ func printSessionTable(env *Env, found []sessions.Session, all bool, projectDir 
 		if state == "" {
 			state = "-" // an older docker ps row (CS-SESS-074)
 		}
-		row := []string{mark + instance, worktree, s.Name, s.Mode, state, uptime(s.Status), count}
+		name := sessions.DisplayName(names[s.Name])
+		if name == "" {
+			name = "-"
+		}
+		row := []string{mark + instance, name, worktree, s.Name, s.Mode, state, uptime(s.Status), count}
 		if all {
 			row = append(row, s.Project)
 		}
 		rows = append(rows, row)
 	}
+	// Widths in runes: a session name may hold non-ASCII text.
 	widths := make([]int, len(header))
 	for _, r := range rows {
 		for i, c := range r {
-			if len(c) > widths[i] {
-				widths[i] = len(c)
+			if n := utf8.RuneCountInString(c); n > widths[i] {
+				widths[i] = n
 			}
 		}
 	}
@@ -139,7 +152,7 @@ func printSessionTable(env *Env, found []sessions.Session, all bool, projectDir 
 		for i, c := range r {
 			b.WriteString(c)
 			if i < len(r)-1 {
-				b.WriteString(strings.Repeat(" ", widths[i]-len(c)+2))
+				b.WriteString(strings.Repeat(" ", widths[i]-utf8.RuneCountInString(c)+2))
 			}
 		}
 		fmt.Fprintln(env.Out, strings.TrimRight(b.String(), " "))
@@ -153,6 +166,61 @@ func printSessionTable(env *Env, found []sessions.Session, all bool, projectDir 
 	if anyOOM {
 		fmt.Fprintln(env.Out, strings.TrimSpace(oomSuffix)+" = a process in this container was killed by the OOM killer: its memoryLimit or the host running out of memory")
 	}
+}
+
+// sessionJSON is one --json row: the discovered session plus its friendly
+// name (CS-SESS-116). "name" is the container name, as it always was.
+type sessionJSON struct {
+	sessions.Session
+	SessionName string `json:"sessionName,omitempty"`
+}
+
+// marshalSessionsJSON is sessions.MarshalJSON with each row's sessionName.
+func marshalSessionsJSON(found []sessions.Session, names map[string]string) ([]byte, error) {
+	rows := make([]sessionJSON, 0, len(found))
+	for _, s := range found {
+		rows = append(rows, sessionJSON{Session: s, SessionName: sessions.DisplayName(names[s.Name])})
+	}
+	return json.MarshalIndent(rows, "", "  ")
+}
+
+// sessionNames finds the friendly name of each session's primary claude
+// (CS-SESS-114): from the container's registry label, else the launcher's
+// <config dir>/sessions and the legacy peers root. Display only: every
+// failure is no name.
+func sessionNames(env *Env, found []sessions.Session) map[string]string {
+	_, _, _, home := hostIdentity(env.Getenv)
+	configDir := env.Getenv("CLAUDE_CONFIG_DIR")
+	if configDir == "" && home != "" {
+		configDir = filepath.Join(home, ".claude")
+	}
+	var dirs []string
+	if filepath.IsAbs(configDir) {
+		dirs = append(dirs, filepath.Join(configDir, "sessions"))
+	}
+	if filepath.IsAbs(home) {
+		dirs = append(dirs, filepath.Join(home, launch.LegacyPeerRegistryRoot, "sessions"))
+	}
+	return sessions.SessionNames(found, sessions.NameLookup{
+		FallbackDirs: dirs,
+		OwnDomain: func() string {
+			d, err := resumeguard.Check{ProcRoot: env.ProcRoot, MachineIDPath: env.MachineIDPath}.OwnDomain()
+			if err != nil {
+				return ""
+			}
+			return d
+		},
+	})
+}
+
+// namedLabel is sessionLabel with the friendly name beside it, as the
+// tier-1 list and the pick lines show it (CS-SESS-115): "otter (big
+// refactor)", or the label alone without a name.
+func namedLabel(s sessions.Session, names map[string]string) string {
+	if n := sessions.DisplayName(names[s.Name]); n != "" {
+		return sessionLabel(s) + " (" + n + ")"
+	}
+	return sessionLabel(s)
 }
 
 // oomSuffix marks a container whose State.OOMKilled is true in the SESSIONS
@@ -242,7 +310,7 @@ func decideSessions(env *Env, projectDir string, f *launchFlags) (sessionDecisio
 	// problem (CS-SESS-034).
 	if f.Ralph {
 		if live := sessions.Live(found); len(live) > 0 {
-			reportRunning(env, live)
+			reportRunning(env, live, sessionNames(env, live))
 		}
 		return sessionDecision{Action: actionNew}, nil
 	}
@@ -274,7 +342,8 @@ func decideSessions(env *Env, projectDir string, f *launchFlags) (sessionDecisio
 
 	// A decision is needed. Report first, so the information is available even
 	// when the command is about to fail for want of a terminal.
-	reportRunning(env, candidates)
+	names := sessionNames(env, candidates)
+	reportRunning(env, candidates, names)
 	if !env.Prompter.Interactive() {
 		return sessionDecision{}, exitErr(exitDecisionRequired,
 			"Error: %d session(s) already running for this project and no terminal is attached.\n"+
@@ -299,10 +368,10 @@ func decideSessions(env *Env, projectDir string, f *launchFlags) (sessionDecisio
 		// to branch a different one, use --branch for claude's picker instead.
 		return sessionDecision{Action: actionNew, BranchArgs: branchNewestArgs}, nil
 	case "j", "join":
-		s, serr := selectInstance(env, candidates, "join")
+		s, serr := selectInstance(env, candidates, "join", names)
 		return sessionDecision{Action: actionJoin, Target: s}, serr
 	case "a", "attach":
-		s, serr := selectInstance(env, candidates, "attach")
+		s, serr := selectInstance(env, candidates, "attach", names)
 		return sessionDecision{Action: actionAttach, Target: s}, serr
 	default:
 		// Includes "q" and the empty answer: Ask returns "" on Enter, on EOF and
@@ -324,10 +393,18 @@ func sessionLabel(s sessions.Session) string {
 	return s.Name
 }
 
-func reportRunning(env *Env, found []sessions.Session) {
+// reportRunning prints the tier-1 list: each session's label with its
+// friendly name beside it (CS-SESS-115), padded in runes to the widest.
+func reportRunning(env *Env, found []sessions.Session, names map[string]string) {
 	fmt.Fprintf(env.Err, "\nFound %d running session(s) for this project:\n", len(found))
+	width := 10
 	for _, s := range found {
-		fmt.Fprintf(env.Err, "  %-10s up %-12s %d session(s)\n", sessionLabel(s), uptime(s.Status), s.Count)
+		if n := utf8.RuneCountInString(namedLabel(s, names)); n > width {
+			width = n
+		}
+	}
+	for _, s := range found {
+		fmt.Fprintf(env.Err, "  %-*s up %-12s %d session(s)\n", width, namedLabel(s, names), uptime(s.Status), s.Count)
 	}
 	fmt.Fprintln(env.Err)
 }
@@ -349,15 +426,16 @@ func resolveTarget(env *Env, candidates []sessions.Session, target, verb string)
 	if len(candidates) == 1 {
 		return candidates[0], nil
 	}
-	reportRunning(env, candidates)
-	return selectInstance(env, candidates, verb)
+	names := sessionNames(env, candidates)
+	reportRunning(env, candidates, names)
+	return selectInstance(env, candidates, verb, names)
 }
 
 // selectInstance is the second tier: it is skipped entirely when there is only
 // one candidate, so the common case stays a single prompt (CS-SESS-017).
-func selectInstance(env *Env, candidates []sessions.Session, verb string) (sessions.Session, error) {
+func selectInstance(env *Env, candidates []sessions.Session, verb string, friendly map[string]string) (sessions.Session, error) {
 	if len(candidates) == 1 {
-		fmt.Fprintf(env.Err, "Using the only running session: %s\n", sessionLabel(candidates[0]))
+		fmt.Fprintf(env.Err, "Using the only running session: %s\n", namedLabel(candidates[0], friendly))
 		return candidates[0], nil
 	}
 	names := sessions.Instances(candidates)

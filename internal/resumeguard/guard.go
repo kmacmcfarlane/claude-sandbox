@@ -540,6 +540,11 @@ func (c Check) hostDomain() (string, error) {
 	return "linux:" + c.machineID() + ":" + ns, nil
 }
 
+// OwnDomain is hostDomain for other readers of the registry: the session
+// listing leaves the host's own records out of a container's name
+// (CS-SESS-114). Only ProcRoot, MachineIDPath and GOOS are read.
+func (c Check) OwnDomain() (string, error) { return c.hostDomain() }
+
 // procLive reports whether pid is still the process that wrote a record with
 // procStart (07 § 4): /proc/<pid> absent = no; its stat's field 22 equal to
 // procStart = yes, different = no (the pid was reused); present but
