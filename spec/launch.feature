@@ -3586,3 +3586,22 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     And off Linux (macOS) a restart is allowed, but client presence cannot be told, so it
       always asks (CS-SESS-108)
 
+  @new
+  Scenario: CS-LNCH-223 Every create records the access it applied
+    Given any new container: interactive, --detach, --branch or the tier-1 [b], headless,
+      ralph, a restart
+    Then it carries the label claude-sandbox.access listing each access option the launch
+      applied with the source that turned it on, in the order dangerous, ssh, git,
+      docker-socket, aws, package-caches, e.g. "ssh=flag,package-caches=config"; "none"
+      when none applied (docker renders an absent label as "", the mark of a container
+      created before it)
+    And the source comes from the launch's own resolution: a host-access option's flag,
+      else a truthy CLAUDE_SANDBOX_HOST_ACCESS_*_ENABLED ("1", "true", "yes"), else the
+      config; dangerous mode's --dangerous, else a truthy CLAUDE_SANDBOX_DANGEROUS, else
+      the config — so a falsy switch is never "env"
+    And the label is written after the fingerprint and never hashed: it is a per-launch
+      record, not configuration
+    And discovery reads it as the field just before {{.Mounts}} (Session.Access); a row of
+      the format before it keeps every other field
+    And a restart reads only it to carry access options over (CS-SESS-107)
+

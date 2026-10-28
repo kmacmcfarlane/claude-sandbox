@@ -233,14 +233,10 @@ func restartable(s sessions.Session) error {
 
 // inspected is what the restart reads from the old container with one
 // docker inspect: claude's command line (Config.Cmd, the launcher's own
-// create argv, held by the daemon), its mounts and its environment.
+// create argv, held by the daemon), for the flags a resume replays. Never
+// read for access: that is the claude-sandbox.access label's (CS-LNCH-223).
 type inspected struct {
-	Cmd    []string
-	Mounts []struct {
-		Source      string `json:"Source"`
-		Destination string `json:"Destination"`
-	}
-	Env []string
+	Cmd []string
 }
 
 // inspectRestartTarget runs the one docker inspect of the target.
@@ -253,7 +249,7 @@ func inspectRestartTarget(env *Env, s sessions.Session) (inspected, error) {
 	out, err := tmuxpane.BoundedRunner{R: env.Runner, Timeout: tmuxpane.ProbeTimeout}.Output(execx.Cmd{
 		Name: "docker",
 		Args: []string{"inspect", "--type", "container", "-f",
-			"{{json .Config.Cmd}}\x1f{{json .Mounts}}\x1f{{json .Config.Env}}", id},
+			"{{json .Config.Cmd}}", id},
 		Stderr: &stderr,
 	})
 	var in inspected
@@ -264,12 +260,7 @@ func inspectRestartTarget(env *Env, s sessions.Session) (inspected, error) {
 		}
 		return in, errors.New(msg)
 	}
-	f := strings.Split(strings.TrimRight(out, "\r\n"), "\x1f")
-	if len(f) != 3 {
-		return in, errors.New("unexpected docker inspect output")
-	}
-	if json.Unmarshal([]byte(f[0]), &in.Cmd) != nil || json.Unmarshal([]byte(f[1]), &in.Mounts) != nil ||
-		json.Unmarshal([]byte(f[2]), &in.Env) != nil {
+	if json.Unmarshal([]byte(strings.TrimSpace(out)), &in.Cmd) != nil {
 		return in, errors.New("unexpected docker inspect output")
 	}
 	return in, nil
@@ -314,7 +305,7 @@ func prepareRestart(env *Env, projectDir string, f *launchFlags, cfg *cascade.Co
 		configDir = filepath.Join(home, ".claude")
 	}
 
-	// CS-SESS-107: claude's command line, its mounts and environment.
+	// CS-SESS-107: claude's command line, for the flags a resume replays.
 	ins, err := inspectRestartTarget(env, target)
 	if err != nil {
 		return nil, exitErr(2, "Error: cannot read %s's command line (%s); nothing was stopped.", rs.who(), registry.Printable(err.Error()))
@@ -734,12 +725,21 @@ func (rs *restartState) composeMark(env *Env, f *launchFlags, cfg *cascade.Confi
 	var notes []string
 	// Config.Cmd is the launcher's own create argv: CommandPrefix, then the
 	// passthrough. The labels say what the prefix holds.
+	// Whether the prefix holds --dangerously-skip-permissions is the access
+	// label's word (CS-LNCH-223), never guessed: a passthrough token right
+	// after "claude" must not read as the launcher's. A container from
+	// before the label tries the prefix without it first, so such a token
+	// is only noted.
 	var pass []string
-	prefixOK, prefixDangerous := false, false
-	for _, dangerous := range []bool{true, false} {
+	prefixOK := false
+	shapes := []bool{false, true}
+	if t.HasAccess {
+		shapes = []bool{launch.ParseAccess(t.Access)["dangerous"] != ""}
+	}
+	for _, dangerous := range shapes {
 		p := launch.CommandPrefix(dangerous, t.Worktree, t.Model)
 		if len(ins.Cmd) >= len(p) && slices.Equal(ins.Cmd[:len(p)], p) {
-			prefixOK, prefixDangerous, pass = true, dangerous, ins.Cmd[len(p):]
+			prefixOK, pass = true, ins.Cmd[len(p):]
 			break
 		}
 	}
@@ -772,7 +772,10 @@ func (rs *restartState) composeMark(env *Env, f *launchFlags, cfg *cascade.Confi
 		notes = append(notes, "Note: "+rs.who()+" was also launched with "+strings.Join(rec.Unreplayed, ", ")+
 			" (claude flags a restart does not replay); pass them again after -- to keep them.")
 	}
-	carried, dropped := carryAccess(env, f, cfg, t, ins, rs.home, prefixOK && prefixDangerous)
+	carried, dropped := carryAccess(env, f, cfg, t)
+	if !t.HasAccess {
+		notes = append(notes, "Note: "+rs.who()+" predates access tracking; pass any access options again.")
+	}
 	if len(carried) > 0 {
 		var parts []string
 		for _, c := range carried {
@@ -791,57 +794,23 @@ func (rs *restartState) composeMark(env *Env, f *launchFlags, cfg *cascade.Confi
 // carriedOption is one access option a restart re-grants (CS-SESS-107).
 type carriedOption struct{ flag, how string }
 
-// carryAccess carries the old session's access options over (CS-SESS-107),
-// but only what the launcher itself recorded as given at the old launch: the
-// claude-sandbox.launchflags label naming the launcher flag, or naming its
-// CLAUDE_SANDBOX_* switch — a switch only when the option was also in effect
-// in the old container, since the label records that it was set, not its
-// value. Such an option that this launch would not give on
-// its own is set as its flag on f (this launch's own flags already won) and
-// returned, so the restart names it.
-//
-// Nothing is ever inferred from the container's mounts, environment or
-// command line: an env file and a cascade config.yaml are session-writable,
-// so a session could otherwise write its way to an access option. An option
-// that evidence says was in effect while the label names neither its flag
-// nor its switch came from the old launch's config; when today's config no
-// longer gives it, it is returned in dropped, for a note, and never granted.
-func carryAccess(env *Env, f *launchFlags, cfg *cascade.Config, s sessions.Session, ins inspected, home string, prefixDangerous bool) (carried []carriedOption, dropped []string) {
-	_, named := tmuxpane.FromLabel(s.LaunchFlags)
-	labelled := s.RegistryDir != ""
-	// Evidence: it confirms a named switch was truthy, and feeds the config
-	// note; alone it never grants.
-	mounted := func(dest string) bool {
-		for _, m := range ins.Mounts {
-			if filepath.Clean(m.Destination) == dest {
-				return true
-			}
-		}
-		return false
+// carryAccess carries the old session's access options over (CS-SESS-107)
+// from ONE source: the claude-sandbox.access label the launcher wrote at the
+// old create (CS-LNCH-223), which records each option it applied and the
+// source that turned it on, from the launch's own resolution — so a falsy
+// switch is never "env". An option from a flag or a switch, that this launch
+// would not give on its own, is set as its flag on f (this launch's own
+// flags already won) and returned, so the restart names it. An option from
+// the old config that today's config no longer gives is returned in dropped,
+// for a note, and never granted. The container's mounts, environment and
+// command line are never read for access: they are session-writable inputs
+// (an env file, a cascade config). A container without the label carries
+// nothing.
+func carryAccess(env *Env, f *launchFlags, cfg *cascade.Config, s sessions.Session) (carried []carriedOption, dropped []string) {
+	if !s.HasAccess {
+		return nil, nil
 	}
-	cachesOn := func() bool {
-		root := filepath.Join(home, launch.PackageCacheRoot)
-		vars := launch.PackageCacheVars()
-		for _, kv := range ins.Env {
-			k, v, ok := strings.Cut(kv, "=")
-			if d, known := vars[k]; ok && known && filepath.Clean(v) == filepath.Join(root, d) {
-				return true
-			}
-		}
-		return false
-	}
-	cascadeMounts := func(dest string) bool {
-		for _, m := range cfg.Mounts {
-			c := m.Container
-			if c == "" {
-				c = m.Host
-			}
-			if dest != "" && filepath.Clean(c) == dest {
-				return true
-			}
-		}
-		return false
-	}
+	old := launch.ParseAccess(s.Access)
 	on := func(cli *bool, envVar string, yaml *bool) bool {
 		if cli != nil && *cli {
 			return true
@@ -852,51 +821,39 @@ func carryAccess(env *Env, f *launchFlags, cfg *cascade.Config, s sessions.Sessi
 		}
 		return yaml != nil && *yaml
 	}
-	decide := func(flag, envVar string, nowOn, evidence bool) (carry bool, how string) {
+	decide := func(name, envVar string, nowOn bool) (bool, string) {
+		src := old[name]
 		switch {
-		case nowOn:
+		case src == "" || nowOn:
 			return false, ""
-		case slices.Contains(named, flag):
+		case src == launch.AccessFlag:
 			return true, "given as a flag at its launch"
-		case slices.Contains(named, envVar):
-			// The label proves the switch was set, not that it was truthy:
-			// only an option also in effect in the old container (its
-			// launcher mount, -e or command-line prefix) is carried.
-			// Requiring both cannot widen anything; otherwise nothing is
-			// carried and nothing said.
-			if !evidence {
-				return false, ""
-			}
-			return true, envVar + " was set at its launch"
-		case labelled && evidence:
-			dropped = append(dropped, flag)
+		case src == launch.AccessEnv:
+			return true, envVar + " was on at its launch"
 		}
+		dropped = append(dropped, "--"+name)
 		return false, ""
 	}
-
-	if ok, how := decide("--dangerous", "CLAUDE_SANDBOX_DANGEROUS", resolveDangerous(env, f, cfg), prefixDangerous); ok {
+	if ok, how := decide("dangerous", "CLAUDE_SANDBOX_DANGEROUS", resolveDangerous(env, f, cfg)); ok {
 		f.Dangerous = true
 		carried = append(carried, carriedOption{"--dangerous", how})
 	}
 	t := true
 	ha := cfg.HostAccess
 	for _, o := range []struct {
-		flag, envVar string
+		name, envVar string
 		cli          **bool
 		yaml         *bool
-		evidence     bool
-		dest         string
 	}{
-		{"--ssh", "CLAUDE_SANDBOX_HOST_ACCESS_SSH_ENABLED", &f.SSH, ha.SSH.Enabled, mounted(filepath.Join(home, ".ssh")), filepath.Join(home, ".ssh")},
-		{"--git", "CLAUDE_SANDBOX_HOST_ACCESS_GIT_ENABLED", &f.Git, ha.Git.Enabled, mounted(filepath.Join(home, ".gitconfig")), filepath.Join(home, ".gitconfig")},
-		{"--docker-socket", "CLAUDE_SANDBOX_HOST_ACCESS_DOCKER_SOCKET_ENABLED", &f.DockerSocket, ha.DockerSocket.Enabled, mounted("/var/run/docker.sock"), "/var/run/docker.sock"},
-		{"--aws", "CLAUDE_SANDBOX_HOST_ACCESS_AWS_ENABLED", &f.AWS, ha.AWS.Enabled, mounted(filepath.Join(home, ".aws")), filepath.Join(home, ".aws")},
-		{"--package-caches", "CLAUDE_SANDBOX_HOST_ACCESS_PACKAGE_CACHES_ENABLED", &f.PackageCaches, ha.PackageCaches.Enabled, cachesOn(), ""},
+		{"ssh", "CLAUDE_SANDBOX_HOST_ACCESS_SSH_ENABLED", &f.SSH, ha.SSH.Enabled},
+		{"git", "CLAUDE_SANDBOX_HOST_ACCESS_GIT_ENABLED", &f.Git, ha.Git.Enabled},
+		{"docker-socket", "CLAUDE_SANDBOX_HOST_ACCESS_DOCKER_SOCKET_ENABLED", &f.DockerSocket, ha.DockerSocket.Enabled},
+		{"aws", "CLAUDE_SANDBOX_HOST_ACCESS_AWS_ENABLED", &f.AWS, ha.AWS.Enabled},
+		{"package-caches", "CLAUDE_SANDBOX_HOST_ACCESS_PACKAGE_CACHES_ENABLED", &f.PackageCaches, ha.PackageCaches.Enabled},
 	} {
-		nowOn := on(*o.cli, o.envVar, o.yaml) || cascadeMounts(o.dest)
-		if ok, how := decide(o.flag, o.envVar, nowOn, o.evidence); ok {
+		if ok, how := decide(o.name, o.envVar, on(*o.cli, o.envVar, o.yaml)); ok {
 			*o.cli = &t
-			carried = append(carried, carriedOption{o.flag, how})
+			carried = append(carried, carriedOption{"--" + o.name, how})
 		}
 	}
 	return carried, dropped

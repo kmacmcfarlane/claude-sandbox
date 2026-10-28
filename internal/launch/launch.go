@@ -15,6 +15,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -47,8 +48,12 @@ type Inputs struct {
 	RalphMode       bool
 	Limit           string
 	SkipPermissions bool
-	CLIModel        string
-	Passthrough     []string
+	// CLIDangerous is --dangerous given on the command line: with
+	// SkipPermissions it says which source turned dangerous mode on, for
+	// the access label (CS-LNCH-223).
+	CLIDangerous bool
+	CLIModel     string
+	Passthrough  []string
 
 	// Instance is the noun identifying this session among the project's
 	// containers (CS-LNCH-026). Empty for ralph, which is single-instance.
@@ -258,6 +263,77 @@ const LabelResume = "claude-sandbox.resume"
 // the config hash, like every label.
 const LabelContinue = "claude-sandbox.continue"
 
+// LabelAccess records the access options a launch applied and the source
+// that turned each on (CS-LNCH-223): "ssh=flag,package-caches=config", ""
+// for none. Launcher-written at create and never hashed; a restart reads
+// only it to carry options over (CS-SESS-107).
+const LabelAccess = "claude-sandbox.access"
+
+// Access sources, as LabelAccess records them; AccessNone is the value of a
+// launch that applied no access option.
+const (
+	AccessNone   = "none"
+	AccessFlag   = "flag"
+	AccessEnv    = "env"
+	AccessConfig = "config"
+)
+
+// AccessOptions are LabelAccess's option names, in label order; each is the
+// launcher flag without its dashes.
+var AccessOptions = []string{"dangerous", "ssh", "git", "docker-socket", "aws", "package-caches"}
+
+// accessSource is resolveFlag's answer with the source that decided it: ""
+// when off. A falsy switch is never "env": resolveFlag then falls to the
+// config.
+func accessSource(cli *bool, envVal string, yaml *bool) string {
+	if cli != nil {
+		if *cli {
+			return AccessFlag
+		}
+		return ""
+	}
+	switch envVal {
+	case "1", "true", "yes":
+		return AccessEnv
+	}
+	if yaml != nil && *yaml {
+		return AccessConfig
+	}
+	return ""
+}
+
+// DangerousSource is the source that turned dangerous mode on, under its
+// OR rule (CS-LNCH-038): the command-line flag, else a truthy
+// CLAUDE_SANDBOX_DANGEROUS, else the config; "" when off.
+func DangerousSource(cli bool, envVal string, cfg bool) string {
+	switch {
+	case cli:
+		return AccessFlag
+	case envVal == "1" || envVal == "true" || envVal == "yes":
+		return AccessEnv
+	case cfg:
+		return AccessConfig
+	}
+	return ""
+}
+
+// ParseAccess reads a LabelAccess value into option → source; entries that
+// are not an AccessOptions name with a known source are dropped.
+func ParseAccess(v string) map[string]string {
+	out := map[string]string{}
+	for _, kv := range strings.Split(v, ",") {
+		k, src, ok := strings.Cut(strings.TrimSpace(kv), "=")
+		if !ok || !slices.Contains(AccessOptions, k) {
+			continue
+		}
+		switch src {
+		case AccessFlag, AccessEnv, AccessConfig:
+			out[k] = src
+		}
+	}
+	return out
+}
+
 // LabelOnHangup records whether the container ends after its turn when its
 // terminal hangs up (CS-LNCH-206): OnHangupEnd or OnHangupKeep. Outside the
 // config hash, like every label: a per-session choice.
@@ -450,6 +526,8 @@ type Plan struct {
 	Resume string
 	// Continue: the container carries claude-sandbox.continue (CS-LNCH-182).
 	Continue bool
+	// Access is the LabelAccess value (CS-LNCH-223).
+	Access string
 	// OnHangup is the LabelOnHangup value (CS-LNCH-206).
 	OnHangup string
 	// Terminal is the claude-sandbox.terminal label's value (CS-LNCH-181).
@@ -558,6 +636,38 @@ func Build(in Inputs) (*Plan, error) {
 	}
 
 	// CS-LNCH-014: host access precedence CLI > env var > YAML.
+	// CS-LNCH-223: what each option's resolution applied, and from where.
+	access := []string{}
+	if in.SkipPermissions {
+		if src := DangerousSource(in.CLIDangerous, in.getenv("CLAUDE_SANDBOX_DANGEROUS"), in.Cfg.Dangerous); src != "" {
+			access = append(access, "dangerous="+src)
+		} else {
+			// Set by a caller that resolved it otherwise: say it was given.
+			access = append(access, "dangerous="+AccessFlag)
+		}
+	}
+	for _, o := range []struct {
+		name   string
+		cli    *bool
+		envVar string
+		yaml   *bool
+	}{
+		{"ssh", in.CLISSH, "CLAUDE_SANDBOX_HOST_ACCESS_SSH_ENABLED", in.Cfg.HostAccess.SSH.Enabled},
+		{"git", in.CLIGit, "CLAUDE_SANDBOX_HOST_ACCESS_GIT_ENABLED", in.Cfg.HostAccess.Git.Enabled},
+		{"docker-socket", in.CLIDockerSocket, "CLAUDE_SANDBOX_HOST_ACCESS_DOCKER_SOCKET_ENABLED", in.Cfg.HostAccess.DockerSocket.Enabled},
+		{"aws", in.CLIAWS, "CLAUDE_SANDBOX_HOST_ACCESS_AWS_ENABLED", in.Cfg.HostAccess.AWS.Enabled},
+		{"package-caches", in.CLIPackageCaches, "CLAUDE_SANDBOX_HOST_ACCESS_PACKAGE_CACHES_ENABLED", in.Cfg.HostAccess.PackageCaches.Enabled},
+	} {
+		if src := accessSource(o.cli, in.getenv(o.envVar), o.yaml); src != "" {
+			access = append(access, o.name+"="+src)
+		}
+	}
+	// "none" for nothing applied: docker renders an absent label as "", the
+	// mark of a container created before this label.
+	p.Access = strings.Join(access, ",")
+	if p.Access == "" {
+		p.Access = AccessNone
+	}
 	ssh := resolveFlag(in.CLISSH, in.getenv("CLAUDE_SANDBOX_HOST_ACCESS_SSH_ENABLED"), in.Cfg.HostAccess.SSH.Enabled)
 	git := resolveFlag(in.CLIGit, in.getenv("CLAUDE_SANDBOX_HOST_ACCESS_GIT_ENABLED"), in.Cfg.HostAccess.Git.Enabled)
 	dockerSocket := resolveFlag(in.CLIDockerSocket, in.getenv("CLAUDE_SANDBOX_HOST_ACCESS_DOCKER_SOCKET_ENABLED"), in.Cfg.HostAccess.DockerSocket.Enabled)
@@ -905,6 +1015,8 @@ func Build(in Inputs) (*Plan, error) {
 	// CS-LNCH-206: whether a hang-up ends the session, for an attach later.
 	p.OnHangup = OnHangupLabelValue(in)
 	p.Labels = append(p.Labels, LabelOnHangup+"="+p.OnHangup)
+	// CS-LNCH-223: the access applied, after the fingerprint (unhashed).
+	p.Labels = append(p.Labels, LabelAccess+"="+p.Access)
 
 	// CS-LNCH-178..181: the terminal identity. After the fingerprint, and
 	// neither EnvFlags nor labels are hashed, so a launch from another

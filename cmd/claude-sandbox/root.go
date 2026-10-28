@@ -1383,7 +1383,7 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 		ProjectDir: projectDir, Home: home,
 		HostUID: uid, HostGID: gid, HostUser: uname,
 		Getenv:    env.Getenv,
-		RalphMode: f.Ralph, Limit: f.Limit, SkipPermissions: dangerous,
+		RalphMode: f.Ralph, Limit: f.Limit, SkipPermissions: dangerous, CLIDangerous: f.Dangerous,
 		CLIModel: f.Model, Passthrough: passthrough,
 		CLISSH: f.SSH, CLIGit: f.Git, CLIDockerSocket: f.DockerSocket, CLIAWS: f.AWS,
 		CLIPackageCaches: f.PackageCaches,

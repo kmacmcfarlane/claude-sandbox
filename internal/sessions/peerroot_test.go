@@ -135,7 +135,31 @@ var _ = Describe("discovery of the continue label (CS-LNCH-182)", func() {
 		Expect(found[1].ShadowDir).To(Equal("/tmp/claude-sandbox2"))
 		Expect(found[1].Mounts).To(Equal([]string{"/m2"}))
 		line := strings.Join(fake.Calls[0].Args, " ")
-		Expect(line).To(ContainSubstring(`{{.Label "claude-sandbox.shadowdir"}}` + sep + `{{.Label "claude-sandbox.onhangup"}}` + sep + "{{.Mounts}} "))
+		Expect(line).To(ContainSubstring(`{{.Label "claude-sandbox.shadowdir"}}` + sep + `{{.Label "claude-sandbox.onhangup"}}` + sep))
+	})
+
+	It("CS-LNCH-223: the access label is the field just before {{.Mounts}}; a 28-field row, or an empty value, has none", func() {
+		fake := &execx.Fake{}
+		fake.On("docker ps", strings.Join([]string{
+			strings.Join(append(head("a"), "", "none", "/tmp/claude-sandbox1", "end", "ssh=flag", "/m1"), sep),
+			strings.Join(append(head("b"), "", "none", "/tmp/claude-sandbox2", "end", "none", "/m2"), sep),
+			strings.Join(append(head("c"), "", "none", "/tmp/claude-sandbox3", "end", "", "/m3"), sep),
+			strings.Join(append(head("d"), "", "none", "/tmp/claude-sandbox4", "end", "/m4"), sep),
+		}, "\n")+"\n", nil)
+		found, err := sessions.DiscoverAllUncounted(fake)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(found).To(HaveLen(4))
+		Expect(found[0].Access).To(Equal("ssh=flag"))
+		Expect(found[0].HasAccess).To(BeTrue())
+		Expect(found[0].OnHangup).To(Equal("end"))
+		Expect(found[0].Mounts).To(Equal([]string{"/m1"}))
+		Expect(found[1].HasAccess).To(BeTrue(), "none: the launch applied nothing")
+		Expect(found[2].HasAccess).To(BeFalse(), "empty: the label is absent")
+		Expect(found[3].HasAccess).To(BeFalse())
+		Expect(found[3].OnHangup).To(Equal("end"))
+		Expect(found[3].Mounts).To(Equal([]string{"/m4"}))
+		line := strings.Join(fake.Calls[0].Args, " ")
+		Expect(line).To(ContainSubstring(`{{.Label "claude-sandbox.onhangup"}}` + sep + `{{.Label "claude-sandbox.access"}}` + sep + "{{.Mounts}} "))
 	})
 
 	It("CS-LNCH-197: the clipboard and shadowdir labels sit before {{.Mounts}}; a 25-field row has neither", func() {

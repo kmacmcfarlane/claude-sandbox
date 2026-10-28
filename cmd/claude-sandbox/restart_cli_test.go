@@ -56,11 +56,11 @@ type restartFix struct {
 	class    string
 	cfgDir   string
 	cmd      []string
-	mounts   []map[string]any
-	cenv     []string
-	extra    []string // more docker ps rows
-	onStop   func()
-	stopErr  error
+	// access is the claude-sandbox.access label (CS-LNCH-223); "" = absent.
+	access  string
+	extra   []string // more docker ps rows
+	onStop  func()
+	stopErr error
 	// failPS makes docker ps fail.
 	failPS bool
 	// onInspect runs before every InspectContainer answer.
@@ -81,6 +81,7 @@ func newRestartFix() *restartFix {
 	f.class = "7"
 	f.flags = ""
 	f.cmd = []string{"claude", "--resume", rsConv}
+	f.access = "none"
 	f.fake.OnFunc("docker ps", func(execx.Cmd) (string, error) {
 		if f.failPS {
 			return "", execx.Fail(1)
@@ -97,9 +98,7 @@ func newRestartFix() *restartFix {
 	})
 	f.fake.OnFunc("json .Config.Cmd", func(execx.Cmd) (string, error) {
 		c, _ := json.Marshal(f.cmd)
-		m, _ := json.Marshal(f.mounts)
-		e, _ := json.Marshal(f.cenv)
-		return string(c) + "\x1f" + string(m) + "\x1f" + string(e) + "\n", nil
+		return string(c) + "\n", nil
 	})
 	f.fake.OnFunc("{{.Name}}", func(c execx.Cmd) (string, error) {
 		if f.onInspect != nil {
@@ -141,7 +140,7 @@ func newRestartFix() *restartFix {
 func (f *restartFix) row(state, status string) string {
 	return strings.Join([]string{rsName, status, f.proj, "claude", "dunlin", "v1", f.model, "", "", f.class, f.worktree,
 		state, f.created.Format("2006-01-02 15:04:05 -0700 MST"), "8g", "default", "", rsOldID,
-		f.cfgDir, f.reg, f.flags, f.resume}, psSep)
+		f.cfgDir, f.reg, f.flags, f.resume, "none", "none", "", "none", "", "keep", f.access, ""}, psSep)
 }
 
 // otherRow is another sandbox's docker ps row.
@@ -564,7 +563,7 @@ var _ = Describe("restart a session in place (CS-SESS-105..108, CS-LNCH-218..221
 			Expect(labelsOf(args)).To(HaveKeyWithValue("claude-sandbox.project", f.proj))
 		})
 
-		DescribeTable("CS-SESS-107: an access option the launchflags label recorded is carried over, named with how it was given",
+		DescribeTable("CS-SESS-107: an option the access label records from a flag or a switch is carried, named with its source",
 			func(setup func(f *restartFix), wantArg, wantLine string) {
 				f.primary("idle")
 				setup(f)
@@ -572,77 +571,76 @@ var _ = Describe("restart a session in place (CS-SESS-105..108, CS-LNCH-218..221
 				Expect(f.errw.String()).To(ContainSubstring("Carried over from 'dunlin': " + wantLine))
 				Expect(strings.Join(f.launched().Args, " ")).To(ContainSubstring(wantArg))
 			},
-			Entry("--docker-socket, a flag", func(f *restartFix) { f.flags = "--docker-socket" },
+			Entry("a flag source", func(f *restartFix) { f.access = "docker-socket=flag" },
 				"/var/run/docker.sock:/var/run/docker.sock", "--docker-socket (given as a flag at its launch)"),
-			Entry("--dangerous, its environment switch, in the launcher's prefix", func(f *restartFix) {
-				f.flags = "CLAUDE_SANDBOX_DANGEROUS"
-				f.cmd = []string{"claude", "--dangerously-skip-permissions", "--resume", rsConv}
-			}, "claude --dangerously-skip-permissions", "--dangerous (CLAUDE_SANDBOX_DANGEROUS was set at its launch)"),
-			Entry("--dangerous, a flag", func(f *restartFix) {
-				f.flags = "--dangerous"
+			Entry("a truthy switch source", func(f *restartFix) {
+				Expect(os.MkdirAll(filepath.Join(f.home, ".ssh"), 0o700)).To(Succeed())
+				f.access = "ssh=env"
+			}, "/.ssh:", "--ssh (CLAUDE_SANDBOX_HOST_ACCESS_SSH_ENABLED was on at its launch)"),
+			Entry("dangerous from a flag", func(f *restartFix) {
+				f.access = "dangerous=flag"
 				f.cmd = []string{"claude", "--dangerously-skip-permissions", "--resume", rsConv}
 			}, "claude --dangerously-skip-permissions", "--dangerous (given as a flag at its launch)"),
-			Entry("--ssh, a flag", func(f *restartFix) {
-				Expect(os.MkdirAll(filepath.Join(f.home, ".ssh"), 0o700)).To(Succeed())
-				f.flags = "--ssh"
-			}, "/.ssh:", "--ssh (given as a flag at its launch)"),
-			Entry("--ssh, its environment switch, in effect in the old container", func(f *restartFix) {
-				ssh := filepath.Join(f.home, ".ssh")
-				Expect(os.MkdirAll(ssh, 0o700)).To(Succeed())
-				f.flags = "CLAUDE_SANDBOX_HOST_ACCESS_SSH_ENABLED"
-				f.mounts = []map[string]any{{"Source": ssh, "Destination": ssh}}
-			}, "/.ssh:", "--ssh (CLAUDE_SANDBOX_HOST_ACCESS_SSH_ENABLED was set at its launch)"),
 		)
 
-		It("CS-SESS-107: switch named + not in effect → not carried, and nothing said", func() {
+		It("CS-SESS-107: a falsy switch with a planted mount is not carried (the label says nothing was applied)", func() {
 			f.primary("idle")
-			Expect(os.MkdirAll(filepath.Join(f.home, ".ssh"), 0o700)).To(Succeed())
-			f.flags = "CLAUDE_SANDBOX_HOST_ACCESS_SSH_ENABLED,CLAUDE_SANDBOX_DANGEROUS"
+			f.flags = "CLAUDE_SANDBOX_HOST_ACCESS_DOCKER_SOCKET_ENABLED"
+			f.access = "none"
+			// A session-writable cascade mount at the socket's path: never read for access.
+			cfgDir := filepath.Join(f.proj, ".claude-sandbox")
+			Expect(os.MkdirAll(cfgDir, 0o755)).To(Succeed())
+			Expect(os.WriteFile(filepath.Join(cfgDir, "config.yaml"), []byte("mounts:\n  - host: "+f.proj+"/x\n    container: /var/run/docker.sock\n"), 0o644)).To(Succeed())
 			Expect(f.run("--restart=dunlin")).To(Equal(0), f.errw.String())
 			Expect(f.errw.String()).NotTo(ContainSubstring("Carried over"))
 			Expect(f.errw.String()).NotTo(ContainSubstring("from its config"))
-			Expect(strings.Join(f.launched().Args, " ")).NotTo(ContainSubstring("/.ssh:"))
-			Expect(f.createdCmd()).NotTo(ContainElement("--dangerously-skip-permissions"))
+			Expect(strings.Join(f.launched().Args, " ")).NotTo(ContainSubstring("/var/run/docker.sock:/var/run/docker.sock"))
 		})
 
-		It("CS-SESS-107: an env-only GOMODCACHE is never carried (env files are session-writable)", func() {
+		It("CS-SESS-107: a falsy switch with a planted env-file variable is not carried", func() {
 			f.primary("idle")
-			f.cenv = []string{"GOMODCACHE=" + filepath.Join(f.home, ".cache", "claude-sandbox", "go-mod")}
+			f.flags = "CLAUDE_SANDBOX_HOST_ACCESS_PACKAGE_CACHES_ENABLED"
+			f.access = "none"
+			cfgDir := filepath.Join(f.proj, ".claude-sandbox")
+			Expect(os.MkdirAll(cfgDir, 0o755)).To(Succeed())
+			Expect(os.WriteFile(filepath.Join(cfgDir, "env"), []byte("GOMODCACHE="+filepath.Join(f.home, ".cache", "claude-sandbox", "go-mod")+"\n"), 0o600)).To(Succeed())
 			Expect(f.run("--restart=dunlin")).To(Equal(0), f.errw.String())
 			Expect(f.errw.String()).NotTo(ContainSubstring("Carried over"))
-			Expect(strings.Join(f.launched().Args, " ")).NotTo(ContainSubstring("GOMODCACHE="))
-			Expect(f.errw.String()).To(ContainSubstring("had --package-caches from its config, which no longer gives it; pass it again to keep it"))
+			Expect(strings.Join(f.launched().Args, " ")).NotTo(ContainSubstring("go-mod:"))
 		})
 
-		It("CS-SESS-107: a cascade ~/.ssh mount alone is never carried", func() {
+		It("CS-SESS-107: a passthrough --dangerously-skip-permissions first is noted, never carried", func() {
 			f.primary("idle")
-			ssh := filepath.Join(f.home, ".ssh")
-			Expect(os.MkdirAll(ssh, 0o700)).To(Succeed())
-			f.mounts = []map[string]any{{"Source": ssh, "Destination": ssh}}
-			Expect(f.run("--restart=dunlin")).To(Equal(0), f.errw.String())
-			Expect(f.errw.String()).NotTo(ContainSubstring("Carried over"))
-			Expect(strings.Join(f.launched().Args, " ")).NotTo(ContainSubstring(ssh + ":"))
-		})
-
-		It("CS-SESS-107: an option from the old config that today's config dropped is named, not carried", func() {
-			f.primary("idle")
-			f.mounts = []map[string]any{{"Source": "/var/run/docker.sock", "Destination": "/var/run/docker.sock"}}
-			Expect(f.run("--restart=dunlin")).To(Equal(0), f.errw.String())
-			Expect(f.errw.String()).To(ContainSubstring("Note: 'dunlin' had --docker-socket from its config, which no longer gives it; pass it again to keep it."))
-			Expect(strings.Join(f.launched().Args, " ")).NotTo(ContainSubstring("docker.sock"))
-		})
-
-		It("CS-SESS-107: --dangerously-skip-permissions passed to claude after -- is named, never granted", func() {
-			f.primary("idle")
-			f.cmd = []string{"claude", "--resume", rsConv, "--dangerously-skip-permissions"}
+			f.access = "none"
+			f.cmd = []string{"claude", "--dangerously-skip-permissions", "--resume", rsConv}
 			Expect(f.run("--restart=dunlin")).To(Equal(0), f.errw.String())
 			Expect(f.createdCmd()).NotTo(ContainElement("--dangerously-skip-permissions"))
 			Expect(f.errw.String()).To(ContainSubstring("was also launched with --dangerously-skip-permissions"))
+			Expect(f.errw.String()).NotTo(ContainSubstring("Carried over"))
+		})
+
+		It("CS-SESS-107: a config source today's config dropped gets the note only", func() {
+			f.primary("idle")
+			f.access = "docker-socket=config"
+			Expect(f.run("--restart=dunlin")).To(Equal(0), f.errw.String())
+			Expect(f.errw.String()).To(ContainSubstring("Note: 'dunlin' had --docker-socket from its config, which no longer gives it; pass it again to keep it."))
+			Expect(f.errw.String()).NotTo(ContainSubstring("Carried over"))
+			Expect(strings.Join(f.launched().Args, " ")).NotTo(ContainSubstring("docker.sock"))
+		})
+
+		It("CS-SESS-107: a container without the access label carries nothing and says so once", func() {
+			f.primary("idle")
+			f.access = ""
+			f.flags = "--docker-socket"
+			Expect(f.run("--restart=dunlin")).To(Equal(0), f.errw.String())
+			Expect(f.errw.String()).To(ContainSubstring("Note: 'dunlin' predates access tracking; pass any access options again."))
+			Expect(f.errw.String()).NotTo(ContainSubstring("Carried over"))
+			Expect(strings.Join(f.launched().Args, " ")).NotTo(ContainSubstring("docker.sock"))
 		})
 
 		It("CS-SESS-107: an option this launch gives on its own is not carried, and nothing is said", func() {
 			f.primary("idle")
-			f.flags = "--docker-socket"
+			f.access = "docker-socket=flag"
 			Expect(f.run("--restart=dunlin", "--docker-socket")).To(Equal(0), f.errw.String())
 			Expect(f.errw.String()).NotTo(ContainSubstring("Carried over"))
 		})
@@ -816,7 +814,7 @@ var _ = Describe("restart a session in place (CS-SESS-105..108, CS-LNCH-218..221
 
 		It("CS-LNCH-220: every way back passes the carried access flags: printed, logged and noticed", func() {
 			f.primary("idle")
-			f.flags = "--docker-socket"
+			f.access = "docker-socket=flag"
 			f.record(519, rsJoin, "idle", "side quest", "user", f.proj, f.created.Add(10*time.Minute))
 			f.tty("y")
 			f.create = func(execx.Cmd, int) (string, error) { return "", fmt.Errorf("boom") }

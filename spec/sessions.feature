@@ -1286,22 +1286,21 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
     And a passthrough --name sets the name and makes it the user's; the user's passthrough,
       stripped of the session family (tmuxpane.StripSessionFamily), follows the replay
     And the old launch's access options (--dangerous, --ssh, --git, --docker-socket, --aws,
-      --package-caches) are carried over only when the launcher itself recorded them as
-      given: the claude-sandbox.launchflags label naming the flag (a flag can only turn an
-      option on), or naming its CLAUDE_SANDBOX_* switch AND the option was in effect in the
-      old container (its launcher mount or bind, its -e, or for --dangerous the launcher's
-      Config.Cmd prefix) — the label proves the switch was set, the effect that it was
-      truthy, and requiring both cannot widen anything; a named switch whose option was not
-      in effect is not carried and gets no note; one this launch would not give on its own
-      (its flags, its env, its config, a cascade mount of the same path) is set as its flag
-    And one line names what was carried and how: "given as a flag at its launch", or
-      "<CLAUDE_SANDBOX_*> was set at its launch", so a re-grant is never silent; this
+      --package-caches) are read ONLY from the old container's claude-sandbox.access label
+      (CS-LNCH-223), which the launcher wrote at its create from its own resolution
+    And an option recorded from a flag or a switch ("flag", "env"), that this launch would
+      not give on its own (its flags, its env, its config), is set as its flag, and one
+      line names what was carried and how: "given as a flag at its launch", or
+      "<CLAUDE_SANDBOX_*> was on at its launch", so a re-grant is never silent; this
       launch's own flags always win
-    And nothing is ever inferred from the old container's mounts, environment or command
-      line (an env file and a cascade config.yaml are session-writable): an option they
-      show in effect, which the label does not name and today's config no longer gives,
-      came from the old config and is only named: "Note: '<noun>' had <opt> from its
-      config, which no longer gives it; pass it again to keep it."
+    And an option recorded from the config ("config") that today's config no longer gives
+      is never re-granted, only named: "Note: '<noun>' had <opt> from its config, which no
+      longer gives it; pass it again to keep it."
+    And the container's mounts, environment and command line are never read for access
+      (an env file and a cascade config.yaml are session-writable); whether the command
+      line's launcher prefix holds --dangerously-skip-permissions is the label's word too
+    And a container without the access label (created before it) carries nothing, with one
+      note: "'<noun>' predates access tracking; pass any access options again."
     And claude flags the restart does not replay are named in one note, by name only; a
       --dangerously-skip-permissions given to claude after -- is one of them, never granted
     And --resume is first after "--", so the resume guard and the resume label

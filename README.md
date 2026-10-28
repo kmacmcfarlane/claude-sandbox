@@ -278,14 +278,15 @@ or choose `[r]` in the menu above. What it does:
    replays (`--effort`, `--add-dir`, `--append-system-prompt`, …). Your own flags on the restart
    command apply on top, and `--model` replaces the carried one.
 5. **Carries the old launch's access options over** — `--dangerous`, `--ssh`, `--git`,
-   `--docker-socket`, `--aws` and `--package-caches` — but only those the launcher itself recorded as
-   given at the old launch: its `launchflags` label names the flag, or names the
-   `CLAUDE_SANDBOX_*` switch and the option was in effect in the old container (the label records
-   that a switch was set, not its value). One line names each option carried and how it was given, so a re-grant is never silent;
-   an option this launch gives anyway is not mentioned. Nothing is inferred from the old container's
-   mounts or environment (an env file or a project `config.yaml` is writable from inside a session):
-   an option that came from the old config, which today's config no longer gives, is only named —
-   "had --ssh from its config; pass it again to keep it". Claude flags a resume does not replay
+   `--docker-socket`, `--aws` and `--package-caches` — reading only what the launcher recorded when it
+   created the old container: its `claude-sandbox.access` label lists each option it applied and
+   whether a flag, a `CLAUDE_SANDBOX_*` switch or the config turned it on. An option from a flag or a
+   switch that this launch would not give anyway is carried, and one line names each, so a re-grant
+   is never silent. One from the old config, which today's config no longer gives, is only named —
+   "had --ssh from its config, which no longer gives it; pass it again to keep it". Nothing is read
+   from the old container's mounts, environment or command line for access (an env file or a project
+   `config.yaml` is writable from inside a session). A container created before the label carries
+   nothing and says so: pass the options again. Claude flags a resume does not replay
    (for example `--permission-mode`, or `--dangerously-skip-permissions` given after `--`) are named,
    never carried: pass them again after `--`. Every printed or logged way back includes the carried
    flags.

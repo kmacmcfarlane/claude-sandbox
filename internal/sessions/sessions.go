@@ -69,6 +69,9 @@ const (
 	LabelShadowDir = launch.LabelShadowDir
 	// LabelOnHangup records whether a hang-up ends the session (CS-LNCH-206).
 	LabelOnHangup = launch.LabelOnHangup
+	// LabelAccess records the access options applied and their sources
+	// (CS-LNCH-223).
+	LabelAccess = launch.LabelAccess
 )
 
 // ModeRalph marks a ralph loop container.
@@ -149,6 +152,12 @@ type Session struct {
 	// OnHangup is the claude-sandbox.onhangup label (CS-LNCH-206): "end",
 	// "keep", or "" for a container that predates it.
 	OnHangup string `json:"-"`
+	// Access is the claude-sandbox.access label (CS-LNCH-223); HasAccess is
+	// false for a container created before it: docker renders an absent
+	// label and an empty one alike, so a launch that applied nothing writes
+	// "none".
+	Access    string `json:"-"`
+	HasAccess bool   `json:"-"`
 	// Mounts are the container's bind sources ({{.Mounts}} under --no-trunc,
 	// split on ","), read for the peers-root pin (CS-DIR-011). nil on an
 	// older row.
@@ -241,6 +250,7 @@ var psFormat = strings.Join([]string{
 	`{{.Label "` + LabelClipboard + `"}}`, // CS-LNCH-197
 	`{{.Label "` + LabelShadowDir + `"}}`, // CS-LNCH-197
 	`{{.Label "` + LabelOnHangup + `"}}`,  // CS-LNCH-206
+	`{{.Label "` + LabelAccess + `"}}`,    // CS-LNCH-223
 	// CS-DIR-011: every bind source, comma-joined; last, so nothing after
 	// it depends on how a source is spelled.
 	"{{.Mounts}}",
@@ -396,6 +406,12 @@ func listAll(r execx.Runner, filter string, count bool) ([]Session, []Session, e
 			// CS-LNCH-206: before Mounts, so a 27-field row (the format
 			// before this label) keeps everything else.
 			s.OnHangup = strings.TrimSpace(f[26])
+		}
+		if len(f) > 28 {
+			// CS-LNCH-223: before Mounts, so a 28-field row (the format
+			// before this label) keeps everything else.
+			s.Access = strings.TrimSpace(f[27])
+			s.HasAccess = s.Access != ""
 		}
 		// An exited container is never a session: every sandbox container
 		// is --rm, so docker is removing it. Only DiscoverForLaunch returns
