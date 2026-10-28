@@ -109,15 +109,15 @@ var _ = Describe("session discovery", func() {
 				Expect(count(strings.Join(rows, "\n"))).To(Equal(1))
 			})
 
-			It("counts a claimed background session once, by its bg-pty-host row", func() {
+			It("leaves out the daemon a --bg launch starts", func() {
 				rows := append(append([]string{}, primary...),
-					"400                 108                 claude bg-pty-host --session x",
-					"401                 400                 /home/u/.local/share/claude/versions/2.1.300 --resume x",
+					"400                 108                 claude daemon run --origin transient",
+					"401                 400                 claude daemon-worker --id 1",
 				)
-				Expect(count(strings.Join(rows, "\n"))).To(Equal(2))
+				Expect(count(strings.Join(rows, "\n"))).To(Equal(1))
 			})
 
-			It("counts an idle pre-warmed spare as 0: neither bg-spare nor its pty host", func() {
+			It("leaves out a background pty host and its spare", func() {
 				rows := append(append([]string{}, primary...),
 					"500                 108                 claude bg-pty-host --spare",
 					"501                 500                 claude bg-spare --warm",
@@ -125,14 +125,12 @@ var _ = Describe("session discovery", func() {
 				Expect(count(strings.Join(rows, "\n"))).To(Equal(1))
 			})
 
-			It("counts a claimed session and an idle spare side by side as 1 more", func() {
+			It("leaves out a background pty host and the session it runs under a versioned binary path", func() {
 				rows := append(append([]string{}, primary...),
 					"400                 108                 claude bg-pty-host --session x",
-					"401                 400                 /home/u/.local/share/claude/versions/2.1.300 --resume x",
-					"500                 108                 claude bg-pty-host --spare",
-					"501                 500                 claude bg-spare --warm",
+					"401                 400                 /home/u/.local/share/claude/versions/2.1.301 --resume x",
 				)
-				Expect(count(strings.Join(rows, "\n"))).To(Equal(2))
+				Expect(count(strings.Join(rows, "\n"))).To(Equal(1))
 			})
 
 			It("counts a ralph container as 1: the loop, not its iteration's claude", func() {
@@ -148,6 +146,20 @@ var _ = Describe("session discovery", func() {
 
 			It("finds the command by the header, so output without a PPID column still counts by argv[0]", func() {
 				Expect(count("PID COMMAND\n1 tini -s -- claude\n2 claude\n")).To(Equal(1))
+			})
+
+			It("without a PPID column, leaves out background helpers but cannot skip a ralph iteration", func() {
+				Expect(count(strings.Join([]string{
+					"PID   COMMAND",
+					"108   claude --dangerously-skip-permissions",
+					"400   claude daemon run --origin transient",
+					"500   claude bg-pty-host --spare",
+					"501   claude bg-spare --warm",
+				}, "\n"))).To(Equal(1))
+			})
+
+			It("without a PPID column, cannot skip a ralph iteration's claude", func() {
+				Expect(count("PID COMMAND\n108 /opt/claude-sandbox/bin/ralph\n130 claude -p\n")).To(Equal(2))
 			})
 		})
 

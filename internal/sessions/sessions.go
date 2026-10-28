@@ -419,6 +419,21 @@ func countSessions(r execx.Runner, name string) int {
 	return countTop(out)
 }
 
+// claudeInternalKinds are the second words of Claude Code's own background
+// processes, which run under the same "claude" argv[0] as a session: the pty
+// host and pre-warmed spare of background (--bg) sessions, and the daemon and
+// its workers. None is counted (CS-SESS-099): the count is display-only and
+// ps cannot reliably tell a background session from that machinery, so
+// background sessions are left out with it. Like tmuxpane's claude arity
+// table, this list follows the Claude Code version (checked on 2.1.301);
+// refresh it on a bump.
+var claudeInternalKinds = map[string]bool{
+	"bg-pty-host":   true,
+	"bg-spare":      true,
+	"daemon":        true,
+	"daemon-worker": true,
+}
+
 // topRow is one parsed "docker top" row: argv0 is the base name of the
 // command's first word, arg1 its second word ("" when none).
 type topRow struct {
@@ -430,18 +445,13 @@ type topRow struct {
 // is exactly "claude" (an interactive or joined session) or "ralph" (the
 // ralph loop) — never docker-init, tini, the pidslot helper, entrypoint.sh or
 // node, whose ARGUMENTS name claude (a container running one claude used to
-// count 4). A claude whose parent is a counted ralph loop is that loop's
+// count 4). A claude row whose second word is in claudeInternalKinds never
+// counts, and a claude whose parent is a counted ralph loop is that loop's
 // iteration, not another session.
 //
-// Background (--bg) sessions: each runs under a "claude bg-pty-host …"
-// process, which counts as the session (the session itself runs under a
-// versioned binary path, so it never counts again). Claude Code also keeps a
-// pre-warmed spare: a "claude bg-pty-host …" whose child is "claude bg-spare
-// …". The spare never counts, and neither does a pty host with a bg-spare
-// child (told apart by PPID; without a PPID column such a host counts 1).
-//
 // The columns are found by the header row: the command is last (it holds
-// spaces) and PPID is optional, so output without it still counts by argv[0].
+// spaces) and PPID is optional, so output without it still counts by argv[0]
+// (without it a ralph iteration's claude counts too).
 func countTop(out string) int {
 	lines := strings.Split(strings.TrimSpace(out), "\n")
 	if len(lines) < 2 {
@@ -462,8 +472,7 @@ func countTop(out string) int {
 		}
 	}
 	var rows []topRow
-	ralph := map[string]bool{}     // pids of ralph loops
-	spareHost := map[string]bool{} // parents of a bg-spare
+	ralph := map[string]bool{} // pids of ralph loops
 	for _, line := range lines[1:] {
 		f := strings.Fields(line)
 		if len(f) <= cmdCol {
@@ -476,11 +485,8 @@ func countTop(out string) int {
 		if ppidCol >= 0 {
 			row.ppid = f[ppidCol]
 		}
-		switch {
-		case row.argv0 == "ralph":
+		if row.argv0 == "ralph" {
 			ralph[row.pid] = true
-		case row.argv0 == "claude" && row.arg1 == "bg-spare" && row.ppid != "":
-			spareHost[row.ppid] = true
 		}
 		rows = append(rows, row)
 	}
@@ -489,9 +495,7 @@ func countTop(out string) int {
 		switch {
 		case row.argv0 == "ralph":
 			n++
-		case row.argv0 != "claude", ralph[row.ppid], row.arg1 == "bg-spare":
-		case row.arg1 == "bg-pty-host" && spareHost[row.pid]:
-		default:
+		case row.argv0 == "claude" && !claudeInternalKinds[row.arg1] && !ralph[row.ppid]:
 			n++
 		}
 	}
