@@ -8,7 +8,9 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
   mechanisms is durability:
 
     - a session in its OWN container is PID 1, so it can be reattached with
-      `docker attach` and survives losing its terminal;
+      `docker attach`; it survives losing its terminal when the detach keys or
+      --detach were used, or with endOnHangup: false, and otherwise ends after
+      its turn when its terminal hangs up (CS-LNCH-207);
     - a session JOINED into an existing container (docker exec) is cheaper but
       its stdio dies with its client and cannot be recovered, and it dies when
       that container's primary process exits (the container is created `--rm`).

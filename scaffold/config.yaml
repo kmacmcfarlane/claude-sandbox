@@ -159,6 +159,15 @@
 # here, or for one launch with CLAUDE_SANDBOX_HOST_CLIPBOARD=0.
 # hostClipboard: false
 
+# End a session after its turn when its terminal hangs up (default ON), as
+# claude outside the sandbox ends with its terminal: a closed tab no longer
+# leaves a container running with nobody attached. The detach keys and
+# --detach still keep a session on purpose; a busy turn gets up to 30 minutes.
+# The resume command is logged and shown by the next launch here. Turn it off
+# to keep sessions running across a closed tab or an SSH drop (reattach with
+# --attach); CLAUDE_SANDBOX_END_ON_HANGUP=0/1 overrides it for one launch.
+# endOnHangup: false
+
 # The container's time zone (default: host), passed as TZ so dates, logs and
 # commits match claude outside the sandbox. host = the host's zone (TZ, else
 # /etc/localtime); none (or off/false/0/no) passes nothing, keeping the

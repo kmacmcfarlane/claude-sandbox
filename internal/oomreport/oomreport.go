@@ -83,6 +83,10 @@ type Outcome struct {
 	// docker kill, a daemon stopping it). It never changes a report; a marked
 	// tmux pane stays pending for it (CS-TMUX-071).
 	OutsideStop bool
+	// Signals are the signals that arrived on Await's stop channel: the one
+	// that ended the wait, then every one already queued behind it, in the
+	// order received (CS-LNCH-207). Empty when no signal ended the wait.
+	Signals []os.Signal
 }
 
 // Watch is a running "docker events" subscription for one container.
@@ -201,17 +205,38 @@ func (w *Watch) Await(timeout time.Duration, done func(Outcome) bool, stop <-cha
 	// CS-LNCH-097: a signal already received wins. select picks at random
 	// among ready cases, so a signal pending together with a die, the
 	// stream's end or the timer is looked for first, every time.
+	var sig os.Signal
 	signalled := func() bool {
 		select {
-		case <-stop:
-			return true
+		case s, ok := <-stop:
+			if ok {
+				sig = s
+			}
+			return ok
 		default:
 			return false
 		}
 	}
+	// stoppedBy is what arrived, with the signal that ended the wait and
+	// every signal already queued behind it (CS-LNCH-207).
+	stoppedBy := func() (Outcome, bool) {
+		o := w.Snapshot()
+		o.Signals = append(o.Signals, sig)
+		for {
+			select {
+			case s, ok := <-stop:
+				if !ok {
+					return o, true
+				}
+				o.Signals = append(o.Signals, s)
+			default:
+				return o, true
+			}
+		}
+	}
 	for {
 		if signalled() {
-			return w.Snapshot(), true
+			return stoppedBy()
 		}
 		o = w.Snapshot()
 		if done(o) {
@@ -221,16 +246,21 @@ func (w *Watch) Await(timeout time.Duration, done func(Outcome) bool, stop <-cha
 		case <-w.changed:
 		case <-w.ended:
 			if signalled() {
-				return w.Snapshot(), true
+				return stoppedBy()
 			}
 			return w.Snapshot(), false
 		case <-timer.C:
 			if signalled() {
-				return w.Snapshot(), true
+				return stoppedBy()
 			}
 			return w.Snapshot(), false
-		case <-stop:
-			return w.Snapshot(), true
+		case s, ok := <-stop:
+			if !ok {
+				stop = nil
+				continue
+			}
+			sig = s
+			return stoppedBy()
 		}
 	}
 }

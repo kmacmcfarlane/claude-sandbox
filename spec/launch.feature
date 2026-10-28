@@ -2090,6 +2090,9 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     Then the launcher exits at once with the child's status: no die wait, no
       report, no terminal reset
     And the shadow directory is left to a later launch's sweep (CS-LNCH-081)
+    And a SIGHUP that came first is a hang-up (CS-LNCH-207): before exiting,
+      the launcher releases its lease and starts the session-end helper, a
+      fork and an exec, when the end applies
 
   Scenario: CS-LNCH-092 The terminal is reset before the report, only on a terminal
     Given the session was OOM-killed (CS-LNCH-089), the launch is not headless,
@@ -3214,6 +3217,207 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       sees the docker client
     And --detach takes no lease: nobody is attached
     And inside a sandbox nothing is written (its state root is container-local)
+
+  # ---- end the session when its terminal hangs up (plan detached-sandboxes
+  # 01 F2 as amended by 02..04) ----
+  # Host parity: claude on the host ends when its terminal closes. A sandbox's
+  # docker client proxies no signal into a TTY container, so closing a tab
+  # used to leave the container running with nobody attached. Isolation cost:
+  # a host process (the session-end helper) acts on registry records that
+  # sandboxes can write; a bridged session can overwrite another container's
+  # record and hold it (busy) until the 30 min cap, or end it early (idle,
+  # waiting) after that container's own terminal hung up — at most one turn's
+  # remainder, the transcript and --resume intact. endOnHangup: false removes
+  # the cost.
+
+  @new
+  Scenario: CS-LNCH-206 endOnHangup: key, env and the container label
+    Then the cascade key "endOnHangup" (a scalar, more-local wins) and
+      CLAUDE_SANDBOX_END_ON_HANGUP (1/true/yes on, 0/false/no off; any other
+      value is unset) resolve tri-state: env > key > on (the default)
+    And there is no CLI flag: the detach keys and --detach keep one session on
+      purpose
+    And every container carries "claude-sandbox.onhangup=end|keep", after the
+      fingerprint and never hashed (a per-session choice, no drift): end when
+      the setting resolved on; keep when it resolved off, and always for
+      --detach, ralph and headless
+    And discovery reads it as a docker ps field just before {{.Mounts}}, which
+      stays the last field; a row of the format before it keeps everything else
+    When an attach chooses its container
+    Then whether its hang-up ends the container is, in order: its own
+      launcher's CLAUDE_SANDBOX_END_ON_HANGUP when set to a recognised value;
+      else the container's label; else (a container from before the label) its
+      own cascade and the default
+    And a container of mode ralph or headless is never ended, whatever the env
+    And the shipped default is on; test fixtures pin the variable to 0 so
+      unrelated tests start no helper, and a dedicated test removes the pin
+
+  @new
+  Scenario: CS-LNCH-207 Telling a hang-up from a detach
+    Given the launcher records every signal it catches, in order: during the
+      session child (SessionResult.Signals) and then during the die wait, where
+      the signal that ends the wait is followed by every signal already queued
+      (Outcome.Signals)
+    And "first" is the first of those that is SIGHUP or SIGTERM (SIGINT and
+      SIGQUIT do not count)
+    Then the session's end is classified:
+      | case                                                                 | classified         |
+      | first is SIGHUP, whatever follows (SIGTERM included)                 | hang-up            |
+      | first is SIGTERM, whatever follows (SIGHUP included)                 | not a hang-up      |
+      | no first; docker died of SIGHUP (Signaled, never the bare code 129)  | hang-up            |
+      | no first; docker exited by itself and no die (the detach keys)       | detach: kept       |
+      | SIGHUP inherited as ignored (nohup)                                  | never caught: kept |
+    And a hang-up of a primary or attach client whose end applies (CS-LNCH-206,
+      CS-LNCH-210) first releases the client's lease, then starts the helper
+      (CS-LNCH-208), and only then runs the pane mark's checks and settle; it
+      still exits at once with the child's status, silently (CS-LNCH-091)
+    And the helper is "claude-sandbox session-end", started through
+      Runner.Start with Cmd.Detach (its own session, no parent-death signal),
+      with --state-dir, --cache-dir, --home, --config-dir, --hangup-at <the
+      launcher's clock in ms> and --mark <the session's pane-mark JSON: id,
+      name, project, instance, class, registry dir, worktree, model>
+    And a helper that cannot be started is one line in
+      <cache>/session-end.log; the container is kept
+    And the launcher never signals the helper: when SIGTERM came first there is
+      no helper, and a SIGTERM after a SIGHUP is part of the hang-up
+    And a join is classified the same way and starts no helper (CS-LNCH-210)
+
+  @new
+  Scenario: CS-LNCH-208 The session-end helper waits for the turn, then stops the container
+    Given the helper of container <id>, on a Linux host
+    Then it takes <StateRoot>/clients/<id>/end.lock with LOCK_EX|LOCK_NB; while
+      another helper holds it, it retries every 2 s until it gets it, or the
+      container reads gone (exit, nothing logged) or paused (kept: paused)
+    And a state root it cannot use leaves it running without the lock
+    And it polls every 2 s; each poll inspects the container by id
+      (sessions.InspectContainer through a bounded runner, 5 s):
+      | inspect answer                  | meaning     | helper                 |
+      | No such container               | gone        | done: ended on its own |
+      | exited, dead or removing        | gone        | done: ended on its own |
+      | paused                          | paused      | kept: paused           |
+      | running, created or restarting  | present     | go on                  |
+      | any other error                 | cannot tell | no verdict this poll   |
+    And then reads the clients (CS-SESS-098, CS-LNCH-209) and the activity
+    And the activity is read from the mark's registry dir (else, for a
+      container without one, <config dir>/sessions and the legacy peers dir):
+      the records at the container's class (pid mod 256), started no earlier
+      than the session's since (to the second), not in the helper's own pid
+      domain
+    And a record counts only while its process lives in the container: when any
+      record is neither idle nor waiting, one "docker top <id> -o pid"
+      (bounded, 5 s) lists the host pids, and a record whose procStart no
+      listed pid's /proc/<pid>/stat starttime equals is dropped as dead; a
+      failed docker top, a record without procStart and an unreadable stat all
+      count; an alive record is re-confirmed every 30 s
+    And the live records decide:
+      | live records                                                       | helper                    |
+      | any busy, shell, an unknown or empty status, or malformed          | wait                      |
+      | all idle or waiting (any waitingFor), at least one                 | end                       |
+      | none (no record, or all dead) for 30 s                             | kept: no live record      |
+      | the registry dir exists but cannot be opened                       | kept: registry unreadable |
+    And a counted record that stops parsing keeps its last state
+    And the wait for a turn is capped at 30 minutes, counting only polls whose
+      verdict was wait (never the time a join holds it); at the cap the helper
+      ends the container anyway, logged with capped: true
+    And right before the stop it checks again: the inspect must say present, no
+      client may be present, the verdict must still be end (or the cap still
+      reached), and the unit and system guards must not keep; any change goes
+      back to polling
+    And the stop is "docker stop --signal SIGTERM --time 30 <64-hex id>",
+      bounded at 40 s (the signal explicit, so a child image's STOPSIGNAL never
+      applies); "No such container" means ended on its own; any other failure
+      is retried once at the next poll, then kept: stop failed
+    And its own SIGTERM or SIGHUP means keep: it exits at once, logged kept:
+      signalled, never starting a pending stop (a docker stop already running
+      is not undone)
+    And its own systemd unit stopping means keep: at start and in the pre-stop
+      check it reads <proc>/self/cgroup's v2 "0::" line, takes the last path
+      component ending in .service or .scope as its unit (a user unit when the
+      path holds /user@<uid>.service/), and runs one bounded
+      "systemctl [--user] show -p ActiveState --value <unit>" (1 s):
+      deactivating, inactive or failed keep (kept: unit stopping); anything
+      else, a failure, a timeout or no unit is no verdict
+    And "systemctl is-system-running" answering stopping keeps too
+    And every final outcome but a lost lock appends one JSON line to
+      <StateRoot>/session-ends.jsonl (0600, O_APPEND|O_NOFOLLOW; past 1 MiB it
+      is renamed to session-ends.jsonl.old first): at, container, containerId,
+      project, instance, worktree, cwdRoot, configDir, sessions (sessionId,
+      name, nameSource, pid, kind primary|join), resume (one
+      tmuxpane.ResumeCommand per session; "" when a value is not printable),
+      reason "hangup", waitedMs, capped, outcome
+    And diagnostics go to <cache>/session-end.log; the helper prints nothing
+    And in a sandbox or on a host other than Linux it keeps the container at
+      once and logs nothing
+
+  @new
+  Scenario: CS-LNCH-209 Several clients on one container
+    Given the helper polls the container's clients (clients.Present)
+    Then the clients of the container's terminal are held primary and attach
+      leases and scanned "attach" and "start -a|-i" docker clients
+    And a terminal client that started after the hang-up keeps the container at
+      once (kept: reattached): a lease whose since is at or after --hangup-at,
+      a scanned process whose start (boot time + starttime) is at least 1 s
+      after it
+    And an older terminal client keeps it only when seen on two polls at least
+      3 s apart (a sibling tab that hung up in the same moment has released its
+      lease by then); one sighting only defers
+    And a join client (a join lease, a scanned exec) holds the container with no
+      cap: the helper waits, and goes on once the join is gone
+    And presence that cannot be told (the leases or /proc unreadable) keeps the
+      container (kept: clients unknown)
+    And a client the scan cannot see (the Docker API, a remote docker context,
+      another user) is invisible: the session can be ended under it;
+      endOnHangup: false is the remedy
+    And an attach between the pre-stop check and the docker stop is not seen
+
+  @new
+  Scenario: CS-LNCH-210 Where the end does not apply
+    Then no helper is started, and the container survives its terminal as
+      before, for:
+      | case                                      | why                                             |
+      | endOnHangup: false or the env off         | the way back to the old behaviour               |
+      | --detach (label keep)                     | launched to run in the background               |
+      | ralph                                     | an unattended loop                              |
+      | headless                                  | no TTY: docker proxies the client's signals     |
+      | a join's hang-up                          | the joined claude is its own process            |
+      | a launcher inside a sandbox               | it cannot see the host's leases or processes    |
+      | a host other than Linux                   | no /proc scan                                   |
+      | the detach keys                           | an explicit keep                                |
+      | nohup, or a tmux client's terminal closed | no SIGHUP reaches the launcher                  |
+    And a launcher killed outright (SIGKILL, no SIGHUP) starts no helper: the
+      container keeps running
+
+  @new
+  Scenario: CS-LNCH-212 The next launch says which sessions ended on hang-up
+    Given the helper stopped a container (outcome ended, or ended at the cap)
+    Then it writes <StateRoot>/notices/ended-<project key>-<ms>-<rand>.json
+      (0600, written to a temp file and renamed; the directory made with
+      EnsureOwnedDir 0700): {v:1, project, at, entries:[{instance, name,
+      sessionId, resume, capped}]}, where <project key> is the first 12 hex of
+      sha256 of the physical project path
+    When a launch, attach or join in that project is interactive: not headless,
+      not ralph, not --detach, not a tmux restore, and its stderr is a terminal
+    Then it claims every notice of this project, always (no tmux step): a
+      ".claimed-<pid>" left by a dead claimant is removed first, a notice older
+      than 7 days is removed unprinted, each notice is renamed aside to
+      ".claimed-<pid>" (losing the rename means another launch claimed it),
+      printed on stderr and removed
+    And a notice is read O_NOFOLLOW, and only as a regular file of the user, at
+      most 4 KiB
+    And it prints at most 3 sessions plus a count, each as:
+      """
+      Note: '<instance>' ended when its terminal closed (after its turn, <local YYYY-MM-DD HH:MM>). Resume it with:
+        <ResumeCommand>
+      """
+      or, at the cap, "(it ended at the 30 min cap while busy, <time>)", and then
+      once "All sessions ended this way: <absolute StateRoot>/session-ends.jsonl"
+    When an attach or a join has chosen a container (its lease taken)
+    Then one bounded InspectContainer by its id runs before the drift check
+    And gone (No such container; exited, dead or removing) claims and prints
+      this project's notices, prints "'<noun>' is no longer running.", releases
+      the lease and exits 1, running no docker attach or exec
+    And any other inspect error goes on as before, and docker reports what is
+      wrong
 
   # ---- host time zone (plan host-timezone 00..02; work item
   # sandboxes-inherit-the-host-s-timezone-by-5dbe) ----

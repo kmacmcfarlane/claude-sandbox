@@ -251,8 +251,9 @@ Feature: Host directories — cache root, state root, owned directories (CS-DIR)
     # unattended.
     Then client leases live in <StateRoot>/clients/<64-hex container id>/,
       each level made with EnsureOwnedDir 0700 (CS-DIR-004/005)
-    And <StateRoot>/session-ends.jsonl is the reserved name of the
-      session-end log (written from F2 on)
+    And <StateRoot>/session-ends.jsonl is the session-end log and
+      <StateRoot>/notices/ holds the ended-session notices, both written by
+      the session-end helper (CS-LNCH-208, CS-LNCH-212)
     When a launch on the host holds the launch lock and its first discovery
       succeeded (beside the shadow-directory sweep, CS-LNCH-081)
     Then a clients/<id> directory that no discovered row names (running,

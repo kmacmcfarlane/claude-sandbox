@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -26,6 +27,15 @@ type Fake struct {
 	// LateSignal, when set, arrives on the result's Late channel: a signal
 	// received after the session child exited (CS-LNCH-097).
 	LateSignal os.Signal
+	// SessionSignals, when set, are the signals the launcher caught during
+	// the session child, in order (SessionResult.Signals); Forwarded is the
+	// last SIGTERM or SIGHUP among them. SessionSignal alone is the same as
+	// a one-element list.
+	SessionSignals []os.Signal
+	// LateSignals, when set, all arrive on the Late channel, in order.
+	LateSignals []os.Signal
+	// ChildSignal is reported as the signal the session child died of.
+	ChildSignal syscall.Signal
 	// Released counts the Release calls of RunSession results.
 	Released int
 	// GitBound, when positive, replaces GitTimeout for the git calls run
@@ -170,7 +180,20 @@ func (f *Fake) RunSession(c Cmd) (SessionResult, error) {
 	f.mu.Lock()
 	f.Session = &c
 	sig, late := f.SessionSignal, f.LateSignal
+	sigs, lates, child := append([]os.Signal(nil), f.SessionSignals...), append([]os.Signal(nil), f.LateSignals...), f.ChildSignal
 	f.mu.Unlock()
+	if sig != nil && len(sigs) == 0 {
+		sigs = []os.Signal{sig}
+	}
+	if late != nil && len(lates) == 0 {
+		lates = []os.Signal{late}
+	}
+	var fwd os.Signal
+	for _, s := range sigs {
+		if s == syscall.SIGTERM || s == syscall.SIGHUP {
+			fwd = s
+		}
+	}
 	out, err := f.match(c)
 	if c.Stdout != nil && out != "" {
 		io.WriteString(c.Stdout, out)
@@ -181,14 +204,16 @@ func (f *Fake) RunSession(c Cmd) (SessionResult, error) {
 			return SessionResult{Code: -1}, err
 		}
 	}
-	res := SessionResult{Code: ExitCode(err), Forwarded: sig, Release: func() {
+	res := SessionResult{Code: ExitCode(err), Forwarded: fwd, Signals: sigs, ChildSignal: child, Release: func() {
 		f.mu.Lock()
 		f.Released++
 		f.mu.Unlock()
 	}}
-	if late != nil {
-		ch := make(chan os.Signal, 1)
-		ch <- late
+	if len(lates) > 0 {
+		ch := make(chan os.Signal, len(lates))
+		for _, l := range lates {
+			ch <- l
+		}
 		res.Late = ch
 	}
 	return res, nil

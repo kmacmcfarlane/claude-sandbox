@@ -1291,7 +1291,7 @@ func restoreAttach(env *Env, p *actProbes, m tmuxpane.Mark, d tmuxpane.Decision,
 	terminalNote(renv, s, snap, snapErr)
 	// CS-LNCH-197: a restore attach pings and restarts the clipboard helper
 	// but writes no target (the pane's environment is the service's).
-	return attachToWith(renv, s, keys, mark, p.release, lease, "", nil)
+	return attachToWith(renv, s, keys, mark, p.release, lease, endOnHangupFor(renv, s, cfg), "", nil)
 }
 
 // restoreResume is row 18's resume (CS-TMUX-058..062): the normal launch

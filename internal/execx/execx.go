@@ -71,6 +71,14 @@ type SessionResult struct {
 	// child (SIGTERM or SIGHUP), nil when the session ended on its own. A
 	// signal-initiated exit is the caller's to end quietly (CS-LNCH-091).
 	Forwarded os.Signal
+	// Signals is every signal the launcher caught while the child ran, in
+	// the order received (SIGINT and SIGQUIT included, whether forwarded or
+	// dropped), so a caller can tell which came first (CS-LNCH-207).
+	Signals []os.Signal
+	// ChildSignal is the signal the child died of (WaitStatus.Signaled), 0
+	// when it exited — never inferred from a 128+n code, which docker passes
+	// through from the container as a normal exit.
+	ChildSignal syscall.Signal
 	// Late delivers the signals the launcher receives after the child has
 	// exited and before Release (CS-LNCH-097); nil when none can arrive.
 	Late <-chan os.Signal
@@ -327,6 +335,7 @@ func (s System) RunSession(c Cmd) (SessionResult, error) {
 	for {
 		select {
 		case sig := <-sigs:
+			res.Signals = append(res.Signals, sig)
 			switch sig {
 			case syscall.SIGTERM, syscall.SIGHUP:
 				res.Forwarded = sig
@@ -338,6 +347,9 @@ func (s System) RunSession(c Cmd) (SessionResult, error) {
 			}
 		case <-done:
 			res.Code = statusCode(cmd.ProcessState)
+			if ws, ok := cmd.ProcessState.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
+				res.ChildSignal = ws.Signal()
+			}
 			return res, nil
 		}
 	}

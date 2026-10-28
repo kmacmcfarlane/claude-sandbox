@@ -41,6 +41,11 @@ func newInitCLI(vars map[string]string) *initCLI {
 		// Key-off, as newCLIFixture (the network is on by default, CS-LNCH-188).
 		c.vars["CLAUDE_SANDBOX_NETWORK"] = "0"
 	}
+	if _, ok := c.vars["CLAUDE_SANDBOX_END_ON_HANGUP"]; !ok {
+		// Off, as newCLIFixture (a hang-up ends the session by default,
+		// CS-LNCH-206).
+		c.vars["CLAUDE_SANDBOX_END_ON_HANGUP"] = "0"
+	}
 	if _, ok := c.vars["CLAUDE_SANDBOX_TIMEZONE"]; !ok {
 		// Off, as newCLIFixture (the host's zone is passed by default, CS-LNCH-213).
 		c.vars["CLAUDE_SANDBOX_TIMEZONE"] = "none"

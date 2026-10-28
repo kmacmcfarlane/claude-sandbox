@@ -148,6 +148,31 @@ var _ = Describe("RunSession (CS-LNCH-085/086)", func() {
 		Expect(h.stderr.String()).To(ContainSubstring("forwarded=hangup"))
 	})
 
+	It("CS-LNCH-207: records every caught signal in order, so SIGHUP then SIGTERM reads as such", func() {
+		h, _ := startHelper(`trap 'echo hup' HUP; trap 'exit 44' TERM; echo ready $$; while :; do sleep 0.05; done`)
+		Expect(h.cmd.Process.Signal(syscall.SIGHUP)).To(Succeed())
+		Expect(h.readLine()).To(Equal("hup"))
+		Expect(h.cmd.Process.Signal(syscall.SIGTERM)).To(Succeed())
+		Expect(h.wait()).To(Equal(44))
+		Expect(h.stderr.String()).To(ContainSubstring("signals=[hangup terminated]"))
+		Expect(h.stderr.String()).To(ContainSubstring("forwarded=terminated"))
+	})
+
+	It("CS-LNCH-207: ChildSignal is the signal the child died of, never a 128+n exit code", func() {
+		res, err := execx.System{}.RunSession(execx.Cmd{Name: "sh", Args: []string{"-c", "kill -HUP $$"}, Stdin: strings.NewReader("")})
+		Expect(err).NotTo(HaveOccurred())
+		res.Done()
+		Expect(res.Code).To(Equal(129))
+		Expect(res.ChildSignal).To(Equal(syscall.SIGHUP))
+		Expect(res.Signals).To(BeEmpty())
+
+		res, err = execx.System{}.RunSession(execx.Cmd{Name: "sh", Args: []string{"-c", "exit 129"}, Stdin: strings.NewReader("")})
+		Expect(err).NotTo(HaveOccurred())
+		res.Done()
+		Expect(res.Code).To(Equal(129))
+		Expect(res.ChildSignal).To(Equal(syscall.Signal(0)))
+	})
+
 	It("CS-LNCH-086: in the terminal's foreground group, SIGINT and SIGQUIT are dropped and the launcher survives", func() {
 		// The terminal delivered them to docker already (same group).
 		h, _ := startHelper(`trap 'exit 44' INT; trap 'exit 45' QUIT; echo ready $$; sleep 0.4; exit 5`, helperForeground+"=1")
@@ -298,6 +323,17 @@ var _ = Describe("Fake.RunSession", func() {
 		f.LateSignal = syscall.SIGINT
 		res, _ = f.RunSession(execx.Cmd{Name: "docker", Args: []string{"attach", "x"}})
 		Expect(<-res.Late).To(Equal(syscall.SIGINT))
+	})
+
+	It("CS-LNCH-207: scripts several signals in order, the child's signal and several late ones", func() {
+		f := &execx.Fake{SessionSignals: []os.Signal{syscall.SIGINT, syscall.SIGHUP, syscall.SIGTERM},
+			LateSignals: []os.Signal{syscall.SIGHUP, syscall.SIGTERM}, ChildSignal: syscall.SIGHUP}
+		res, _ := f.RunSession(execx.Cmd{Name: "docker", Args: []string{"attach", "x"}})
+		Expect(res.Signals).To(Equal([]os.Signal{syscall.SIGINT, syscall.SIGHUP, syscall.SIGTERM}))
+		Expect(res.Forwarded).To(Equal(syscall.SIGTERM))
+		Expect(res.ChildSignal).To(Equal(syscall.SIGHUP))
+		Expect(<-res.Late).To(Equal(syscall.SIGHUP))
+		Expect(<-res.Late).To(Equal(syscall.SIGTERM))
 	})
 
 	It("a non-code error is a failure to start", func() {

@@ -148,6 +148,12 @@ type Inputs struct {
 	// banner, the context paragraph (CS-LNCH-191) and the hash input.
 	Network string
 
+	// EndOnHangup is the resolved endOnHangup / CLAUDE_SANDBOX_END_ON_HANGUP
+	// (EndOnHangupWanted, CS-LNCH-206), rendered as the LabelOnHangup label:
+	// "end" when set, "keep" when not, and always "keep" for a --detach,
+	// ralph or headless launch. Never hashed.
+	EndOnHangup bool
+
 	// ClipboardWanted is the resolved hostClipboard / CLAUDE_SANDBOX_HOST_CLIPBOARD
 	// for this kind of launch (ClipboardWanted, CS-LNCH-194): on by default,
 	// never for headless or ralph. The zero value is off.
@@ -245,6 +251,51 @@ const LabelResume = "claude-sandbox.resume"
 // as opening a conversation there until its registry record exists. Outside
 // the config hash, like every label.
 const LabelContinue = "claude-sandbox.continue"
+
+// LabelOnHangup records whether the container ends after its turn when its
+// terminal hangs up (CS-LNCH-206): OnHangupEnd or OnHangupKeep. Outside the
+// config hash, like every label: a per-session choice.
+const LabelOnHangup = "claude-sandbox.onhangup"
+
+// The LabelOnHangup values.
+const (
+	OnHangupEnd  = "end"
+	OnHangupKeep = "keep"
+)
+
+// EndOnHangupEnv is the endOnHangup key's environment override.
+const EndOnHangupEnv = "CLAUDE_SANDBOX_END_ON_HANGUP"
+
+// EndOnHangupWanted resolves the key (CS-LNCH-206): CLAUDE_SANDBOX_END_ON_HANGUP
+// (1/true/yes on, 0/false/no off) > endOnHangup > ON. Host parity: claude on
+// the host ends when its terminal closes.
+func EndOnHangupWanted(getenv func(string) string, cfg *cascade.Config) bool {
+	var key *bool
+	if cfg != nil {
+		key = cfg.EndOnHangup
+	}
+	return ResolveTristate(nil, getenv(EndOnHangupEnv), key, true)
+}
+
+// EndOnHangupEnvSet reports the env override when it holds a recognised
+// value (an attach's first source, CS-LNCH-206).
+func EndOnHangupEnvSet(getenv func(string) string) (on, set bool) {
+	switch strings.ToLower(strings.TrimSpace(getenv(EndOnHangupEnv))) {
+	case "1", "true", "yes":
+		return true, true
+	case "0", "false", "no":
+		return false, true
+	}
+	return false, false
+}
+
+// OnHangupLabelValue is a launch's LabelOnHangup value.
+func OnHangupLabelValue(in Inputs) string {
+	if in.EndOnHangup && !in.Detached && !in.RalphMode && !in.Headless {
+		return OnHangupEnd
+	}
+	return OnHangupKeep
+}
 
 // HeadlessEnv is the exact list of variables a headless launch forwards from
 // its own environment (CS-LNCH-063): what the Claude Agent SDK and Paseo set
@@ -393,6 +444,8 @@ type Plan struct {
 	Resume string
 	// Continue: the container carries claude-sandbox.continue (CS-LNCH-182).
 	Continue bool
+	// OnHangup is the LabelOnHangup value (CS-LNCH-206).
+	OnHangup string
 	// Terminal is the claude-sandbox.terminal label's value (CS-LNCH-181).
 	Terminal string
 
@@ -845,6 +898,9 @@ func Build(in Inputs) (*Plan, error) {
 		p.Labels = append(p.Labels, LabelContinue+"=1")
 	}
 	p.Continue = in.Continue
+	// CS-LNCH-206: whether a hang-up ends the session, for an attach later.
+	p.OnHangup = OnHangupLabelValue(in)
+	p.Labels = append(p.Labels, LabelOnHangup+"="+p.OnHangup)
 
 	// CS-LNCH-178..181: the terminal identity. After the fingerprint, and
 	// neither EnvFlags nor labels are hashed, so a launch from another

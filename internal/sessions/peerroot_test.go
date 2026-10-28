@@ -116,7 +116,26 @@ var _ = Describe("discovery of the continue label (CS-LNCH-182)", func() {
 		Expect(found[0].Terminal).To(Equal("none"))
 		Expect(found[0].Mounts).To(Equal([]string{"/m1"}))
 		line := strings.Join(fake.Calls[0].Args, " ")
-		Expect(line).To(ContainSubstring(`{{.Label "claude-sandbox.continue"}}` + sep + `{{.Label "claude-sandbox.clipboard"}}` + sep + `{{.Label "claude-sandbox.shadowdir"}}` + sep + "{{.Mounts}} "))
+		Expect(line).To(ContainSubstring(`{{.Label "claude-sandbox.continue"}}` + sep + `{{.Label "claude-sandbox.clipboard"}}` + sep + `{{.Label "claude-sandbox.shadowdir"}}` + sep))
+	})
+
+	It("CS-LNCH-206: the onhangup label is the field just before {{.Mounts}}; a 27-field row has none", func() {
+		fake := &execx.Fake{}
+		fake.On("docker ps", strings.Join([]string{
+			strings.Join(append(head("a"), "", "bridge", "/tmp/claude-sandbox1", "end", "/m1"), sep),
+			strings.Join(append(head("b"), "", "none", "/tmp/claude-sandbox2", "/m2"), sep),
+		}, "\n")+"\n", nil)
+		found, err := sessions.DiscoverAllUncounted(fake)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(found).To(HaveLen(2))
+		Expect(found[0].OnHangup).To(Equal("end"))
+		Expect(found[0].ShadowDir).To(Equal("/tmp/claude-sandbox1"))
+		Expect(found[0].Mounts).To(Equal([]string{"/m1"}))
+		Expect(found[1].OnHangup).To(BeEmpty())
+		Expect(found[1].ShadowDir).To(Equal("/tmp/claude-sandbox2"))
+		Expect(found[1].Mounts).To(Equal([]string{"/m2"}))
+		line := strings.Join(fake.Calls[0].Args, " ")
+		Expect(line).To(ContainSubstring(`{{.Label "claude-sandbox.shadowdir"}}` + sep + `{{.Label "claude-sandbox.onhangup"}}` + sep + "{{.Mounts}} "))
 	})
 
 	It("CS-LNCH-197: the clipboard and shadowdir labels sit before {{.Mounts}}; a 25-field row has neither", func() {
