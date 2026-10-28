@@ -842,7 +842,7 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       | label                         | value                                  |
       | claude-sandbox.project        | the absolute project directory          |
       | claude-sandbox.mode           | "claude" or "ralph"                     |
-      | claude-sandbox.instance       | the instance noun (absent for ralph)    |
+      | claude-sandbox.instance       | the instance noun (empty for ralph)     |
       | claude-sandbox.version        | the launcher version                    |
       | claude-sandbox.model          | the resolved model, empty when unset    |
       | claude-sandbox.confighash     | the effective-config hash (CS-SESS-020) |
@@ -916,7 +916,7 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       clusters expand ("-pr <id>" resumes <id>), and only a bare "--" that no
       flag consumes stops it. The pane mark keeps its own stop rules
       (CS-TMUX-013/017)
-    But no resume label is set when:
+    But an empty resume label is set (CS-SESS-120) when:
       | case                                        | why                                            |
       | "--fork-session" is certainly an option (CS-LNCH-183) | a fork gets a new id; forking a live conversation is legitimate |
       | "--resume" or "-r" has no id (the picker)   | nothing is known to guard                      |
@@ -1061,9 +1061,10 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     And the label is outside the drift fingerprint: confighash and inputs are
       the same with and without it
     And discovery reads it as a ps field just before {{.Mounts}}, which stays
-      the last field, so rows of the earlier formats still parse
-    And a launch that is not a guarded continue carries no continue label and
-      never reads a registry directory for it
+      the last field; only the format's exact count is read (CS-SESS-118)
+    And a launch that is not a guarded continue carries
+      "claude-sandbox.continue=" (written empty, CS-SESS-120) and never reads a
+      registry directory for it
 
   Scenario: CS-LNCH-029 Container runtime environment
     Then docker create receives: -it --rm --init,

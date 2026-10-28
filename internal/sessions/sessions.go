@@ -177,9 +177,9 @@ func (s Session) exited() bool {
 }
 
 // running reports whether docker counts the container as running — "paused"
-// included, since docker top works on a paused container. A row with no
-// state (an older format) is running unless its status says it is a
-// reservation (CS-SESS-071).
+// included, since docker top works on a paused container. A row with an
+// empty state is running unless its status says it is a reservation
+// (CS-SESS-071).
 func (s Session) running() bool {
 	switch s.State {
 	case "running", "paused":

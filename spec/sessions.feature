@@ -486,7 +486,7 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
 
   Scenario: CS-SESS-035 Ralph containers carry no instance noun
     Then a ralph container is named "claude-sandbox-<project-slug>-ralph"
-    And its claude-sandbox.instance label is absent
+    And its claude-sandbox.instance label is written empty (CS-SESS-120)
 
   Scenario: CS-SESS-044 Join runs claude through the pid-class helper
     When join is chosen
@@ -740,7 +740,8 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
       paused container as running, and "docker top" works on it)
     And the created one counts 0 with no "docker top" (it fails on a
       container that is not running)
-    And a row from an older format with no state is counted as before
+    And a current-format row with an empty State is counted as before (only
+      the format's exact count is read, CS-SESS-118)
 
   Scenario: CS-SESS-074 "sessions" shows each container's state
     Given a running container and a paused container of this project
