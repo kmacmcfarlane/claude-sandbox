@@ -67,6 +67,8 @@ const (
 	LabelClipboard = clipboard.LabelClipboard
 	// LabelShadowDir names the container's shadow directory.
 	LabelShadowDir = launch.LabelShadowDir
+	// LabelOnHangup records whether a hang-up ends the session (CS-LNCH-206).
+	LabelOnHangup = launch.LabelOnHangup
 )
 
 // ModeRalph marks a ralph loop container.
@@ -144,6 +146,9 @@ type Session struct {
 	// and the display target live.
 	Clipboard string `json:"-"`
 	ShadowDir string `json:"-"`
+	// OnHangup is the claude-sandbox.onhangup label (CS-LNCH-206): "end",
+	// "keep", or "" for a container that predates it.
+	OnHangup string `json:"-"`
 	// Mounts are the container's bind sources ({{.Mounts}} under --no-trunc,
 	// split on ","), read for the peers-root pin (CS-DIR-011). nil on an
 	// older row.
@@ -235,6 +240,7 @@ var psFormat = strings.Join([]string{
 	`{{.Label "` + LabelContinue + `"}}`,  // CS-LNCH-182
 	`{{.Label "` + LabelClipboard + `"}}`, // CS-LNCH-197
 	`{{.Label "` + LabelShadowDir + `"}}`, // CS-LNCH-197
+	`{{.Label "` + LabelOnHangup + `"}}`,  // CS-LNCH-206
 	// CS-DIR-011: every bind source, comma-joined; last, so nothing after
 	// it depends on how a source is spelled.
 	"{{.Mounts}}",
@@ -385,6 +391,11 @@ func listAll(r execx.Runner, filter string, count bool) ([]Session, []Session, e
 			// before these labels) keeps everything else.
 			s.Clipboard = strings.TrimSpace(f[24])
 			s.ShadowDir = f[25]
+		}
+		if len(f) > 27 {
+			// CS-LNCH-206: before Mounts, so a 27-field row (the format
+			// before this label) keeps everything else.
+			s.OnHangup = strings.TrimSpace(f[26])
 		}
 		// An exited container is never a session: every sandbox container
 		// is --rm, so docker is removing it. Only DiscoverForLaunch returns

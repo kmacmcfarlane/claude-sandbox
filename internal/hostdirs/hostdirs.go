@@ -82,10 +82,16 @@ func ClientsDir(stateRoot string) string {
 }
 
 // SessionEndsLog is the session-end log's path (CS-DIR-029): one JSON line
-// per container the launcher ended, with the command that resumes it.
-// Reserved here; the session-end helper writes it.
+// per container the launcher ended, with the command that resumes it. The
+// session-end helper writes it (CS-LNCH-208).
 func SessionEndsLog(stateRoot string) string {
 	return filepath.Join(stateRoot, "session-ends.jsonl")
+}
+
+// NoticesDir holds the ended-session notices the session-end helper writes
+// and the next interactive launch in the project claims (CS-LNCH-212).
+func NoticesDir(stateRoot string) string {
+	return filepath.Join(stateRoot, "notices")
 }
 
 // CheckOwnedDir is EnsureOwnedDir's refusals without its side effects: it

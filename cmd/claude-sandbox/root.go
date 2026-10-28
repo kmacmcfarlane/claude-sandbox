@@ -29,6 +29,7 @@ import (
 	"github.com/kmacmcfarlane/claude-sandbox/internal/pidslot"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/prompt"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/ralphloop"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/sessionend"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/tmuxpane"
 )
 
@@ -117,6 +118,9 @@ type Env struct {
 	// file; the MachineIDPath rule). Fixtures point both at scratch.
 	Readlink        func(string) (string, error)
 	EtcTimezonePath string
+	// GOOS is runtime.GOOS unless set: ending a session on hang-up stands
+	// down on a host other than Linux (CS-LNCH-210).
+	GOOS string
 
 	// restore is set only on the Env copy a "tmux restore" resumes with
 	// (CS-TMUX-058, plan 10 § 5.2): the pane's pending row to put back and
@@ -228,7 +232,7 @@ func Main(args []string) int {
 // path so "claude-sandbox --rebuild init" errors instead of routing to init.
 func isSubcommand(a string) bool {
 	switch a {
-	case "init", "init-ralph", "ralph", "help", "completion", "sessions", "pidslot", "headless", "global-config", "tmux", cacheBudgetCheckCmd, imagebuild.PrefetchSubcommand, clipboard.HelperSubcommand:
+	case "init", "init-ralph", "ralph", "help", "completion", "sessions", "pidslot", "headless", "global-config", "tmux", cacheBudgetCheckCmd, imagebuild.PrefetchSubcommand, clipboard.HelperSubcommand, sessionend.Subcommand:
 		return true
 	// CS-COMP-002/003: the hidden commands the generated completion scripts
 	// call on every keystroke. Without these they fall through to runLaunch,
@@ -304,7 +308,7 @@ func newRootCmd(env *Env) *cobra.Command {
 	}
 	ralphCmd := newRalphCmd(env)
 	registerRalphCompletions(ralphCmd)
-	root.AddCommand(newInitCmd(env, false), newInitCmd(env, true), ralphCmd, newSessionsCmd(env), newGlobalConfigCmd(env), newTmuxCmd(env), newPidslotCmd(env), newHeadlessCmd(env), newCacheBudgetCheckCmd(env), newCLIPrefetchCmd(env), newClipboardBridgeCmd(env))
+	root.AddCommand(newInitCmd(env, false), newInitCmd(env, true), ralphCmd, newSessionsCmd(env), newGlobalConfigCmd(env), newTmuxCmd(env), newPidslotCmd(env), newHeadlessCmd(env), newCacheBudgetCheckCmd(env), newCLIPrefetchCmd(env), newClipboardBridgeCmd(env), newSessionEndCmd(env))
 	// CS-INIT-002: a rejected flag names itself and lists the command's valid
 	// options (inherited by init/init-ralph/ralph).
 	root.SetFlagErrorFunc(func(c *cobra.Command, err error) error {
@@ -1078,6 +1082,11 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 		// already did); nor does a scripted one whose stderr is no terminal
 		// (nobody would read it).
 		claimNotice(env)
+		if !f.Ralph {
+			// CS-LNCH-212: sessions here that ended when their terminal
+			// hung up, once.
+			claimEndedNotices(env, projectDir)
+		}
 	}
 	switch decision.Action {
 	case actionQuit:
@@ -1356,6 +1365,9 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 	// work and outside the launch lock; a tmux restore resume writes none
 	// (nobody sits at that pane) and stands down silently.
 	in.ClipboardWanted = launch.ClipboardWanted(env.Getenv, cfg, headless, f.Ralph)
+	// CS-LNCH-206: the label records the choice; Build keeps --detach, ralph
+	// and headless at keep.
+	in.EndOnHangup = launch.EndOnHangupWanted(env.Getenv, cfg)
 	in.ClipboardQuiet = env.restore != nil
 	if in.ClipboardWanted && env.restore == nil && !hostdirs.InSandbox(env.Getenv) {
 		res := resolveClipboard(env)

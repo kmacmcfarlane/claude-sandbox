@@ -99,6 +99,21 @@ var _ = Describe("config cascade", func() {
 		Expect(cfg.SandboxNetwork).To(BeNil())
 	})
 
+	It("CS-LNCH-206: endOnHangup merges like any other scalar (more-local wins) and stays out of the hashed JSON", func() {
+		files := writeConfigs(tmp, "endOnHangup: true\n", "endOnHangup: false\n")
+		cfg, err := cascade.Load(files)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.EndOnHangup).NotTo(BeNil())
+		Expect(*cfg.EndOnHangup).To(BeFalse())
+		raw, _ := json.Marshal(cfg)
+		Expect(string(raw)).NotTo(ContainSubstring("ndOnHangup"))
+
+		files = writeConfigs(tmp, "model: opus\n")
+		cfg, err = cascade.Load(files)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.EndOnHangup).To(BeNil())
+	})
+
 	It("CS-LNCH-194: hostClipboard merges like any other scalar and stays out of the hashed JSON", func() {
 		files := writeConfigs(tmp, "hostClipboard: true\n", "hostClipboard: false\n")
 		cfg, err := cascade.Load(files)

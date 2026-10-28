@@ -79,7 +79,53 @@ type Record struct {
 	PIDDomain  string `json:"pidDomain"`
 	Name       string `json:"name"`
 	NameSource string `json:"nameSource"`
+	// Status is what the session is doing (idle, busy, waiting, shell in
+	// Claude Code 2.1.29x), kept as any text, cleaned (Printable), so a
+	// newer value reads as unknown rather than as absent; WaitingFor is
+	// what a waiting session waits for, cleaned like a name. The
+	// session-end helper waits while a turn runs (CS-LNCH-208).
+	// These four are decoded leniently (statusFields): a value of another
+	// JSON type reads as absent, never as a malformed record, which would
+	// make the resume guard fail closed and the save hook miss.
+	Status     string `json:"-"`
+	WaitingFor string `json:"-"`
+	// StatusUpdatedAt and UpdatedAt are unix ms, 0 when absent or not a
+	// positive number.
+	StatusUpdatedAt int64 `json:"-"`
+	UpdatedAt       int64 `json:"-"`
 }
+
+// statusFields is the lenient view of a record's status fields.
+type statusFields struct {
+	Status          json.RawMessage `json:"status"`
+	WaitingFor      json.RawMessage `json:"waitingFor"`
+	StatusUpdatedAt json.RawMessage `json:"statusUpdatedAt"`
+	UpdatedAt       json.RawMessage `json:"updatedAt"`
+}
+
+func rawString(m json.RawMessage) string {
+	var v string
+	if json.Unmarshal(m, &v) != nil {
+		return ""
+	}
+	return v
+}
+
+func rawMillis(m json.RawMessage) int64 {
+	var v float64
+	if json.Unmarshal(m, &v) != nil || v <= 0 || v > 1<<53 {
+		return 0
+	}
+	return int64(v)
+}
+
+// Known status values (Claude Code 2.1.29x).
+const (
+	StatusIdle    = "idle"
+	StatusBusy    = "busy"
+	StatusWaiting = "waiting"
+	StatusShell   = "shell"
+)
 
 // recordName is a record's file name; the capture is its pid.
 var recordName = regexp.MustCompile(`^([0-9]{1,10})\.json$`)
@@ -185,6 +231,13 @@ func (d *Dir) Read(e Entry) (Record, error) {
 	}
 	if !IsUUID(r.SessionID) {
 		return Record{}, fmt.Errorf("%w: %s: sessionId is not a conversation id", ErrMalformed, e.Name)
+	}
+	var sf statusFields
+	if json.Unmarshal(data, &sf) == nil {
+		r.Status = Printable(rawString(sf.Status))
+		r.WaitingFor = CleanName(rawString(sf.WaitingFor))
+		r.StatusUpdatedAt = rawMillis(sf.StatusUpdatedAt)
+		r.UpdatedAt = rawMillis(sf.UpdatedAt)
 	}
 	r.Name = CleanName(r.Name)
 	if r.Name == "" || !NameSources[r.NameSource] {

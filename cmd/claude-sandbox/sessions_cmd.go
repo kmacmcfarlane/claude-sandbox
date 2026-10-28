@@ -477,6 +477,10 @@ func joinExistingSession(env *Env, projectDir string, f *launchFlags, cfg *casca
 	}
 	lease := takeLease(env, d.Target.ID, kind)
 	defer lease.Release()
+	// CS-LNCH-212: a container ended (on hang-up) while the menu was read.
+	if err := endedBeforeAttach(env, projectDir, d.Target, lease); err != nil {
+		return true, err
+	}
 
 	model := f.Model
 	if model == "" {
@@ -518,13 +522,13 @@ func joinExistingSession(env *Env, projectDir string, f *launchFlags, cfg *casca
 		_, _, _, home := hostIdentity(env.Getenv)
 		if snapErr == nil {
 			// CS-LNCH-202: the JetBrains note, after the target is written.
-			return true, attachToWith(env, d.Target, cfg.DetachKeys, attachMark(d.Target, home, wt.Root), nil, lease, clipboard.ByAttach, func(eff *clipboard.Target, bridged bool) {
+			return true, attachToWith(env, d.Target, cfg.DetachKeys, attachMark(d.Target, home, wt.Root), nil, lease, endOnHangupFor(env, d.Target, cfg), clipboard.ByAttach, func(eff *clipboard.Target, bridged bool) {
 				if bridged && launch.ClipboardWanted(env.Getenv, cfg, false, false) {
 					jetbrainsNote(env, projectDir, snap, eff)
 				}
 			})
 		}
-		return true, attachTo(env, d.Target, cfg.DetachKeys, attachMark(d.Target, home, wt.Root), nil, lease)
+		return true, attachToWith(env, d.Target, cfg.DetachKeys, attachMark(d.Target, home, wt.Root), nil, lease, endOnHangupFor(env, d.Target, cfg), clipboard.ByAttach, nil)
 	}
 	_, _, hostUser, _ := hostIdentity(env.Getenv)
 	// CS-SESS-092: an unreadable snapshot leaves the container's identity
@@ -765,13 +769,14 @@ func newInstance(env *Env, projectDir string, f *launchFlags, gitRoot string) st
 // 64-hex id when it is known, else the name; the event filter keeps the name,
 // which oomreport matches exactly (CS-TMUX-056, CS-LNCH-095).
 func attachTo(env *Env, s sessions.Session, configuredKeys string, mark *paneMark, onChild func(), lease *clients.Lease) error {
-	return attachToWith(env, s, configuredKeys, mark, onChild, lease, clipboard.ByAttach, nil)
+	return attachToWith(env, s, configuredKeys, mark, onChild, lease, false, clipboard.ByAttach, nil)
 }
 
 // attachToWith is attachTo with a hook that sees the clipboard bridge's
 // effective target once the attach re-pointed it (CS-LNCH-197/202). lease is
 // the attach's client lease (CS-LNCH-204), taken and released by the caller.
-func attachToWith(env *Env, s sessions.Session, configuredKeys string, mark *paneMark, onChild func(), lease *clients.Lease, by string, clip func(*clipboard.Target, bool)) error {
+// endOnHangup: this attach's hang-up ends the container (CS-LNCH-206).
+func attachToWith(env *Env, s sessions.Session, configuredKeys string, mark *paneMark, onChild func(), lease *clients.Lease, endOnHangup bool, by string, clip func(*clipboard.Target, bool)) error {
 	// CS-LNCH-197: re-point the bridge to this shell's display, never
 	// downgrading, and restart a dead helper.
 	eff, bridged := refreshClipboardBridge(env, s, by)
@@ -792,7 +797,7 @@ func attachToWith(env *Env, s sessions.Session, configuredKeys string, mark *pan
 	end, err := runSession(env, execx.Cmd{
 		Name: "docker",
 		Args: []string{"attach", "--detach-keys=" + detachKeys, target},
-	}, s.Name, sessionOpts{kind: primarySession, after: func() { checkGlobalConfig(env, pre) }, mark: mark, onChild: onChild, lease: lease})
+	}, s.Name, sessionOpts{kind: primarySession, after: func() { checkGlobalConfig(env, pre) }, mark: mark, onChild: onChild, lease: lease, endOnHangup: endOnHangup})
 	if err != nil {
 		return err
 	}

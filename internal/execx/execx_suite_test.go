@@ -67,6 +67,9 @@ func runHelper(script string) int {
 	if res.Forwarded != nil {
 		fmt.Fprintf(os.Stderr, "forwarded=%v\n", res.Forwarded)
 	}
+	if len(res.Signals) > 0 {
+		fmt.Fprintf(os.Stderr, "signals=%v\n", res.Signals)
+	}
 	if os.Getenv(helperLate) == "1" {
 		fmt.Println("returned")
 		select {

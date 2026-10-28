@@ -102,6 +102,10 @@ func newCLIFixture() *cliFixture {
 		// fixture pins it off so every other test keeps its argv, and
 		// timezone_cli_test.go deletes this key to test the default.
 		"CLAUDE_SANDBOX_TIMEZONE": "none",
+		// A hang-up ends the session by default (CS-LNCH-206); the fixture
+		// pins it off so no other test starts the session-end helper, and
+		// hangup_cli_test.go deletes this key to test the default.
+		"CLAUDE_SANDBOX_END_ON_HANGUP": "0",
 	}
 	// Never the real /proc (the guards' host check reads it): a scratch tree
 	// with only this namespace's link; a test needing more sets its own.

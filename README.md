@@ -207,7 +207,7 @@ Launching in a project that already has a session offers five choices:
 Found 1 running session(s) for this project:
   otter (big refactor) up 2h14m      1 session(s)
 
-  [n] new session in a new container   (isolated; attachable if your terminal drops)
+  [n] new session in a new container   (isolated; ends after its turn when its terminal closes, the detach keys keep it)
   [b] branch the newest conversation into a new container   (fork it; both continue independently)
   [j] new session in an existing container   (dies with that container's primary; not attachable later)
   [a] attach to an existing session   (shares the terminal if someone is already using it)
@@ -219,11 +219,11 @@ Found 1 running session(s) for this project:
 | | New container (`n`) | Branch (`b`) | Join a container (`j`) | Attach (`a`) |
 |---|---|---|---|---|
 | Conversation | fresh | a **fork** of the newest one | fresh | the running one |
-| Survives losing your terminal | yes — reattach with `--attach` | yes — reattach with `--attach` | **no**, gone for good | n/a (this *is* the recovery path) |
+| Survives losing your terminal | after the detach keys, with `--detach`, or with `endOnHangup: false` — reattach with `--attach`; otherwise it ends after its turn ([When the terminal closes](#when-the-terminal-closes)) | the same | **no**, gone for good | n/a (this *is* the recovery path) |
 | Dies when another session exits | no | no | **yes** — the container is `--rm` | n/a |
 | Cost | a second container, its own memory limit | a second container, its own memory limit | almost nothing | nothing |
 
-If your terminal died and you want your session back, that is **`[a]` attach**. Use **`[b]` branch** to explore a side idea with the running session's full context — the fork gets its own session id, so both conversations continue independently. Use `[j]` only for a genuinely disposable second session, and remember it cannot be recovered.
+If you detached (or turned `endOnHangup` off) and want your session back, that is **`[a]` attach**; a session whose terminal closed ended after its turn, and the next launch here prints the command that resumes it. Use **`[b]` branch** to explore a side idea with the running session's full context — the fork gets its own session id, so both conversations continue independently. Use `[j]` only for a genuinely disposable second session, and remember it cannot be recovered.
 
 ### Branching a conversation
 
@@ -360,6 +360,79 @@ Detach and reattach are repeatable — a reattached session can be detached agai
 Docker's own default (`ctrl-p ctrl-q`) is deliberately not used, because the Claude Code TUI binds `ctrl+p`. Override with `detachKeys` in `config.yaml`; the override applies to all three session types together. (For a new container the keys ride `docker start -ai`, the client that attaches — see [Launch reservation](#launch-reservation).)
 
 Docker cannot report whether another client is attached, so attaching to a session someone else is actively using silently shares the terminal — output is duplicated and keystrokes interleave.
+
+### When the terminal closes
+
+**On by default**, for host parity: `claude` on the host ends when its terminal closes, and so
+does a sandbox session now. Docker's client passes no signal into a container with a TTY, so a
+closed tab (a JetBrains terminal tab, a GNOME Terminal window, an SSH drop, `tmux kill-pane`)
+used to leave the container running with nobody attached, and such containers piled up.
+
+What happens, by how the terminal went away:
+
+| Event | Session |
+|---|---|
+| The terminal hangs up (the launcher gets SIGHUP first) | ends **after its turn** |
+| The detach keys (`ctrl-q` `ctrl-q`) | keeps running; `--attach` picks it up |
+| `--detach` | keeps running (launched to run in the background) |
+| SIGTERM first (a supervisor, `kill <pid>`, systemd stopping a unit) | as before: the launcher exits, the container keeps running |
+| `nohup`, or a tmux client's terminal closed (tmux keeps the pane) | no SIGHUP reaches the launcher: keeps running |
+| The launcher killed outright (SIGKILL) | keeps running |
+
+On a hang-up the launcher releases its client lease, starts a small detached helper
+(`claude-sandbox session-end`, its own session, so it outlives the terminal) and exits at once
+with docker's status. The helper:
+
+- **lets the running turn finish**: it polls every 2 seconds and reads the session's `status`
+  from Claude Code's own registry record (never a transcript). `busy`, `shell` or an unknown
+  value waits; `idle`, or `waiting` (a prompt nobody can answer now), ends. A record counts only
+  while its process is alive in the container (one `docker top`), so a join killed mid-turn does
+  not hold it. The wait is **capped at 30 minutes**; a turn still busy then is ended anyway (a
+  hung tool, most likely), and the log and the note say so;
+- **steps aside for another client**: a terminal that attaches after the hang-up keeps the
+  session (the helper exits); a second attach that was already open keeps it once seen on two
+  polls; a join still in use holds it, with no cap, until the join is gone;
+- **keeps the container whenever it cannot see**: no live registry record within 30 seconds, an
+  unreadable registry or `/proc`, a paused container, its own SIGTERM or SIGHUP, its systemd unit
+  stopping (the IDE's scope, `tmux.service`) or the host shutting down;
+- **then stops it**: `docker stop --signal SIGTERM --time 30 <id>` — claude gets SIGTERM, as a
+  host claude gets its hang-up, and SIGKILL follows 30 seconds later if it does not exit. The
+  container is `--rm`, so it is gone; the conversation is not.
+
+Every outcome is a JSON line in `~/.local/state/claude-sandbox/session-ends.jsonl` (the
+launcher's state root; `$XDG_STATE_HOME/claude-sandbox` when that is set), with the session ids and the command that
+resumes each one; diagnostics go to `~/.cache/claude-sandbox/session-end.log`. The next
+interactive launch, attach or join in the project prints each ended session once:
+
+```
+Note: 'heron' ended when its terminal closed (after its turn, 2026-10-22 14:03). Resume it with:
+  cd /home/user/work/myproject && claude-sandbox --new --no-worktree -- --resume 3f2a6c1e-7b4d-4e8a-9c5f-1d2e3a4b5c6d --name 'fix the flaky login test'
+All sessions ended this way: /home/user/.local/state/claude-sandbox/session-ends.jsonl
+```
+
+To list every resume command at once:
+
+```bash
+jq -r 'select(.outcome == "ended") | .resume[]' ~/.local/state/claude-sandbox/session-ends.jsonl
+```
+
+An `--attach` or `--join` to a session that ended while you read the menu prints that note and
+`'heron' is no longer running.` and exits 1.
+
+Turn it off with `endOnHangup: false` in any `config.yaml` (more-local wins), or for one launch
+with `CLAUDE_SANDBOX_END_ON_HANGUP=0`: the container then survives losing its terminal, as
+before. Each container records its choice in the label `claude-sandbox.onhangup=end|keep`
+(not part of the config-drift hash); an `--attach` follows the container's label unless its own
+`CLAUDE_SANDBOX_END_ON_HANGUP` is set. It never applies to ralph, headless, `--detach`, or a
+joined session's hang-up (the joined claude is left as before), nor to a launcher inside a
+sandbox or on macOS (they cannot see the host's clients).
+
+Limits: a client that attaches through the Docker API (the JetBrains Docker plugin, Portainer),
+through a remote docker context, or as another user is invisible to the helper, so a session can
+be ended under it — turn the setting off where you use one. An attach in the instant between the
+helper's last check and its `docker stop` is not seen. Pressing the detach keys less than
+2 seconds before closing the tab reads as a hang-up. Spec: `spec/launch.feature`
+CS-LNCH-206..210 and CS-LNCH-212.
 
 ### Starting detached
 
@@ -2116,6 +2189,7 @@ If no `.claude-sandbox/Dockerfile` is found anywhere up to `/`, the launcher war
 | `CLAUDE_SANDBOX_WORKTREE` | (unset: off interactive, on ralph) | `1`/`true`/`yes` runs sessions in their own worktree (equivalent to `--worktree`); `0`/`false`/`no` runs them in the shared checkout, ralph included; either overrides a config `worktree` key |
 | `CLAUDE_SANDBOX_SHARED_PEER_REGISTRY` | (unset) | `1`/`true`/`yes` shares the Claude Code peer registry and message sockets with other opted-in sandboxes regardless of `CLAUDE_CONFIG_DIR` (equivalent to `sharedPeerRegistry: true`); `0`/`false`/`no` is an explicit off that overrides a config `true` |
 | `CLAUDE_SANDBOX_HOST_CLIPBOARD` | (unset: on) | `0`/`false`/`no` turns the [host clipboard bridge](#host-clipboard-bridge) off for one launch (as `hostClipboard: false`); `1`/`true`/`yes` turns it on over a config `false` |
+| `CLAUDE_SANDBOX_END_ON_HANGUP` | (unset: on) | `0`/`false`/`no` keeps a session running when its terminal closes, for one launch or attach (as `endOnHangup: false`); `1`/`true`/`yes` ends it after its turn over a config `false` or a container's `keep` label (see [When the terminal closes](#when-the-terminal-closes)) |
 | `CLAUDE_SANDBOX_CLIPBOARD_DISPLAY` | (unset) | the bridge's display target from this shell: `none`, `x:<DISPLAY>` or `<DISPLAY>`, `wayland:<name or socket>` (read from the launching shell only, never an env file) |
 | `CLAUDE_SANDBOX_NETWORK` | (unset: on) | New containers join the `claude-sandbox` Docker network by default, whose DNS goes through the host's resolver (see [Container network and DNS](#container-network-and-dns)); `0`/`false`/`no` turns it off for the launch (overriding a config `true` or the default, like `sandboxNetwork: false`); `1`/`true`/`yes` overrides a config `false` |
 | `CLAUDE_SANDBOX_TIMEZONE` | (unset: `timezone`, else `host`) | The containers' `TZ` (see [Time zone](#time-zone)): `host`, a zone such as `UTC` or `Europe/Berlin`, or `none`/`off`/`false`/`0`/`no` to pass nothing; overrides a config `timezone` key; an env file's `TZ` still wins |
@@ -2352,7 +2426,9 @@ kill (see [Memory limit](#memory-limit)). What changes:
 - **Exit code.** The launcher exits with docker's status, or 128+n when docker died of signal n. A status of 78 also prints what the global-config link check needs (see [Global config](#global-config-claudejson)).
 - **Signals.** SIGTERM and SIGHUP sent to the launcher are forwarded to docker, and an exit
   they cause is silent and immediate (no report), which is what an SDK client such as Paseo
-  expects when it stops a session. SIGINT and SIGQUIT generated by the terminal (while
+  expects when it stops a session. A SIGHUP that arrives before any SIGTERM is a hang-up: before
+  it exits, the launcher starts the session-end helper (see
+  [When the terminal closes](#when-the-terminal-closes)). SIGINT and SIGQUIT generated by the terminal (while
   docker holds it in raw mode Ctrl-C is just a byte for claude; outside raw mode the terminal
   signals the whole foreground group) already reach docker, so the launcher drops its own copy
   and survives; when the launcher is not the terminal's foreground job — no controlling terminal, as under a

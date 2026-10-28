@@ -77,6 +77,18 @@ together.
   the session (a fingerprinting detail); no host file or path is mounted
   (added 2026-10-27 with the host-timezone feature).
 
+- `endOnHangup`: on (parity: claude on the host ends when its terminal
+  closes; a hang-up ends the session after its turn, a busy turn capped at
+  30 minutes; never ralph, headless, `--detach` or a join; off with
+  `endOnHangup: false` or `CLAUDE_SANDBOX_END_ON_HANGUP=0`). Availability
+  cost: an SSH drop or a mis-closed tab ends the session after its turn
+  (`--resume` continues it; the next launch prints the command); the detach
+  keys or `--detach` keep a session on purpose. Isolation cost: a host helper
+  acts on registry records sandboxes can write, so a bridged session can hold
+  another container (until the cap) or end it early (one turn's remainder)
+  after that container's own terminal hung up. Stand-downs: a launcher in a
+  sandbox, macOS.
+
 ## Proposed (awaiting operator approval)
 
 *Not approved. Candidates the personas and scenarios show are missing. Each

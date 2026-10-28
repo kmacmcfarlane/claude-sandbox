@@ -374,6 +374,9 @@ func startReserved(env *Env, plan *launch.Plan, headless bool, pre *globalcfg.He
 		fallback: oomreport.Limit{Value: plan.MemoryLimit, Source: plan.MemoryLimitSource},
 		headless: headless,
 		mark:     mark,
+		// CS-LNCH-206/210: the label's choice (keep for ralph, headless),
+		// and only where the helper can see the clients.
+		endOnHangup: plan.OnHangup == launch.OnHangupEnd && !headless && hangupApplies(env),
 	}
 	if !headless {
 		// CS-GCFG-001: not headless — an SDK client SIGTERMs right after the

@@ -10,6 +10,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"os"
 
 	"github.com/kmacmcfarlane/claude-sandbox/internal/clients"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
@@ -55,6 +56,11 @@ type sessionOpts struct {
 	// early (the session-end helper must not count this launcher, plan
 	// detached-sandboxes F2); Release is idempotent.
 	lease *clients.Lease
+	// endOnHangup is set when this client's hang-up ends the container after
+	// its turn (CS-LNCH-206/210): a primary or an attach whose setting
+	// resolved on, on a Linux host, outside a sandbox. Never for a join,
+	// ralph or headless. The helper reads the session from mark.
+	endOnHangup bool
 	// onChild runs right after the pane is marked and right before the
 	// session child starts: a restore releases its start lock there after
 	// an attach, or starts its readiness watcher (CS-TMUX-060/061). nil on
@@ -132,6 +138,13 @@ func runSession(env *Env, c execx.Cmd, container string, o sessionOpts) (end ses
 		return sessionEnd{code: res.Code}, err
 	}
 	end = sessionEnd{code: res.Code}
+	// CS-LNCH-207: a hang-up seen while the child ran (or docker dying of
+	// it) starts the session-end helper before anything else, the launcher
+	// may be killed soon after.
+	hungUp := isHangup(res.Signals, res.ChildSignal)
+	if hungUp {
+		startSessionEnd(env, o)
+	}
 	if pane != nil && vanished(env, o, res.Code, started) {
 		// The prior mark goes back before any CS-TMUX-071 row: no probe.
 		putBack = true
@@ -170,6 +183,11 @@ func runSession(env *Env, c execx.Cmd, container string, o sessionOpts) (end ses
 		verdict = oomreport.Joined(res.Code, out)
 	}
 	if stopped {
+		// CS-LNCH-207: the signals of the child and of the die wait, in
+		// order; a SIGHUP that came first is a hang-up.
+		if !hungUp && isHangup(append(append([]os.Signal(nil), res.Signals...), out.Signals...), 0) {
+			startSessionEnd(env, o)
+		}
 		// CS-LNCH-097: a signal after the child exited asks for the exit
 		// now — with the child's status, silently. Like a forwarded signal,
 		// it unsets unless a stop from outside is in evidence.
