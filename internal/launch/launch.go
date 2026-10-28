@@ -870,6 +870,13 @@ func Build(in Inputs) (*Plan, error) {
 	}
 	p.Labels = append(p.Labels, LabelTimezone+"="+tzLabel)
 
+	// CS-LNCH-226: no label value may hold a control or bidi character
+	// (discovery splits each docker ps row on a control character,
+	// CS-SESS-118). The configured values were refused with their source
+	// before any image work (CS-LNCH-224); this is the backstop.
+	if err := CheckLabels(p.Labels); err != nil {
+		return nil, err
+	}
 	return p, nil
 }
 

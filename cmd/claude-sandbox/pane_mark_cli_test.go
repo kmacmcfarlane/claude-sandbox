@@ -221,7 +221,7 @@ var _ = Describe("tmux pane mark (CS-TMUX-010..019)", func() {
 		})
 
 		It("CS-TMUX-012: an attach records the model label only when launchflags names --model", func() {
-			running(psRowMark("cs-otter", f.proj, "claude", "otter", "sonnet", "37", "otter", created, "short",
+			running(psRowMark("cs-otter", f.proj, "claude", "otter", "sonnet", "37", "otter", created, "4f1c2a9b8e7d",
 				"", f.home+"/.claude/sessions", ""))
 			f.fake.On("rev-parse --show-toplevel", f.proj+"\n", nil)
 			Expect(f.run("--attach=otter")).To(Equal(0), f.errw.String())

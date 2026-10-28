@@ -13,7 +13,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -240,8 +242,84 @@ var psFormat = strings.Join([]string{
 	"{{.Mounts}}",
 }, fieldSep)
 
-// psFieldCount is the minimum a row must carry; State and CreatedAt follow.
-const psFieldCount = 11
+// psFields is the number of fields psFormat produces: docker renders every
+// placeholder for every container (an absent label is an empty field), so a
+// row of this format has exactly this many fields. A label value holding the
+// separator would add fields and shift every later one (CS-SESS-118);
+// launchers refuse to write one (CS-LNCH-224), and discovery drops any row
+// that is not one of the known shapes. {{.Mounts}} is last and may hold
+// commas but never the separator, so the count is exact.
+var psFields = strings.Count(psFormat, fieldSep) + 1
+
+// psEarlierShapes are the field counts of the formats before the current
+// one (the base 11, +State/CreatedAt 13, +memory 15, +the retired keep label
+// 16, +ID/configdir/registry/launchflags 20, +resume 21, +peerroot/Mounts
+// 23, +terminal 24, +continue 25). This format never yields them: docker
+// output only ever has psFields fields, and an injected separator only adds
+// fields, never removes one, so accepting them can never read a shifted
+// row. Each is read with exactly the fields that shape had and validated
+// like a current row (CS-SESS-118/119).
+var psEarlierShapes = map[int]bool{11: true, 13: true, 15: true, 16: true, 20: true, 21: true, 23: true, 24: true, 25: true}
+
+// knownShape reports whether n fields is the current format or an earlier one.
+func knownShape(n int) bool { return n == psFields || psEarlierShapes[n] }
+
+// WarnOut receives discovery's warnings about rows it drops (CS-SESS-118).
+// stderr, so a headless launch's stdout stays claude's alone; tests replace it.
+var WarnOut io.Writer = os.Stderr
+
+// containerNameRe is docker's container name rule (with the leading "/"
+// some docker listings print).
+var containerNameRe = regexp.MustCompile(`^/?[A-Za-z0-9][A-Za-z0-9_.-]*$`)
+
+// dropRow warns once about a row discovery will not interpret, naming the
+// container when the row's first field is a valid container name. The name
+// comes before every label field and cannot hold the separator, so the first
+// field is the name even in a shifted row; nothing else is printed.
+func dropRow(f []string, why string) {
+	who := "a container"
+	if len(f) > 0 && containerNameRe.MatchString(f[0]) {
+		who = "container " + strings.TrimPrefix(f[0], "/")
+	}
+	fmt.Fprintf(WarnOut, "WARNING: ignoring %s in the sandbox listing (%s); it is left out of discovery.\n", who, why)
+}
+
+// knownStates are the container states docker reports.
+var knownStates = map[string]bool{
+	StateCreated: true, "running": true, "paused": true, StateRestarting: true,
+	"removing": true, StateExited: true, "dead": true,
+}
+
+var (
+	fullIDRe = regexp.MustCompile(`^[0-9a-f]{12,64}$`)
+	uuidRe   = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+)
+
+// rowProblem validates the fields of a parsed row whose shape is known
+// (CS-SESS-119): every field with a fixed form must have it (the continue
+// label stays "1" or not, as CS-LNCH-182 reads it). "" = valid.
+func rowProblem(s Session) string {
+	switch {
+	case !containerNameRe.MatchString(s.Name):
+		return "its name is not a container name"
+	case s.State != "" && !knownStates[s.State]:
+		return "its state is not a docker container state"
+	case s.ID != "" && !fullIDRe.MatchString(s.ID):
+		return "its id is not a container id"
+	case s.PIDClass != "" && !validClass(s.PIDClass):
+		return "its pid class label is not a number from 0 to 255"
+	case s.Resume != "" && !uuidRe.MatchString(s.Resume):
+		return "its resume label is not a conversation id"
+	}
+	return ""
+}
+
+// validClass is a pid class label: a decimal 0..255 without a sign or
+// leading zeros.
+func validClass(v string) bool {
+	n, err := strconv.Atoi(v)
+	return err == nil && n >= 0 && n < 256 && strconv.Itoa(n) == v
+}
 
 // createdAtLayout parses the first three fields of docker ps's {{.CreatedAt}},
 // e.g. "2026-09-18 12:34:56 -0700" of "2026-09-18 12:34:56 -0700 PDT". The
@@ -341,50 +419,54 @@ func listAll(r execx.Runner, filter string, count bool) ([]Session, []Session, e
 			continue
 		}
 		f := strings.Split(line, fieldSep)
-		if len(f) < psFieldCount {
-			continue // malformed row: skip it, keep the rest (CS-SESS-006)
+		if !knownShape(len(f)) {
+			// CS-SESS-118: never interpreted. A label value holding the
+			// separator shifts every later field, so a session could
+			// otherwise choose the state, id, registry or resume label
+			// discovery reads.
+			dropRow(f, fmt.Sprintf("%d fields, not %d", len(f), psFields))
+			continue
 		}
 		s := Session{
 			Name: f[0], Status: f[1], Project: f[2], Mode: f[3],
 			Instance: f[4], Version: f[5], Model: f[6], ConfigHash: f[7],
 			Inputs: launch.DecodeInputs(f[8]), PIDClass: f[9], Worktree: f[10],
 		}
-		if len(f) > 11 {
+		n := len(f)
+		if n >= 13 {
 			s.State = strings.TrimSpace(f[11])
-		}
-		if len(f) > 12 {
 			s.CreatedAt = parseCreatedAt(f[12])
 		}
-		if len(f) > 14 {
+		if n >= 15 {
 			s.MemoryLimit, s.MemoryLimitSource = f[13], f[14]
 		}
-		if len(f) > 19 {
+		if n >= 20 {
 			s.ID = strings.TrimSpace(f[16])
 			s.ConfigDirEnv, s.RegistryDir, s.LaunchFlags = f[17], f[18], f[19]
 		}
-		if len(f) > 20 {
+		if n >= 21 {
 			s.Resume = strings.TrimSpace(f[20])
 		}
-		if len(f) > 22 {
+		if n >= 23 {
 			s.PeerRoot = strings.TrimSpace(f[21])
-			// Mounts is always the LAST field, so a row of the format before
-			// the terminal label (23 fields) keeps its bind sources and the
-			// peers-root pin, and simply has no terminal label (CS-SESS-091).
-			s.Mounts = launch.SplitMounts(f[len(f)-1])
+			// Mounts is always the LAST field (CS-SESS-091), so every shape
+			// from 23 fields on keeps its bind sources and the peers pin.
+			s.Mounts = launch.SplitMounts(f[n-1])
 		}
-		if len(f) > 23 {
+		if n >= 24 {
 			s.Terminal = strings.TrimSpace(f[22])
 		}
-		if len(f) > 24 {
-			// CS-LNCH-182: before Mounts, so a 24-field row (the format
-			// before this label) keeps its terminal label and its mounts.
-			s.Continue = strings.TrimSpace(f[23]) == "1"
+		if n >= 25 {
+			s.Continue = strings.TrimSpace(f[23]) == "1" // CS-LNCH-182
 		}
-		if len(f) > 26 {
-			// CS-LNCH-197: before Mounts, so a 25-field row (the format
-			// before these labels) keeps everything else.
+		if n >= 27 {
+			// CS-LNCH-197
 			s.Clipboard = strings.TrimSpace(f[24])
 			s.ShadowDir = f[25]
+		}
+		if why := rowProblem(s); why != "" {
+			dropRow(f, why)
+			continue
 		}
 		// An exited container is never a session: every sandbox container
 		// is --rm, so docker is removing it. Only DiscoverForLaunch returns

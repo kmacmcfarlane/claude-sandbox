@@ -233,7 +233,12 @@ func (r LaunchRecord) LabelNames() []string {
 		}
 	}
 	for _, n := range r.Unreplayed {
-		out = appendName(out, n)
+		// CS-LNCH-226: an unknown passthrough flag's name is whatever was
+		// typed; only a name FromLabel would read back is written, so no
+		// control character (or the "," separator) reaches the label.
+		if labelName.MatchString(n) {
+			out = appendName(out, n)
+		}
 	}
 	return out
 }

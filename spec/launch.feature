@@ -3307,3 +3307,46 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       nothing; headless and ralph get the value like any create
     And a container created before this drifts once on attach or join, through
       the shadow CLAUDE.md's new static time zone bullet; [n] clears it
+
+  # ---- label values (discovery field injection) ----
+  # Discovery reads every label from one docker ps row whose fields are joined
+  # by the unit separator (CS-SESS-118). A label value holding it would shift
+  # every later field, so no label the launcher writes may hold a control
+  # character (Cc: the separator, newline, CR and tab among them) or one of
+  # the twelve Bidi_Control characters.
+
+  Scenario: CS-LNCH-224 A configured label value with a control or bidi character is refused before any image work
+    Given a launch that would create a container
+    And one of the configured values that become labels holds a control or
+      bidi character: the cascade "model" key, the cascade "memoryLimit" key,
+      the project directory's path, or CLAUDE_CONFIG_DIR
+    Then the launch exits 2 before any image build or docker create
+    And the message names the value and its source: the config.yaml that set
+      the key (cascade.KeySourceOf), "environment" for CLAUDE_CONFIG_DIR, and
+      the character as U+XXXX; the value itself is never printed
+    And an attach or join, which creates nothing, is not refused
+    And the worktree name needs no new check: --worktree=NAME is already
+      letters, digits, ".", "_" and "-" (CS-LNCH-043), and the cascade
+      "worktree" key is a boolean
+
+  Scenario: CS-LNCH-225 A command-line --model with a control or bidi character is refused
+    Given "--model <v>" or "--model=<v>" where v holds a control or bidi character
+    Then the arguments are refused with exit 2 before anything runs
+    And the message names --model and the character, never the value
+    And the model is also claude's own --model, so no real model is refused
+
+  Scenario: CS-LNCH-226 Build refuses any label value it would write with a control or bidi character
+    Given a plan whose labels are complete
+    Then every "key=value" label is checked, and a value with a control or
+      bidi character fails Build, naming the label key (exit 2 before docker
+      create): the backstop for the values the launcher derives — the
+      version, the memoryLimit source path, the shadow directory, the registry
+      and peers root paths
+    And the launchflags label writes only flag names FromLabel would read back
+      (an unknown passthrough flag's typed name is dropped, not refused)
+    And the inputs label escapes a Bidi_Control character in a path as \uXXXX
+      (encoding/json already escapes control characters), which decodes to
+      the same path
+    And the terminal label already goes through registry.Printable, and the
+      timezone label is a validated ASCII shape; the mode, pid class, resume,
+      continue, detached and clipboard labels are fixed forms
