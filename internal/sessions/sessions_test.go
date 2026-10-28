@@ -101,11 +101,36 @@ var _ = Describe("session discovery", func() {
 				Expect(count(strings.Join(rows, "\n"))).To(Equal(2))
 			})
 
-			It("counts a separate claude process, such as a --bg session, and an absolute argv[0]", func() {
+			It("never counts a look-alike argv[0]", func() {
 				rows := append(append([]string{}, primary...),
-					"300                 108                 /home/u/.local/bin/claude --bg",
 					"310                 108                 bash -c claude-helper --claude",
 					"311                 108                 /usr/bin/claudette",
+				)
+				Expect(count(strings.Join(rows, "\n"))).To(Equal(1))
+			})
+
+			It("counts a claimed background session once, by its bg-pty-host row", func() {
+				rows := append(append([]string{}, primary...),
+					"400                 108                 claude bg-pty-host --session x",
+					"401                 400                 /home/u/.local/share/claude/versions/2.1.300 --resume x",
+				)
+				Expect(count(strings.Join(rows, "\n"))).To(Equal(2))
+			})
+
+			It("counts an idle pre-warmed spare as 0: neither bg-spare nor its pty host", func() {
+				rows := append(append([]string{}, primary...),
+					"500                 108                 claude bg-pty-host --spare",
+					"501                 500                 claude bg-spare --warm",
+				)
+				Expect(count(strings.Join(rows, "\n"))).To(Equal(1))
+			})
+
+			It("counts a claimed session and an idle spare side by side as 1 more", func() {
+				rows := append(append([]string{}, primary...),
+					"400                 108                 claude bg-pty-host --session x",
+					"401                 400                 /home/u/.local/share/claude/versions/2.1.300 --resume x",
+					"500                 108                 claude bg-pty-host --spare",
+					"501                 500                 claude bg-spare --warm",
 				)
 				Expect(count(strings.Join(rows, "\n"))).To(Equal(2))
 			})

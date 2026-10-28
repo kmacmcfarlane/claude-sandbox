@@ -419,18 +419,26 @@ func countSessions(r execx.Runner, name string) int {
 	return countTop(out)
 }
 
-// topRow is one parsed "docker top" row.
+// topRow is one parsed "docker top" row: argv0 is the base name of the
+// command's first word, arg1 its second word ("" when none).
 type topRow struct {
-	pid, ppid, argv0 string
+	pid, ppid, argv0, arg1 string
 }
 
 // countTop counts the session processes in "docker top -o pid,ppid,args"
 // output (CS-SESS-099). A row counts only when the base name of its argv[0]
-// is exactly "claude" (an interactive, joined or --bg session) or "ralph"
-// (the ralph loop) — never docker-init, tini, the pidslot helper,
-// entrypoint.sh or node, whose ARGUMENTS name claude (a container running one
-// claude used to count 4). A claude whose parent is a counted ralph loop is
-// that loop's iteration, not another session.
+// is exactly "claude" (an interactive or joined session) or "ralph" (the
+// ralph loop) — never docker-init, tini, the pidslot helper, entrypoint.sh or
+// node, whose ARGUMENTS name claude (a container running one claude used to
+// count 4). A claude whose parent is a counted ralph loop is that loop's
+// iteration, not another session.
+//
+// Background (--bg) sessions: each runs under a "claude bg-pty-host …"
+// process, which counts as the session (the session itself runs under a
+// versioned binary path, so it never counts again). Claude Code also keeps a
+// pre-warmed spare: a "claude bg-pty-host …" whose child is "claude bg-spare
+// …". The spare never counts, and neither does a pty host with a bg-spare
+// child (told apart by PPID; without a PPID column such a host counts 1).
 //
 // The columns are found by the header row: the command is last (it holds
 // spaces) and PPID is optional, so output without it still counts by argv[0].
@@ -454,18 +462,25 @@ func countTop(out string) int {
 		}
 	}
 	var rows []topRow
-	ralph := map[string]bool{}
+	ralph := map[string]bool{}     // pids of ralph loops
+	spareHost := map[string]bool{} // parents of a bg-spare
 	for _, line := range lines[1:] {
 		f := strings.Fields(line)
 		if len(f) <= cmdCol {
 			continue
 		}
 		row := topRow{pid: f[pidCol], argv0: path.Base(f[cmdCol])}
+		if len(f) > cmdCol+1 {
+			row.arg1 = f[cmdCol+1]
+		}
 		if ppidCol >= 0 {
 			row.ppid = f[ppidCol]
 		}
-		if row.argv0 == "ralph" {
+		switch {
+		case row.argv0 == "ralph":
 			ralph[row.pid] = true
+		case row.argv0 == "claude" && row.arg1 == "bg-spare" && row.ppid != "":
+			spareHost[row.ppid] = true
 		}
 		rows = append(rows, row)
 	}
@@ -474,7 +489,9 @@ func countTop(out string) int {
 		switch {
 		case row.argv0 == "ralph":
 			n++
-		case row.argv0 == "claude" && !ralph[row.ppid]:
+		case row.argv0 != "claude", ralph[row.ppid], row.arg1 == "bg-spare":
+		case row.arg1 == "bg-pty-host" && spareHost[row.pid]:
+		default:
 			n++
 		}
 	}

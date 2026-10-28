@@ -55,7 +55,8 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
     And a row counts only when the base name of its first argument (argv[0]) is exactly "claude" or "ralph"
     And docker-init, tini, the pidslot helper (claude-sandbox pidslot -- claude), entrypoint.sh and node never count, whatever their arguments name
     And a join's rows (claude-sandbox pidslot -- claude, tini -s -- claude, claude) add exactly 1
-    And a separate claude process, such as a background --bg session, counts as a session
+    And a background (--bg) session counts once, by its pty host row "claude bg-pty-host …" (the session it runs under a versioned binary path does not count again)
+    And a row "claude bg-spare …" (Claude Code's pre-warmed spare) never counts, and neither does the "claude bg-pty-host" row whose child it is, so an idle spare adds 0
     And a claude process whose parent is a counted ralph loop is that loop's iteration and does not count again, so a ralph container counts 1
     And the columns are found by the header row (PID, PPID, then the command last), so output without a PPID column still counts by argv[0]
 
