@@ -42,8 +42,24 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
   Scenario: CS-SESS-003 Session count includes joined sessions
     Given a container running 3 claude processes
     When sessions are discovered
-    Then "docker top" runs for that container
+    Then "docker top" runs for that container with "-o pid,ppid,args"
     And the session count is 3
+
+  Scenario: CS-SESS-099 Only a claude session process counts, not a process whose command line mentions claude
+    # Observed on a container running exactly one claude, which was counted 4:
+    #   /sbin/docker-init -- /opt/claude-sandbox/bin/entrypoint.sh claude --dangerously-skip-permissions
+    #   tini -s -- claude --dangerously-skip-permissions
+    #   claude --dangerously-skip-permissions
+    #   node /opt/claude-sandbox/mcp/discord-notify/dist/index.mjs
+    Given a container whose "docker top" rows are the four above
+    When sessions are discovered
+    Then the session count is 1
+    And a row counts only when the base name of its first argument (argv[0]) is exactly "claude" or "ralph"
+    And docker-init, tini, the pidslot helper (claude-sandbox pidslot -- claude), entrypoint.sh and node never count, whatever their arguments name
+    And a join's rows (claude-sandbox pidslot -- claude, tini -s -- claude, claude) add exactly 1
+    And background (--bg) sessions and Claude Code's background helpers are not counted: a "claude" row whose second word is one of Claude Code's internal process kinds (bg-pty-host, bg-spare, daemon, daemon-worker) never counts, and a session run under a versioned binary path never counts either
+    And a claude process whose parent is a counted ralph loop is that loop's iteration and does not count again, so a ralph container counts 1
+    And the columns are found by the header row (PID, PPID, then the command last), so output without a PPID column still counts by argv[0] (and then cannot skip a ralph iteration's claude)
 
   Scenario: CS-SESS-004 A failing docker top degrades instead of failing discovery
     Given "docker top" exits non-zero for one container
@@ -94,8 +110,8 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
   Scenario: CS-SESS-010 "sessions" lists the current project by default
     When "claude-sandbox sessions" is run
     Then only sessions whose claude-sandbox.project matches the cwd's project are listed
-    And the columns are INSTANCE, WORKTREE, NAME, MODE, STATE, UP, SESSIONS
-      (STATE: CS-SESS-074)
+    And the columns are INSTANCE, NAME, WORKTREE, CONTAINER, MODE, STATE, UP,
+      SESSIONS (NAME: CS-SESS-116; STATE: CS-SESS-074)
     # WORKTREE is the claude-sandbox.worktree label, "-" when the session runs
     # in the shared checkout (CS-LNCH-044).
 
@@ -1189,3 +1205,63 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
     And when the clients directory exists but cannot be read, or <proc>
       cannot be listed, the answer is "cannot tell", never "no client"
     And the reader removes nothing
+
+  # ---- friendly session names ----
+  # The instance noun is random; the name Claude Code shows in its terminal
+  # title (a /rename, --name, or the name it derives) is what a person
+  # recognises. The launcher cannot read a terminal's title, so it reads the
+  # same name from the peer-registry record of the container's primary claude,
+  # the source the tmux save hook and window label use (CS-TMUX-034).
+
+  @new
+  Scenario: CS-SESS-114 A session's name is its primary claude's registry name
+    Given a listed container with a pid class and a creation time
+    Then its records are read from the directory its claude-sandbox.registry
+      label names, else from the launcher's <config dir>/sessions and the
+      legacy peers root's sessions/ (a container from before the label)
+    And a record is the container's when its pid % 256 is the class, its
+      startedAt is at or after the container's creation (truncated to the
+      second), and its pidDomain is not the launcher's own (a claude on the
+      host sharing the directory)
+    And of those the earliest is the primary's (it starts before any join),
+      and its cleaned name (internal/registry: printable, at most 200
+      characters, not starting with "-") is the session's name
+    And a container without a class or a creation time, a reservation, a
+      missing or unreadable directory, a malformed or vanished record, or a
+      record without a name gives no name — silently, never an error or a
+      warning
+    And each registry directory is listed once per listing, whatever the
+      number of containers using it, only the records at a watched class are
+      read, and no docker call is added
+    And headless and ralph containers get a name when one is found
+
+  @new
+  Scenario: CS-SESS-115 The launch-time lists show the name beside the noun
+    Given 2 sessions are running, "otter" named "big refactor" and "heron"
+      with no name
+    When a launch reports them (the tier-1 list, the list before an
+      --attach/--join pick, ralph's report)
+    Then the lines read "otter (big refactor)  up …" and "heron  up …", the
+      labels padded to the widest
+    And with one candidate the pick line reads "Using the only running
+      session: otter (big refactor)"
+    And the prompt "Which session to attach? [otter/heron]" and every
+      "--attach=<noun>" or "--join=<noun>" the launcher prints name the noun
+      only
+
+  @new
+  Scenario: CS-SESS-116 "sessions" shows the name; --json carries it
+    When "claude-sandbox sessions" is run
+    Then a NAME column right after INSTANCE holds the session's name, "-"
+      without one, and the docker container name is in the CONTAINER column
+    When "claude-sandbox sessions --json" is run
+    Then each object with a name carries "sessionName"; "name" stays the
+      container name, as before
+
+  @new
+  Scenario: CS-SESS-117 A shown name is printable and capped
+    Given a registry record whose name holds control, bidi or zero-width
+      characters, or is longer than 40 characters
+    Then every listing shows it through registry.Printable, cut to 39
+      characters plus "…" when longer than 40
+    And the name is never part of a shell command the launcher prints

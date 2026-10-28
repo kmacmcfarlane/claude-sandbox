@@ -416,7 +416,7 @@ var _ = Describe("headless containers are not candidates (CS-SESS-055)", func() 
 
 	It("CS-SESS-055: sessions lists it, marked headless", func() {
 		Expect(f.run("sessions")).To(Equal(0), f.errw.String())
-		Expect(f.out.String()).To(MatchRegexp(`heron\s+-\s+cs-h\s+headless\s`))
+		Expect(f.out.String()).To(MatchRegexp(`heron\s+-\s+-\s+cs-h\s+headless\s`))
 		g := newCLIFixture()
 		g.fake.On("docker ps", psRowMode("cs-h", g.proj, sessions.ModeHeadless, "heron", "4")+"\n", nil)
 		Expect(g.run("sessions", "--json")).To(Equal(0))

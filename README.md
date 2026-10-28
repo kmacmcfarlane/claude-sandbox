@@ -188,12 +188,12 @@ claude-sandbox sessions --json
 ```
 
 ```
-INSTANCE  WORKTREE  NAME                                              MODE    STATE    UP     SESSIONS
-otter     -         claude-sandbox-kmacmcfarlane-myproj-1de77a-otter  claude  running  2h14m  1
-heron     -         claude-sandbox-kmacmcfarlane-myproj-1de77a-heron  claude  running  11m    2
+INSTANCE  NAME          WORKTREE  CONTAINER                                         MODE    STATE    UP     SESSIONS
+otter     big refactor  -         claude-sandbox-kmacmcfarlane-myproj-1de77a-otter  claude  running  2h14m  1
+heron     -             -         claude-sandbox-kmacmcfarlane-myproj-1de77a-heron  claude  running  11m    2
 ```
 
-Each session gets a short **instance noun** (`otter`, `heron`) so it can be named by hand. `SESSIONS` counts the claude processes inside a container, so joined sessions are visible too. A container another launch has reserved but not yet started (see [Launch reservation](#launch-reservation)) is not listed: there is nothing in it to attach to yet. A container started by `claude-sandbox headless` is listed with `headless` in the `MODE` column, but it is never offered to `--attach`, `--join` or the launch-time prompt, and on its own it never triggers that prompt: its stdio is an SDK client's JSON stream ([Headless mode](#headless-mode-paseo-and-other-sdk-clients)).
+Each session gets a short **instance noun** (`otter`, `heron`) so it can be named by hand. `NAME` is the session's own name — the one Claude Code shows in the terminal title (set with `/rename` or `--name`, or derived by Claude Code) — read from the peer-registry record of the container's primary claude; `-` when there is none (a fresh session, a ralph run, or a record that cannot be read). It is shown printable and cut to 40 characters, beside the noun in the launch-time list too, and `--json` carries it as `"sessionName"` (`"name"` stays the container name). Type the noun, not the name, to `--attach=`/`--join=`. `SESSIONS` counts the claude sessions inside a container (each process whose command is `claude`, or a ralph loop, whose own claude is not counted again; not the helpers around them such as `tini` or an MCP server), so joined sessions are visible too. Background (`--bg`) sessions and Claude Code's background helpers are not counted. A container another launch has reserved but not yet started (see [Launch reservation](#launch-reservation)) is not listed: there is nothing in it to attach to yet. A container started by `claude-sandbox headless` is listed with `headless` in the `MODE` column, but it is never offered to `--attach`, `--join` or the launch-time prompt, and on its own it never triggers that prompt: its stdio is an SDK client's JSON stream ([Headless mode](#headless-mode-paseo-and-other-sdk-clients)).
 
 `STATE` is docker's container state (`running` or `paused`); `--json` carries it as `"state"`. Every session's container is created `--rm`, so it disappears when it stops and is only ever listed while it runs: an exited container (one docker is still removing) is never listed and holds no instance noun or pid class.
 
@@ -205,7 +205,7 @@ Launching in a project that already has a session offers five choices:
 
 ```
 Found 1 running session(s) for this project:
-  otter      up 2h14m      1 session(s)
+  otter (big refactor) up 2h14m      1 session(s)
 
   [n] new session in a new container   (isolated; ends after its turn when its terminal closes, the detach keys keep it)
   [b] branch the newest conversation into a new container   (fork it; both continue independently)
