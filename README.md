@@ -279,8 +279,9 @@ or choose `[r]` in the menu above. What it does:
    command apply on top, and `--model` replaces the carried one.
 5. **Carries the old launch's access options over** — `--dangerous`, `--ssh`, `--git`,
    `--docker-socket`, `--aws` and `--package-caches` — but only those the launcher itself recorded as
-   given at the old launch: its `launchflags` label names the flag, or the `CLAUDE_SANDBOX_*`
-   switch. One line names each option carried and how it was given, so a re-grant is never silent;
+   given at the old launch: its `launchflags` label names the flag, or names the
+   `CLAUDE_SANDBOX_*` switch and the option was in effect in the old container (the label records
+   that a switch was set, not its value). One line names each option carried and how it was given, so a re-grant is never silent;
    an option this launch gives anyway is not mentioned. Nothing is inferred from the old container's
    mounts or environment (an env file or a project `config.yaml` is writable from inside a session):
    an option that came from the old config, which today's config no longer gives, is only named —

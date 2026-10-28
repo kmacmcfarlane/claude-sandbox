@@ -574,6 +574,10 @@ var _ = Describe("restart a session in place (CS-SESS-105..108, CS-LNCH-218..221
 			},
 			Entry("--docker-socket, a flag", func(f *restartFix) { f.flags = "--docker-socket" },
 				"/var/run/docker.sock:/var/run/docker.sock", "--docker-socket (given as a flag at its launch)"),
+			Entry("--dangerous, its environment switch, in the launcher's prefix", func(f *restartFix) {
+				f.flags = "CLAUDE_SANDBOX_DANGEROUS"
+				f.cmd = []string{"claude", "--dangerously-skip-permissions", "--resume", rsConv}
+			}, "claude --dangerously-skip-permissions", "--dangerous (CLAUDE_SANDBOX_DANGEROUS was set at its launch)"),
 			Entry("--dangerous, a flag", func(f *restartFix) {
 				f.flags = "--dangerous"
 				f.cmd = []string{"claude", "--dangerously-skip-permissions", "--resume", rsConv}
@@ -582,11 +586,24 @@ var _ = Describe("restart a session in place (CS-SESS-105..108, CS-LNCH-218..221
 				Expect(os.MkdirAll(filepath.Join(f.home, ".ssh"), 0o700)).To(Succeed())
 				f.flags = "--ssh"
 			}, "/.ssh:", "--ssh (given as a flag at its launch)"),
-			Entry("--ssh, its environment switch", func(f *restartFix) {
-				Expect(os.MkdirAll(filepath.Join(f.home, ".ssh"), 0o700)).To(Succeed())
+			Entry("--ssh, its environment switch, in effect in the old container", func(f *restartFix) {
+				ssh := filepath.Join(f.home, ".ssh")
+				Expect(os.MkdirAll(ssh, 0o700)).To(Succeed())
 				f.flags = "CLAUDE_SANDBOX_HOST_ACCESS_SSH_ENABLED"
+				f.mounts = []map[string]any{{"Source": ssh, "Destination": ssh}}
 			}, "/.ssh:", "--ssh (CLAUDE_SANDBOX_HOST_ACCESS_SSH_ENABLED was set at its launch)"),
 		)
+
+		It("CS-SESS-107: switch named + not in effect → not carried, and nothing said", func() {
+			f.primary("idle")
+			Expect(os.MkdirAll(filepath.Join(f.home, ".ssh"), 0o700)).To(Succeed())
+			f.flags = "CLAUDE_SANDBOX_HOST_ACCESS_SSH_ENABLED,CLAUDE_SANDBOX_DANGEROUS"
+			Expect(f.run("--restart=dunlin")).To(Equal(0), f.errw.String())
+			Expect(f.errw.String()).NotTo(ContainSubstring("Carried over"))
+			Expect(f.errw.String()).NotTo(ContainSubstring("from its config"))
+			Expect(strings.Join(f.launched().Args, " ")).NotTo(ContainSubstring("/.ssh:"))
+			Expect(f.createdCmd()).NotTo(ContainElement("--dangerously-skip-permissions"))
+		})
 
 		It("CS-SESS-107: an env-only GOMODCACHE is never carried (env files are session-writable)", func() {
 			f.primary("idle")

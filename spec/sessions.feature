@@ -1287,9 +1287,13 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
       stripped of the session family (tmuxpane.StripSessionFamily), follows the replay
     And the old launch's access options (--dangerous, --ssh, --git, --docker-socket, --aws,
       --package-caches) are carried over only when the launcher itself recorded them as
-      given: the claude-sandbox.launchflags label naming the flag, or naming its
-      CLAUDE_SANDBOX_* switch; one this launch would not give on its own (its flags, its
-      env, its config, a cascade mount of the same path) is set as its flag
+      given: the claude-sandbox.launchflags label naming the flag (a flag can only turn an
+      option on), or naming its CLAUDE_SANDBOX_* switch AND the option was in effect in the
+      old container (its launcher mount or bind, its -e, or for --dangerous the launcher's
+      Config.Cmd prefix) — the label proves the switch was set, the effect that it was
+      truthy, and requiring both cannot widen anything; a named switch whose option was not
+      in effect is not carried and gets no note; one this launch would not give on its own
+      (its flags, its env, its config, a cascade mount of the same path) is set as its flag
     And one line names what was carried and how: "given as a flag at its launch", or
       "<CLAUDE_SANDBOX_*> was set at its launch", so a re-grant is never silent; this
       launch's own flags always win

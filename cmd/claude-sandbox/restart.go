@@ -794,7 +794,9 @@ type carriedOption struct{ flag, how string }
 // carryAccess carries the old session's access options over (CS-SESS-107),
 // but only what the launcher itself recorded as given at the old launch: the
 // claude-sandbox.launchflags label naming the launcher flag, or naming its
-// CLAUDE_SANDBOX_* switch. Such an option that this launch would not give on
+// CLAUDE_SANDBOX_* switch — a switch only when the option was also in effect
+// in the old container, since the label records that it was set, not its
+// value. Such an option that this launch would not give on
 // its own is set as its flag on f (this launch's own flags already won) and
 // returned, so the restart names it.
 //
@@ -807,7 +809,8 @@ type carriedOption struct{ flag, how string }
 func carryAccess(env *Env, f *launchFlags, cfg *cascade.Config, s sessions.Session, ins inspected, home string, prefixDangerous bool) (carried []carriedOption, dropped []string) {
 	_, named := tmuxpane.FromLabel(s.LaunchFlags)
 	labelled := s.RegistryDir != ""
-	// Evidence, for the note only.
+	// Evidence: it confirms a named switch was truthy, and feeds the config
+	// note; alone it never grants.
 	mounted := func(dest string) bool {
 		for _, m := range ins.Mounts {
 			if filepath.Clean(m.Destination) == dest {
@@ -856,6 +859,14 @@ func carryAccess(env *Env, f *launchFlags, cfg *cascade.Config, s sessions.Sessi
 		case slices.Contains(named, flag):
 			return true, "given as a flag at its launch"
 		case slices.Contains(named, envVar):
+			// The label proves the switch was set, not that it was truthy:
+			// only an option also in effect in the old container (its
+			// launcher mount, -e or command-line prefix) is carried.
+			// Requiring both cannot widen anything; otherwise nothing is
+			// carried and nothing said.
+			if !evidence {
+				return false, ""
+			}
 			return true, envVar + " was set at its launch"
 		case labelled && evidence:
 			dropped = append(dropped, flag)
