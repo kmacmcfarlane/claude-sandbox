@@ -17,6 +17,7 @@ import (
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/imagebuild"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/sessions"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/sessions/sessionstest"
 )
 
 // trapPrompter records every use. A headless launch must never reach the
@@ -41,7 +42,7 @@ func (p *trapPrompter) Ask(_, q string, _ time.Duration) string {
 
 // psRowMode is a running docker ps row with an explicit mode label.
 func psRowMode(name, project, mode, instance, class string) string {
-	return strings.Join([]string{name, "Up 1 hour", project, mode, instance, "v1", "", "", "", class, "", "running", ""}, psSep)
+	return sessionstest.Row(name, "Up 1 hour", project, mode, instance, "v1", "", "", "", class, "", "running", "")
 }
 
 // createTail returns the create argv after "--name <name> <image>": the

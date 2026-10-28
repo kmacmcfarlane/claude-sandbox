@@ -26,6 +26,7 @@ import (
 	"github.com/kmacmcfarlane/claude-sandbox/internal/hostdirs"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/registry"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/sessionend"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/sessions/sessionstest"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/tmuxpane"
 )
 
@@ -122,7 +123,7 @@ func newFixture() *fixture {
 			}
 			return "", execx.Fail(1)
 		}
-		return strings.Join([]string{"/" + cname, st, "2026-10-28T12:00:00Z", f.proj, "otter", "claude"}, "\x1f") + "\n", nil
+		return sessionstest.InspectRow("/"+cname, st, "2026-10-28T12:00:00Z", f.proj, "otter", "claude") + "\n", nil
 	})
 	f.opts = sessionend.Options{
 		Mark: tmuxpane.Mark{V: tmuxpane.MarkVersion, State: tmuxpane.StateActive, Mode: tmuxpane.ModeClaude,

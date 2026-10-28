@@ -7,6 +7,7 @@ package globalcfg_test
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -141,7 +142,7 @@ var _ = Describe("global-config migrate (CS-GCFG-041..051)", func() {
 		Expect(out).To(ContainSubstring("Update every claude-sandbox launcher"))
 		Expect(out).To(ContainSubstring(globalcfg.SmokeTest))
 		Expect(f.errw.String()).To(BeEmpty())
-		Expect(f.fake.CommandLines()).To(ContainElement(HavePrefix("docker ps -a --no-trunc --format {{.Names}}\x1f{{.Mounts}}")))
+		Expect(f.fake.CommandLines()).To(ContainElement(HavePrefix("docker ps -a --no-trunc --format {{json .Names}}\x1f{{json .Mounts}}")))
 	})
 
 	Describe("CS-GCFG-042: layouts it cannot migrate", func() {
@@ -226,10 +227,10 @@ var _ = Describe("global-config migrate (CS-GCFG-041..051)", func() {
 
 		It("CS-GCFG-045: a container mounting the file refuses, matched by exact source; others do not", func() {
 			f.fake.On("docker ps", strings.Join([]string{
-				"cs-otter\x1f/proj,/home/x/.claude," + f.link + ",/tmp/claude-sandbox123/CLAUDE.md",
-				"cs-kept\x1f" + f.link + "/",
-				"cs-near\x1f" + f.link + ".bak,/other" + f.link,
-				"unrelated\x1f",
+				mrow("cs-otter", "/proj,/home/x/.claude,"+f.link+",/tmp/claude-sandbox123/CLAUDE.md"),
+				mrow("cs-kept", f.link+"/"),
+				mrow("cs-near", f.link+".bak,/other"+f.link),
+				mrow("unrelated", ""),
 			}, "\n")+"\n", nil)
 			err := globalcfg.Migrate(f.opts())
 			expectRefused(err, "cs-otter, cs-kept", "--force", "tmux kill-server")
@@ -241,7 +242,7 @@ var _ = Describe("global-config migrate (CS-GCFG-041..051)", func() {
 		})
 
 		It("CS-GCFG-045: a container mounting the link's target counts too", func() {
-			f.fake.On("docker ps", "cs-old\x1f"+f.target+"\n", nil)
+			f.fake.On("docker ps", mrow("cs-old", f.target)+"\n", nil)
 			expectRefused(globalcfg.Migrate(f.opts()), "cs-old")
 		})
 
@@ -255,8 +256,20 @@ var _ = Describe("global-config migrate (CS-GCFG-041..051)", func() {
 			Expect(f.errw.String()).To(ContainSubstring("WARNING: cannot tell"))
 		})
 
+		It("CS-SESS-118: a mount source holding a newline stays in its field and cannot hide a later mount", func() {
+			f.fake.On("docker ps", mrow("cs-x", "/tmp/a\n"+mrow("forged", "")+","+f.link)+"\n", nil)
+			expectRefused(globalcfg.Migrate(f.opts()), "cs-x")
+		})
+
+		It("CS-SESS-118: a line that is not this format's fails the listing, as a failed listing does", func() {
+			f.fake.On("docker ps", "cs-raw\x1f"+f.link+"\n", nil)
+			expectRefused(globalcfg.Migrate(f.opts()), "cannot tell", "--force")
+			f.fake.On("docker ps", mrow("-rf", "/proj")+"\n", nil)
+			expectRefused(globalcfg.Migrate(f.opts()), "cannot tell")
+		})
+
 		It("CS-GCFG-047: migrate --force names the containers and says they keep the old inode", func() {
-			f.fake.On("docker ps", "cs-otter\x1f"+f.link+"\n", nil)
+			f.fake.On("docker ps", mrow("cs-otter", f.link)+"\n", nil)
 			o := f.opts()
 			o.Force = true
 			Expect(globalcfg.Migrate(o)).To(Succeed())
@@ -551,7 +564,7 @@ var _ = Describe("global-config revert (CS-GCFG-046, CS-GCFG-047, CS-GCFG-052)",
 	It("CS-GCFG-052: finishing an interrupted revert still refuses while a linked container exists", func() {
 		Expect(os.Remove(f.link)).To(Succeed())
 		write(f.link, cfg)
-		f.fake.On("docker ps", "cs-linked\x1f/proj\n", nil)
+		f.fake.On("docker ps", mrow("cs-linked", "/proj")+"\n", nil)
 		f.fake.On("docker inspect", `/cs-linked`+"\x1f"+`["CLAUDE_SANDBOX_GLOBAL_CONFIG=`+f.target+`"]`+"\n", nil)
 		expectRefused(globalcfg.Revert(f.opts()), "cs-linked")
 		Expect(exists(f.target)).To(BeTrue())
@@ -586,7 +599,7 @@ var _ = Describe("global-config revert (CS-GCFG-046, CS-GCFG-047, CS-GCFG-052)",
 	})
 
 	It("CS-GCFG-046: a container whose CLAUDE_SANDBOX_GLOBAL_CONFIG names this target refuses, read in one inspect", func() {
-		f.fake.On("docker ps", "cs-linked\x1f/proj\ncs-legacy\x1f/proj\ncs-empty\x1f\ncs-otherhome\x1f\n", nil)
+		f.fake.On("docker ps", mrow("cs-linked", "/proj")+"\n"+mrow("cs-legacy", "/proj")+"\n"+mrow("cs-empty", "")+"\n"+mrow("cs-otherhome", "")+"\n", nil)
 		f.fake.On("docker inspect", strings.Join([]string{
 			`/cs-linked` + "\x1f" + `["PATH=/usr/bin","CLAUDE_SANDBOX_GLOBAL_CONFIG=` + f.target + `"]`,
 			`/cs-legacy` + "\x1f" + `["PATH=/usr/bin"]`,
@@ -605,12 +618,12 @@ var _ = Describe("global-config revert (CS-GCFG-046, CS-GCFG-047, CS-GCFG-052)",
 			}
 		}
 		Expect(inspects).To(HaveLen(1))
-		Expect(inspects[0]).To(HaveSuffix(" cs-linked cs-legacy cs-empty cs-otherhome"))
+		Expect(inspects[0]).To(HaveSuffix(" -- cs-linked cs-legacy cs-empty cs-otherhome"), "CS-SESS-118: -- ends the flags")
 		Expect(isLink(f.link)).To(BeTrue())
 	})
 
 	It("CS-GCFG-046: the inspect's stdout is parsed even when it exits non-zero", func() {
-		f.fake.On("docker ps", "cs-linked\x1f/proj\ncs-gone\x1f/proj\n", nil)
+		f.fake.On("docker ps", mrow("cs-linked", "/proj")+"\n"+mrow("cs-gone", "/proj")+"\n", nil)
 		f.fake.On("docker inspect", `/cs-linked`+"\x1f"+`["CLAUDE_SANDBOX_GLOBAL_CONFIG=`+f.target+`"]`+"\n", execx.Fail(1))
 		expectRefused(globalcfg.Revert(f.opts()), "cs-linked")
 	})
@@ -618,7 +631,7 @@ var _ = Describe("global-config revert (CS-GCFG-046, CS-GCFG-047, CS-GCFG-052)",
 	It("CS-GCFG-046: migrate never inspects the environment", func() {
 		Expect(os.Remove(f.link)).To(Succeed())
 		Expect(os.Rename(f.target, f.link)).To(Succeed())
-		f.fake.On("docker ps", "cs-a\x1f/proj\n", nil)
+		f.fake.On("docker ps", mrow("cs-a", "/proj")+"\n", nil)
 		Expect(globalcfg.Migrate(f.opts())).To(Succeed())
 		for _, l := range f.fake.CommandLines() {
 			Expect(l).NotTo(HavePrefix("docker inspect"))
@@ -626,7 +639,7 @@ var _ = Describe("global-config revert (CS-GCFG-046, CS-GCFG-047, CS-GCFG-052)",
 	})
 
 	It("CS-GCFG-047: revert --force warns that linked containers' saves are dropped or re-create the file", func() {
-		f.fake.On("docker ps", "cs-linked\x1f/proj\n", nil)
+		f.fake.On("docker ps", mrow("cs-linked", "/proj")+"\n", nil)
 		f.fake.On("docker inspect", `/cs-linked`+"\x1f"+`["CLAUDE_SANDBOX_GLOBAL_CONFIG=`+f.target+`"]`+"\n", nil)
 		o := f.opts()
 		o.Force = true
@@ -720,7 +733,7 @@ var _ = Describe("another spelling of the same file (CS-GCFG-045, CS-GCFG-046)",
 
 	It("CS-GCFG-045: a mount of the file by another spelling refuses migrate", func() {
 		write(f.link, cfg)
-		f.fake.On("docker ps", "cs-alias\x1f"+filepath.Join(alias, ".claude.json")+"\n", nil)
+		f.fake.On("docker ps", mrow("cs-alias", filepath.Join(alias, ".claude.json"))+"\n", nil)
 		expectRefused(globalcfg.Migrate(f.opts()), "cs-alias")
 		Expect(read(f.link)).To(Equal(cfg))
 	})
@@ -730,7 +743,7 @@ var _ = Describe("another spelling of the same file (CS-GCFG-045, CS-GCFG-046)",
 		// The same inode under another name: a hardlink outside $HOME.
 		other := filepath.Join(filepath.Dir(f.home), "elsewhere.json")
 		Expect(os.Link(f.link, other)).To(Succeed())
-		f.fake.On("docker ps", "cs-other\x1f"+other+"\n", nil)
+		f.fake.On("docker ps", mrow("cs-other", other)+"\n", nil)
 		Expect(globalcfg.Migrate(f.opts())).To(Succeed(), f.errw.String())
 		Expect(isLink(f.link)).To(BeTrue())
 	})
@@ -738,7 +751,7 @@ var _ = Describe("another spelling of the same file (CS-GCFG-045, CS-GCFG-046)",
 	It("CS-GCFG-046: a linked container naming the target by another spelling refuses revert", func() {
 		write(f.target, cfg)
 		Expect(os.Symlink(".claude/.claude.json", f.link)).To(Succeed())
-		f.fake.On("docker ps", "cs-alias\x1f/proj\n", nil)
+		f.fake.On("docker ps", mrow("cs-alias", "/proj")+"\n", nil)
 		f.fake.On("docker inspect", `/cs-alias`+"\x1f"+`["CLAUDE_SANDBOX_GLOBAL_CONFIG=`+filepath.Join(alias, ".claude", ".claude.json")+`"]`+"\n", nil)
 		expectRefused(globalcfg.Revert(f.opts()), "cs-alias")
 		Expect(isLink(f.link)).To(BeTrue())
@@ -840,3 +853,11 @@ var _ = Describe("global-config accept (CS-GCFG-054)", func() {
 		Expect(exists(f.state)).To(BeFalse())
 	})
 })
+
+// mrow renders one line of the container check's docker ps format: the
+// name and the mount sources, each a JSON string.
+func mrow(name, mounts string) string {
+	n, _ := json.Marshal(name)
+	m, _ := json.Marshal(mounts)
+	return string(n) + "\x1f" + string(m)
+}

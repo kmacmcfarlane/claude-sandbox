@@ -2439,7 +2439,7 @@ var _ = Describe("launch.Build", func() {
 		}
 		in.PIDClass = ""
 		p := build()
-		Expect(p.Labels).NotTo(ContainElement(HavePrefix("claude-sandbox.pidclass=")))
+		Expect(p.Labels).To(ContainElement("claude-sandbox.pidclass="))
 		Expect(p.EnvFlags).NotTo(ContainElement(HavePrefix("CLAUDE_SANDBOX_PID_CLASS=")))
 	})
 
@@ -2617,7 +2617,7 @@ var _ = Describe("launch.Build", func() {
 		p := build()
 		Expect(p.Labels).To(ContainElement("claude-sandbox.mode=ralph"))
 		for _, l := range p.Labels {
-			Expect(l).NotTo(HavePrefix("claude-sandbox.instance="))
+			Expect(l).NotTo(MatchRegexp("^claude-sandbox\\.instance=."))
 		}
 	})
 

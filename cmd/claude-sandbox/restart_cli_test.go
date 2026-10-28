@@ -28,6 +28,8 @@ import (
 	"github.com/kmacmcfarlane/claude-sandbox/internal/hostdirs"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/prompt"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/sessionend"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/sessions"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/sessions/sessionstest"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/tmuxpane"
 )
 
@@ -116,7 +118,7 @@ func newRestartFix() *restartFix {
 		st, _ := json.Marshal("running")
 		return strings.Join([]string{string(n), string(c), string(l), string(cr), string(st)}, "\x1f") + "\n", nil
 	})
-	f.fake.OnFunc("{{.Name}}", func(c execx.Cmd) (string, error) {
+	f.fake.OnFunc(sessions.InspectFormat, func(c execx.Cmd) (string, error) {
 		if f.onInspect != nil {
 			f.onInspect()
 		}
@@ -130,7 +132,7 @@ func newRestartFix() *restartFix {
 		if f.stopped {
 			state = "exited"
 		}
-		return strings.Join([]string{"/" + rsName, state, f.created.Format(time.RFC3339Nano), f.proj, "dunlin", "claude"}, "\x1f") + "\n", nil
+		return sessionstest.InspectRow("/"+rsName, state, f.created.Format(time.RFC3339Nano), f.proj, "dunlin", "claude") + "\n", nil
 	})
 	f.fake.OnFunc("docker stop", func(execx.Cmd) (string, error) {
 		if f.onStop != nil {
@@ -158,13 +160,18 @@ func (f *restartFix) row(state, status string) string {
 	if f.psAccess != nil {
 		acc = *f.psAccess
 	}
-	r := strings.Join([]string{rsName, status, f.proj, "claude", "dunlin", "v1", f.model, "", "", f.class, f.worktree,
-		state, f.created.Format("2006-01-02 15:04:05 -0700 MST"), "8g", "default", "", rsOldID,
-		f.cfgDir, f.reg, f.flags, f.resume, "none", "none", "", "none", "", "keep", acc, ""}, psSep)
+	r := sessionstest.Row(f.rowFields(state, status, acc)...)
 	if f.rowOver != nil {
 		r = f.rowOver(r)
 	}
 	return r
+}
+
+// rowFields are the target's discovery row, field by field.
+func (f *restartFix) rowFields(state, status, access string) []string {
+	return []string{rsName, status, f.proj, "claude", "dunlin", "v1", f.model, "", "", f.class, f.worktree,
+		state, f.created.Format("2006-01-02 15:04:05 -0700 MST"), "8g", "default", "", rsOldID,
+		f.cfgDir, f.reg, f.flags, f.resume, "none", "none", "", "none", "", "keep", access, ""}
 }
 
 // labels are the target's Config.Labels as its own inspect decodes them.
@@ -189,9 +196,9 @@ func (f *restartFix) labels() map[string]string {
 
 // otherRow is another sandbox's docker ps row.
 func (f *restartFix) otherRow(name, instance, mode, state, resume string) string {
-	return strings.Join([]string{name, "Up 1 hour", f.proj, mode, instance, "v1", "", "", "", "9", "",
+	return sessionstest.Row(name, "Up 1 hour", f.proj, mode, instance, "v1", "", "", "", "9", "",
 		state, f.created.Format("2006-01-02 15:04:05 -0700 MST"), "8g", "default", "", strings.Repeat("b", 64),
-		"", f.reg, "", resume}, psSep)
+		"", f.reg, "", resume)
 }
 
 // record writes a registry record at the class.
@@ -694,15 +701,18 @@ var _ = Describe("restart a session in place (CS-SESS-105..108, CS-LNCH-218..221
 		It("CS-SESS-106: a model label holding \x1f that shifts the row (50 fields) and plants docker-socket=flag: exit 2, nothing stopped", func() {
 			f.primary("idle")
 			f.access = "none"
-			honest := strings.Split(f.row("running", "Up 1 hour"), psSep)
+			honest := f.rowFields("running", "Up 1 hour", "none")
 			planted := append([]string{}, honest[7:28]...)
 			planted[27-7] = "docker-socket=flag"
 			f.model = "opus" + psSep + strings.Join(planted, psSep)
-			row := strings.Split(f.row("running", "Up 1 hour"), psSep)
-			Expect(row).To(HaveLen(50))
-			Expect(row[27]).To(Equal("docker-socket=flag"))
+			// The row as a raw (pre-JSON) listing would render it: 50 fields.
+			shifted := strings.Split(strings.Join(f.rowFields("running", "Up 1 hour", "none"), psSep), psSep)
+			Expect(shifted).To(HaveLen(50))
+			Expect(shifted[27]).To(Equal("docker-socket=flag"))
+			f.rowOver = func(string) string { return sessionstest.Raw(shifted...) }
+			// Discovery drops a row of another field count (CS-SESS-118), so
+			// the target is not found; nothing is stopped or created.
 			Expect(f.run("--restart=dunlin")).To(Equal(2))
-			Expect(f.errw.String()).To(ContainSubstring("do not match its listing"))
 			Expect(f.errw.String()).NotTo(ContainSubstring("Carried over"))
 			Expect(f.count("docker stop")).To(BeZero())
 			Expect(f.count("docker create")).To(BeZero())
@@ -717,7 +727,7 @@ var _ = Describe("restart a session in place (CS-SESS-105..108, CS-LNCH-218..221
 			f.record(263, rsOther, "idle", "planted", "user", f.proj, f.created.Add(3*time.Second))
 			f.reg = saved
 			f.rowOver = func(r string) string {
-				return strings.Replace(r, psSep+saved+psSep, psSep+forged+psSep, 1)
+				return strings.Replace(r, `"`+saved+`"`, `"`+forged+`"`, 1)
 			}
 			Expect(f.run("--restart=dunlin")).To(Equal(2))
 			Expect(f.errw.String()).To(ContainSubstring("do not match its listing"))
@@ -796,7 +806,7 @@ var _ = Describe("restart a session in place (CS-SESS-105..108, CS-LNCH-218..221
 			Expect(f.lock.acquiredAt[0]).To(BeNumerically(">", stop), "the stop is outside the lock")
 			removal := -1
 			for i, l := range f.fake.CommandLines() {
-				if i > stop && strings.Contains(l, "{{.Name}}") {
+				if i > stop && strings.Contains(l, sessions.InspectFormat) {
 					removal = i
 					break
 				}

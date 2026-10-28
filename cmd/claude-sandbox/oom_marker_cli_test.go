@@ -13,6 +13,7 @@ import (
 
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/prompt"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/sessions/sessionstest"
 )
 
 // oomInspect is the pattern of the batched OOM inspect.
@@ -20,8 +21,8 @@ const oomInspect = "{{.State.OOMKilled}}"
 
 // psRowLimit is psRow plus the create-time memoryLimit labels (CS-LNCH-093).
 func psRowLimit(name, project, instance, limit, source string) string {
-	return strings.Join([]string{name, "Up 1 hour", project, "claude", instance, "v1", "", "", "", "", "",
-		"running", "", limit, source}, psSep)
+	return sessionstest.Row(name, "Up 1 hour", project, "claude", instance, "v1", "", "", "", "", "",
+		"running", "", limit, source)
 }
 
 var _ = Describe("the OOM marker (CS-SESS-061..063)", func() {
@@ -49,7 +50,7 @@ var _ = Describe("the OOM marker (CS-SESS-061..063)", func() {
 			f.fake.On(oomInspect, "/cs-a true\n/cs-b false\n", nil)
 			Expect(f.run("sessions")).To(Equal(0))
 			Expect(inspects()).To(Equal([]string{
-				"docker inspect --type container --format {{.Name}} {{.State.OOMKilled}} cs-a cs-b",
+				"docker inspect --type container --format {{.Name}} {{.State.OOMKilled}} -- cs-a cs-b",
 			}))
 			var otter, heron string
 			for _, l := range strings.Split(f.out.String(), "\n") {
@@ -114,7 +115,7 @@ var _ = Describe("the OOM marker (CS-SESS-061..063)", func() {
 			Expect(f.run("--attach=otter")).To(Equal(0))
 			Expect(f.errw.String()).To(ContainSubstring(note + "16g (from /ws/.claude-sandbox/config.yaml).\n"))
 			Expect(strings.Count(f.errw.String(), "killed by the OOM killer")).To(Equal(1))
-			Expect(inspects()).To(Equal([]string{"docker inspect --type container --format {{.Name}} {{.State.OOMKilled}} cs-a"}))
+			Expect(inspects()).To(Equal([]string{"docker inspect --type container --format {{.Name}} {{.State.OOMKilled}} -- cs-a"}))
 			Expect(f.sessionLine()).To(Equal("docker attach --detach-keys=ctrl-q,ctrl-q cs-a"))
 		})
 

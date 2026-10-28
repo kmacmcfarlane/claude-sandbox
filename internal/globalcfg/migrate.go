@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -628,8 +629,14 @@ func (h *heldLock) release() {
 
 // ---- the container checks (CS-GCFG-045..047) ----
 
-// psMountsFormat lists every container's name and its mount sources.
-const psMountsFormat = "{{.Names}}\x1f{{.Mounts}}"
+// psMountsFormat lists every container's name and its mount sources, each a
+// JSON string: docker prints a bind source raw, and a source holding a
+// newline would otherwise cut its row in two and hide the mounts after it.
+const psMountsFormat = "{{json .Names}}\x1f{{json .Mounts}}"
+
+// containerNameRe is docker's container name rule. A name that fails it did
+// not come from docker and is never passed on to docker inspect.
+var containerNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
 
 // inspectEnvFormat is one line per container: its name and its env as JSON.
 const inspectEnvFormat = "{{.Name}}\x1f{{json .Config.Env}}"
@@ -723,9 +730,22 @@ func containersUsing(r execx.Runner, paths []string, envTarget string) ([]string
 	}
 	for _, line := range strings.Split(out, "\n") {
 		line = strings.TrimRight(line, "\r")
-		name, mounts, _ := strings.Cut(line, "\x1f")
-		if name = strings.TrimSpace(name); name == "" {
+		if strings.TrimSpace(line) == "" {
 			continue
+		}
+		rawName, rawMounts, ok := strings.Cut(line, "\x1f")
+		var name, mounts string
+		if !ok || strings.Contains(rawMounts, "\x1f") ||
+			json.Unmarshal([]byte(rawName), &name) != nil || json.Unmarshal([]byte(rawMounts), &mounts) != nil {
+			// Not a row of this format: the listing cannot be trusted to
+			// name every user, so it fails as a failed listing does.
+			return nil, fmt.Errorf("docker ps: unexpected output")
+		}
+		// A legacy link adds "other/alias" names after a comma; the first
+		// is the container's own.
+		name, _, _ = strings.Cut(name, ",")
+		if name = strings.TrimPrefix(strings.TrimSpace(name), "/"); !containerNameRe.MatchString(name) {
+			return nil, fmt.Errorf("docker ps: unexpected container name")
 		}
 		names = append(names, name)
 		for _, m := range strings.Split(mounts, ",") {
@@ -737,7 +757,9 @@ func containersUsing(r execx.Runner, paths []string, envTarget string) ([]string
 	if envTarget == "" || len(names) == 0 {
 		return users, nil
 	}
-	args := append([]string{"inspect", "--type", "container", "--format", inspectEnvFormat}, names...)
+	// "--": every name passed docker's name rule above, so none can read as
+	// a flag; the separator keeps that true whatever a later change admits.
+	args := append([]string{"inspect", "--type", "container", "--format", inspectEnvFormat, "--"}, names...)
 	// stdout is parsed even on a non-zero exit: docker prints the containers
 	// it found before failing on one removed since the listing.
 	iout, ierr := r.Output(execx.Cmd{Name: "docker", Args: args, Stderr: io.Discard})

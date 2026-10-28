@@ -720,7 +720,10 @@ func wouldBeFingerprintNet(env *Env, projectDir string, f *launchFlags, cfg *cas
 		MountInfo: env.MountInfo,
 		// CS-DIR-017/019: the target's own root, and nothing created for it.
 		PeerRoot: peerRoot, NoCreatePeerDirs: true,
-		Network: netName,
+		// CS-LNCH-226: creates nothing, so no label or mount value check: a
+		// value that went bad since the create must not fail it.
+		DriftOnly: true,
+		Network:   netName,
 		// CS-LNCH-201: the wanted bridge, as the launch hashes it.
 		ClipboardWanted: launch.ClipboardWanted(env.Getenv, cfg, false, f.Ralph),
 		ClipboardQuiet:  true,

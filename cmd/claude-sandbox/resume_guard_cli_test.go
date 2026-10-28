@@ -18,6 +18,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/sessions/sessionstest"
 )
 
 const guardID = "0b5e9c3a-1f2d-4e5f-8a9b-0c1d2e3f4a5b"
@@ -28,9 +29,9 @@ func psRowResume(name, project, mode, instance, class, state string, created tim
 	if state == "created" {
 		status = "Created"
 	}
-	return strings.Join([]string{name, status, project, mode, instance, "v1", "", "", "", class, "",
+	return sessionstest.Row(name, status, project, mode, instance, "v1", "", "", "", class, "",
 		state, created.Format("2006-01-02 15:04:05 -0700 MST"), "8g", "default", "",
-		strings.Repeat("a", 64), "", registry, "", resume}, psSep)
+		strings.Repeat("a", 64), "", registry, "", resume)
 }
 
 // labelsOf returns the --label values of a docker create argv.
@@ -67,7 +68,7 @@ var _ = Describe("the resume guard (CS-LNCH-110, CS-SESS-065..069)", func() {
 			all := creates(f)
 			Expect(all).To(HaveLen(2))
 			plain, resumed := labelsOf(all[0]), labelsOf(all[1])
-			Expect(plain).NotTo(HaveKey("claude-sandbox.resume"))
+			Expect(plain).To(HaveKeyWithValue("claude-sandbox.resume", ""))
 			Expect(resumed).To(HaveKeyWithValue("claude-sandbox.resume", guardID))
 			Expect(resumed["claude-sandbox.confighash"]).To(Equal(plain["claude-sandbox.confighash"]))
 			Expect(resumed["claude-sandbox.inputs"]).To(Equal(plain["claude-sandbox.inputs"]))
@@ -100,7 +101,7 @@ var _ = Describe("the resume guard (CS-LNCH-110, CS-SESS-065..069)", func() {
 			} {
 				h := newCLIFixture()
 				Expect(h.run(append([]string{"--new", "--"}, pt...)...)).To(Equal(0), h.errw.String())
-				Expect(labelsOf(h.launched().Args)).NotTo(HaveKey("claude-sandbox.resume"), "%v", pt)
+				Expect(labelsOf(h.launched().Args)).To(HaveKeyWithValue("claude-sandbox.resume", ""), "%v", pt)
 			}
 		})
 
@@ -124,7 +125,7 @@ var _ = Describe("the resume guard (CS-LNCH-110, CS-SESS-065..069)", func() {
 			} {
 				g := newCLIFixture()
 				Expect(g.run(args...)).To(Equal(0), "%v: %s", args, g.errw.String())
-				Expect(labelsOf(g.launched().Args)).NotTo(HaveKey("claude-sandbox.resume"), "%v", args)
+				Expect(labelsOf(g.launched().Args)).To(HaveKeyWithValue("claude-sandbox.resume", ""), "%v", args)
 			}
 		})
 	})

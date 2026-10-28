@@ -10,6 +10,7 @@ import (
 
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/sessions"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/sessions/sessionstest"
 )
 
 // sep mirrors the unit separator the package uses between --format fields.
@@ -17,7 +18,7 @@ const sep = "\x1f"
 
 // row builds one docker ps --format line.
 func row(name, status, project, mode, instance, version, model, hash, inputs string) string {
-	return strings.Join([]string{name, status, project, mode, instance, version, model, hash, inputs, "", ""}, sep)
+	return sessionstest.Row(name, status, project, mode, instance, version, model, hash, inputs, "", "")
 }
 
 var _ = Describe("session discovery", func() {
@@ -292,7 +293,7 @@ var _ = Describe("instance nouns (CS-SESS-007..009)", func() {
 var _ = Describe("worktree label (CS-LNCH-044)", func() {
 	It("CS-LNCH-044, CS-SESS-010: reads the worktree label as the eleventh ps field", func() {
 		fake := &execx.Fake{}
-		fake.On("docker ps", strings.Join([]string{"cs-a", "Up", "/p", "claude", "otter", "v1", "", "", "", "42", "otter"}, sep)+"\n"+
+		fake.On("docker ps", sessionstest.Row("cs-a", "Up", "/p", "claude", "otter", "v1", "", "", "", "42", "otter")+"\n"+
 			row("cs-b", "Up", "/p", "claude", "heron", "v1", "", "", "")+"\n", nil)
 		fake.On("docker top", "PID COMMAND\n1 claude\n", nil)
 		all, err := sessions.DiscoverAll(fake)
@@ -310,7 +311,7 @@ var _ = Describe("worktree label (CS-LNCH-044)", func() {
 var _ = Describe("pid classes (CS-PID-004)", func() {
 	It("CS-PID-004: reads the pidclass label as the tenth ps field", func() {
 		fake := &execx.Fake{}
-		fake.On("docker ps", strings.Join([]string{"cs-a", "Up", "/p", "claude", "otter", "v1", "", "", "", "42", ""}, sep)+"\n", nil)
+		fake.On("docker ps", sessionstest.Row("cs-a", "Up", "/p", "claude", "otter", "v1", "", "", "", "42", "")+"\n", nil)
 		fake.On("docker top", "PID COMMAND\n1 claude\n", nil)
 		all, err := sessions.DiscoverAll(fake)
 		Expect(err).NotTo(HaveOccurred())
@@ -351,7 +352,7 @@ func stateRow(name, project, instance, class, state, createdAt string) string {
 	if state == sessions.StateCreated {
 		status = "Created"
 	}
-	return strings.Join([]string{name, status, project, "claude", instance, "v1", "", "", "", class, "", state, createdAt}, sep)
+	return sessionstest.Row(name, status, project, "claude", instance, "v1", "", "", "", class, "", state, createdAt)
 }
 
 var _ = Describe("reservations (CS-SESS-050..052)", func() {
@@ -396,7 +397,7 @@ var _ = Describe("reservations (CS-SESS-050..052)", func() {
 			"2026-09-18 05:00:00 -0700 PDT",
 		} {
 			fake = &execx.Fake{}
-			fake.On("docker ps", strings.Join([]string{"b", "Created", "/p", "claude", "heron", "v1", "", "", "", "", "", "created", v}, sep)+"\n", nil)
+			fake.On("docker ps", sessionstest.Row("b", "Created", "/p", "claude", "heron", "v1", "", "", "", "", "", "created", v)+"\n", nil)
 			got, err := sessions.DiscoverAll(fake)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(got[0].CreatedAt.IsZero()).To(BeFalse(), v)
@@ -481,7 +482,7 @@ var _ = Describe("headless containers (CS-SESS-055)", func() {
 	It("CS-SESS-055: are never candidates, but are live and hold their noun and class", func() {
 		fake := &execx.Fake{}
 		row := func(name, mode, instance, class string) string {
-			return strings.Join([]string{name, "Up 1 minute", "/p", mode, instance, "v1", "", "", "", class, "", "running", ""}, sep)
+			return sessionstest.Row(name, "Up 1 minute", "/p", mode, instance, "v1", "", "", "", class, "", "running", "")
 		}
 		fake.On("docker ps", row("a", "claude", "otter", "1")+"\n"+row("b", sessions.ModeHeadless, "heron", "2")+"\n", nil)
 		fake.On("docker top", "PID COMMAND\n1 claude\n", nil)
@@ -504,7 +505,7 @@ var _ = Describe("the OOM marker (CS-SESS-061..063)", func() {
 		all := []sessions.Session{{Name: "a"}, {Name: "b"}, {Name: "c"}}
 		sessions.MarkOOM(fake, all)
 		Expect(fake.CommandLines()).To(Equal([]string{
-			"docker inspect --type container --format {{.Name}} {{.State.OOMKilled}} a b c",
+			"docker inspect --type container --format {{.Name}} {{.State.OOMKilled}} -- a b c",
 		}), "one inspect across every listed container, never one per container")
 		Expect([]bool{all[0].OOMKilled, all[1].OOMKilled, all[2].OOMKilled}).To(Equal([]bool{false, true, false}))
 	})
@@ -550,13 +551,13 @@ var _ = Describe("the OOM marker (CS-SESS-061..063)", func() {
 	It("CS-SESS-063: discovery reads the create-time memoryLimit labels from the same ps output", func() {
 		fields := []string{"a", "Up 1 minute", "/p", "claude", "otter", "v1", "", "", "", "1", "", "running", "",
 			"16g", "/ws/.claude-sandbox/config.yaml"}
-		fake.On("docker ps", strings.Join(fields, sep)+"\n", nil)
+		fake.On("docker ps", sessionstest.Row(fields...)+"\n", nil)
 		got, err := sessions.DiscoverAllUncounted(fake)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(got[0].MemoryLimit).To(Equal("16g"))
 		Expect(got[0].MemoryLimitSource).To(Equal("/ws/.claude-sandbox/config.yaml"))
-		Expect(fake.CommandLines()[0]).To(ContainSubstring(`{{.Label "claude-sandbox.memorylimit"}}`))
-		Expect(fake.CommandLines()[0]).To(ContainSubstring(`{{.Label "claude-sandbox.memorylimitsource"}}`))
+		Expect(fake.CommandLines()[0]).To(ContainSubstring(`{{json (.Label "claude-sandbox.memorylimit")}}`))
+		Expect(fake.CommandLines()[0]).To(ContainSubstring(`{{json (.Label "claude-sandbox.memorylimitsource")}}`))
 		Expect(strings.Join(fake.CommandLines(), "\n")).NotTo(ContainSubstring("docker inspect"))
 	})
 })
@@ -570,8 +571,8 @@ func fullRow(name, project, instance, class, state string) string {
 		"created": "Created",
 		"exited":  "Exited (0) 3 hours ago",
 	}[state]
-	return strings.Join([]string{name, status, project, "claude", instance, "v1", "", "", "", class, "",
-		state, "", "", "", ""}, sep)
+	return sessionstest.Row(name, status, project, "claude", instance, "v1", "", "", "", class, "",
+		state, "", "", "", "")
 }
 
 var _ = Describe("exited containers and container states (CS-SESS-070, 071, 074)", func() {
@@ -660,8 +661,8 @@ var _ = Describe("InspectContainer (CS-TMUX-051)", func() {
 
 	It("CS-TMUX-051: one docker inspect reads the name, state, creation and the project, instance and mode labels", func() {
 		fake := &execx.Fake{}
-		fake.On("docker inspect", strings.Join([]string{"/claude-sandbox-a-b-c-heron", "running", "2026-09-29T12:00:00.123456789Z",
-			"/srv/my proj", "heron", "claude"}, sep)+"\n", nil)
+		fake.On("docker inspect", sessionstest.InspectRow("/claude-sandbox-a-b-c-heron", "running", "2026-09-29T12:00:00.123456789Z",
+			"/srv/my proj", "heron", "claude")+"\n", nil)
 		c, err := sessions.InspectContainer(fake, id)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(c.Name).To(Equal("claude-sandbox-a-b-c-heron"))
@@ -670,10 +671,11 @@ var _ = Describe("InspectContainer (CS-TMUX-051)", func() {
 		Expect(c.Project).To(Equal("/srv/my proj"))
 		Expect(c.Instance).To(Equal("heron"))
 		Expect(c.Mode).To(Equal("claude"))
+		// CS-SESS-118: every field is JSON, and "--" ends the flags.
 		Expect(fake.CommandLines()).To(Equal([]string{"docker inspect --type container -f " + strings.Join([]string{
-			"{{.Name}}", "{{.State.Status}}", "{{.Created}}",
-			`{{index .Config.Labels "claude-sandbox.project"}}`, `{{index .Config.Labels "claude-sandbox.instance"}}`,
-			`{{index .Config.Labels "claude-sandbox.mode"}}`}, sep) + " " + id}))
+			"{{json .Name}}", "{{json .State.Status}}", "{{json .Created}}",
+			`{{json (index .Config.Labels "claude-sandbox.project")}}`, `{{json (index .Config.Labels "claude-sandbox.instance")}}`,
+			`{{json (index .Config.Labels "claude-sandbox.mode")}}`}, sep) + " -- " + id}))
 	})
 
 	It("CS-TMUX-051: 'no such container' is ErrNoSuchContainer; any other failure is returned as it is", func() {
@@ -700,12 +702,27 @@ var _ = Describe("InspectContainer (CS-TMUX-051)", func() {
 		Expect(err).To(MatchError(ContainSubstring("unexpected output")))
 	})
 
-	It("CS-TMUX-051: a label docker renders as <no value> is empty", func() {
+	It("CS-TMUX-051: an absent label is empty", func() {
 		fake := &execx.Fake{}
-		fake.On("docker inspect", strings.Join([]string{"/x", "exited", "bad", "<no value>", "<no value>", "<no value>"}, sep)+"\n", nil)
+		fake.On("docker inspect", sessionstest.InspectRow("/x", "exited", "bad", "", "", "")+"\n", nil)
 		c, err := sessions.InspectContainer(fake, id)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(c.Project + c.Instance + c.Mode).To(BeEmpty())
 		Expect(c.Created.IsZero()).To(BeTrue())
+	})
+
+	It("CS-SESS-118: a label holding a newline or the separator cannot shift the fields", func() {
+		fake := &execx.Fake{}
+		fake.On("docker inspect", sessionstest.InspectRow("/x", "running", "2026-09-29T12:00:00Z",
+			"/p\n\"y\"\x1frunning", "heron", "claude")+"\n", nil)
+		c, err := sessions.InspectContainer(fake, id)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(c.Project).To(Equal("/p\n\"y\"\x1frunning"))
+		Expect(c.Instance).To(Equal("heron"))
+		// A raw (non-JSON) line of six fields is not this format.
+		fake = &execx.Fake{}
+		fake.On("docker inspect", strings.Join([]string{"/x", "running", "t", "/p", "heron", "claude"}, sep)+"\n", nil)
+		_, err = sessions.InspectContainer(fake, id)
+		Expect(err).To(MatchError(ContainSubstring("unexpected output")))
 	})
 })

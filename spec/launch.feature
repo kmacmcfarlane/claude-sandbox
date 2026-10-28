@@ -842,7 +842,7 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       | label                         | value                                  |
       | claude-sandbox.project        | the absolute project directory          |
       | claude-sandbox.mode           | "claude" or "ralph"                     |
-      | claude-sandbox.instance       | the instance noun (absent for ralph)    |
+      | claude-sandbox.instance       | the instance noun (empty for ralph)     |
       | claude-sandbox.version        | the launcher version                    |
       | claude-sandbox.model          | the resolved model, empty when unset    |
       | claude-sandbox.confighash     | the effective-config hash (CS-SESS-020) |
@@ -916,7 +916,7 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       clusters expand ("-pr <id>" resumes <id>), and only a bare "--" that no
       flag consumes stops it. The pane mark keeps its own stop rules
       (CS-TMUX-013/017)
-    But no resume label is set when:
+    But an empty resume label is set (CS-SESS-120) when:
       | case                                        | why                                            |
       | "--fork-session" is certainly an option (CS-LNCH-183) | a fork gets a new id; forking a live conversation is legitimate |
       | "--resume" or "-r" has no id (the picker)   | nothing is known to guard                      |
@@ -1061,9 +1061,10 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     And the label is outside the drift fingerprint: confighash and inputs are
       the same with and without it
     And discovery reads it as a ps field just before {{.Mounts}}, which stays
-      the last field, so rows of the earlier formats still parse
-    And a launch that is not a guarded continue carries no continue label and
-      never reads a registry directory for it
+      the last field; only the format's exact count is read (CS-SESS-118)
+    And a launch that is not a guarded continue carries
+      "claude-sandbox.continue=" (written empty, CS-SESS-120) and never reads a
+      registry directory for it
 
   Scenario: CS-LNCH-029 Container runtime environment
     Then docker create receives: -it --rm --init,
@@ -3601,7 +3602,61 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       the config — so a falsy switch is never "env"
     And the label is written after the fingerprint and never hashed: it is a per-launch
       record, not configuration
-    And discovery reads it as the field just before {{.Mounts}} (Session.Access); a row of
-      the format before it keeps every other field
+    And discovery reads it as the JSON field just before {{json .Mounts}} (Session.Access),
+      in the format's exact field count (CS-SESS-118); an empty value is a container created
+      before the label
     And a restart reads only it to carry access options over (CS-SESS-107)
 
+  # ---- label values (discovery field injection) ----
+  # Discovery reads every label, and every bind source, from one docker ps
+  # line; it renders each field as JSON (CS-SESS-118), so a control character
+  # can no longer shift or forge a row. As defence in depth, no label the
+  # launcher writes and no bind mount path may hold a control character (Cc:
+  # the separator, newline, CR and tab among them) or one of the twelve
+  # Bidi_Control characters.
+
+  Scenario: CS-LNCH-224 A configured label value with a control or bidi character is refused before any image work
+    Given a launch that would create a container
+    And one of the configured values that become labels holds a control or
+      bidi character: the cascade "model" key, the cascade "memoryLimit" key,
+      a cascade "mounts" entry's host or container, the project directory's
+      path, or CLAUDE_CONFIG_DIR
+    Then the launch exits 2 before any image build or docker create
+    And the message names the value and its source: the config.yaml that set
+      the key (cascade.KeySourceOf; for a mount, the config.yaml whose own
+      mounts list holds it, as "mounts[i] host"), "environment" for
+      CLAUDE_CONFIG_DIR, and
+      the character as U+XXXX; the value itself is never printed
+    And an attach or join, which creates nothing, is not refused
+    And the worktree name needs no new check: --worktree=NAME is already
+      letters, digits, ".", "_" and "-" (CS-LNCH-043), and the cascade
+      "worktree" key is a boolean
+
+  Scenario: CS-LNCH-225 A command-line --model with a control or bidi character is refused
+    Given "--model <v>" or "--model=<v>" where v holds a control or bidi character
+    Then the arguments are refused with exit 2 before anything runs
+    And the message names --model and the character, never the value
+    And the model is also claude's own --model, so no real model is refused
+
+  Scenario: CS-LNCH-226 Build refuses any label value it would write with a control or bidi character
+    Given a plan whose labels are complete
+    Then every "key=value" label is checked, and a value with a control or
+      bidi character fails Build, naming the label key (exit 2 before docker
+      create): the backstop for the values the launcher derives — the
+      version, the memoryLimit source path, the shadow directory, the registry
+      and peers root paths
+    And every -v spec (source and destination: cascade mounts, the
+      settings.json target, the linked worktree's git common dir, caches,
+      shadows) and the clipboard --mount source are checked the same way: a
+      bad one fails Build ("a bind mount's path holds ...")
+    And the attach/join drift check's would-be build (Inputs.DriftOnly)
+      skips both checks: it creates nothing, so a value that went bad since
+      the container was created neither fails the check nor reads as drift
+    And the launchflags label writes only flag names FromLabel would read back
+      (an unknown passthrough flag's typed name is dropped, not refused)
+    And the inputs label escapes a Bidi_Control character in a path as \uXXXX
+      (encoding/json already escapes control characters), which decodes to
+      the same path
+    And the terminal label already goes through registry.Printable, and the
+      timezone label is a validated ASCII shape; the mode, pid class, resume,
+      continue, detached and clipboard labels are fixed forms

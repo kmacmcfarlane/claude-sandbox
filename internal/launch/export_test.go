@@ -17,3 +17,6 @@ func CaptureFingerprintText(f func(string)) func() {
 	fingerprintTextHook = f
 	return func() { fingerprintTextHook = old }
 }
+
+// EscapeBidi exposes the inputs label's bidi escaping (CS-LNCH-226).
+var EscapeBidi = escapeBidi

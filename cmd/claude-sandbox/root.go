@@ -557,6 +557,9 @@ func scanArgs(args []string, headless bool) (*launchFlags, error) {
 			if i+1 >= len(args) || args[i+1] == "" {
 				return nil, exitErr(2, "Error: --model requires a value")
 			}
+			if err := checkCLIModel(args[i+1]); err != nil {
+				return nil, err
+			}
 			f.Model = args[i+1]
 			i += 2
 		case "--rebuild":
@@ -649,6 +652,9 @@ func scanArgs(args []string, headless bool) (*launchFlags, error) {
 				}
 				if strings.HasPrefix(v, "=") {
 					return nil, exitErr(2, "Error: --model: invalid value '%s'", v)
+				}
+				if err := checkCLIModel(v); err != nil {
+					return nil, err
 				}
 				f.Model = v
 				i++
@@ -1207,6 +1213,12 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 	tzChoice, err := launch.TimezoneChoice(env.Getenv, cfg, cascade.KeySourceOf(configSnap, "timezone"))
 	if err != nil {
 		return exitErr(2, "Error: %v", err)
+	}
+	// CS-LNCH-224: every configured value that becomes a container label is
+	// checked here, before any image work, and named with its source; Build
+	// re-checks every label as a backstop (CS-LNCH-226).
+	if err := launch.CheckConfiguredLabels(configuredLabelValues(env, f, cfg, configSnap, projectDir)); err != nil {
+		return exitErr(2, "Error: %v.", err)
 	}
 	if adj < 0 {
 		fmt.Fprintf(env.Err, "WARNING: oomScoreAdj %d is below 0: this sandbox is shielded from the host's OOM killer, which will prefer host processes (the desktop) over it.\n", adj)

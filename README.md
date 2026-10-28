@@ -1270,7 +1270,8 @@ file rewritten while the launch builds images changes nothing until the next lau
 files are handled the same way (docker gets verbatim copies of the bytes the launcher
 checked). Only regular files are read: a FIFO, device or socket at a `config.yaml` or `env`
 path fails the launch at once with an error naming it (exit 2), never a hang; `init` reads
-the same way. The launcher's own reads of the other files a session can write — the
+the same way. A configured value holding a control or bidi character (`model`, `memoryLimit`,
+a `mounts` path, `--model`, `CLAUDE_CONFIG_DIR`, the project path) is refused with exit 2. The launcher's own reads of the other files a session can write — the
 project `.gitignore`, a linked worktree's back-link, `CLAUDE.md`/`.mcp.json`/`.gitconfig` for
 the shadow copies, the global config the health check reads, and this repository's own
 Dockerfiles for the rebuild fingerprint — never wait on such a file either: each treats it

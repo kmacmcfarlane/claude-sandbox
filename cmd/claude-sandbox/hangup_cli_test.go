@@ -27,14 +27,15 @@ import (
 	"github.com/kmacmcfarlane/claude-sandbox/internal/prompt"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/sessionend"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/sessions"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/sessions/sessionstest"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/tmuxpane"
 )
 
 // psRowHangup is psRowMark with the labels up to onhangup (CS-LNCH-206) and
 // the mounts.
 func psRowHangup(name, project, mode, instance, created, id, onhangup string) string {
-	return psRowMark(name, project, mode, instance, "", "37", "", created, id, "", "/reg/sessions", "") +
-		psSep + strings.Join([]string{"", "none", "none", "", "none", "", onhangup, ""}, psSep)
+	return sessionstest.Row(name, "Up 1 hour", project, mode, instance, "v1", "", "", "", "37", "",
+		"running", created, "8g", "default", "", id, "", "/reg/sessions", "", "", "none", "none", "", "none", "", onhangup)
 }
 
 var _ = Describe("end the session on hang-up (CS-LNCH-206..212)", func() {
@@ -263,7 +264,7 @@ var _ = Describe("end the session on hang-up (CS-LNCH-206..212)", func() {
 
 		It("CS-LNCH-212: a join to a removing container is gone too", func() {
 			running("claude", "end")
-			f.fake.On("docker inspect --type container", "/cs-otter\x1fremoving\x1f2026-10-28T11:00:00Z\x1f"+f.proj+"\x1fotter\x1fclaude\n", nil)
+			f.fake.On("docker inspect --type container", sessionstest.InspectRow("/cs-otter", "removing", "2026-10-28T11:00:00Z", f.proj, "otter", "claude")+"\n", nil)
 			Expect(f.run("--join=otter")).To(Equal(1))
 			Expect(f.errw.String()).To(ContainSubstring("'otter' is no longer running."))
 			Expect(f.fake.Session).To(BeNil())

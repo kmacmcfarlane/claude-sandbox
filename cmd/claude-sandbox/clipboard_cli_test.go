@@ -19,14 +19,15 @@ import (
 	"github.com/kmacmcfarlane/claude-sandbox/internal/clipboard"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/sessions"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/sessions/sessionstest"
 )
 
 // psRowClip is a discovery row carried through the clipboard and shadowdir
 // labels; resume is the resume label.
-func psRowClip(name, project, instance, clip, shadow, resume, worktree string) string {
-	return strings.Join([]string{name, "Up 1 hour", project, "claude", instance, "v1", "", "", "", "3", worktree,
+func psRowClip(name, project, instance, clip, shadow, resume, worktree string, mounts ...string) string {
+	return sessionstest.Row(name, "Up 1 hour", project, "claude", instance, "v1", "", "", "", "3", worktree,
 		"running", "2026-09-30 12:00:00 +0000 UTC", "", "", "",
-		strings.Repeat("b", 64), "", "", "", resume, "none", "none", "", clip, shadow, ""}, psSep)
+		strings.Repeat("b", 64), "", "", "", resume, "none", "none", "", clip, shadow, "", "", strings.Join(mounts, ","))
 }
 
 // signalRunner wraps the fake and hands back, for the clipboard helper's
@@ -213,14 +214,14 @@ var _ = Describe("the host clipboard bridge (CLI)", func() {
 			f.envmap["DISPLAY"] = ":0"
 			// A nested container: its shadow root is inside the config-dir
 			// mount, here the TempRoot itself as a bind source.
-			attach(psRowClip("cs-a", f.proj, "otter", "bridge", shadow, "", "") + f.env.TempRoot + "," + f.proj)
+			attach(psRowClip("cs-a", f.proj, "otter", "bridge", shadow, "", "", f.env.TempRoot, f.proj))
 			_, err := os.Stat(filepath.Join(shadow, "clipboard-target.json"))
 			Expect(os.IsNotExist(err)).To(BeTrue())
 			Expect(helperStarts()).To(BeEmpty())
 
 			link := filepath.Join(f.env.TempRoot, "link")
 			Expect(os.Symlink(f.env.TempRoot, link)).To(Succeed())
-			attach(psRowClip("cs-a", f.proj, "otter", "bridge", shadow, "", "") + link)
+			attach(psRowClip("cs-a", f.proj, "otter", "bridge", shadow, "", "", link))
 			Expect(helperStarts()).To(BeEmpty(), "the source after EvalSymlinks")
 		})
 

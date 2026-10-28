@@ -76,7 +76,8 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
 
   Scenario: CS-SESS-006 Malformed docker output is tolerated
     Given "docker ps" emits a line with too few fields
-    Then that line is skipped and the remaining sessions are returned
+    Then that line is skipped (with one warning, CS-SESS-118) and the remaining
+      sessions are returned
 
   # ---- instance nouns ----
 
@@ -491,7 +492,7 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
 
   Scenario: CS-SESS-035 Ralph containers carry no instance noun
     Then a ralph container is named "claude-sandbox-<project-slug>-ralph"
-    And its claude-sandbox.instance label is absent
+    And its claude-sandbox.instance label is written empty (CS-SESS-120)
 
   Scenario: CS-SESS-044 Join runs claude through the pid-class helper
     When join is chosen
@@ -745,7 +746,8 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
       paused container as running, and "docker top" works on it)
     And the created one counts 0 with no "docker top" (it fails on a
       container that is not running)
-    And a row from an older format with no state is counted as before
+    And a current-format row with an empty State is counted as before (only
+      the format's exact count is read, CS-SESS-118)
 
   Scenario: CS-SESS-074 "sessions" shows each container's state
     Given a running container and a paused container of this project
@@ -1403,3 +1405,53 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
     Then every listing shows it through registry.Printable, cut to 39
       characters plus "…" when longer than 40
     And the name is never part of a shell command the launcher prints
+
+  # ---- discovery rows (field injection) ----
+  # Several label values come from session-writable inputs, and docker prints
+  # bind sources raw in {{.Mounts}}. Read by index from a separator-joined
+  # line, a value holding the separator would shift the later fields, and one
+  # holding a newline would end the row and forge the next.
+
+  Scenario: CS-SESS-118 Every discovery field is JSON, and only the exact field count is read
+    Given discovery's docker ps format
+    Then every field is rendered as JSON: each label as {{json (.Label "k")}}
+      (docker ps's {{.Labels}} is one comma-joined string, ambiguous when a
+      value holds a comma), {{json .Names}}, .Status, .State, .CreatedAt, .ID
+      and {{json .Mounts}}, and the retired slot as ""
+    And JSON escapes every control character, so neither the unit separator
+      nor a newline occurs inside a field: each container is exactly one line
+      of exactly the format's field count, whatever its labels or bind sources
+      hold
+    And a line is read only when it has exactly that count and every field
+      decodes as a JSON string; any other line is dropped, with one stderr
+      warning naming the container when its first field decodes to a valid
+      container name, else "a container"
+    And no other count is accepted, earlier formats' included: docker always
+      renders the whole format, which is this binary's own, so any other
+      count did not come from it
+    And the other lines of the listing are returned as before
+    And InspectContainer's fields are JSON the same way, and the global-config
+      container check lists {{json .Names}} and {{json .Mounts}}: a line it
+      cannot decode fails the listing (refused unless --force), and a name
+      that is not a container name is never passed to docker inspect
+    And every docker inspect given names from a listing ends its flags with "--"
+
+  Scenario: CS-SESS-119 Fields with a fixed form are validated
+    Given a decoded row
+    Then the row is dropped with the same warning when its name is not a
+      container name, its State is not a docker container state, its ID is not
+      12 to 64 lowercase hex characters, its pid class is not a decimal 0..255,
+      or its resume label is not a lowercase UUID; empty values pass
+    And the continue label stays as CS-LNCH-182 reads it: "1" sets it,
+      anything else does not
+
+  Scenario: CS-SESS-120 Every label discovery reads is written at create, empty when unset
+    Given docker copies an image's LABEL for every key the create does not set
+    Then every launch writes every label discovery reads (sessions.ReadLabels:
+      project, mode, instance, version, model, confighash, inputs, pidclass,
+      worktree, memorylimit, memorylimitsource, configdir, registry,
+      launchflags, resume, peerroot, terminal, continue, clipboard, shadowdir),
+      with an empty value when unset — instance for ralph, resume and continue
+      for a launch that neither resumes nor continues
+    And so an image defining claude-sandbox.resume (or any of them) cannot make
+      a container read as resuming, continuing or holding a pid class

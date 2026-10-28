@@ -121,6 +121,12 @@ var _ = Describe("tmuxpane", func() {
 			Expect(unreplayed).To(Equal([]string{"--bare", "CLAUDE_SANDBOX_DANGEROUS"}))
 		})
 
+		It("CS-LNCH-226: an unknown flag's typed name reaches the label only when FromLabel would read it back", func() {
+			r := tmuxpane.Record(nil, "", []string{"--foo\x1fcreated", "--bar,baz", "--ok"}, nil)
+			Expect(r.Unreplayed).To(ContainElement("--foo\x1fcreated"), "the record still names it")
+			Expect(r.LabelValue()).To(Equal("--ok"))
+		})
+
 		It("CS-TMUX-017: ResumeID reads an explicit resume in every spelling, with the scan's stop rules", func() {
 			for _, args := range [][]string{
 				{"--resume", convID}, {"--resume=" + convID}, {"-r", convID}, {"-r" + convID},
