@@ -340,6 +340,8 @@ var _ = Describe("the session-end helper", func() {
 		Expect(sessionend.ResumeCommand(m, rec("/elsewhere"))).To(BeEmpty())
 		Expect(sessionend.ResumeCommand(m, rec("/r/.claude/worktrees/a b"))).To(BeEmpty())
 		Expect(sessionend.ResumeCommand(m, rec("/r/.claude/worktrees/feat+x/sub"))).To(BeEmpty())
+		Expect(sessionend.ResumeCommand(m, rec("/r/.claude/worktrees/a/.claude/worktrees/b"))).To(BeEmpty())
+		Expect(sessionend.ResumeCommand(m, rec("/r/.claude/worktrees/a/.claude/worktrees/b/sub"))).To(BeEmpty())
 		Expect(sessionend.ResumeCommand(m, rec(""))).To(BeEmpty())
 
 		// A primary in its own worktree; a join of it in the shared checkout.
@@ -352,6 +354,7 @@ var _ = Describe("the session-end helper", func() {
 		// A project launched inside a worktree: its own cwd is no worktree flag.
 		m = tmuxpane.Mark{V: tmuxpane.MarkVersion, Project: "/r/.claude/worktrees/x", CwdRoot: "/r/.claude/worktrees/x"}
 		Expect(sessionend.ResumeCommand(m, rec("/r/.claude/worktrees/x/sub"))).To(Equal("cd /r/.claude/worktrees/x && claude-sandbox --new --no-worktree -- --resume " + conv2))
+		Expect(sessionend.ResumeCommand(m, rec("/r/.claude/worktrees/x/.claude/worktrees/gen"))).To(Equal("cd /r/.claude/worktrees/x && claude-sandbox --new --worktree=gen -- --resume " + conv2))
 	})
 
 	It("CS-LNCH-208: the real state root is refused under go test", func() {

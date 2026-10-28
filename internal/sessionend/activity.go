@@ -258,19 +258,28 @@ func worktreeOf(m tmuxpane.Mark, cwd string) (worktree string, ok bool) {
 	}
 	cwd = filepath.Clean(cwd)
 	const sep = "/.claude/worktrees/"
-	if i := strings.LastIndex(cwd, sep); i > 0 {
-		root := cwd[:i]
-		name, _, _ := strings.Cut(cwd[i+len(sep):], "/")
-		// The worktree's root must hold the project, and the worktree must
-		// not itself hold it (a project launched inside a worktree).
-		if name != "" && within(m.Project, root) && !within(m.Project, root+sep+name) {
-			// Decided here: a name no worktree flag can carry gets no
-			// command, never the shared checkout's.
-			if worktreeName.MatchString(name) && name != "." && name != ".." {
-				return name, true
-			}
-			return "", false
+	// The FIRST worktrees dir whose root holds the project, and whose
+	// worktree does not itself hold it (a project launched inside a
+	// worktree), decides: nothing after it falls through.
+	for off := 0; ; {
+		j := strings.Index(cwd[off:], sep)
+		if j < 0 {
+			break
 		}
+		i := off + j
+		off = i + len(sep)
+		root := cwd[:i]
+		name, _, _ := strings.Cut(cwd[off:], "/")
+		if i == 0 || name == "" || !within(m.Project, root) || within(m.Project, root+sep+name) {
+			continue
+		}
+		if strings.Contains(cwd[off+len(name):]+"/", sep) {
+			return "", false // a worktree nested in a worktree: no command
+		}
+		if worktreeName.MatchString(name) && name != "." && name != ".." {
+			return name, true
+		}
+		return "", false // a name no worktree flag can carry
 	}
 	if m.CwdRoot != "" && within(cwd, m.CwdRoot) {
 		return m.Worktree, !m.WorktreeGenerated || m.Worktree != ""
