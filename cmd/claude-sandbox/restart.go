@@ -259,7 +259,7 @@ func inspectRestartTarget(env *Env, s sessions.Session) (inspected, error) {
 	out, err := tmuxpane.BoundedRunner{R: env.Runner, Timeout: tmuxpane.ProbeTimeout}.Output(execx.Cmd{
 		Name: "docker",
 		Args: []string{"inspect", "--type", "container", "-f",
-			"{{json .Name}}\x1f{{json .Config.Cmd}}\x1f{{json .Config.Labels}}\x1f{{json .Created}}\x1f{{json .State.Status}}", id},
+			"{{json .Name}}\x1f{{json .Config.Cmd}}\x1f{{json .Config.Labels}}\x1f{{json .Created}}\x1f{{json .State.Status}}", "--", id},
 		Stderr: &stderr,
 	})
 	var in inspected

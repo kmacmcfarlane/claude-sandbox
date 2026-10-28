@@ -684,7 +684,7 @@ var _ = Describe("restart a session in place (CS-SESS-105..108, CS-LNCH-218..221
 			f.access = "docker-socket=flag"
 			Expect(f.run("--restart=dunlin")).To(Equal(0), f.errw.String())
 			Expect(f.fake.CommandLines()).To(ContainElement(
-				"docker inspect --type container -f {{json .Name}}\x1f{{json .Config.Cmd}}\x1f{{json .Config.Labels}}\x1f{{json .Created}}\x1f{{json .State.Status}} " + rsOldID))
+				"docker inspect --type container -f {{json .Name}}\x1f{{json .Config.Cmd}}\x1f{{json .Config.Labels}}\x1f{{json .Created}}\x1f{{json .State.Status}} -- " + rsOldID))
 			Expect(f.errw.String()).To(ContainSubstring("Carried over from 'dunlin': --docker-socket"))
 		})
 
