@@ -9,7 +9,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -18,6 +17,7 @@ import (
 	"github.com/kmacmcfarlane/claude-sandbox/internal/clients"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/prompt"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/sessions/sessionstest"
 )
 
 // heldKinds lists the kinds of the held leases on container id.
@@ -161,8 +161,8 @@ var _ = Describe("client leases (CS-LNCH-204)", func() {
 		})
 
 		It("CS-LNCH-204: the lease is held at the drift prompt, and a quit there releases it", func() {
-			row := strings.Join([]string{"cs-otter", "Up 1 hour", f.proj, "claude", "otter", "v1", "", "stalehash1234", "[]", "37", "",
-				"running", created, "8g", "default", "", markID, "", "", ""}, psSep)
+			row := sessionstest.Row("cs-otter", "Up 1 hour", f.proj, "claude", "otter", "v1", "", "stalehash1234", "[]", "37", "",
+				"running", created, "8g", "default", "", markID, "", "", "")
 			running(row)
 			var atPrompt []clients.Kind
 			f.env.Prompter = promptHook{

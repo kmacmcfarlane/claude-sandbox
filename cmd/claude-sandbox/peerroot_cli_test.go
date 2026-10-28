@@ -18,6 +18,7 @@ import (
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/paths"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/sessions"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/sessions/sessionstest"
 )
 
 // mountsRow is a discovery row carrying every trailing field through the
@@ -27,11 +28,9 @@ func mountsRow(name, project, class, state, peerRoot string, mounts ...string) s
 	if state == "exited" {
 		status = "Exited (0) 1 second ago"
 	}
-	return strings.Join([]string{
-		name, status, project, "claude", "", "v1", "", "", "", class, "",
+	return sessionstest.Row(name, status, project, "claude", "", "v1", "", "", "", class, "",
 		state, "2026-09-30 12:00:00 +0000 UTC", "", "", "",
-		"", "", "", "", "", peerRoot, "none", strings.Join(mounts, ","),
-	}, psSep)
+		"", "", "", "", "", peerRoot, "none", "", "", "", strings.Join(mounts, ","))
 }
 
 var _ = Describe("peers root move: drain-then-switch (CS-DIR-010..019)", func() {
@@ -110,7 +109,7 @@ var _ = Describe("peers root move: drain-then-switch (CS-DIR-010..019)", func() 
 			}
 		}
 		Expect(ps).To(ContainSubstring("--no-trunc"))
-		Expect(ps).To(ContainSubstring("{{.Mounts}}"))
+		Expect(ps).To(ContainSubstring("{{json .Mounts}}"))
 	})
 
 	It("CS-DIR-011: a container mounting the legacy root pins it, and the banner says so", func() {

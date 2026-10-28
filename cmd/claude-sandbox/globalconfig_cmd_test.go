@@ -7,6 +7,7 @@ package main
 // directories.
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 
@@ -61,7 +62,7 @@ var _ = Describe("global-config subcommand (CS-GCFG-041..055)", func() {
 
 	It("CS-GCFG-045, CS-GCFG-047: --force is a flag of migrate and revert", func() {
 		writeFile(link, `{}`)
-		f.fake.On("docker ps", "cs-a\x1f"+link+"\n", nil)
+		f.fake.On("docker ps", mrow("cs-a", link)+"\n", nil)
 		Expect(f.run("global-config", "migrate")).To(Equal(1))
 		Expect(f.errw.String()).To(ContainSubstring("cs-a"))
 		f.errw.Reset()
@@ -102,4 +103,12 @@ func readFileString(p string) string {
 	b, err := os.ReadFile(p)
 	Expect(err).NotTo(HaveOccurred())
 	return string(b)
+}
+
+// mrow renders one line of the container check's docker ps format: the
+// name and the mount sources, each a JSON string.
+func mrow(name, mounts string) string {
+	n, _ := json.Marshal(name)
+	m, _ := json.Marshal(mounts)
+	return string(n) + "\x1f" + string(m)
 }

@@ -86,7 +86,7 @@ var _ = Describe("CS-LNCH-111: the notification ping names the waiting session",
 			in.Instance = ""
 			p := build()
 			Expect(p.EnvFlags).NotTo(ContainElement(HavePrefix("CLAUDE_SANDBOX_INSTANCE=")))
-			Expect(p.Labels).NotTo(ContainElement(HavePrefix("claude-sandbox.instance=")))
+			Expect(p.Labels).To(ContainElement("claude-sandbox.instance="))
 			Expect(p.EnvFlags).To(ContainElement("CLAUDE_SANDBOX_CONTAINER=" + p.ContainerName))
 			Expect(p.EnvFlags).To(ContainElement("CLAUDE_SANDBOX_MODE=ralph"))
 			Expect(p.ContainerName).To(HaveSuffix("-ralph"))

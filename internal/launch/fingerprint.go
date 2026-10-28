@@ -187,7 +187,9 @@ func encodeInputs(inputs []InputDigest) string {
 	if err != nil {
 		return "[]"
 	}
-	return string(b)
+	// CS-LNCH-226: encoding/json escapes control characters but not bidi
+	// controls, which a path may hold; escaped, the label holds neither.
+	return escapeBidi(string(b))
 }
 
 // DecodeInputs parses a claude-sandbox.inputs label. A malformed or absent

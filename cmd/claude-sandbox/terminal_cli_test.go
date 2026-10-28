@@ -15,15 +15,16 @@ import (
 
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/prompt"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/sessions/sessionstest"
 )
 
 const jediTerm = "JetBrains-JediTerm"
 
 // psRowTerm is a discovery row carried through the terminal label and Mounts.
 func psRowTerm(name, project, instance, terminal string) string {
-	return strings.Join([]string{name, "Up 1 hour", project, "claude", instance, "v1", "", "", "", "3", "",
+	return sessionstest.Row(name, "Up 1 hour", project, "claude", instance, "v1", "", "", "", "3", "",
 		"running", "2026-09-30 12:00:00 +0000 UTC", "", "", "",
-		"", "", "", "", "", "none", terminal, ""}, psSep)
+		"", "", "", "", "", "none", terminal, "")
 }
 
 var _ = Describe("terminal identity (CS-LNCH-178..181, CS-SESS-090..092)", func() {

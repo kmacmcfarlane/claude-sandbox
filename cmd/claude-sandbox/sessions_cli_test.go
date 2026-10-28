@@ -24,18 +24,19 @@ import (
 	"github.com/kmacmcfarlane/claude-sandbox/internal/paths"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/prompt"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/sessions"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/sessions/sessionstest"
 )
 
 const psSep = "\x1f"
 
 // psRow builds one line of scripted `docker ps --format` output.
 func psRow(name, status, project, instance string) string {
-	return strings.Join([]string{name, status, project, "claude", instance, "v1", "", "", "", "", ""}, psSep)
+	return sessionstest.Row(name, status, project, "claude", instance, "v1", "", "", "", "", "")
 }
 
 // psRowFull additionally sets the model, config hash and inputs label.
 func psRowFull(name, status, project, instance, model, hash, inputs string) string {
-	return strings.Join([]string{name, status, project, "claude", instance, "v1", model, hash, inputs, "", ""}, psSep)
+	return sessionstest.Row(name, status, project, "claude", instance, "v1", model, hash, inputs, "", "")
 }
 
 var _ = Describe("sessions (CS-SESS)", func() {
@@ -531,7 +532,7 @@ var _ = Describe("sessions (CS-SESS)", func() {
 			Expect(f.run("--ralph")).To(Equal(0))
 			line := f.launchLine()
 			Expect(line).To(ContainSubstring("-ralph claude-sandbox"))
-			Expect(line).NotTo(ContainSubstring("claude-sandbox.instance="))
+			Expect(line).To(ContainSubstring("--label claude-sandbox.instance= "))
 		})
 
 		It("CS-LNCH-032: labels reach docker create", func() {
@@ -552,7 +553,7 @@ var _ = Describe("sessions (CS-SESS)", func() {
 		})
 
 		It("CS-SESS-034: a ralph container is not offered as an attach candidate", func() {
-			f.fake.On("docker ps", strings.Join([]string{"cs-r", "Up 1 hour", f.proj, "ralph", "", "v1", "", "", ""}, psSep)+"\n", nil)
+			f.fake.On("docker ps", sessionstest.Row("cs-r", "Up 1 hour", f.proj, "ralph", "", "v1", "", "", "")+"\n", nil)
 			f.fake.On("docker top", "PID  COMMAND\n1  /opt/claude-sandbox/bin/ralph\n", nil)
 			f.env.Prompter = &prompt.Scripted{IsTTY: false}
 			// Only a ralph container is running, so there is no decision to make
@@ -715,8 +716,8 @@ func statePsRow(name, project, instance, class, state string) string {
 		"paused":  "Up 1 hour (Paused)",
 		"exited":  "Exited (0) 3 hours ago",
 	}[state]
-	return strings.Join([]string{name, status, project, "claude", instance, "v1", "", "", "", class, "",
-		state, "", "", "", ""}, psSep)
+	return sessionstest.Row(name, status, project, "claude", instance, "v1", "", "", "", class, "",
+		state, "", "", "", "")
 }
 
 var _ = Describe("container states in the sessions listing (CS-SESS-070, 074)", func() {

@@ -23,6 +23,7 @@ import (
 	"github.com/kmacmcfarlane/claude-sandbox/internal/launch"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/oomreport"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/sessions"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/sessions/sessionstest"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/tmuxpane"
 )
 
@@ -34,8 +35,8 @@ const (
 // psRowMark is a docker ps row carrying every optional trailing field, the
 // CS-LNCH-109 labels included.
 func psRowMark(name, project, mode, instance, model, class, worktree, created, id, configDir, registry, flags string) string {
-	return strings.Join([]string{name, "Up 1 hour", project, mode, instance, "v1", model, "", "", class, worktree,
-		"running", created, "8g", "default", "", id, configDir, registry, flags}, psSep)
+	return sessionstest.Row(name, "Up 1 hour", project, mode, instance, "v1", model, "", "", class, worktree,
+		"running", created, "8g", "default", "", id, configDir, registry, flags)
 }
 
 var _ = Describe("tmux pane mark (CS-TMUX-010..019)", func() {
@@ -221,7 +222,7 @@ var _ = Describe("tmux pane mark (CS-TMUX-010..019)", func() {
 		})
 
 		It("CS-TMUX-012: an attach records the model label only when launchflags names --model", func() {
-			running(psRowMark("cs-otter", f.proj, "claude", "otter", "sonnet", "37", "otter", created, "short",
+			running(psRowMark("cs-otter", f.proj, "claude", "otter", "sonnet", "37", "otter", created, "4f1c2a9b8e7d",
 				"", f.home+"/.claude/sessions", ""))
 			f.fake.On("rev-parse --show-toplevel", f.proj+"\n", nil)
 			Expect(f.run("--attach=otter")).To(Equal(0), f.errw.String())

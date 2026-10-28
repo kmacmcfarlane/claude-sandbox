@@ -20,6 +20,7 @@ import (
 
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/prompt"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/sessions/sessionstest"
 )
 
 // reservedRow is a ps row carrying the optional State and CreatedAt fields.
@@ -28,8 +29,8 @@ func reservedRow(name, project, instance, class, state string, created time.Time
 	if state == "created" {
 		status = "Created"
 	}
-	return strings.Join([]string{name, status, project, "claude", instance, "v1", "", "", "", class, "",
-		state, created.Format("2006-01-02 15:04:05 -0700 MST")}, psSep)
+	return sessionstest.Row(name, status, project, "claude", instance, "v1", "", "", "", class, "",
+		state, created.Format("2006-01-02 15:04:05 -0700 MST"))
 }
 
 // conflictOn makes "docker create" fail with docker's name-conflict message for
@@ -198,8 +199,8 @@ var _ = Describe("launch reservation (CS-SESS-048..054, CS-LNCH-057)", func() {
 			reservedRow("old-running", "/elsewhere", "lynx", "9", "running", now.Add(-time.Hour)),
 			// An exited container is not a reservation, however old
 			// (CS-SESS-070): it must never be removed as stale.
-			strings.Join([]string{"old-exited", "Exited (0) 2 hours ago", "/elsewhere", "claude", "moth", "v1", "", "", "", "10", "",
-				"exited", now.Add(-2 * time.Hour).Format("2006-01-02 15:04:05 -0700 MST")}, psSep),
+			sessionstest.Row("old-exited", "Exited (0) 2 hours ago", "/elsewhere", "claude", "moth", "v1", "", "", "", "10", "",
+				"exited", now.Add(-2*time.Hour).Format("2006-01-02 15:04:05 -0700 MST")),
 		}, "\n")+"\n", nil)
 		f.fake.On("docker top", "PID  COMMAND\n1  claude\n", nil)
 		Expect(f.run("--no-session-check")).To(Equal(0), f.errw.String())

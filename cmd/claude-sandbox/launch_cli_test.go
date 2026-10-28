@@ -24,6 +24,7 @@ import (
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/imagebuild"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/prompt"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/sessions"
 )
 
 // fakeLock is the launch-lock seam under test (CS-SESS-048). It records where
@@ -109,6 +110,10 @@ func newCLIFixture() *cliFixture {
 	Expect(os.MkdirAll(filepath.Join(proc, "self", "ns"), 0o755)).To(Succeed())
 	Expect(os.Symlink("pid:[4026531836]", filepath.Join(proc, "self", "ns", "pid"))).To(Succeed())
 	f.lock = &fakeLock{fake: f.fake}
+	// Discovery's dropped-row warnings (CS-SESS-118) go to the fixture's
+	// stderr, never the test binary's.
+	sessions.WarnOut = f.errw
+	DeferCleanup(func() { sessions.WarnOut = os.Stderr })
 	f.env = &Env{
 		Runner:   f.fake,
 		Prompter: &prompt.Scripted{},
