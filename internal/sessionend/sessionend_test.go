@@ -315,6 +315,21 @@ var _ = Describe("the session-end helper", func() {
 		Expect(f.stops()).To(HaveLen(1))
 	})
 
+	It("CS-LNCH-208: a cap reached whose pre-stop re-check finds the turn idle ends uncapped", func() {
+		sessionend.TurnMax = 4 * time.Second
+		f.record(7, conv1, "busy", "", t0.Add(time.Second))
+		f.onInspect = func(n int) {
+			if n == 4 { // the pre-stop re-check of the poll that reached the cap
+				f.record(7, conv1, "idle", "", t0.Add(time.Second))
+			}
+		}
+		res := f.run()
+		Expect(res.Outcome).To(Equal(sessionend.OutcomeEnded))
+		Expect(res.Capped).To(BeFalse())
+		Expect(f.entries()[0].Capped).To(BeFalse())
+		Expect(f.clock.afters).To(Equal(2))
+	})
+
 	It("CS-LNCH-208: a join's resume command names the worktree its record's cwd is in; an unknown place prints none", func() {
 		m := tmuxpane.Mark{V: tmuxpane.MarkVersion, Project: "/r", CwdRoot: "/r", Worktree: ""}
 		rec := func(cwd string) registry.Record {
@@ -323,6 +338,8 @@ var _ = Describe("the session-end helper", func() {
 		Expect(sessionend.ResumeCommand(m, rec("/r/.claude/worktrees/gen-x/sub"))).To(Equal("cd /r && claude-sandbox --new --worktree=gen-x -- --resume " + conv2))
 		Expect(sessionend.ResumeCommand(m, rec("/r/sub"))).To(Equal("cd /r && claude-sandbox --new --no-worktree -- --resume " + conv2))
 		Expect(sessionend.ResumeCommand(m, rec("/elsewhere"))).To(BeEmpty())
+		Expect(sessionend.ResumeCommand(m, rec("/r/.claude/worktrees/a b"))).To(BeEmpty())
+		Expect(sessionend.ResumeCommand(m, rec("/r/.claude/worktrees/feat+x/sub"))).To(BeEmpty())
 		Expect(sessionend.ResumeCommand(m, rec(""))).To(BeEmpty())
 
 		// A primary in its own worktree; a join of it in the shared checkout.

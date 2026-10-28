@@ -263,9 +263,13 @@ func worktreeOf(m tmuxpane.Mark, cwd string) (worktree string, ok bool) {
 		name, _, _ := strings.Cut(cwd[i+len(sep):], "/")
 		// The worktree's root must hold the project, and the worktree must
 		// not itself hold it (a project launched inside a worktree).
-		if within(m.Project, root) && !within(m.Project, root+sep+name) &&
-			worktreeName.MatchString(name) && name != "." && name != ".." {
-			return name, true
+		if name != "" && within(m.Project, root) && !within(m.Project, root+sep+name) {
+			// Decided here: a name no worktree flag can carry gets no
+			// command, never the shared checkout's.
+			if worktreeName.MatchString(name) && name != "." && name != ".." {
+				return name, true
+			}
+			return "", false
 		}
 	}
 	if m.CwdRoot != "" && within(cwd, m.CwdRoot) {
