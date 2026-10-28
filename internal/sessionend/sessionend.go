@@ -33,7 +33,6 @@ import (
 	"github.com/kmacmcfarlane/claude-sandbox/internal/clients"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/hostdirs"
-	"github.com/kmacmcfarlane/claude-sandbox/internal/launch"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/oomreport"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/registry"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/sessions"
@@ -161,29 +160,14 @@ type Result struct {
 	Logged bool
 }
 
-// verdict is the registry's answer for one poll.
-type verdict int
-
-const (
-	verdictEnd verdict = iota
-	verdictWait
-	verdictNone
-	verdictUnreadable
-)
-
 // run is one helper run's state.
 type run struct {
 	o       Options
 	clock   Clock
 	id      string
-	class   int
-	since   int64 // ms, truncated to the second
-	domain  string
 	boot    time.Time
-	last    map[int]registry.Record
-	live    map[string]liveState
+	turn    *Turn
 	seenOld map[string]time.Time
-	counted []registry.Record
 }
 
 type liveState struct {
@@ -203,8 +187,7 @@ func Run(o Options) Result {
 	if goos == "" {
 		goos = runtimeGOOS
 	}
-	r := &run{o: o, clock: o.Clock, id: o.Mark.ContainerID,
-		last: map[int]registry.Record{}, live: map[string]liveState{}, seenOld: map[string]time.Time{}}
+	r := &run{o: o, clock: o.Clock, id: o.Mark.ContainerID, seenOld: map[string]time.Time{}}
 	if o.InSandbox || goos != "linux" {
 		// CS-LNCH-210: a nested launcher cannot see the host's leases or
 		// processes, and only Linux has the /proc scan.
@@ -214,12 +197,16 @@ func Run(o Options) Result {
 	if !clients.IsFullID(r.id) {
 		return r.finish(Result{Outcome: OutcomeNoID})
 	}
-	r.class = -1
+	class := -1
 	if c, err := strconv.Atoi(o.Mark.Class); err == nil && c >= 0 {
-		r.class = c % 256
+		class = c % 256
 	}
-	r.since = (o.Mark.Since / 1000) * 1000
-	r.domain = ownDomain(o.ProcRoot, o.MachineIDPath)
+	// The turn rule (CS-LNCH-208), shared with the restart (CS-SESS-108).
+	r.turn = NewTurn(TurnOptions{
+		Runner: o.Runner, ProcRoot: o.ProcRoot, Container: r.id, Class: class,
+		Since: o.Mark.Since, OwnDomain: ownDomain(o.ProcRoot, o.MachineIDPath),
+		RegistryDirs: r.registryDirs(), Clock: o.Clock, Logf: r.logf,
+	})
 	r.boot, _ = clients.BootTime(procRootOf(o.ProcRoot))
 	r.logf("hang-up of %s (%s) at %s", o.Mark.Container, r.id, o.HangupAt.UTC().Format(time.RFC3339))
 
@@ -244,41 +231,54 @@ var runtimeGOOS = runtime.GOOS
 // leaves the helper running without the lock: two helpers both running
 // docker stop is harmless.
 func (r *run) lock(stateRoot string) (*os.File, Result, bool) {
-	dir := clients.ContainerDir(stateRoot, r.id)
-	for _, d := range []string{stateRoot, hostdirs.ClientsDir(stateRoot), dir} {
-		if err := hostdirs.EnsureOwnedDir(d, hostdirs.OwnedDirMode, nil); err != nil {
+	for {
+		f, held, err := TryEndLock(stateRoot, r.id)
+		if err != nil {
 			r.logf("no end lock (%v); going on without it", err)
 			return nil, Result{}, true
 		}
-	}
-	f, err := os.OpenFile(filepath.Join(dir, clients.EndLockName), os.O_RDWR|os.O_CREATE|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0o600)
-	if err != nil {
-		r.logf("no end lock (%v); going on without it", err)
-		return nil, Result{}, true
-	}
-	for {
-		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
-		if err == nil {
+		if !held {
 			return f, Result{}, true
 		}
-		if !errors.Is(err, syscall.EWOULDBLOCK) {
-			r.logf("no end lock (%v); going on without it", err)
-			f.Close()
-			return nil, Result{}, true
-		}
 		if !r.wait(EndPoll) {
-			f.Close()
 			return nil, r.finish(Result{Outcome: OutcomeSignalled}), false
 		}
 		switch st, _ := r.inspect(); st {
 		case stateGone:
-			f.Close()
 			r.logf("another helper's container is gone; exiting")
 			return nil, Result{Outcome: OutcomeLostLock}, false
 		case statePaused:
-			f.Close()
 			return nil, r.finish(Result{Outcome: OutcomePaused}), false
 		}
+	}
+}
+
+// TryEndLock makes one attempt at container id's end.lock (one ender per
+// container, CS-LNCH-208; the restart takes it too, CS-LNCH-218): the state
+// root, its clients dir and the container's dir made owned (0700), the lock
+// file opened O_NOFOLLOW|O_CLOEXEC, one LOCK_EX|LOCK_NB. It returns the
+// locked file (closing it releases the lock); held when another process
+// holds it; an error when the lock cannot be used at all.
+func TryEndLock(stateRoot, id string) (f *os.File, held bool, err error) {
+	dir := clients.ContainerDir(stateRoot, id)
+	for _, d := range []string{stateRoot, hostdirs.ClientsDir(stateRoot), dir} {
+		if err := hostdirs.EnsureOwnedDir(d, hostdirs.OwnedDirMode, nil); err != nil {
+			return nil, false, err
+		}
+	}
+	f, err = os.OpenFile(filepath.Join(dir, clients.EndLockName), os.O_RDWR|os.O_CREATE|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0o600)
+	if err != nil {
+		return nil, false, err
+	}
+	switch err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); {
+	case err == nil:
+		return f, false, nil
+	case errors.Is(err, syscall.EWOULDBLOCK):
+		f.Close()
+		return nil, true, nil
+	default:
+		f.Close()
+		return nil, false, err
 	}
 }
 
@@ -317,11 +317,11 @@ func (r *run) poll() Result {
 		case clientsHold:
 			continue
 		}
-		v := r.activity()
+		v, _ := r.turn.activity()
 		switch v {
-		case verdictUnreadable:
+		case VerdictUnreadable:
 			return r.finish(Result{Outcome: OutcomeRegistry, Waited: waited})
-		case verdictNone:
+		case VerdictNone:
 			now := r.clock.Now()
 			if noneSince.IsZero() {
 				noneSince = now
@@ -330,7 +330,7 @@ func (r *run) poll() Result {
 				return r.finish(Result{Outcome: OutcomeNoRecord, Waited: waited})
 			}
 			continue
-		case verdictWait:
+		case VerdictWait:
 			noneSince = time.Time{}
 			if !first {
 				waited += EndPoll
@@ -339,7 +339,7 @@ func (r *run) poll() Result {
 				continue
 			}
 			capped = true
-		case verdictEnd:
+		case VerdictEnd:
 			noneSince = time.Time{}
 		}
 
@@ -361,13 +361,13 @@ func (r *run) poll() Result {
 		if p := r.present(); p.CannotTell() || len(p.Clients) > 0 {
 			continue
 		}
-		v2 := r.activity()
-		if !(v2 == verdictEnd || (capped && v2 == verdictWait)) {
+		v2, _ := r.turn.activity()
+		if !(v2 == VerdictEnd || (capped && v2 == VerdictWait)) {
 			continue
 		}
 		switch r.stop() {
 		case stopDone:
-			return r.finish(Result{Outcome: OutcomeEnded, Capped: capped && v2 == verdictWait, Waited: waited})
+			return r.finish(Result{Outcome: OutcomeEnded, Capped: capped && v2 == VerdictWait, Waited: waited})
 		case stopGone:
 			return r.finish(Result{Outcome: OutcomeEndedOnItsOwn, Waited: waited})
 		default:
@@ -666,9 +666,4 @@ func ownDomain(procRoot, machineIDPath string) string {
 	}
 	b, _ := os.ReadFile(p)
 	return "linux:" + registry.JSTrim(string(b)) + ":" + ns
-}
-
-// legacyRegistry is the legacy peers root's records dir for home.
-func legacyRegistry(home string) string {
-	return filepath.Join(home, launch.LegacyPeerRegistryRoot, "sessions")
 }

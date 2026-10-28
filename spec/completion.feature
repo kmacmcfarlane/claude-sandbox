@@ -171,3 +171,11 @@ Feature: Shell completion (CS-COMP)
       suggestions rather than blocking a TAB press
     # Measured ~10ms for a label-filtered docker ps, but the timeout keeps the
     # guarantee in CS-COMP-022 unconditional.
+
+  @new
+  Scenario: CS-COMP-028 --restart completes as --attach does
+    Then "--restart" is offered among the launcher flags, with a description
+    And "--restart=<noun>" completes the instance nouns of this project's live sessions,
+      through the same bounded docker query as --attach and --join (CS-COMP-024)
+    And headless offers no --restart (CS-LNCH-221)
+

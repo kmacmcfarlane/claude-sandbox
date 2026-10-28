@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/hostdirs"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/launch"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/registry"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/sessions"
@@ -254,16 +255,43 @@ func (c Check) aliveRecord(s sessions.Session, matches []registry.Record) (regis
 			return m, true, nil
 		}
 	}
-	pids, err := c.top(s.Name)
-	if err != nil {
-		return registry.Record{}, false, fmt.Errorf("docker top %s: %v", s.Name, err)
+	return AliveRecord(c.Runner, c.procRoot(), s.Name, matches)
+}
+
+// AliveRecord is CS-SESS-089's liveness test for records of one container,
+// shared by the guard and the restart (CS-SESS-106): the first record that
+// cannot be ruled out, and whether there is one. A record without a
+// procStart cannot be ruled out and needs no docker call. Otherwise ONE
+// bounded "docker top <container> -o pid" lists the container's host pids,
+// and a record lives while one of them has its procStart (/proc/<pid>/stat
+// field 22, the same in every pid namespace); a pid whose stat cannot be
+// read or parsed, or a listing with no pid visible here, cannot rule it out
+// (alive). A failed or timed-out docker top is an error: the caller decides
+// whether that fails closed. procRoot "" is the real /proc, and panics under
+// go test.
+func AliveRecord(runner execx.Runner, procRoot, container string, recs []registry.Record) (registry.Record, bool, error) {
+	for _, m := range recs {
+		if m.ProcStart == "" {
+			return m, true, nil
+		}
 	}
+	if len(recs) == 0 {
+		return registry.Record{}, false, nil
+	}
+	if procRoot == "" {
+		procRoot = Check{}.procRoot()
+	}
+	pids, err := top(runner, container)
+	if err != nil {
+		return registry.Record{}, false, fmt.Errorf("docker top %s: %v", container, err)
+	}
+	matches := recs
 	// Only a pid whose stat was read can rule the record out. Nothing listed,
 	// or no listed pid visible here (a nested launcher's /proc does not show
 	// host pids), cannot rule it out: alive, failing closed.
 	unknown, read := false, 0
 	for _, pid := range pids {
-		data, err := os.ReadFile(filepath.Join(c.procRoot(), pid, "stat"))
+		data, err := os.ReadFile(filepath.Join(procRoot, pid, "stat"))
 		if err != nil {
 			if !errors.Is(err, os.ErrNotExist) {
 				unknown = true
@@ -290,12 +318,12 @@ func (c Check) aliveRecord(s sessions.Session, matches []registry.Record) (regis
 
 // top runs "docker top <name> -o pid" through Runner.Start, killed with the
 // launcher and after TopTimeout, and returns the host pids it lists.
-func (c Check) top(name string) ([]string, error) {
-	if c.Runner == nil {
+func top(runner execx.Runner, name string) ([]string, error) {
+	if runner == nil {
 		return nil, errors.New("no docker runner")
 	}
 	var out, errOut syncBuffer
-	proc, err := c.Runner.Start(execx.Cmd{
+	proc, err := runner.Start(execx.Cmd{
 		Name: "docker", Args: []string{"top", name, "-o", "pid"},
 		Stdout: &out, Stderr: &errOut, DieWithParent: true,
 	})
@@ -358,28 +386,52 @@ func (s *syncBuffer) String() string {
 	return s.b.String()
 }
 
-// registryDirs is where a sandbox's records land: its registry label — the
-// dir its launch applied, the legacy or the new peers root alike — else (a
-// container from before the label, and so from before the peers move,
-// CS-DIR-011) both places they could be: its config dir and the LEGACY root.
+// registryDirs is where a sandbox's records land (RegistryDirs).
 func (c Check) registryDirs(s sessions.Session) []string {
-	if s.RegistryDir != "" {
-		return []string{s.RegistryDir}
+	return RegistryDirs(s.RegistryDir, c.ConfigDir, c.Home)
+}
+
+// RegistryDirs is where a sandbox's registry records are (CS-SESS-066): the
+// claude-sandbox.registry label's dir when set — the dir its launch applied,
+// the legacy or the new peers root alike; else — a container from before the
+// label, and so from before the peers move (CS-DIR-011) — both places they
+// could be: <configDir>/sessions and the LEGACY peers root's sessions under
+// home. Empty inputs are skipped. The one builder of this list: the guard,
+// the restart, the session-end helper and the friendly names use it.
+func RegistryDirs(registryLabel, configDir, home string) []string {
+	if registryLabel != "" {
+		return []string{registryLabel}
 	}
 	var dirs []string
-	if c.ConfigDir != "" {
-		dirs = append(dirs, filepath.Join(c.ConfigDir, "sessions"))
+	if configDir != "" {
+		dirs = append(dirs, filepath.Join(configDir, "sessions"))
 	}
-	if c.Home != "" {
-		dirs = append(dirs, filepath.Join(c.Home, launch.LegacyPeerRegistryRoot, "sessions"))
+	if home != "" {
+		dirs = append(dirs, filepath.Join(home, launch.LegacyPeerRegistryRoot, "sessions"))
 	}
 	return dirs
 }
 
-// recordsAt reads every record at a pid class across dirs. A directory that
-// exists but cannot be read, or a record there that stays malformed after
-// the retries, is an error.
+// recordsAt reads every record at a pid class across dirs (ReadClass).
 func (c Check) recordsAt(dirs []string, class int) ([]registry.Record, error) {
+	return ReadClass(dirs, class, c.sleep)
+}
+
+// ReadClass reads every record at a pid class (pid % 256) across dirs, with
+// the guard's fail-closed rules (CS-SESS-067), shared with the restart
+// (CS-SESS-106): a missing directory holds no records; a directory that
+// exists but cannot be opened or listed is an error; a record that stays
+// malformed after Retries re-reads spaced RetryDelay (only
+// registry.ErrPartial is retried), or that fails structurally (a link, not a
+// regular file, a pid mismatch, a non-UUID sessionId), is an error; only a
+// record that vanished mid-read is skipped. sleep spaces the retries (nil =
+// time.Sleep). Under go test it panics before opening anything when a dir is
+// at or below one of the invoking user's real registry roots.
+func ReadClass(dirs []string, class int, sleep func(time.Duration)) ([]registry.Record, error) {
+	guardRealRegistry(dirs)
+	if sleep == nil {
+		sleep = time.Sleep
+	}
 	var out []registry.Record
 	for _, dir := range dirs {
 		d, err := registry.OpenDir(dir)
@@ -389,7 +441,7 @@ func (c Check) recordsAt(dirs []string, class int) ([]registry.Record, error) {
 		if err != nil {
 			return nil, err
 		}
-		recs, err := c.readClass(d, class)
+		recs, err := readClass(d, class, sleep)
 		d.Close()
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", dir, err)
@@ -399,7 +451,28 @@ func (c Check) recordsAt(dirs []string, class int) ([]registry.Record, error) {
 	return out, nil
 }
 
-func (c Check) readClass(d *registry.Dir, class int) ([]registry.Record, error) {
+// guardRealRegistry panics under go test when a registry dir is at or below
+// one of the invoking user's real registry roots: its ~/.claude, the peers
+// root or the legacy peers root, each by $HOME and by the user database,
+// lexically and symlink-resolved. Not the whole home: a developer's TMPDIR,
+// and so every scratch directory, may live under it.
+func guardRealRegistry(dirs []string) {
+	if !testing.Testing() {
+		return
+	}
+	for _, h := range realHomes() {
+		for _, rel := range []string{".claude", hostdirs.PeersRootRel, hostdirs.LegacyPeersRootRel} {
+			root := filepath.Join(h, rel)
+			for _, d := range dirs {
+				if InTree(d, root) {
+					panic("resumeguard: a test would read the real registry " + d + "; point HOME and the registry label at a scratch directory")
+				}
+			}
+		}
+	}
+}
+
+func readClass(d *registry.Dir, class int, sleep func(time.Duration)) ([]registry.Record, error) {
 	es, err := d.Entries()
 	if err != nil {
 		return nil, err
@@ -415,7 +488,7 @@ func (c Check) readClass(d *registry.Dir, class int) ([]registry.Record, error) 
 			if err == nil || !errors.Is(err, registry.ErrPartial) || attempt >= Retries {
 				break
 			}
-			c.sleep(RetryDelay)
+			sleep(RetryDelay)
 		}
 		if errors.Is(err, os.ErrNotExist) {
 			continue // the session exited while the directory was read

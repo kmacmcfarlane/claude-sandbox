@@ -53,6 +53,12 @@ type Inputs struct {
 	// Instance is the noun identifying this session among the project's
 	// containers (CS-LNCH-026). Empty for ralph, which is single-instance.
 	Instance string
+	// KeepInstance is a restart reusing the old container's noun
+	// (CS-LNCH-218): the reservation keeps it unless a discovered container
+	// (running, reserved, or still being removed) holds it, and never checks
+	// it against existing worktrees — that worktree is the one reopened. Not
+	// hashed: a per-session choice, like the noun.
+	KeepInstance bool
 
 	// Worktree is the name handed to claude's --worktree (CS-LNCH-041); empty
 	// means the session works in the shared checkout. Rendered as the
@@ -673,21 +679,19 @@ func Build(in Inputs) (*Plan, error) {
 		if in.SkipPermissions {
 			p.Command = append(p.Command, "--dangerously-skip-permissions")
 		}
+		// CS-LNCH-041/045: launcher-owned flags precede --model and the
+		// passthrough tail, so a passthrough claude flag can still override
+		// them.
+		if in.Worktree != "" {
+			p.Command = append(p.Command, "--worktree", in.Worktree)
+		}
+		if model != "" {
+			p.Command = append(p.Command, "--model", model)
+		}
 	} else {
 		// The instance noun distinguishes concurrent sessions in one project.
 		p.ContainerName = "claude-sandbox-" + slug + "-" + in.Instance
-		p.Command = []string{"claude"}
-		if in.SkipPermissions {
-			p.Command = append(p.Command, "--dangerously-skip-permissions")
-		}
-	}
-	// CS-LNCH-041/045: launcher-owned flags precede --model and the
-	// passthrough tail, so a passthrough claude flag can still override them.
-	if in.Worktree != "" {
-		p.Command = append(p.Command, "--worktree", in.Worktree)
-	}
-	if model != "" {
-		p.Command = append(p.Command, "--model", model)
+		p.Command = CommandPrefix(in.SkipPermissions, in.Worktree, model)
 	}
 	p.Command = append(p.Command, in.Passthrough...)
 
@@ -1862,6 +1866,37 @@ func ResolveTristate(cli *bool, envVal string, yaml *bool, def bool) bool {
 }
 
 // resolveFlag implements the CLI > env var > YAML precedence.
+// CommandPrefix is the launcher-owned head of an interactive container's
+// command (CS-LNCH-026/041): "claude", --dangerously-skip-permissions when
+// dangerous mode resolved on, then --worktree <w> and --model <m> when set;
+// the passthrough follows it. The one definition Build and the restart's
+// reading of an old container's Config.Cmd share (CS-SESS-107).
+func CommandPrefix(skipPermissions bool, worktree, model string) []string {
+	c := []string{"claude"}
+	if skipPermissions {
+		c = append(c, "--dangerously-skip-permissions")
+	}
+	if worktree != "" {
+		c = append(c, "--worktree", worktree)
+	}
+	if model != "" {
+		c = append(c, "--model", model)
+	}
+	return c
+}
+
+// PackageCacheVars maps each package-cache toolchain variable to its
+// directory name under PackageCacheRoot (CS-LNCH-035): a container whose
+// environment sets one to that directory had the caches on (the restart's
+// reading of an old container, CS-SESS-107).
+func PackageCacheVars() map[string]string {
+	out := map[string]string{}
+	for _, c := range packageCaches {
+		out[c.env] = c.dir
+	}
+	return out
+}
+
 func resolveFlag(cli *bool, envVal string, yaml *bool) bool {
 	if cli != nil {
 		return *cli

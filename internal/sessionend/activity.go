@@ -11,25 +11,90 @@ import (
 
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/registry"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/resumeguard"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/tmuxpane"
 )
 
+// Verdict is the turn rule's answer for one read of a container's records
+// (02 § 3.3).
+type Verdict int
+
+const (
+	// VerdictEnd: every live record is idle or waiting (a turn boundary).
+	VerdictEnd Verdict = iota
+	// VerdictWait: a record is busy, shell, unknown or malformed.
+	VerdictWait
+	// VerdictNone: no live record of the container.
+	VerdictNone
+	// VerdictUnreadable: a registry directory could not be read.
+	VerdictUnreadable
+)
+
+// TurnOptions configure a Turn.
+type TurnOptions struct {
+	// Runner runs the bounded "docker top" of the liveness check.
+	Runner execx.Runner
+	// ProcRoot is /proc; "" panics under go test.
+	ProcRoot string
+	// Container is the container's 64-hex id (docker top's argument).
+	Container string
+	// Class is the container's pid class (0..255); negative matches nothing.
+	Class int
+	// Since is the container's creation in unix ms: records started before
+	// it are an earlier container's. Truncated to the second here.
+	Since int64
+	// OwnDomain is the launcher's own pid domain ("" = unknown): a record
+	// from it is a claude on the host, never the container's.
+	OwnDomain string
+	// RegistryDirs is where the records are (resumeguard.RegistryDirs).
+	RegistryDirs []string
+	// Clock is the time seam LiveRecheck is measured with; nil = the real
+	// clock.
+	Clock Clock
+	// Logf receives diagnostics; nil discards them.
+	Logf func(format string, a ...any)
+}
+
+// Turn is the turn rule over one container's live records (CS-LNCH-208):
+// the session-end helper polls it, and the restart reads it at its decision
+// and its re-check (CS-SESS-108). It keeps, across reads, each record's last
+// good state (a counted record that stops parsing keeps it) and each
+// record's liveness (re-confirmed after LiveRecheck).
+type Turn struct {
+	o       TurnOptions
+	since   int64
+	last    map[int]registry.Record
+	live    map[string]liveState
+	counted []registry.Record
+}
+
+// NewTurn makes a Turn.
+func NewTurn(o TurnOptions) *Turn {
+	if o.Clock == nil {
+		o.Clock = realClock{}
+	}
+	return &Turn{o: o, since: (o.Since / 1000) * 1000, last: map[int]registry.Record{}, live: map[string]liveState{}}
+}
+
+// Read reads the container's live records once and decides: the verdict,
+// the records counted (parsed, live, the container's), and for
+// VerdictUnreadable the error.
+func (t *Turn) Read() (Verdict, []registry.Record, error) {
+	v, err := t.activity()
+	return v, append([]registry.Record(nil), t.counted...), err
+}
+
+func (t *Turn) logf(format string, a ...any) {
+	if t.o.Logf != nil {
+		t.o.Logf(format, a...)
+	}
+}
+
 // registryDirs is where the container's records are: the mark's registry dir
 // (the claude-sandbox.registry label, CS-LNCH-109), else — a container from
-// before the label — both places they could be, as the resume guard reads
-// them (CS-SESS-066): the config dir's sessions and the legacy peers root.
+// before the label — both places they could be (resumeguard.RegistryDirs).
 func (r *run) registryDirs() []string {
-	if r.o.Mark.RegistryDir != "" {
-		return []string{r.o.Mark.RegistryDir}
-	}
-	var dirs []string
-	if r.o.ConfigDir != "" {
-		dirs = append(dirs, filepath.Join(r.o.ConfigDir, "sessions"))
-	}
-	if r.o.Home != "" {
-		dirs = append(dirs, legacyRegistry(r.o.Home))
-	}
-	return dirs
+	return resumeguard.RegistryDirs(r.o.Mark.RegistryDir, r.o.ConfigDir, r.o.Home)
 }
 
 // slot is one record the poll read: the record (the last good one when it
@@ -40,25 +105,25 @@ type slot struct {
 }
 
 // activity reads the container's live records and decides (02 § 3).
-func (r *run) activity() verdict {
+func (t *Turn) activity() (Verdict, error) {
 	var slots []slot
-	for _, dir := range r.registryDirs() {
+	for _, dir := range t.o.RegistryDirs {
 		d, err := registry.OpenDir(dir)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
 		if err != nil {
-			r.logf("registry: %v", err)
-			return verdictUnreadable
+			t.logf("registry: %v", err)
+			return VerdictUnreadable, err
 		}
 		es, err := d.Entries()
 		if err != nil {
 			d.Close()
-			r.logf("registry: %v", err)
-			return verdictUnreadable
+			t.logf("registry: %v", err)
+			return VerdictUnreadable, err
 		}
 		for _, e := range es {
-			if r.class < 0 || e.PID%256 != r.class {
+			if t.o.Class < 0 || e.PID%256 != t.o.Class {
 				continue
 			}
 			rec, err := d.Read(e)
@@ -68,38 +133,38 @@ func (r *run) activity() verdict {
 			case err != nil:
 				// A counted record that stops parsing keeps its last state;
 				// one never seen parsing counts as unknown work (wait).
-				if last, ok := r.last[e.PID]; ok {
+				if last, ok := t.last[e.PID]; ok {
 					slots = append(slots, slot{rec: last})
 				} else {
 					slots = append(slots, slot{rec: registry.Record{PID: e.PID}, malformed: true})
 				}
 				continue
 			}
-			if rec.StartedAt < r.since || (r.domain != "" && rec.PIDDomain == r.domain) {
+			if rec.StartedAt < t.since || (t.o.OwnDomain != "" && rec.PIDDomain == t.o.OwnDomain) {
 				continue
 			}
-			r.last[e.PID] = rec
+			t.last[e.PID] = rec
 			slots = append(slots, slot{rec: rec})
 		}
 		d.Close()
 	}
 	// Liveness (02 § 3.2): only when some record would hold the container.
 	if anyWaits(slots) {
-		slots = r.alive(slots)
+		slots = t.alive(slots)
 	}
-	r.counted = r.counted[:0]
+	t.counted = t.counted[:0]
 	for _, s := range slots {
 		if !s.malformed {
-			r.counted = append(r.counted, s.rec)
+			t.counted = append(t.counted, s.rec)
 		}
 	}
 	if len(slots) == 0 {
-		return verdictNone
+		return VerdictNone, nil
 	}
 	if anyWaits(slots) {
-		return verdictWait
+		return VerdictWait, nil
 	}
-	return verdictEnd
+	return VerdictEnd, nil
 }
 
 // Ends reports whether a record's status lets the session end: idle (a turn
@@ -122,42 +187,42 @@ func anyWaits(slots []slot) bool {
 // (CS-SESS-089's test): one bounded "docker top" lists its host pids, and a
 // record lives while one of them has its procStart. A record without
 // procStart, a failed docker top and an unreadable stat all count.
-func (r *run) alive(slots []slot) []slot {
-	now := r.clock.Now()
+func (t *Turn) alive(slots []slot) []slot {
+	now := t.o.Clock.Now()
 	need := false
 	for _, s := range slots {
 		if s.malformed || s.rec.ProcStart == "" {
 			continue
 		}
-		st, ok := r.live[liveKey(s.rec)]
+		st, ok := t.live[liveKey(s.rec)]
 		if !ok || (st.alive && now.Sub(st.checked) >= LiveRecheck) {
 			need = true
 		}
 	}
 	if need {
-		starts, err := r.topStarts()
+		starts, err := t.topStarts()
 		if err != nil {
-			r.logf("docker top: %v (records count as alive)", err)
+			t.logf("docker top: %v (records count as alive)", err)
 		}
 		for _, s := range slots {
 			if s.malformed || s.rec.ProcStart == "" {
 				continue
 			}
 			k := liveKey(s.rec)
-			if st, ok := r.live[k]; ok && !(st.alive && now.Sub(st.checked) >= LiveRecheck) {
+			if st, ok := t.live[k]; ok && !(st.alive && now.Sub(st.checked) >= LiveRecheck) {
 				continue
 			}
 			if err != nil || starts == nil {
-				r.live[k] = liveState{alive: true, checked: now}
+				t.live[k] = liveState{alive: true, checked: now}
 				continue
 			}
-			r.live[k] = liveState{alive: starts[s.rec.ProcStart], checked: now}
+			t.live[k] = liveState{alive: starts[s.rec.ProcStart], checked: now}
 		}
 	}
 	out := slots[:0]
 	for _, s := range slots {
 		if !s.malformed && s.rec.ProcStart != "" {
-			if st, ok := r.live[liveKey(s.rec)]; ok && !st.alive {
+			if st, ok := t.live[liveKey(s.rec)]; ok && !st.alive {
 				continue
 			}
 		}
@@ -171,9 +236,9 @@ func liveKey(rec registry.Record) string { return strconv.Itoa(rec.PID) + "/" + 
 // topStarts returns the starttimes of the container's host processes, nil
 // when no listed pid's stat could be read or one could not (cannot rule a
 // record out).
-func (r *run) topStarts() (map[string]bool, error) {
-	out, err := tmuxpane.BoundedRunner{R: r.o.Runner, Timeout: TopBound}.Output(execx.Cmd{
-		Name: "docker", Args: []string{"top", r.id, "-o", "pid"},
+func (t *Turn) topStarts() (map[string]bool, error) {
+	out, err := tmuxpane.BoundedRunner{R: t.o.Runner, Timeout: TopBound}.Output(execx.Cmd{
+		Name: "docker", Args: []string{"top", t.o.Container, "-o", "pid"},
 	})
 	if err != nil {
 		return nil, err
@@ -188,7 +253,7 @@ func (r *run) topStarts() (map[string]bool, error) {
 		if _, err := strconv.ParseUint(f[0], 10, 32); err != nil {
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(procRootOf(r.o.ProcRoot), f[0], "stat"))
+		data, err := os.ReadFile(filepath.Join(procRootOf(t.o.ProcRoot), f[0], "stat"))
 		if err != nil {
 			if !errors.Is(err, os.ErrNotExist) {
 				unknown = true
@@ -229,7 +294,10 @@ func StartTime(stat string) (string, bool) {
 // sessionsOf is the logged form of the counted records: the earliest start
 // is the primary, the rest joins; each with its resume command.
 func (r *run) sessionsOf() []Session {
-	recs := append([]registry.Record(nil), r.counted...)
+	var recs []registry.Record
+	if r.turn != nil {
+		recs = append(recs, r.turn.counted...)
+	}
 	sort.SliceStable(recs, func(i, j int) bool { return recs[i].StartedAt < recs[j].StartedAt })
 	var out []Session
 	for i, rec := range recs {

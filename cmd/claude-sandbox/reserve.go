@@ -174,9 +174,21 @@ func reserveContainer(env *Env, in launch.Inputs, wt worktreeChoice, ralph bool,
 
 		if !ralph {
 			taken := append(append(launch.ExistingWorktrees(wt.Root), sessions.Instances(project)...), lost...)
-			if slices.Contains(taken, instance) {
-				picked := sessions.PickNoun(taken, nil)
-				if attempt == 1 {
+			held := slices.Contains(taken, instance)
+			if in.KeepInstance {
+				// CS-LNCH-218: a restart keeps its noun — the worktree of
+				// that name is the one it reopens — unless a container,
+				// one docker is still removing included, holds it.
+				held = slices.Contains(append(append(sessions.Instances(project),
+					sessions.Instances(sessions.ForProject(removing, in.ProjectDir))...), lost...), instance)
+			}
+			if held {
+				picked := sessions.PickNoun(append(taken, instance), nil)
+				switch {
+				case in.KeepInstance:
+					fmt.Fprintf(env.Out, "'%s' is still being removed; using '%s'.\n", instance, picked)
+					in.KeepInstance = false
+				case attempt == 1:
 					fmt.Fprintf(env.Out, "Instance '%s' was taken by a concurrent launch; using '%s'.\n", instance, picked)
 				}
 				instance = picked
@@ -253,7 +265,9 @@ func reserveContainer(env *Env, in launch.Inputs, wt worktreeChoice, ralph bool,
 		if conflicts >= maxCreateAttempts {
 			return nil, exitErr(2, "Error: container name %s is already in use; gave up after %d attempts to reserve a free instance name.", plan.ContainerName, conflicts)
 		}
-		fmt.Fprintf(env.Err, "Container name %s was taken during launch; picking another instance.\n", plan.ContainerName)
+		if !in.KeepInstance {
+			fmt.Fprintf(env.Err, "Container name %s was taken during launch; picking another instance.\n", plan.ContainerName)
+		}
 		lost = append(lost, instance)
 	}
 }
@@ -382,6 +396,11 @@ func startReserved(env *Env, plan *launch.Plan, headless bool, pre *globalcfg.He
 		// CS-GCFG-001: not headless — an SDK client SIGTERMs right after the
 		// result, and the next launch's check catches the damage.
 		o.after = func() { checkGlobalConfig(env, pre) }
+	}
+	if env.restart != nil {
+		// CS-LNCH-220: the restart's watcher and its log line, right before
+		// the session child; its signal handlers end there.
+		o.onChild = env.restart.onChild(env, plan)
 	}
 	if env.restore != nil && env.restore.onReserved != nil {
 		// CS-TMUX-061/062: a restore resume watches its new session come up

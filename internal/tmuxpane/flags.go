@@ -756,3 +756,32 @@ func appendName(list []string, n string) []string {
 	}
 	return append(list, n)
 }
+
+// StripSessionFamily drops every session-family flag (--resume/-r,
+// --continue/-c, --session-id, --from-pr, --teleport, --fork-session,
+// --name/-n) and its value from a passthrough, keeping everything else in
+// order (CS-SESS-107): a restart passes its own "--resume <id> [--name n]"
+// first, so the user's tokens must not name the conversation a second time.
+// The walk stops — keeping the rest verbatim — at "--", the first
+// positional, or an unknown flag followed by a word (ScanPassthrough's
+// rules), so a prompt or a value it cannot place is never dropped.
+func StripSessionFamily(args []string) []string {
+	var out []string
+	i := 0
+	for i < len(args) {
+		a := args[i]
+		if a == "--" || !strings.HasPrefix(a, "-") || a == "-" {
+			break
+		}
+		name, _ := flagName(a)
+		next, stop := step(args, i)
+		if !sessionFamily[name] {
+			out = append(out, args[i:next]...)
+		}
+		i = next
+		if stop {
+			break
+		}
+	}
+	return append(out, args[i:]...)
+}

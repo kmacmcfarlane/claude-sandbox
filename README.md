@@ -66,6 +66,10 @@ claude-sandbox sessions
 # Reattach after your terminal died:
 claude-sandbox --attach
 
+# Or restart it in a new container: a fresh screen with the whole conversation
+# (the old container is stopped once its turn is over):
+claude-sandbox --restart=otter
+
 # Start a session in the background (no terminal needed), attach later:
 claude-sandbox --detach -- "/librarian-mode start"
 
@@ -112,6 +116,7 @@ These flags are consumed by the launcher and control the container environment. 
 | `--detach` | | Start a new container in the background and exit 0, printing the `--attach` command; needs no terminal and implies `--new`. Refused with `--ralph`, `--attach`, `--join`, `--branch` and `headless`. See [Starting detached](#starting-detached) |
 | `--branch` | | Fork a conversation into a new container (claude's `--resume` picker chooses which); add claude's `--name "my-name"` to name the fork |
 | `--attach[=INSTANCE]` | | Reattach to a running session instead of launching |
+| `--restart[=INSTANCE]` | | Restart a running session in a new container: stop the old one (refused while a turn runs) and resume its conversation here with a fresh screen, under the same noun, in the same place, with the old launch's access options. See [Restarting a session](#restarting-a-session) |
 | `--join[=INSTANCE]` | | Start another session inside a running container |
 | `--no-session-check` | | Skip the multi-session prompt and just launch |
 | `--allow-config-drift` | | Attach or join even if the config changed since that session started |
@@ -201,7 +206,7 @@ A container in which the OOM killer has killed a process shows `(OOM)` after its
 
 ### Launching when a session already exists
 
-Launching in a project that already has a session offers five choices:
+Launching in a project that already has a session offers six choices:
 
 ```
 Found 1 running session(s) for this project:
@@ -211,19 +216,21 @@ Found 1 running session(s) for this project:
   [b] branch the newest conversation into a new container   (fork it; both continue independently)
   [j] new session in an existing container   (dies with that container's primary; not attachable later)
   [a] attach to an existing session   (shares the terminal if someone is already using it)
+  [r] restart a session in a new container   (resumes its conversation here with a fresh screen; stops the old container)
   [q] quit
 ```
 
 **Which to pick:**
 
-| | New container (`n`) | Branch (`b`) | Join a container (`j`) | Attach (`a`) |
-|---|---|---|---|---|
-| Conversation | fresh | a **fork** of the newest one | fresh | the running one |
-| Survives losing your terminal | after the detach keys, with `--detach`, or with `endOnHangup: false` — reattach with `--attach`; otherwise it ends after its turn ([When the terminal closes](#when-the-terminal-closes)) | the same | **no**, gone for good | n/a (this *is* the recovery path) |
-| Dies when another session exits | no | no | **yes** — the container is `--rm` | n/a |
-| Cost | a second container, its own memory limit | a second container, its own memory limit | almost nothing | nothing |
+| | New container (`n`) | Branch (`b`) | Join a container (`j`) | Attach (`a`) | Restart (`r`) |
+|---|---|---|---|---|---|
+| Conversation | fresh | a **fork** of the newest one | fresh | the running one | the running one, resumed |
+| Screen | new | new | new | the TUI redraws; earlier scroll-back is gone | **new, with the whole history** |
+| Survives losing your terminal | after the detach keys, with `--detach`, or with `endOnHangup: false` — reattach with `--attach`; otherwise it ends after its turn ([When the terminal closes](#when-the-terminal-closes)) | the same | **no**, gone for good | n/a (this *is* the recovery path) | as a new container |
+| Dies when another session exits | no | no | **yes** — the container is `--rm` | n/a | no |
+| Cost | a second container, its own memory limit | a second container, its own memory limit | almost nothing | nothing | the old container is **stopped**: its joined sessions and anything else running there end with it |
 
-If you detached (or turned `endOnHangup` off) and want your session back, that is **`[a]` attach**; a session whose terminal closed ended after its turn, and the next launch here prints the command that resumes it. Use **`[b]` branch** to explore a side idea with the running session's full context — the fork gets its own session id, so both conversations continue independently. Use `[j]` only for a genuinely disposable second session, and remember it cannot be recovered.
+If you detached (or turned `endOnHangup` off) and want your session back, that is **`[a]` attach** — or **`[r]` restart** when you want its history on screen again; a session whose terminal closed ended after its turn, and the next launch here prints the command that resumes it. Use **`[b]` branch** to explore a side idea with the running session's full context — the fork gets its own session id, so both conversations continue independently. Use `[j]` only for a genuinely disposable second session, and remember it cannot be recovered.
 
 ### Branching a conversation
 
@@ -239,6 +246,68 @@ claude-sandbox --branch --name "something sidequest"  # same, and name the fork 
 To name the fork up front instead of `/rename`-ing afterwards, add claude's own `--name` (short form `-n`) — it passes through like any claude flag and sets the display name shown in the resume picker and terminal title. It composes with `--branch` or stands alone to name any new session at launch: `claude-sandbox --name "big refactor"`. (There is deliberately no `--branch=NAME` form: on `--attach=`/`--join=` the `=` value picks a *target*, and a value that instead named the result would make the same syntax mean two things.)
 
 The launcher composes claude's own `--resume`/`--continue`/`--fork-session` and never reads the transcript files (their format is internal to Claude Code and version-unstable). Because branch always means a *new* container, `--branch` rejects `--attach`, `--join`, `--ralph`, and a passthrough `--resume`/`--continue`.
+
+### Restarting a session
+
+`docker attach` splices your terminal onto the session's: the TUI redraws, and everything that
+scrolled by before is gone. A restart gives the session a fresh screen with its whole history
+instead: it stops the session's container gracefully and resumes the same conversation in a new
+one, under the same noun.
+
+```bash
+claude-sandbox --restart=otter   # this project's session 'otter'
+claude-sandbox --restart         # the only running session, or pick one
+```
+
+or choose `[r]` in the menu above. What it does:
+
+1. **Finds the conversation** the session has open now (Claude Code's own registry record for the
+   container's main claude, so a `/resume` or `/clear` inside the session is followed) and checks
+   it runs where its transcript is filed.
+2. **Refuses a running turn** (exit 1, nothing stopped): retry once the session is idle, or
+   attach. A prompt waiting for an answer is asked about, since restarting drops it.
+3. **Asks first (default No)** when something else would be affected: another terminal attached to
+   the session (named with its tmux pane and since when), a joined session in that container (it is
+   killed with the container; its resume command is printed and logged), or when whether someone is
+   attached cannot be told (macOS). With nothing else affected there is no question, just one line
+   saying what happens.
+4. **Builds the new launch** first — images included — and only then stops the old container
+   (`docker stop --signal SIGTERM --time 30`, as when a terminal closes), waits for docker to remove
+   it, and starts the new one: `--resume <id>`, the conversation's own `--name`, the session's
+   worktree (explicitly, both ways), the `--model` given at its launch, and the claude flags a resume
+   replays (`--effort`, `--add-dir`, `--append-system-prompt`, …). Your own flags on the restart
+   command apply on top, and `--model` replaces the carried one.
+5. **Carries the old launch's access options over**: `--dangerous`, `--ssh`, `--git`,
+   `--docker-socket`, `--aws` and `--package-caches`, read from the old container itself and its
+   `launchflags` label. One line names each option carried and how it was given (a flag, an
+   environment switch, the config — or "cannot be told", in which case it is carried as the flag),
+   so a re-grant is never silent. An option this launch gives anyway is not mentioned. Claude flags
+   a resume does not replay (for example `--permission-mode`) are named, never carried: pass them
+   again after `--`.
+
+There is no exemption from the [resume guard](#resuming-a-conversation-that-is-already-open-exit-4):
+by the time the new container is reserved the old one is gone, so the guard finds nothing holding
+the conversation. A launch that resumed the same conversation in between wins; the restart then
+exits 4 and says where it is open.
+
+**Every failure after the stop leaves the way back:** the exact command that resumes the
+conversation is printed, the restart is logged to `~/.local/state/claude-sandbox/session-ends.jsonl`
+(`"reason": "restart"`), and the next launch in the project prints the command once. That includes a
+new session that ends with an error before it is up (for example a conversation missing from the
+config dir). A tmux pane that showed the old session returns to its prompt with no mark (it does not
+go pending for a conversation that now runs elsewhere).
+
+**Refused** (exit 2, nothing stopped): headless and ralph containers, a paused one (unpause it first),
+one still starting, one started by an older launcher, one using another `CLAUDE_CONFIG_DIR` than this
+shell (the message prints the right command), a `--resume <id>` naming a conversation the session does
+not have open (one a joined session holds: end that session first), `--worktree`/`--no-worktree`,
+`--new`, `--attach`, `--join`, `--branch`, `--detach`, and a launcher inside a sandbox (it cannot see who
+is attached or reach the host's tmux).
+
+**What a restart does not keep:** joined sessions and anything else running in the old container
+(a dev server, a background task) end with it; session state that `--resume` does not restore — a
+permission mode switched with Shift+Tab, a `/model` change, MCP connections, an unsent draft — is
+lost.
 
 ### Resuming a conversation that is already open (exit 4)
 
@@ -257,6 +326,10 @@ Error: conversation 0b5e9c3a-… is already open in 'otter' (claude-sandbox-…-
        Attach to it:  cd ~/work/proj && claude-sandbox --attach=otter
        Or fork it:    add --fork-session after -- (a new conversation id)
 ```
+
+When the holder is a session of this project and you want the conversation in this terminal with
+its history on screen, `claude-sandbox --restart=<noun>` stops that session and resumes it here
+([Restarting a session](#restarting-a-session)).
 
 - **Open** means: another sandbox was created to resume it and has not switched away yet
   (its `claude-sandbox.resume` label, below), a running or paused sandbox's own claude — or a

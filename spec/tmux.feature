@@ -1408,3 +1408,20 @@ Feature: tmux integration (CS-TMUX)
       pane finds the window its own (case B) and hands it back at its end
     And an automatic window, a window that still carries the options (a live server), a different
       name, or an unlabelled row makes no write
+
+  @new
+  Scenario: CS-TMUX-080 A restart unsets the old container's pane marks before the stop
+    Given a restart about to stop a container (CS-LNCH-218)
+    Then one bounded "tmux list-panes -a" finds every pane whose mark names that container
+      (its 64-hex id, else its name), and each mark is unset with one bounded set-option,
+      right before docker stop
+    And the old pane's launcher then finds no mark of its own at its settle and unsets
+      (CS-TMUX-071 is unchanged), so the pane never goes pending for a conversation that
+      runs elsewhere
+    And when the stop fails and the container still runs, each mark is set back, but only
+      on a pane whose mark is still unset (one bounded show-options first): a mark written
+      since is left alone
+    And the new container's pane mark carries the conversation it resumes, so
+      CS-TMUX-017's note stays quiet
+    And a tmux server that does not answer leaves nothing to unset
+

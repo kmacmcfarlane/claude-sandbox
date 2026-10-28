@@ -34,7 +34,34 @@ type Entry struct {
 	WaitedMs    int64     `json:"waitedMs"`
 	Capped      bool      `json:"capped"`
 	Outcome     string    `json:"outcome"`
+	// A restart's fields (CS-LNCH-220): the container it created, how the
+	// conversation was found (record, label or mark), the turn state it
+	// stopped at (idle, waiting, unknown), and claude's picker command when
+	// the conversation came from a label or a mark.
+	NewContainer       string `json:"newContainer,omitempty"`
+	NewInstance        string `json:"newInstance,omitempty"`
+	ConversationSource string `json:"conversationSource,omitempty"`
+	TurnState          string `json:"turnState,omitempty"`
+	Picker             string `json:"picker,omitempty"`
 }
+
+// Reasons a log line or a notice records.
+const (
+	// ReasonHangup: the helper ended a container whose terminal closed.
+	ReasonHangup = "hangup"
+	// ReasonRestart: a restart stopped the container (CS-LNCH-220).
+	ReasonRestart = "restart"
+	// ReasonRestartJoin: a joined session killed by a restart's stop.
+	ReasonRestartJoin = "restart-join"
+)
+
+// Restart outcomes, as logged (CS-LNCH-220).
+const (
+	OutcomeRestarted        = "restarted"
+	OutcomeStartFailed      = "start-failed"
+	OutcomeRefusedAfterStop = "refused-after-stop"
+	OutcomeInterrupted      = "interrupted"
+)
 
 // finish logs a final outcome: one line in the session-end log, and for an
 // end the helper caused, a notice for the next launch in the project.
@@ -45,7 +72,7 @@ func (r *run) finish(res Result) Result {
 	e := Entry{
 		At: now.UTC().Format(time.RFC3339), Container: m.Container, ContainerID: m.ContainerID,
 		Project: m.Project, Instance: m.Instance, Worktree: m.Worktree, CwdRoot: m.CwdRoot,
-		ConfigDir: m.ConfigDir, Sessions: res.Sessions, Resume: []string{}, Reason: "hangup",
+		ConfigDir: m.ConfigDir, Sessions: res.Sessions, Resume: []string{}, Reason: ReasonHangup,
 		WaitedMs: now.Sub(r.o.HangupAt).Milliseconds(), Capped: res.Capped, Outcome: res.Outcome,
 	}
 	if e.Sessions == nil {

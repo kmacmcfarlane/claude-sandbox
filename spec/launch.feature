@@ -3516,3 +3516,68 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       nothing; headless and ralph get the value like any create
     And a container created before this drifts once on attach or join, through
       the shadow CLAUDE.md's new static time zone bullet; [n] clears it
+
+  # ---- restarting a session (sessions.feature CS-SESS-105..108) ----
+
+  @new
+  Scenario: CS-LNCH-218 The restart's sequence: the stop after the image work, before the lock
+    Given a restart decided (CS-SESS-105..108)
+    Then the image work, the env and config checks and the global-config health check run
+      first; nothing is stopped when any of them fails
+    And then, before the launch lock: the container's end.lock is taken
+      (sessionend.TryEndLock); one held by a session-end helper is polled every EndPoll,
+      for at most 60 s (then exit 1, nothing stopped), going on when the lock is taken, and
+      skipping the stop when the container is gone meanwhile; the restart takes no lease
+    And the re-check (CS-SESS-108) reads the container, the class's records with
+      resumeguard.ReadClass (a malformed one exits 2 before the turn rule runs), the
+      primary and its conversation, the turn rule, then the clients
+    And then the pane marks naming it are unset (CS-TMUX-080), and
+      "docker stop --signal SIGTERM --time 30 <64-hex id>" runs, bounded at 40 s
+    And then the restart waits, polling every 250 ms for at most 10 s, until docker
+      removed the container
+    And the launch then reserves its container as any launch does: the resume guard runs
+      under the lock with no exemption, and finds nothing holding the conversation
+    And the noun is the old one (Inputs.KeepInstance): never checked against existing
+      worktrees (that worktree is the one reopened); when a discovered container, one
+      docker is still removing included, holds it, or docker's create reports a name
+      conflict, a new noun is picked with "'<noun>' is still being removed; using '<new>'."
+    And the turn wait, the stop and the removal wait never hold the launch lock
+
+  @new
+  Scenario: CS-LNCH-220 Every failure after the stop leaves the way back
+    Given a restart whose docker stop began
+    Then a failure after it — the launch lock, the resume guard (exit 4: a launch that
+      resumed the id meanwhile wins, and one more line says the old container was stopped
+      and its conversation is open in the session named), docker create or start — prints
+      the launch's own error, then the conversation's resume command
+      (tmuxpane.ResumeCommand), and exits with the error's status
+    And a docker stop that fails while the container still runs creates nothing, sets the
+      unset marks back (CS-TMUX-080) and exits 1 naming its state and the attach command
+    And SIGINT, SIGTERM and SIGHUP are caught from the restart's start until its session
+      child installs its own handlers: before the stop a signal exits 128+n with nothing
+      stopped; after it the stop and the removal wait finish, a reservation is removed,
+      no session starts, the resume command is printed and the launcher exits 128+n
+    And every restart that stopped something appends one line to
+      <StateRoot>/session-ends.jsonl (reason "restart"; outcome restarted, start-failed,
+      refused-after-stop or interrupted; the old and new container and noun; how the
+      conversation was found; the turn state; each conversation with its resume command,
+      the joins' included; claude's picker command when it came from a label or a mark)
+    And an outcome other than restarted, and every join the stop killed, writes the
+      CS-LNCH-212 notice, so the next interactive launch in the project prints the
+      resume command once
+    And the killed joins' resume commands are printed right after the stop
+    And a new session that ends with a crash code before its claude resumed the
+      conversation, within a minute (tmuxpane.StartWatcher), prints that it ended before
+      it was up, where the conversation is, and the resume command, and logs start-failed
+
+  @new
+  Scenario: CS-LNCH-221 Where a restart stands down
+    Then a launcher inside a sandbox (hostdirs.InSandbox) refuses --restart, exit 2,
+      before any docker call: it sees neither the host's leases nor its processes, cannot
+      reach the host's tmux, and its launch lock is container-private; the message names
+      the host command
+    And headless refuses --restart (headlessRejection), and headless, ralph, paused and
+      reserved containers are never restarted (CS-SESS-105)
+    And off Linux (macOS) a restart is allowed, but client presence cannot be told, so it
+      always asks (CS-SESS-108)
+

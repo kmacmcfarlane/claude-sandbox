@@ -34,6 +34,11 @@ type NoticeEntry struct {
 	SessionID string `json:"sessionId,omitempty"`
 	Resume    string `json:"resume,omitempty"`
 	Capped    bool   `json:"capped,omitempty"`
+	// Reason is why it ended: "" (a hang-up, CS-LNCH-212), ReasonRestart (a
+	// restart that stopped the container and did not resume the
+	// conversation) or ReasonRestartJoin (a joined session a restart's stop
+	// killed), CS-LNCH-220.
+	Reason string `json:"reason,omitempty"`
 }
 
 // NoticeMax is a notice file's largest size; a larger one is removed
@@ -179,7 +184,14 @@ func NoticeText(e NoticeEntry, at time.Time) string {
 		when = fmt.Sprintf("it ended at the %d min cap while busy", int(TurnMax.Minutes()))
 	}
 	inst := registry.Printable(e.Instance)
-	head := fmt.Sprintf("Note: '%s' ended when its terminal closed (%s, %s).", inst, when, at.Local().Format("2006-01-02 15:04"))
+	stamp := at.Local().Format("2006-01-02 15:04")
+	head := fmt.Sprintf("Note: '%s' ended when its terminal closed (%s, %s).", inst, when, stamp)
+	switch e.Reason {
+	case ReasonRestart:
+		head = fmt.Sprintf("Note: a restart of '%s' stopped its container but did not resume its conversation (%s).", inst, stamp)
+	case ReasonRestartJoin:
+		head = fmt.Sprintf("Note: a session joined to '%s' was killed when '%s' was restarted (%s).", inst, inst, stamp)
+	}
 	resume := e.Resume
 	if strings.IndexFunc(resume, func(r rune) bool { return unicode.IsControl(r) || unicode.Is(unicode.Cf, r) }) >= 0 {
 		resume = "" // the file is the user's, but never print an escape
