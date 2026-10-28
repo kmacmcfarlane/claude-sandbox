@@ -93,9 +93,14 @@ type restartState struct {
 	userPass   []string
 	// clientKeys are the attached clients at the decision.
 	clientKeys map[string]bool
-	turnState  string
+	// joinKeys are the joins counted so far (rs.joins), by record key.
+	joinKeys  map[string]bool
+	turnState string
 
 	// After the decision.
+	// carried are the access flags carried over (CS-SESS-107): every way back
+	// the restart prints, logs or leaves as a notice passes them too.
+	carried []string
 	held    []tmuxpane.HeldMark
 	stopped bool
 	sig     <-chan os.Signal
@@ -283,7 +288,7 @@ func prepareRestart(env *Env, projectDir string, f *launchFlags, cfg *cascade.Co
 	}
 	_, _, _, home := hostIdentity(env.Getenv)
 	rs := &restartState{target: target, home: home, class: -1,
-		statuses: map[string]string{}, clientKeys: map[string]bool{}}
+		statuses: map[string]string{}, clientKeys: map[string]bool{}, joinKeys: map[string]bool{}}
 	attach := attachCommand(projectDir, home, target.Instance)
 
 	// CS-SESS-107: the config dir is where the transcript is. A container
@@ -350,6 +355,7 @@ func prepareRestart(env *Env, projectDir string, f *launchFlags, cfg *cascade.Co
 			continue
 		}
 		if _, alive, err := resumeguard.AliveRecord(env.Runner, env.ProcRoot, target.Name, []registry.Record{r}); err != nil || alive {
+			rs.joinKeys[recordKey(r)] = true
 			rs.joins = append(rs.joins, r)
 		}
 	}
@@ -571,7 +577,7 @@ func (rs *restartState) noRecordLines() []string {
 		rs.who() + " has no registry record, so the launcher cannot see whether a turn is running or which conversation is open now;",
 		from + ". If /resume or /clear switched it since, the open one is stopped and " + rs.mark.Conversation + " is resumed instead.",
 	}
-	if p := tmuxpane.ResumePickerCommand(rs.mark); p != "" && tmuxpane.PrintableMark(rs.mark) {
+	if p := rs.pickerCmd(); p != "" && tmuxpane.PrintableMark(rs.mark) {
 		lines = append(lines, "Find the other with claude's picker:  "+p)
 	} else {
 		lines = append(lines, "Find the other with claude's picker in that session's directory.")
@@ -760,24 +766,24 @@ func (rs *restartState) composeMark(env *Env, f *launchFlags, cfg *cascade.Confi
 	if n := tmuxpane.NameArg(f.Passthrough); n != "" {
 		m.Name, m.NameSource = n, tmuxpane.NameSourceUser
 	}
-	passDangerous := slices.Contains(rec.Unreplayed, "--dangerously-skip-permissions")
-	var unreplayed []string
-	for _, n := range rec.Unreplayed {
-		if n != "--dangerously-skip-permissions" {
-			unreplayed = append(unreplayed, n)
-		}
-	}
-	if len(unreplayed) > 0 {
-		notes = append(notes, "Note: "+rs.who()+" was also launched with "+strings.Join(unreplayed, ", ")+
+	// Claude flags a resume does not replay are named, never carried; a
+	// --dangerously-skip-permissions given to claude after -- is one of them.
+	if len(rec.Unreplayed) > 0 {
+		notes = append(notes, "Note: "+rs.who()+" was also launched with "+strings.Join(rec.Unreplayed, ", ")+
 			" (claude flags a restart does not replay); pass them again after -- to keep them.")
 	}
-	carried := carryAccess(env, f, cfg, t, ins, rs.home, prefixOK && prefixDangerous || passDangerous, passDangerous)
+	carried, dropped := carryAccess(env, f, cfg, t, ins, rs.home, prefixOK && prefixDangerous)
 	if len(carried) > 0 {
 		var parts []string
 		for _, c := range carried {
 			parts = append(parts, c.flag+" ("+c.how+")")
+			rs.carried = append(rs.carried, c.flag)
 		}
 		notes = append(notes, "Carried over from "+rs.who()+": "+strings.Join(parts, ", ")+".")
+	}
+	if len(dropped) > 0 {
+		notes = append(notes, "Note: "+rs.who()+" had "+strings.Join(dropped, ", ")+
+			" from its config, which no longer gives it; pass it again to keep it.")
 	}
 	return notes
 }
@@ -785,34 +791,26 @@ func (rs *restartState) composeMark(env *Env, f *launchFlags, cfg *cascade.Confi
 // carriedOption is one access option a restart re-grants (CS-SESS-107).
 type carriedOption struct{ flag, how string }
 
-// carryAccess carries the old session's access options over (the operator's
-// answer): for each widening launcher option, whether it was in effect in
-// the old container — read from the container itself (claude's command line,
-// its mounts, its environment) and the launchflags label — and how it was
-// given: a flag (the label names it), an environment switch (the label names
-// the variable; its value, or the config behind it, is not recorded), or the
-// config (in effect, named nowhere). One this launch would not give on its
-// own is set as its flag on f — this launch's explicit flags already won —
-// and returned so the restart names it. An option whose source cannot be
-// told (no label) is carried as the flag, and says so.
-func carryAccess(env *Env, f *launchFlags, cfg *cascade.Config, s sessions.Session, ins inspected, home string, oldDangerous, passDangerous bool) []carriedOption {
+// carryAccess carries the old session's access options over (CS-SESS-107),
+// but only what the launcher itself recorded as given at the old launch: the
+// claude-sandbox.launchflags label naming the launcher flag, or naming its
+// CLAUDE_SANDBOX_* switch. Such an option that this launch would not give on
+// its own is set as its flag on f (this launch's own flags already won) and
+// returned, so the restart names it.
+//
+// Nothing is ever inferred from the container's mounts, environment or
+// command line: an env file and a cascade config.yaml are session-writable,
+// so a session could otherwise write its way to an access option. An option
+// that evidence says was in effect while the label names neither its flag
+// nor its switch came from the old launch's config; when today's config no
+// longer gives it, it is returned in dropped, for a note, and never granted.
+func carryAccess(env *Env, f *launchFlags, cfg *cascade.Config, s sessions.Session, ins inspected, home string, prefixDangerous bool) (carried []carriedOption, dropped []string) {
 	_, named := tmuxpane.FromLabel(s.LaunchFlags)
 	labelled := s.RegistryDir != ""
+	// Evidence, for the note only.
 	mounted := func(dest string) bool {
 		for _, m := range ins.Mounts {
 			if filepath.Clean(m.Destination) == dest {
-				return true
-			}
-		}
-		return false
-	}
-	cascadeMounts := func(dest string) bool {
-		for _, m := range cfg.Mounts {
-			c := m.Container
-			if c == "" {
-				c = m.Host
-			}
-			if filepath.Clean(c) == dest {
 				return true
 			}
 		}
@@ -829,18 +827,17 @@ func carryAccess(env *Env, f *launchFlags, cfg *cascade.Config, s sessions.Sessi
 		}
 		return false
 	}
-	how := func(flag, envVar string, extra string) string {
-		switch {
-		case slices.Contains(named, flag):
-			return "given as a flag"
-		case extra != "":
-			return extra
-		case slices.Contains(named, envVar):
-			return "from " + envVar + " or the config at its launch; this launch does not give it"
-		case labelled:
-			return "from the config at its launch, which no longer gives it"
+	cascadeMounts := func(dest string) bool {
+		for _, m := range cfg.Mounts {
+			c := m.Container
+			if c == "" {
+				c = m.Host
+			}
+			if dest != "" && filepath.Clean(c) == dest {
+				return true
+			}
 		}
-		return "how it was given cannot be told; carried as the flag"
+		return false
 	}
 	on := func(cli *bool, envVar string, yaml *bool) bool {
 		if cli != nil && *cli {
@@ -852,24 +849,32 @@ func carryAccess(env *Env, f *launchFlags, cfg *cascade.Config, s sessions.Sessi
 		}
 		return yaml != nil && *yaml
 	}
-	t := true
-	var out []carriedOption
-
-	if oldDangerous && !resolveDangerous(env, f, cfg) {
-		extra := ""
-		if passDangerous && !slices.Contains(named, "--dangerous") {
-			extra = "passed to claude after -- at its launch"
+	decide := func(flag, envVar string, nowOn, evidence bool) (carry bool, how string) {
+		switch {
+		case nowOn:
+			return false, ""
+		case slices.Contains(named, flag):
+			return true, "given as a flag at its launch"
+		case slices.Contains(named, envVar):
+			return true, envVar + " was set at its launch"
+		case labelled && evidence:
+			dropped = append(dropped, flag)
 		}
-		f.Dangerous = true
-		out = append(out, carriedOption{"--dangerous", how("--dangerous", "CLAUDE_SANDBOX_DANGEROUS", extra)})
+		return false, ""
 	}
+
+	if ok, how := decide("--dangerous", "CLAUDE_SANDBOX_DANGEROUS", resolveDangerous(env, f, cfg), prefixDangerous); ok {
+		f.Dangerous = true
+		carried = append(carried, carriedOption{"--dangerous", how})
+	}
+	t := true
 	ha := cfg.HostAccess
 	for _, o := range []struct {
 		flag, envVar string
 		cli          **bool
 		yaml         *bool
-		old          bool
-		viaMounts    string
+		evidence     bool
+		dest         string
 	}{
 		{"--ssh", "CLAUDE_SANDBOX_HOST_ACCESS_SSH_ENABLED", &f.SSH, ha.SSH.Enabled, mounted(filepath.Join(home, ".ssh")), filepath.Join(home, ".ssh")},
 		{"--git", "CLAUDE_SANDBOX_HOST_ACCESS_GIT_ENABLED", &f.Git, ha.Git.Enabled, mounted(filepath.Join(home, ".gitconfig")), filepath.Join(home, ".gitconfig")},
@@ -877,17 +882,13 @@ func carryAccess(env *Env, f *launchFlags, cfg *cascade.Config, s sessions.Sessi
 		{"--aws", "CLAUDE_SANDBOX_HOST_ACCESS_AWS_ENABLED", &f.AWS, ha.AWS.Enabled, mounted(filepath.Join(home, ".aws")), filepath.Join(home, ".aws")},
 		{"--package-caches", "CLAUDE_SANDBOX_HOST_ACCESS_PACKAGE_CACHES_ENABLED", &f.PackageCaches, ha.PackageCaches.Enabled, cachesOn(), ""},
 	} {
-		old := o.old || slices.Contains(named, o.flag)
-		if !old {
-			continue
+		nowOn := on(*o.cli, o.envVar, o.yaml) || cascadeMounts(o.dest)
+		if ok, how := decide(o.flag, o.envVar, nowOn, o.evidence); ok {
+			*o.cli = &t
+			carried = append(carried, carriedOption{o.flag, how})
 		}
-		if on(*o.cli, o.envVar, o.yaml) || (o.viaMounts != "" && cascadeMounts(o.viaMounts)) {
-			continue // this launch gives it on its own
-		}
-		*o.cli = &t
-		out = append(out, carriedOption{o.flag, how(o.flag, o.envVar, "")})
 	}
-	return out
+	return carried, dropped
 }
 
 // beforeReserve runs right before the launch lock (CS-LNCH-218): end.lock,
@@ -1095,7 +1096,10 @@ func (rs *restartState) recheck(env *Env) (gone bool, err error) {
 		if r.Status == registry.StatusWaiting && rs.statuses[recordKey(r)] != registry.StatusWaiting {
 			asks = append(asks, fmt.Sprintf("%s is waiting for an answer to a prompt now; restarting drops that prompt.", recordLabel(r)))
 		}
-		if _, seen := rs.statuses[recordKey(r)]; !seen && (rs.primary == nil || r.PID != rs.primary.PID) && (!ok || r.PID != primary.PID) {
+		// A new join: not one the decision counted (its join set), nor the
+		// primary then or now.
+		if !rs.joinKeys[recordKey(r)] && (rs.primary == nil || r.PID != rs.primary.PID) && (!ok || r.PID != primary.PID) {
+			rs.joinKeys[recordKey(r)] = true
 			rs.joins = append(rs.joins, r)
 			asks = append(asks, "A joined session started there since you chose it: "+recordLabel(r)+". It is killed (SIGKILL) when the container stops; its resume command is printed and logged after the stop.")
 		}
@@ -1123,10 +1127,31 @@ func (rs *restartState) recheck(env *Env) (gone bool, err error) {
 	return false, nil
 }
 
+// resumeCmd is the conversation's way back (CS-LNCH-220): ResumeCommand
+// with the access flags the restart carried, so a way back never drops
+// them.
+func (rs *restartState) resumeCmd() string {
+	args := tmuxpane.ResumeArgs(rs.mark)
+	if args == nil {
+		return ""
+	}
+	return tmuxpane.CommandLine(rs.mark, append(append([]string(nil), rs.carried...), args...))
+}
+
+// pickerCmd is claude's picker in the session's place, with the carried
+// access flags.
+func (rs *restartState) pickerCmd() string {
+	args := tmuxpane.ResumePickerArgs(rs.mark)
+	if args == nil {
+		return ""
+	}
+	return tmuxpane.CommandLine(rs.mark, append(append([]string(nil), rs.carried...), args...))
+}
+
 // joinResume is a killed join's way back: its resume command, else where to
 // resume it by hand.
 func (rs *restartState) joinResume(j registry.Record) string {
-	if c := sessionend.ResumeCommand(rs.mark, j); c != "" {
+	if c := sessionend.ResumeCommandWith(rs.mark, j, rs.carried); c != "" {
 		return c
 	}
 	return fmt.Sprintf("%s: resume it by hand from %s with claude-sandbox --new -- --resume %s", recordLabel(j), registry.Printable(j.Cwd), j.SessionID)
@@ -1135,13 +1160,13 @@ func (rs *restartState) joinResume(j registry.Record) string {
 // sessionsForLog is the logged form of the conversations the stop ended.
 func (rs *restartState) sessionsForLog() []sessionend.Session {
 	out := []sessionend.Session{{SessionID: rs.mark.Conversation, Name: rs.mark.Name, NameSource: rs.mark.NameSource,
-		Kind: "primary", Resume: tmuxpane.ResumeCommand(rs.mark)}}
+		Kind: "primary", Resume: rs.resumeCmd()}}
 	if rs.primary != nil {
 		out[0].PID = rs.primary.PID
 	}
 	for _, j := range rs.joins {
 		out = append(out, sessionend.Session{SessionID: j.SessionID, Name: j.Name, NameSource: j.NameSource,
-			PID: j.PID, Kind: "join", Resume: sessionend.ResumeCommand(rs.mark, j)})
+			PID: j.PID, Kind: "join", Resume: sessionend.ResumeCommandWith(rs.mark, j, rs.carried)})
 	}
 	return out
 }
@@ -1163,7 +1188,7 @@ func (rs *restartState) logOutcome(env *Env, outcome string) {
 		e.NewContainer, e.NewInstance = rs.newPlan.ContainerName, rs.newPlan.Instance
 	}
 	if rs.source != "record" {
-		e.Picker = tmuxpane.ResumePickerCommand(m)
+		e.Picker = rs.pickerCmd()
 	}
 	for _, s := range e.Sessions {
 		e.Resume = append(e.Resume, s.Resume)
@@ -1174,7 +1199,7 @@ func (rs *restartState) logOutcome(env *Env, outcome string) {
 	n := sessionend.Notice{V: 1, Project: rs.target.Project, At: now.UnixMilli()}
 	if outcome != sessionend.OutcomeRestarted {
 		n.Entries = append(n.Entries, sessionend.NoticeEntry{Instance: rs.target.Instance, Name: m.Name, SessionID: m.Conversation,
-			Resume: tmuxpane.ResumeCommand(m), Reason: sessionend.ReasonRestart})
+			Resume: rs.resumeCmd(), Reason: sessionend.ReasonRestart})
 	}
 	for _, j := range rs.joins {
 		n.Entries = append(n.Entries, sessionend.NoticeEntry{Instance: rs.target.Instance, Name: j.Name, SessionID: j.SessionID,
@@ -1201,11 +1226,16 @@ func (rs *restartState) failAfterStop(env *Env, err error, outcome string) error
 	case err != nil:
 		fmt.Fprintf(env.Err, "Error: %v\n", err)
 	}
-	if code == exitResumeLive {
-		fmt.Fprintf(env.Err, "%s was stopped; its conversation is now open in the session named above.\n", rs.who())
+	var gr *guardRefusal
+	if errorAs(err, &gr) {
+		if gr.held {
+			fmt.Fprintf(env.Err, "%s was stopped; its conversation is now open in the session named above.\n", rs.who())
+		} else {
+			fmt.Fprintf(env.Err, "%s was stopped; whether its conversation is open elsewhere now cannot be told (see above).\n", rs.who())
+		}
 	}
 	fmt.Fprintf(env.Err, "The old container of %s was stopped, and its conversation (%s) was not resumed.\n", rs.who(), rs.convLabel())
-	fmt.Fprintf(env.Err, "Resume it by hand: %s\n", tmuxpane.ResumeCommand(rs.mark))
+	fmt.Fprintf(env.Err, "Resume it by hand: %s\n", rs.resumeCmd())
 	rs.logOutcome(env, outcome)
 	return &execx.CodeError{Code: code}
 }
@@ -1232,26 +1262,38 @@ func (rs *restartState) onChild(env *Env, plan *launch.Plan) func() {
 // with a crash code before its claude resumed the conversation, within
 // EarlyEnd, gets the way back printed and logged.
 func (rs *restartState) afterSession(env *Env, err error) error {
-	if rs.watcher == nil {
-		return err
+	if err == nil {
+		// Exit 0: the session's own end, whenever it came.
+		rs.watcher.ChildReturned()
+		return nil
 	}
-	code := 0
+	code := 2
 	var ce *execx.CodeError
+	what := "could not be started"
 	if errorAs(err, &ce) {
 		code = ce.Code
-	}
-	if !rs.watcher.EndedEarly() || tmuxpane.CleanExit(code) {
-		return err
+		if rs.watcher != nil && !rs.watcher.EndedEarly() {
+			return err // it was up: a later end is the session's own
+		}
+		// 78 included: pidslot refused to start claude (CS-GCFG-038).
+		what = fmt.Sprintf("ended before it was up (exit %d)", code)
+		if ce.Msg != "" && ce.Msg != fmt.Sprintf("exit %d", ce.Code) {
+			fmt.Fprintln(env.Err, ce.Msg)
+		}
+	} else {
+		// docker could not be run at all: the session never started.
+		rs.watcher.ChildReturned()
+		fmt.Fprintf(env.Err, "Error: %v\n", err)
 	}
 	cfg := rs.mark.ConfigDir
 	if cfg == "" {
 		cfg = "its config dir"
 	}
-	fmt.Fprintf(env.Err, "Error: the restarted session of %s (%s) ended before it was up (exit %d).\n", rs.who(), rs.convLabel(), code)
+	fmt.Fprintf(env.Err, "Error: the restarted session of %s (%s) %s.\n", rs.who(), rs.convLabel(), what)
 	fmt.Fprintf(env.Err, "       The old container was stopped; the conversation is in %s.\n", cfg)
-	fmt.Fprintf(env.Err, "       Resume it by hand: %s\n", tmuxpane.ResumeCommand(rs.mark))
+	fmt.Fprintf(env.Err, "       Resume it by hand: %s\n", rs.resumeCmd())
 	rs.logOutcome(env, sessionend.OutcomeStartFailed)
-	return err
+	return &execx.CodeError{Code: code}
 }
 
 // signalsForRestart is Env.restartSignals with the real handlers as its

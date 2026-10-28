@@ -369,6 +369,12 @@ func within(p, root string) bool {
 // rec's cwd names; "" when that place cannot be told or a value it would
 // print is not printable.
 func ResumeCommand(m tmuxpane.Mark, rec registry.Record) string {
+	return ResumeCommandWith(m, rec, nil)
+}
+
+// ResumeCommandWith is ResumeCommand with launcher flags before the resume's
+// own: a restart passes the access flags it carried (CS-SESS-107).
+func ResumeCommandWith(m tmuxpane.Mark, rec registry.Record, launcherFlags []string) string {
 	wt, ok := worktreeOf(m, rec.Cwd)
 	if !ok {
 		return ""
@@ -378,5 +384,9 @@ func ResumeCommand(m tmuxpane.Mark, rec registry.Record) string {
 	if !tmuxpane.PrintableMark(m) {
 		return ""
 	}
-	return tmuxpane.ResumeCommand(m)
+	args := tmuxpane.ResumeArgs(m)
+	if args == nil {
+		return ""
+	}
+	return tmuxpane.CommandLine(m, append(append([]string(nil), launcherFlags...), args...))
 }

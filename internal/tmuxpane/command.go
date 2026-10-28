@@ -33,8 +33,14 @@ func ResumeCommand(m Mark) string {
 // so it needs no conversation. "" for a worktree whose generated name is not
 // recorded yet (any worktree flag would open the picker in the wrong place).
 func ResumePickerCommand(m Mark) string {
+	return commandLine(m, ResumePickerArgs(m))
+}
+
+// ResumePickerArgs are ResumePickerCommand's launcher arguments, unquoted;
+// nil for a worktree whose generated name is not recorded yet.
+func ResumePickerArgs(m Mark) []string {
 	if m.WorktreeGenerated && m.Worktree == "" {
-		return ""
+		return nil
 	}
 	w := []string{"--new"}
 	if m.Worktree != "" {
@@ -45,8 +51,15 @@ func ResumePickerCommand(m Mark) string {
 	if m.Model != "" {
 		w = append(w, "--model", m.Model)
 	}
-	return commandLine(m, append(w, "--", "--resume"))
+	return append(w, "--", "--resume")
 }
+
+// CommandLine is the printed command for launcher args in m's place: "cd
+// <project> && [CLAUDE_CONFIG_DIR=<v> ]claude-sandbox <args…>", every word
+// shell-quoted; "" for nil args. ResumeCommand is CommandLine(m,
+// ResumeArgs(m)); a restart prepends the access flags it carried
+// (CS-SESS-107).
+func CommandLine(m Mark, args []string) string { return commandLine(m, args) }
 
 // PrintableMark reports whether every mark value a printed command shows is
 // free of control and bidi characters (CS-TMUX-017's rule, shared with the

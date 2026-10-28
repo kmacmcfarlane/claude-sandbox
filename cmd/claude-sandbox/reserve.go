@@ -322,6 +322,23 @@ func guardResume(env *Env, in launch.Inputs, found []sessions.Session, derr erro
 	if !v.Open {
 		return nil
 	}
+	held := v.Holder != nil || v.HostPID != 0
+	return &guardRefusal{err: guardMessage(in, v).(*execx.CodeError), held: held}
+}
+
+// guardRefusal is the resume guard's exit 4, saying whether a holder was
+// named (held) or the guard could not tell: a restart words its line after
+// the stop by it (CS-LNCH-220).
+type guardRefusal struct {
+	err  *execx.CodeError
+	held bool
+}
+
+func (g *guardRefusal) Error() string { return g.err.Error() }
+func (g *guardRefusal) Unwrap() error { return g.err }
+
+// guardMessage is the guard's refusal text (CS-SESS-065..068).
+func guardMessage(in launch.Inputs, v resumeguard.Verdict) error {
 	const (
 		why  = "       a second session on it would interleave writes into one transcript.\n"
 		fork = "       Or fork it:    add --fork-session after -- (a new conversation id)"

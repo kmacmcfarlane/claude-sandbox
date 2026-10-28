@@ -1285,17 +1285,21 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
       launch's own --model replaces it
     And a passthrough --name sets the name and makes it the user's; the user's passthrough,
       stripped of the session family (tmuxpane.StripSessionFamily), follows the replay
-    And the old launch's access options are carried over: --dangerous, --ssh, --git,
-      --docker-socket, --aws and --package-caches, each read from the container itself
-      (--dangerously-skip-permissions in its command line; the ~/.ssh, ~/.gitconfig,
-      /var/run/docker.sock or ~/.aws mount; a package-cache variable set to its cache dir)
-      and the launchflags label; one this launch would not give on its own (its flags, its
+    And the old launch's access options (--dangerous, --ssh, --git, --docker-socket, --aws,
+      --package-caches) are carried over only when the launcher itself recorded them as
+      given: the claude-sandbox.launchflags label naming the flag, or naming its
+      CLAUDE_SANDBOX_* switch; one this launch would not give on its own (its flags, its
       env, its config, a cascade mount of the same path) is set as its flag
-    And one line names what was carried and how each was given: "given as a flag", "from
-      <ENV> or the config at its launch", "from the config at its launch, which no longer
-      gives it", or, when that cannot be told, "carried as the flag", so a re-grant is
-      never silent; this launch's own flags always win
-    And claude flags the restart does not replay are named in one note, by name only
+    And one line names what was carried and how: "given as a flag at its launch", or
+      "<CLAUDE_SANDBOX_*> was set at its launch", so a re-grant is never silent; this
+      launch's own flags always win
+    And nothing is ever inferred from the old container's mounts, environment or command
+      line (an env file and a cascade config.yaml are session-writable): an option they
+      show in effect, which the label does not name and today's config no longer gives,
+      came from the old config and is only named: "Note: '<noun>' had <opt> from its
+      config, which no longer gives it; pass it again to keep it."
+    And claude flags the restart does not replay are named in one note, by name only; a
+      --dangerously-skip-permissions given to claude after -- is one of them, never granted
     And --resume is first after "--", so the resume guard and the resume label
       (CS-LNCH-110) read the conversation
 

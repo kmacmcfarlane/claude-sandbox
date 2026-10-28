@@ -3549,8 +3549,10 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     Then a failure after it — the launch lock, the resume guard (exit 4: a launch that
       resumed the id meanwhile wins, and one more line says the old container was stopped
       and its conversation is open in the session named), docker create or start — prints
-      the launch's own error, then the conversation's resume command
-      (tmuxpane.ResumeCommand), and exits with the error's status
+      the launch's own error, then the conversation's resume command (tmuxpane.ResumeArgs
+      with the access flags the restart carried, CS-SESS-107, in front), and exits with
+      the error's status; the guard's extra line says the conversation is open in the
+      session named only when it named a holder, else that it cannot be told
     And a docker stop that fails while the container still runs creates nothing, sets the
       unset marks back (CS-TMUX-080) and exits 1 naming its state and the attach command
     And SIGINT, SIGTERM and SIGHUP are caught from the restart's start until its session
@@ -3566,9 +3568,12 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       CS-LNCH-212 notice, so the next interactive launch in the project prints the
       resume command once
     And the killed joins' resume commands are printed right after the stop
-    And a new session that ends with a crash code before its claude resumed the
-      conversation, within a minute (tmuxpane.StartWatcher), prints that it ended before
-      it was up, where the conversation is, and the resume command, and logs start-failed
+    And a new session that ends with any code but 0 (78 included) before its claude
+      resumed the conversation, within a minute (tmuxpane.StartWatcher), or whose docker
+      client could not be run at all, prints that it ended before it was up (or could not
+      be started), where the conversation is, and the resume command, and logs start-failed
+    And every way back printed, logged (each conversation's resume, the picker) or left
+      as a notice carries the access flags the restart carried
 
   @new
   Scenario: CS-LNCH-221 Where a restart stands down

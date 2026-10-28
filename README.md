@@ -277,13 +277,17 @@ or choose `[r]` in the menu above. What it does:
    worktree (explicitly, both ways), the `--model` given at its launch, and the claude flags a resume
    replays (`--effort`, `--add-dir`, `--append-system-prompt`, …). Your own flags on the restart
    command apply on top, and `--model` replaces the carried one.
-5. **Carries the old launch's access options over**: `--dangerous`, `--ssh`, `--git`,
-   `--docker-socket`, `--aws` and `--package-caches`, read from the old container itself and its
-   `launchflags` label. One line names each option carried and how it was given (a flag, an
-   environment switch, the config — or "cannot be told", in which case it is carried as the flag),
-   so a re-grant is never silent. An option this launch gives anyway is not mentioned. Claude flags
-   a resume does not replay (for example `--permission-mode`) are named, never carried: pass them
-   again after `--`.
+5. **Carries the old launch's access options over** — `--dangerous`, `--ssh`, `--git`,
+   `--docker-socket`, `--aws` and `--package-caches` — but only those the launcher itself recorded as
+   given at the old launch: its `launchflags` label names the flag, or the `CLAUDE_SANDBOX_*`
+   switch. One line names each option carried and how it was given, so a re-grant is never silent;
+   an option this launch gives anyway is not mentioned. Nothing is inferred from the old container's
+   mounts or environment (an env file or a project `config.yaml` is writable from inside a session):
+   an option that came from the old config, which today's config no longer gives, is only named —
+   "had --ssh from its config; pass it again to keep it". Claude flags a resume does not replay
+   (for example `--permission-mode`, or `--dangerously-skip-permissions` given after `--`) are named,
+   never carried: pass them again after `--`. Every printed or logged way back includes the carried
+   flags.
 
 There is no exemption from the [resume guard](#resuming-a-conversation-that-is-already-open-exit-4):
 by the time the new container is reserved the old one is gone, so the guard finds nothing holding
@@ -293,8 +297,8 @@ exits 4 and says where it is open.
 **Every failure after the stop leaves the way back:** the exact command that resumes the
 conversation is printed, the restart is logged to `~/.local/state/claude-sandbox/session-ends.jsonl`
 (`"reason": "restart"`), and the next launch in the project prints the command once. That includes a
-new session that ends with an error before it is up (for example a conversation missing from the
-config dir). A tmux pane that showed the old session returns to its prompt with no mark (it does not
+new session that ends with any non-zero exit before it is up (for example a conversation missing
+from the config dir), or that docker could not start at all. A tmux pane that showed the old session returns to its prompt with no mark (it does not
 go pending for a conversation that now runs elsewhere).
 
 **Refused** (exit 2, nothing stopped): headless and ralph containers, a paused one (unpause it first),
