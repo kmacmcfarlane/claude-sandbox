@@ -1270,11 +1270,15 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
       CLAUDE_CONFIG_DIR; a container without the labels (an older launcher) exits 2
     And nothing the restart decides on is read from the docker ps row (a "\x1f"-split text
       a session-written label can shift): it runs its own docker inspect of the target, by
-      its 64-hex id when known, of {{json .Name}}, {{json .Config.Cmd}} and
-      {{json .Config.Labels}}, split on the first raw "\x1f" (JSON escapes control
-      characters), and when the name or any of the project, mode, instance, registry,
-      configdir, pidclass, worktree, resume, launchflags or model labels differs from the
-      row, it refuses with exit 2: "the container's labels do not match its listing"
+      its 64-hex id when known, of {{json .Name}}, {{json .Config.Cmd}},
+      {{json .Config.Labels}}, {{json .Created}} and {{json .State.Status}}, split on the
+      raw "\x1f" (JSON escapes control characters); when the name or any of the project,
+      mode, instance, registry, configdir, pidclass, worktree, resume, launchflags or model
+      labels differs from the row, exactly, it refuses with exit 2: "the container's labels
+      do not match its listing"
+    And past that check every field it decides on — those labels, the access label, the
+      creation time (RFC 3339) and the state — is the inspect's; only the 64-hex id it
+      inspected by is the row's
     And nothing is stopped by any of these refusals
 
   @new

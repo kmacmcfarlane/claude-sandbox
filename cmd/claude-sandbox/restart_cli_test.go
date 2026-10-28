@@ -64,9 +64,11 @@ type restartFix struct {
 	psAccess  *string
 	labelOver map[string]string
 	inspName  string
-	extra     []string // more docker ps rows
-	onStop    func()
-	stopErr   error
+	// rowOver rewrites the target's docker ps row (a forged listing).
+	rowOver func(string) string
+	extra   []string // more docker ps rows
+	onStop  func()
+	stopErr error
 	// failPS makes docker ps fail.
 	failPS bool
 	// onInspect runs before every InspectContainer answer.
@@ -110,7 +112,9 @@ func newRestartFix() *restartFix {
 		n, _ := json.Marshal(name)
 		c, _ := json.Marshal(f.cmd)
 		l, _ := json.Marshal(f.labels())
-		return string(n) + "\x1f" + string(c) + "\x1f" + string(l) + "\n", nil
+		cr, _ := json.Marshal(f.created.Format(time.RFC3339Nano))
+		st, _ := json.Marshal("running")
+		return strings.Join([]string{string(n), string(c), string(l), string(cr), string(st)}, "\x1f") + "\n", nil
 	})
 	f.fake.OnFunc("{{.Name}}", func(c execx.Cmd) (string, error) {
 		if f.onInspect != nil {
@@ -154,9 +158,13 @@ func (f *restartFix) row(state, status string) string {
 	if f.psAccess != nil {
 		acc = *f.psAccess
 	}
-	return strings.Join([]string{rsName, status, f.proj, "claude", "dunlin", "v1", f.model, "", "", f.class, f.worktree,
+	r := strings.Join([]string{rsName, status, f.proj, "claude", "dunlin", "v1", f.model, "", "", f.class, f.worktree,
 		state, f.created.Format("2006-01-02 15:04:05 -0700 MST"), "8g", "default", "", rsOldID,
 		f.cfgDir, f.reg, f.flags, f.resume, "none", "none", "", "none", "", "keep", acc, ""}, psSep)
+	if f.rowOver != nil {
+		r = f.rowOver(r)
+	}
+	return r
 }
 
 // labels are the target's Config.Labels as its own inspect decodes them.
@@ -669,7 +677,7 @@ var _ = Describe("restart a session in place (CS-SESS-105..108, CS-LNCH-218..221
 			f.access = "docker-socket=flag"
 			Expect(f.run("--restart=dunlin")).To(Equal(0), f.errw.String())
 			Expect(f.fake.CommandLines()).To(ContainElement(
-				"docker inspect --type container -f {{json .Name}}\x1f{{json .Config.Cmd}}\x1f{{json .Config.Labels}} " + rsOldID))
+				"docker inspect --type container -f {{json .Name}}\x1f{{json .Config.Cmd}}\x1f{{json .Config.Labels}}\x1f{{json .Created}}\x1f{{json .State.Status}} " + rsOldID))
 			Expect(f.errw.String()).To(ContainSubstring("Carried over from 'dunlin': --docker-socket"))
 		})
 
@@ -681,6 +689,51 @@ var _ = Describe("restart a session in place (CS-SESS-105..108, CS-LNCH-218..221
 			Expect(f.run("--restart=dunlin")).To(Equal(0), f.errw.String())
 			Expect(f.errw.String()).NotTo(ContainSubstring("Carried over"))
 			Expect(strings.Join(f.launched().Args, " ")).NotTo(ContainSubstring("docker.sock"))
+		})
+
+		It("CS-SESS-106: a model label holding \x1f that shifts the row (50 fields) and plants docker-socket=flag: exit 2, nothing stopped", func() {
+			f.primary("idle")
+			f.access = "none"
+			honest := strings.Split(f.row("running", "Up 1 hour"), psSep)
+			planted := append([]string{}, honest[7:28]...)
+			planted[27-7] = "docker-socket=flag"
+			f.model = "opus" + psSep + strings.Join(planted, psSep)
+			row := strings.Split(f.row("running", "Up 1 hour"), psSep)
+			Expect(row).To(HaveLen(50))
+			Expect(row[27]).To(Equal("docker-socket=flag"))
+			Expect(f.run("--restart=dunlin")).To(Equal(2))
+			Expect(f.errw.String()).To(ContainSubstring("do not match its listing"))
+			Expect(f.errw.String()).NotTo(ContainSubstring("Carried over"))
+			Expect(f.count("docker stop")).To(BeZero())
+			Expect(f.count("docker create")).To(BeZero())
+		})
+
+		It("CS-SESS-106: a row registry differing only by a trailing space: exit 2 (the comparison is exact)", func() {
+			f.primary("idle")
+			forged := f.reg + " "
+			Expect(os.MkdirAll(forged, 0o700)).To(Succeed())
+			saved := f.reg
+			f.reg = forged
+			f.record(263, rsOther, "idle", "planted", "user", f.proj, f.created.Add(3*time.Second))
+			f.reg = saved
+			f.rowOver = func(r string) string {
+				return strings.Replace(r, psSep+saved+psSep, psSep+forged+psSep, 1)
+			}
+			Expect(f.run("--restart=dunlin")).To(Equal(2))
+			Expect(f.errw.String()).To(ContainSubstring("do not match its listing"))
+			Expect(f.count("docker stop")).To(BeZero())
+			Expect(f.count("docker create")).To(BeZero())
+		})
+
+		It("CS-SESS-106: the creation time and state are the inspect's, not the row's", func() {
+			f.primary("idle")
+			real := f.created.Format("2006-01-02 15:04:05 -0700 MST")
+			fake := f.created.Add(30 * time.Minute).Format("2006-01-02 15:04:05 -0700 MST")
+			f.rowOver = func(r string) string { return strings.Replace(r, real, fake, 1) }
+			// With the row's time the primary record would be an earlier
+			// container's; with the inspect's it is found.
+			Expect(f.run("--restart=dunlin")).To(Equal(0), f.errw.String())
+			Expect(f.createdCmd()).To(ContainElements("--resume", rsConv))
 		})
 
 		It("CS-SESS-106: an access value in the ps row only, none in the inspect, is a predating container", func() {

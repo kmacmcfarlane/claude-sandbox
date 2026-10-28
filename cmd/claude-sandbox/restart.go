@@ -234,15 +234,18 @@ func restartable(s sessions.Session) error {
 // inspected is what the restart reads from the old container with its own
 // docker inspect, every field JSON-encoded (CS-SESS-106): its name, claude's
 // command line (Config.Cmd, the launcher's own create argv, for the flags a
-// resume replays) and its labels. Nothing a restart decides on is read from
+// resume replays), its labels, its creation time and its state. Every field
+// the restart decides on is taken from here once checkListing passed. Nothing a restart decides on is read from
 // the docker ps row: a ps row is "\x1f"-split text, and a label value a
 // session can write (a cascade model holding "\x1f") shifts its fields.
 // JSON escapes every control character, so a raw "\x1f" in the output is
 // always the separator.
 type inspected struct {
-	Name   string
-	Cmd    []string
-	Labels map[string]string
+	Name    string
+	Cmd     []string
+	Labels  map[string]string
+	Created time.Time
+	State   string
 }
 
 // inspectRestartTarget runs the one docker inspect of the target: by its
@@ -256,7 +259,7 @@ func inspectRestartTarget(env *Env, s sessions.Session) (inspected, error) {
 	out, err := tmuxpane.BoundedRunner{R: env.Runner, Timeout: tmuxpane.ProbeTimeout}.Output(execx.Cmd{
 		Name: "docker",
 		Args: []string{"inspect", "--type", "container", "-f",
-			"{{json .Name}}\x1f{{json .Config.Cmd}}\x1f{{json .Config.Labels}}", id},
+			"{{json .Name}}\x1f{{json .Config.Cmd}}\x1f{{json .Config.Labels}}\x1f{{json .Created}}\x1f{{json .State.Status}}", id},
 		Stderr: &stderr,
 	})
 	var in inspected
@@ -267,11 +270,18 @@ func inspectRestartTarget(env *Env, s sessions.Session) (inspected, error) {
 		}
 		return in, errors.New(msg)
 	}
-	f := strings.SplitN(strings.TrimSpace(out), "\x1f", 3)
-	if len(f) != 3 || json.Unmarshal([]byte(f[0]), &in.Name) != nil ||
-		json.Unmarshal([]byte(f[1]), &in.Cmd) != nil || json.Unmarshal([]byte(f[2]), &in.Labels) != nil {
+	f := strings.Split(strings.TrimSpace(out), "\x1f")
+	var created string
+	if len(f) != 5 || json.Unmarshal([]byte(f[0]), &in.Name) != nil ||
+		json.Unmarshal([]byte(f[1]), &in.Cmd) != nil || json.Unmarshal([]byte(f[2]), &in.Labels) != nil ||
+		json.Unmarshal([]byte(f[3]), &created) != nil || json.Unmarshal([]byte(f[4]), &in.State) != nil {
 		return in, errors.New("unexpected docker inspect output")
 	}
+	t, err := time.Parse(time.RFC3339Nano, created)
+	if err != nil {
+		return in, errors.New("unexpected docker inspect output (created)")
+	}
+	in.Created = t
 	in.Name = strings.TrimPrefix(in.Name, "/")
 	if in.Labels == nil {
 		in.Labels = map[string]string{}
@@ -281,9 +291,10 @@ func inspectRestartTarget(env *Env, s sessions.Session) (inspected, error) {
 
 // checkListing compares the labels the restart decides on, as its own
 // inspect decoded them, with the docker ps row the target was picked from
-// (CS-SESS-106): any difference refuses, exit 2 — a shifted or forged row
-// is never acted on. The access label is not compared: it is read from the
-// inspect alone.
+// (CS-SESS-106), exactly (the launcher never writes surrounding
+// whitespace): any difference refuses, exit 2 — a shifted or forged row is
+// never acted on. The access label is not compared: it is read from the
+// inspect alone, as is every field once this passed (fromInspect).
 func checkListing(t sessions.Session, in inspected) error {
 	l := in.Labels
 	pairs := []struct{ key, row string }{
@@ -295,7 +306,7 @@ func checkListing(t sessions.Session, in inspected) error {
 	}
 	bad := in.Name != t.Name
 	for _, p := range pairs {
-		if strings.TrimSpace(l[p.key]) != strings.TrimSpace(p.row) {
+		if l[p.key] != p.row {
 			bad = true
 		}
 	}
@@ -304,6 +315,21 @@ func checkListing(t sessions.Session, in inspected) error {
 			registry.Printable(sessionLabel(t)))
 	}
 	return nil
+}
+
+// fromInspect is the target with every field the restart decides on taken
+// from its own inspect: the labels, the creation time, the state and the
+// access label (CS-SESS-106, CS-LNCH-223). The 64-hex id stays the row's:
+// the inspect went by it and its name matched.
+func fromInspect(t sessions.Session, in inspected) sessions.Session {
+	l := in.Labels
+	t.Project, t.Mode, t.Instance = l[sessions.LabelProject], l[sessions.LabelMode], l[sessions.LabelInstance]
+	t.RegistryDir, t.ConfigDirEnv, t.PIDClass = l[sessions.LabelRegistry], l[sessions.LabelConfigDir], l[sessions.LabelPIDClass]
+	t.Worktree, t.Resume, t.LaunchFlags, t.Model = l[sessions.LabelWorktree], l[sessions.LabelResume], l[sessions.LabelLaunchFlags], l[sessions.LabelModel]
+	t.CreatedAt, t.State = in.Created, in.State
+	t.Access = l[launch.LabelAccess]
+	t.HasAccess = t.Access != ""
+	return t
 }
 
 // prepareRestart is the decision phase (CS-SESS-106..108): before any image
@@ -327,8 +353,10 @@ func prepareRestart(env *Env, projectDir string, f *launchFlags, cfg *cascade.Co
 	if err := checkListing(target, ins); err != nil {
 		return nil, err
 	}
-	target.Access = strings.TrimSpace(ins.Labels[launch.LabelAccess])
-	target.HasAccess = target.Access != ""
+	target = fromInspect(target, ins)
+	if err := restartable(target); err != nil {
+		return nil, err
+	}
 	_, _, _, home := hostIdentity(env.Getenv)
 	rs := &restartState{target: target, home: home, class: -1,
 		statuses: map[string]string{}, clientKeys: map[string]bool{}, joinKeys: map[string]bool{}}
