@@ -231,15 +231,22 @@ func restartable(s sessions.Session) error {
 	return nil
 }
 
-// inspected is what the restart reads from the old container with one
-// docker inspect: claude's command line (Config.Cmd, the launcher's own
-// create argv, held by the daemon), for the flags a resume replays. Never
-// read for access: that is the claude-sandbox.access label's (CS-LNCH-223).
+// inspected is what the restart reads from the old container with its own
+// docker inspect, every field JSON-encoded (CS-SESS-106): its name, claude's
+// command line (Config.Cmd, the launcher's own create argv, for the flags a
+// resume replays) and its labels. Nothing a restart decides on is read from
+// the docker ps row: a ps row is "\x1f"-split text, and a label value a
+// session can write (a cascade model holding "\x1f") shifts its fields.
+// JSON escapes every control character, so a raw "\x1f" in the output is
+// always the separator.
 type inspected struct {
-	Cmd []string
+	Name   string
+	Cmd    []string
+	Labels map[string]string
 }
 
-// inspectRestartTarget runs the one docker inspect of the target.
+// inspectRestartTarget runs the one docker inspect of the target: by its
+// 64-hex id when known, else by name.
 func inspectRestartTarget(env *Env, s sessions.Session) (inspected, error) {
 	id := s.Name
 	if fullID.MatchString(s.ID) {
@@ -249,7 +256,7 @@ func inspectRestartTarget(env *Env, s sessions.Session) (inspected, error) {
 	out, err := tmuxpane.BoundedRunner{R: env.Runner, Timeout: tmuxpane.ProbeTimeout}.Output(execx.Cmd{
 		Name: "docker",
 		Args: []string{"inspect", "--type", "container", "-f",
-			"{{json .Config.Cmd}}", id},
+			"{{json .Name}}\x1f{{json .Config.Cmd}}\x1f{{json .Config.Labels}}", id},
 		Stderr: &stderr,
 	})
 	var in inspected
@@ -260,10 +267,43 @@ func inspectRestartTarget(env *Env, s sessions.Session) (inspected, error) {
 		}
 		return in, errors.New(msg)
 	}
-	if json.Unmarshal([]byte(strings.TrimSpace(out)), &in.Cmd) != nil {
+	f := strings.SplitN(strings.TrimSpace(out), "\x1f", 3)
+	if len(f) != 3 || json.Unmarshal([]byte(f[0]), &in.Name) != nil ||
+		json.Unmarshal([]byte(f[1]), &in.Cmd) != nil || json.Unmarshal([]byte(f[2]), &in.Labels) != nil {
 		return in, errors.New("unexpected docker inspect output")
 	}
+	in.Name = strings.TrimPrefix(in.Name, "/")
+	if in.Labels == nil {
+		in.Labels = map[string]string{}
+	}
 	return in, nil
+}
+
+// checkListing compares the labels the restart decides on, as its own
+// inspect decoded them, with the docker ps row the target was picked from
+// (CS-SESS-106): any difference refuses, exit 2 — a shifted or forged row
+// is never acted on. The access label is not compared: it is read from the
+// inspect alone.
+func checkListing(t sessions.Session, in inspected) error {
+	l := in.Labels
+	pairs := []struct{ key, row string }{
+		{sessions.LabelProject, t.Project}, {sessions.LabelMode, t.Mode}, {sessions.LabelInstance, t.Instance},
+		{sessions.LabelRegistry, t.RegistryDir}, {sessions.LabelConfigDir, t.ConfigDirEnv},
+		{sessions.LabelPIDClass, t.PIDClass}, {sessions.LabelWorktree, t.Worktree},
+		{sessions.LabelResume, t.Resume}, {sessions.LabelLaunchFlags, t.LaunchFlags},
+		{sessions.LabelModel, t.Model},
+	}
+	bad := in.Name != t.Name
+	for _, p := range pairs {
+		if strings.TrimSpace(l[p.key]) != strings.TrimSpace(p.row) {
+			bad = true
+		}
+	}
+	if bad {
+		return exitErr(2, "Error: the container's labels do not match its listing (docker ps), so '%s' is not restarted; nothing was stopped.",
+			registry.Printable(sessionLabel(t)))
+	}
+	return nil
 }
 
 // prepareRestart is the decision phase (CS-SESS-106..108): before any image
@@ -277,6 +317,18 @@ func prepareRestart(env *Env, projectDir string, f *launchFlags, cfg *cascade.Co
 	if err := restartable(target); err != nil {
 		return nil, err
 	}
+	// CS-SESS-106/107: its own inspect, decoded as JSON, and the labels the
+	// restart decides on checked against the row; the access label comes
+	// from it alone (CS-LNCH-223).
+	ins, err := inspectRestartTarget(env, target)
+	if err != nil {
+		return nil, exitErr(2, "Error: cannot inspect '%s' (%s); nothing was stopped.", registry.Printable(sessionLabel(target)), registry.Printable(err.Error()))
+	}
+	if err := checkListing(target, ins); err != nil {
+		return nil, err
+	}
+	target.Access = strings.TrimSpace(ins.Labels[launch.LabelAccess])
+	target.HasAccess = target.Access != ""
 	_, _, _, home := hostIdentity(env.Getenv)
 	rs := &restartState{target: target, home: home, class: -1,
 		statuses: map[string]string{}, clientKeys: map[string]bool{}, joinKeys: map[string]bool{}}
@@ -303,12 +355,6 @@ func prepareRestart(env *Env, projectDir string, f *launchFlags, cfg *cascade.Co
 	configDir := target.ConfigDirEnv
 	if configDir == "" {
 		configDir = filepath.Join(home, ".claude")
-	}
-
-	// CS-SESS-107: claude's command line, for the flags a resume replays.
-	ins, err := inspectRestartTarget(env, target)
-	if err != nil {
-		return nil, exitErr(2, "Error: cannot read %s's command line (%s); nothing was stopped.", rs.who(), registry.Printable(err.Error()))
 	}
 
 	// CS-SESS-106: the primary claude's record, read with the guard's own

@@ -279,7 +279,8 @@ or choose `[r]` in the menu above. What it does:
    command apply on top, and `--model` replaces the carried one.
 5. **Carries the old launch's access options over** — `--dangerous`, `--ssh`, `--git`,
    `--docker-socket`, `--aws` and `--package-caches` — reading only what the launcher recorded when it
-   created the old container: its `claude-sandbox.access` label lists each option it applied and
+   created the old container (read from the restart's own `docker inspect` of it, never from the
+   `docker ps` listing): its `claude-sandbox.access` label lists each option it applied and
    whether a flag, a `CLAUDE_SANDBOX_*` switch or the config turned it on. An option from a flag or a
    switch that this launch would not give anyway is carried, and one line names each, so a re-grant
    is never silent. One from the old config, which today's config no longer gives, is only named —

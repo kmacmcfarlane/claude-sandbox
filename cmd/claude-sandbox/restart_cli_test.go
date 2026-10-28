@@ -57,10 +57,16 @@ type restartFix struct {
 	cfgDir   string
 	cmd      []string
 	// access is the claude-sandbox.access label (CS-LNCH-223); "" = absent.
-	access  string
-	extra   []string // more docker ps rows
-	onStop  func()
-	stopErr error
+	access string
+	// psAccess, when set, is what the docker ps row shows in the access
+	// field instead (a forged or shifted row); labelOver overrides labels in
+	// the inspect only, and inspName the inspected name.
+	psAccess  *string
+	labelOver map[string]string
+	inspName  string
+	extra     []string // more docker ps rows
+	onStop    func()
+	stopErr   error
 	// failPS makes docker ps fail.
 	failPS bool
 	// onInspect runs before every InspectContainer answer.
@@ -97,8 +103,14 @@ func newRestartFix() *restartFix {
 		return strings.Join(rows, "\n") + "\n", nil
 	})
 	f.fake.OnFunc("json .Config.Cmd", func(execx.Cmd) (string, error) {
+		name := "/" + rsName
+		if f.inspName != "" {
+			name = f.inspName
+		}
+		n, _ := json.Marshal(name)
 		c, _ := json.Marshal(f.cmd)
-		return string(c) + "\n", nil
+		l, _ := json.Marshal(f.labels())
+		return string(n) + "\x1f" + string(c) + "\x1f" + string(l) + "\n", nil
 	})
 	f.fake.OnFunc("{{.Name}}", func(c execx.Cmd) (string, error) {
 		if f.onInspect != nil {
@@ -138,9 +150,33 @@ func newRestartFix() *restartFix {
 
 // row is the target's docker ps row, every label up to the resume label.
 func (f *restartFix) row(state, status string) string {
+	acc := f.access
+	if f.psAccess != nil {
+		acc = *f.psAccess
+	}
 	return strings.Join([]string{rsName, status, f.proj, "claude", "dunlin", "v1", f.model, "", "", f.class, f.worktree,
 		state, f.created.Format("2006-01-02 15:04:05 -0700 MST"), "8g", "default", "", rsOldID,
-		f.cfgDir, f.reg, f.flags, f.resume, "none", "none", "", "none", "", "keep", f.access, ""}, psSep)
+		f.cfgDir, f.reg, f.flags, f.resume, "none", "none", "", "none", "", "keep", acc, ""}, psSep)
+}
+
+// labels are the target's Config.Labels as its own inspect decodes them.
+func (f *restartFix) labels() map[string]string {
+	l := map[string]string{
+		"claude-sandbox.project": f.proj, "claude-sandbox.mode": "claude", "claude-sandbox.instance": "dunlin",
+		"claude-sandbox.model": f.model, "claude-sandbox.pidclass": f.class, "claude-sandbox.worktree": f.worktree,
+		"claude-sandbox.configdir": f.cfgDir, "claude-sandbox.registry": f.reg,
+		"claude-sandbox.launchflags": f.flags,
+	}
+	if f.resume != "" {
+		l["claude-sandbox.resume"] = f.resume
+	}
+	if f.access != "" {
+		l["claude-sandbox.access"] = f.access
+	}
+	for k, v := range f.labelOver {
+		l[k] = v
+	}
+	return l
 }
 
 // otherRow is another sandbox's docker ps row.
@@ -627,6 +663,57 @@ var _ = Describe("restart a session in place (CS-SESS-105..108, CS-LNCH-218..221
 			Expect(f.errw.String()).NotTo(ContainSubstring("Carried over"))
 			Expect(strings.Join(f.launched().Args, " ")).NotTo(ContainSubstring("docker.sock"))
 		})
+
+		It("CS-SESS-106: the restart's own inspect goes by the 64-hex id and decodes JSON; a normal container carries as before", func() {
+			f.primary("idle")
+			f.access = "docker-socket=flag"
+			Expect(f.run("--restart=dunlin")).To(Equal(0), f.errw.String())
+			Expect(f.fake.CommandLines()).To(ContainElement(
+				"docker inspect --type container -f {{json .Name}}\x1f{{json .Config.Cmd}}\x1f{{json .Config.Labels}} " + rsOldID))
+			Expect(f.errw.String()).To(ContainSubstring("Carried over from 'dunlin': --docker-socket"))
+		})
+
+		It("CS-SESS-106: a ps row planting docker-socket=flag (a shifted field) carries nothing: access is the inspect's", func() {
+			f.primary("idle")
+			planted := "docker-socket=flag"
+			f.psAccess = &planted
+			f.access = "none"
+			Expect(f.run("--restart=dunlin")).To(Equal(0), f.errw.String())
+			Expect(f.errw.String()).NotTo(ContainSubstring("Carried over"))
+			Expect(strings.Join(f.launched().Args, " ")).NotTo(ContainSubstring("docker.sock"))
+		})
+
+		It("CS-SESS-106: an access value in the ps row only, none in the inspect, is a predating container", func() {
+			f.primary("idle")
+			planted := "docker-socket=flag"
+			f.psAccess = &planted
+			f.access = ""
+			Expect(f.run("--restart=dunlin")).To(Equal(0), f.errw.String())
+			Expect(f.errw.String()).To(ContainSubstring("predates access tracking"))
+			Expect(f.errw.String()).NotTo(ContainSubstring("Carried over"))
+		})
+
+		DescribeTable("CS-SESS-106: a ps row its own inspect does not confirm: exit 2, nothing stopped",
+			func(setup func(f *restartFix)) {
+				f.primary("idle")
+				setup(f)
+				Expect(f.run("--restart=dunlin")).To(Equal(2))
+				Expect(f.errw.String()).To(ContainSubstring("the container's labels do not match its listing"))
+				Expect(f.count("docker stop")).To(BeZero())
+				Expect(f.count("docker create")).To(BeZero())
+			},
+			Entry("project", func(f *restartFix) { f.labelOver = map[string]string{"claude-sandbox.project": "/elsewhere"} }),
+			Entry("mode", func(f *restartFix) { f.labelOver = map[string]string{"claude-sandbox.mode": "headless"} }),
+			Entry("instance", func(f *restartFix) { f.labelOver = map[string]string{"claude-sandbox.instance": "heron"} }),
+			Entry("registry", func(f *restartFix) { f.labelOver = map[string]string{"claude-sandbox.registry": "/planted/sessions"} }),
+			Entry("configdir", func(f *restartFix) { f.labelOver = map[string]string{"claude-sandbox.configdir": "/planted"} }),
+			Entry("pidclass", func(f *restartFix) { f.labelOver = map[string]string{"claude-sandbox.pidclass": "8"} }),
+			Entry("worktree", func(f *restartFix) { f.labelOver = map[string]string{"claude-sandbox.worktree": "x"} }),
+			Entry("resume", func(f *restartFix) { f.labelOver = map[string]string{"claude-sandbox.resume": rsOther} }),
+			Entry("launchflags", func(f *restartFix) { f.labelOver = map[string]string{"claude-sandbox.launchflags": "--docker-socket"} }),
+			Entry("model", func(f *restartFix) { f.labelOver = map[string]string{"claude-sandbox.model": "opus"} }),
+			Entry("the container's name", func(f *restartFix) { f.inspName = "/claude-sandbox-other" }),
+		)
 
 		It("CS-SESS-107: a container without the access label carries nothing and says so once", func() {
 			f.primary("idle")

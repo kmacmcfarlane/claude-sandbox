@@ -1268,6 +1268,13 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
     And the container's claude-sandbox.configdir label must equal this launcher's raw
       CLAUDE_CONFIG_DIR, else exit 2 printing the command with the right
       CLAUDE_CONFIG_DIR; a container without the labels (an older launcher) exits 2
+    And nothing the restart decides on is read from the docker ps row (a "\x1f"-split text
+      a session-written label can shift): it runs its own docker inspect of the target, by
+      its 64-hex id when known, of {{json .Name}}, {{json .Config.Cmd}} and
+      {{json .Config.Labels}}, split on the first raw "\x1f" (JSON escapes control
+      characters), and when the name or any of the project, mode, instance, registry,
+      configdir, pidclass, worktree, resume, launchflags or model labels differs from the
+      row, it refuses with exit 2: "the container's labels do not match its listing"
     And nothing is stopped by any of these refusals
 
   @new
@@ -1287,7 +1294,8 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
       stripped of the session family (tmuxpane.StripSessionFamily), follows the replay
     And the old launch's access options (--dangerous, --ssh, --git, --docker-socket, --aws,
       --package-caches) are read ONLY from the old container's claude-sandbox.access label
-      (CS-LNCH-223), which the launcher wrote at its create from its own resolution
+      (CS-LNCH-223), which the launcher wrote at its create from its own resolution, as the
+      restart's own inspect decodes it (CS-SESS-106) — never from the docker ps row
     And an option recorded from a flag or a switch ("flag", "env"), that this launch would
       not give on its own (its flags, its env, its config), is set as its flag, and one
       line names what was carried and how: "given as a flag at its launch", or
