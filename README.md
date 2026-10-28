@@ -405,9 +405,9 @@ resumes each one; diagnostics go to `~/.cache/claude-sandbox/session-end.log`. T
 interactive launch, attach or join in the project prints each ended session once:
 
 ```
-Note: 'dunlin' ended when its terminal closed (after its turn, 2026-10-22 14:03). Resume it with:
-  cd /home/rt/work/firewatch && claude-sandbox --new --no-worktree -- --resume 89c48574-4a51-4b78-aebc-8b883599932c --name 'cognito throttling errors'
-All sessions ended this way: /home/rt/.local/state/claude-sandbox/session-ends.jsonl
+Note: 'heron' ended when its terminal closed (after its turn, 2026-10-22 14:03). Resume it with:
+  cd /home/user/work/myproject && claude-sandbox --new --no-worktree -- --resume 3f2a6c1e-7b4d-4e8a-9c5f-1d2e3a4b5c6d --name 'fix the flaky login test'
+All sessions ended this way: /home/user/.local/state/claude-sandbox/session-ends.jsonl
 ```
 
 To list every resume command at once:
@@ -417,7 +417,7 @@ jq -r 'select(.outcome == "ended") | .resume[]' ~/.local/state/claude-sandbox/se
 ```
 
 An `--attach` or `--join` to a session that ended while you read the menu prints that note and
-`'dunlin' is no longer running.` and exits 1.
+`'heron' is no longer running.` and exits 1.
 
 Turn it off with `endOnHangup: false` in any `config.yaml` (more-local wins), or for one launch
 with `CLAUDE_SANDBOX_END_ON_HANGUP=0`: the container then survives losing its terminal, as

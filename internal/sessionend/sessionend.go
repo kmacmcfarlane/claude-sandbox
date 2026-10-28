@@ -291,6 +291,9 @@ func (r *run) poll() Result {
 		capped    bool
 	)
 	for first := true; ; first = false {
+		// capped is this poll's claim only: a later poll that ends on an
+		// idle verdict is never logged as ended at the cap.
+		capped = false
 		if !first && !r.wait(EndPoll) {
 			return r.finish(Result{Outcome: OutcomeSignalled, Waited: waited})
 		}
@@ -360,12 +363,11 @@ func (r *run) poll() Result {
 		}
 		v2 := r.activity()
 		if !(v2 == verdictEnd || (capped && v2 == verdictWait)) {
-			capped = false
 			continue
 		}
 		switch r.stop() {
 		case stopDone:
-			return r.finish(Result{Outcome: OutcomeEnded, Capped: capped, Waited: waited})
+			return r.finish(Result{Outcome: OutcomeEnded, Capped: capped && v2 == verdictWait, Waited: waited})
 		case stopGone:
 			return r.finish(Result{Outcome: OutcomeEndedOnItsOwn, Waited: waited})
 		default:
@@ -609,14 +611,17 @@ func (r *run) logf(format string, a ...any) {
 	fmt.Fprintf(r.o.Log, "%s %s: %s\n", r.clock.Now().UTC().Format(time.RFC3339), r.o.Mark.Container, fmt.Sprintf(format, a...))
 }
 
-// checkStateRoot refuses an empty state root: under go test it would be the
-// real one (CS-DIR-007).
+// checkStateRoot refuses an empty state root, and under go test the real one
+// (clients.IsRealStateRoot, CS-DIR-007).
 func checkStateRoot(root string) string {
 	if root == "" {
 		if testing.Testing() {
 			panic("sessionend: an empty state root under go test would be the real one; pass a scratch directory")
 		}
 		panic("sessionend: empty state root")
+	}
+	if testing.Testing() && clients.IsRealStateRoot(root) {
+		panic("sessionend: a test would use the real state root " + root + "; pass a scratch directory")
 	}
 	return root
 }

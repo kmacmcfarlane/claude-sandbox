@@ -9,6 +9,10 @@ import (
 	"github.com/kmacmcfarlane/claude-sandbox/internal/hostdirs"
 )
 
+// IsRealStateRoot is isRealStateRoot, for the session-end helper's own
+// guard (it writes the log and the notices under the same root).
+func IsRealStateRoot(root string) bool { return isRealStateRoot(root) }
+
 // isRealStateRoot reports whether root (cleaned, symlinks resolved as far as
 // it exists) is at or inside the real state root of the real home
 // (os.UserHomeDir and user.Current's), default or XDG — globalcfg.OpenStore's

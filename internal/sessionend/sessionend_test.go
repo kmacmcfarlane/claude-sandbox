@@ -24,6 +24,7 @@ import (
 	"github.com/kmacmcfarlane/claude-sandbox/internal/clients"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/execx"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/hostdirs"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/registry"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/sessionend"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/tmuxpane"
 )
@@ -74,6 +75,8 @@ type fixture struct {
 	log     *bytes.Buffer
 	inspect []string // states answered in order; the last one repeats
 	nInsp   int
+	// onInspect runs before the n-th inspect (1-based) is answered.
+	onInspect func(n int)
 }
 
 func newFixture() *fixture {
@@ -99,6 +102,9 @@ func newFixture() *fixture {
 	f.inspect = []string{"running"}
 	f.fake.OnFunc(inspectP, func(c execx.Cmd) (string, error) {
 		i := f.nInsp
+		if f.onInspect != nil {
+			f.onInspect(i + 1)
+		}
 		if i >= len(f.inspect) {
 			i = len(f.inspect) - 1
 		}
@@ -283,6 +289,63 @@ var _ = Describe("the session-end helper", func() {
 		Expect(res.Waited).To(Equal(30 * time.Minute))
 		Expect(f.stops()).To(HaveLen(1))
 		Expect(f.entries()[0].Capped).To(BeTrue())
+	})
+
+	It("CS-LNCH-208: a cap reached, then deferred by a client, then an idle turn ends uncapped", func() {
+		sessionend.TurnMax = 4 * time.Second
+		f.record(7, conv1, "busy", "", t0.Add(time.Second))
+		var l *clients.Lease
+		f.onInspect = func(n int) {
+			if n == 4 { // the pre-stop re-check of the poll that reached the cap
+				var err error
+				l, err = clients.Take(f.state, cid, clients.KindJoin, t0, "")
+				Expect(err).NotTo(HaveOccurred())
+				f.record(7, conv1, "idle", "", t0.Add(time.Second))
+			}
+		}
+		f.clock.hook = func(n int) {
+			if n == 3 {
+				l.Release()
+			}
+		}
+		res := f.run()
+		Expect(res.Outcome).To(Equal(sessionend.OutcomeEnded))
+		Expect(res.Capped).To(BeFalse())
+		Expect(f.entries()[0].Capped).To(BeFalse())
+		Expect(f.stops()).To(HaveLen(1))
+	})
+
+	It("CS-LNCH-208: a join's resume command names the worktree its record's cwd is in; an unknown place prints none", func() {
+		m := tmuxpane.Mark{V: tmuxpane.MarkVersion, Project: "/r", CwdRoot: "/r", Worktree: ""}
+		rec := func(cwd string) registry.Record {
+			return registry.Record{SessionID: conv2, Cwd: cwd}
+		}
+		Expect(sessionend.ResumeCommand(m, rec("/r/.claude/worktrees/gen-x/sub"))).To(Equal("cd /r && claude-sandbox --new --worktree=gen-x -- --resume " + conv2))
+		Expect(sessionend.ResumeCommand(m, rec("/r/sub"))).To(Equal("cd /r && claude-sandbox --new --no-worktree -- --resume " + conv2))
+		Expect(sessionend.ResumeCommand(m, rec("/elsewhere"))).To(BeEmpty())
+		Expect(sessionend.ResumeCommand(m, rec(""))).To(BeEmpty())
+
+		// A primary in its own worktree; a join of it in the shared checkout.
+		m = tmuxpane.Mark{V: tmuxpane.MarkVersion, Project: "/r/p", CwdRoot: "/r/.claude/worktrees/otter", Worktree: "otter"}
+		Expect(sessionend.ResumeCommand(m, rec("/r/.claude/worktrees/otter"))).To(Equal("cd /r/p && claude-sandbox --new --worktree=otter -- --resume " + conv2))
+		Expect(sessionend.ResumeCommand(m, rec("/r/.claude/worktrees/gen-y"))).To(Equal("cd /r/p && claude-sandbox --new --worktree=gen-y -- --resume " + conv2))
+		Expect(sessionend.ResumeCommand(m, rec("/r/p"))).To(Equal("cd /r/p && claude-sandbox --new --no-worktree -- --resume " + conv2))
+		Expect(sessionend.ResumeCommand(m, rec("/r/other"))).To(BeEmpty())
+
+		// A project launched inside a worktree: its own cwd is no worktree flag.
+		m = tmuxpane.Mark{V: tmuxpane.MarkVersion, Project: "/r/.claude/worktrees/x", CwdRoot: "/r/.claude/worktrees/x"}
+		Expect(sessionend.ResumeCommand(m, rec("/r/.claude/worktrees/x/sub"))).To(Equal("cd /r/.claude/worktrees/x && claude-sandbox --new --no-worktree -- --resume " + conv2))
+	})
+
+	It("CS-LNCH-208: the real state root is refused under go test", func() {
+		home, err := os.UserHomeDir()
+		Expect(err).NotTo(HaveOccurred())
+		real := hostdirs.StateRoot(home, nil)
+		Expect(func() { sessionend.AppendLog(real, sessionend.Entry{}) }).To(Panic())
+		Expect(func() { sessionend.WriteNotice(real, sessionend.Notice{}) }).To(Panic())
+		Expect(func() { sessionend.ClaimNotices(sessionend.ClaimOptions{StateRoot: real}) }).To(Panic())
+		f.opts.StateRoot = real
+		Expect(func() { f.run() }).To(Panic())
 	})
 
 	It("CS-LNCH-208: no live record keeps the container after 30 s, never stopping it", func() {
@@ -621,7 +684,7 @@ var _ = Describe("ended-session notices (CS-LNCH-212)", func() {
 	now := time.Date(2026, 10, 28, 14, 3, 0, 0, time.Local)
 	BeforeEach(func() {
 		base := GinkgoT().TempDir()
-		state, proj = filepath.Join(base, "state"), "/home/rt/work/my project"
+		state, proj = filepath.Join(base, "state"), "/home/user/work/my project"
 	})
 	write := func(project string, at time.Time, entries ...sessionend.NoticeEntry) {
 		Expect(sessionend.WriteNotice(state, sessionend.Notice{V: 1, Project: project, At: at.UnixMilli(), Entries: entries})).To(Succeed())
@@ -633,7 +696,7 @@ var _ = Describe("ended-session notices (CS-LNCH-212)", func() {
 	}
 
 	It("CS-LNCH-212: notices are 0600 in a 0700 directory, named by the project key", func() {
-		write(proj, now, sessionend.NoticeEntry{Instance: "dunlin"})
+		write(proj, now, sessionend.NoticeEntry{Instance: "heron"})
 		fi, err := os.Stat(hostdirs.NoticesDir(state))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(fi.Mode().Perm()).To(Equal(os.FileMode(0o700)))
@@ -645,17 +708,17 @@ var _ = Describe("ended-session notices (CS-LNCH-212)", func() {
 	})
 
 	It("CS-LNCH-212: the cap wording, a session without a resume command, and at most 3 sessions plus a count", func() {
-		write(proj, now, sessionend.NoticeEntry{Instance: "dunlin", Resume: "cd '/home/rt/work/my project' && claude-sandbox --new --no-worktree -- --resume x", Capped: true})
+		write(proj, now, sessionend.NoticeEntry{Instance: "heron", Resume: "cd '/home/user/work/my project' && claude-sandbox --new --no-worktree -- --resume x", Capped: true})
 		write(proj, now.Add(time.Second), sessionend.NoticeEntry{Instance: "otter"}, sessionend.NoticeEntry{Instance: "otter"}, sessionend.NoticeEntry{Instance: "otter"})
 		out := claim()
-		Expect(out).To(HavePrefix("Note: 'dunlin' ended when its terminal closed (it ended at the 30 min cap while busy, 2026-10-28 14:03). Resume it with:\n  cd '/home/rt/work/my project' && "))
+		Expect(out).To(HavePrefix("Note: 'heron' ended when its terminal closed (it ended at the 30 min cap while busy, 2026-10-28 14:03). Resume it with:\n  cd '/home/user/work/my project' && "))
 		Expect(out).To(ContainSubstring("Note: 'otter' ended when its terminal closed (after its turn, 2026-10-28 14:03).\n"))
 		Expect(out).To(ContainSubstring("Note: 1 more sessions here ended the same way.\n"))
 		Expect(strings.Count(out, "All sessions ended this way: ")).To(Equal(1))
 	})
 
 	It("CS-LNCH-212: another project's notice is left for it; an expired one is removed unprinted", func() {
-		write("/other", now, sessionend.NoticeEntry{Instance: "kestrel"})
+		write("/other", now, sessionend.NoticeEntry{Instance: "wren"})
 		write(proj, now.Add(-8*24*time.Hour), sessionend.NoticeEntry{Instance: "old"})
 		Expect(claim()).To(BeEmpty())
 		ents, _ := os.ReadDir(hostdirs.NoticesDir(state))
@@ -665,7 +728,7 @@ var _ = Describe("ended-session notices (CS-LNCH-212)", func() {
 
 	It("CS-LNCH-212: a dead claimant's .claimed file is removed; a live one's is left", func() {
 		dir := hostdirs.NoticesDir(state)
-		write(proj, now, sessionend.NoticeEntry{Instance: "dunlin"})
+		write(proj, now, sessionend.NoticeEntry{Instance: "heron"})
 		dead := filepath.Join(dir, "ended-"+sessionend.ProjectKey(proj)+"-1-aa.json.claimed-999999")
 		live := filepath.Join(dir, "ended-"+sessionend.ProjectKey(proj)+"-2-bb.json.claimed-1")
 		Expect(os.WriteFile(dead, []byte("{}"), 0o600)).To(Succeed())
@@ -673,7 +736,7 @@ var _ = Describe("ended-session notices (CS-LNCH-212)", func() {
 		var out bytes.Buffer
 		sessionend.ClaimNotices(sessionend.ClaimOptions{StateRoot: state, Project: proj, Out: &out, Now: now,
 			Alive: func(pid int) bool { return pid == 1 }})
-		Expect(out.String()).To(ContainSubstring("'dunlin'"))
+		Expect(out.String()).To(ContainSubstring("'heron'"))
 		_, err := os.Stat(dead)
 		Expect(os.IsNotExist(err)).To(BeTrue())
 		_, err = os.Stat(live)

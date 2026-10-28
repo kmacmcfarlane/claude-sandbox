@@ -3318,7 +3318,9 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     And a counted record that stops parsing keeps its last state
     And the wait for a turn is capped at 30 minutes, counting only polls whose
       verdict was wait (never the time a join holds it); at the cap the helper
-      ends the container anyway, logged with capped: true
+      ends the container anyway, logged with capped: true; capped is claimed only
+      when the poll that stops it still read wait — a stop deferred past the
+      cap that then finds the turn idle is an ordinary end
     And right before the stop it checks again: the inspect must say present, no
       client may be present, the verdict must still be end (or the cap still
       reached), and the unit and system guards must not keep; any change goes
@@ -3343,7 +3345,10 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       is renamed to session-ends.jsonl.old first): at, container, containerId,
       project, instance, worktree, cwdRoot, configDir, sessions (sessionId,
       name, nameSource, pid, kind primary|join), resume (one
-      tmuxpane.ResumeCommand per session; "" when a value is not printable),
+      tmuxpane.ResumeCommand per session, in the worktree the record's cwd
+      names — <root>/.claude/worktrees/<name> for a root holding the project,
+      else the mark's own place, else the shared checkout; "" when the cwd is
+      under none of them or a value is not printable),
       reason "hangup", waitedMs, capped, outcome
     And diagnostics go to <cache>/session-end.log; the helper prints nothing
     And in a sandbox or on a host other than Linux it keeps the container at

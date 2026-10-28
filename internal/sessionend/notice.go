@@ -65,6 +65,7 @@ func noticeOf(m tmuxpane.Mark, res Result, now time.Time) Notice {
 // ended-<project key>-<ms>-<rand>.json, 0600, through a temp file and a
 // rename. Entries are dropped from the end until it fits NoticeMax.
 func WriteNotice(stateRoot string, n Notice) error {
+	stateRoot = checkStateRoot(stateRoot)
 	dir := hostdirs.NoticesDir(stateRoot)
 	for _, d := range []string{stateRoot, dir} {
 		if err := hostdirs.EnsureOwnedDir(d, hostdirs.OwnedDirMode, nil); err != nil {

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -242,10 +243,56 @@ func (r *run) sessionsOf() []Session {
 	return out
 }
 
+// worktreeName is a worktree name read from a record's cwd (CS-TMUX-036).
+var worktreeName = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+
+// worktreeOf says where rec's claude ran, for its resume command: a worktree
+// read from a cwd under <root>/.claude/worktrees/<name> for a root holding
+// the project (as tmuxpane.Apply reads a join's), else the mark's own place
+// (a cwd under its CwdRoot), else the shared checkout (a cwd under the
+// project). ok is false for a cwd under none of them: no
+// command is better than a wrong one.
+func worktreeOf(m tmuxpane.Mark, cwd string) (worktree string, ok bool) {
+	if cwd == "" {
+		return "", false
+	}
+	cwd = filepath.Clean(cwd)
+	const sep = "/.claude/worktrees/"
+	if i := strings.LastIndex(cwd, sep); i > 0 {
+		root := cwd[:i]
+		name, _, _ := strings.Cut(cwd[i+len(sep):], "/")
+		// The worktree's root must hold the project, and the worktree must
+		// not itself hold it (a project launched inside a worktree).
+		if within(m.Project, root) && !within(m.Project, root+sep+name) &&
+			worktreeName.MatchString(name) && name != "." && name != ".." {
+			return name, true
+		}
+	}
+	if m.CwdRoot != "" && within(cwd, m.CwdRoot) {
+		return m.Worktree, !m.WorktreeGenerated || m.Worktree != ""
+	}
+	if m.Project != "" && within(cwd, m.Project) {
+		return "", true
+	}
+	return "", false
+}
+
+// within reports whether p is root or below it, lexically.
+func within(p, root string) bool {
+	p, root = filepath.Clean(p), filepath.Clean(root)
+	return p == root || strings.HasPrefix(p, root+string(filepath.Separator))
+}
+
 // ResumeCommand is the command that resumes rec's conversation in a new
-// container of the mark's project (tmuxpane.ResumeCommand); "" when a value
-// it would print is not printable.
+// container of the mark's project (tmuxpane.ResumeCommand), in the worktree
+// rec's cwd names; "" when that place cannot be told or a value it would
+// print is not printable.
 func ResumeCommand(m tmuxpane.Mark, rec registry.Record) string {
+	wt, ok := worktreeOf(m, rec.Cwd)
+	if !ok {
+		return ""
+	}
+	m.Worktree, m.WorktreeGenerated = wt, false
 	m.Conversation, m.Name, m.NameSource = rec.SessionID, rec.Name, rec.NameSource
 	if !tmuxpane.PrintableMark(m) {
 		return ""

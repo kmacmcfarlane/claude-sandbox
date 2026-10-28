@@ -71,6 +71,7 @@ func (r *run) finish(res Result) Result {
 // AppendLog appends e to the session-end log (0600, O_APPEND|O_NOFOLLOW),
 // renaming a log past LogMax to <log>.old first.
 func AppendLog(stateRoot string, e Entry) error {
+	stateRoot = checkStateRoot(stateRoot)
 	if err := hostdirs.EnsureOwnedDir(stateRoot, hostdirs.OwnedDirMode, nil); err != nil {
 		return err
 	}

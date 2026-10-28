@@ -280,26 +280,26 @@ var _ = Describe("end the session on hang-up (CS-LNCH-206..212)", func() {
 
 	It("CS-LNCH-212: an interactive launch in a terminal claims this project's notices once; a scripted one does not", func() {
 		Expect(sessionend.WriteNotice(f.state, sessionend.Notice{V: 1, Project: f.proj, At: now.UnixMilli(),
-			Entries: []sessionend.NoticeEntry{{Instance: "dunlin", Resume: "cd " + f.proj + " && claude-sandbox --new --no-worktree -- --resume x"}}})).To(Succeed())
+			Entries: []sessionend.NoticeEntry{{Instance: "heron", Resume: "cd " + f.proj + " && claude-sandbox --new --no-worktree -- --resume x"}}})).To(Succeed())
 		f.run("--new")
-		Expect(f.errw.String()).NotTo(ContainSubstring("dunlin"))
+		Expect(f.errw.String()).NotTo(ContainSubstring("heron"))
 
 		f.env.IsTerminal = func(io.Writer) bool { return true }
 		f.errw.Reset()
 		f.run("--new")
-		Expect(f.errw.String()).To(ContainSubstring("Note: 'dunlin' ended when its terminal closed (after its turn, "))
+		Expect(f.errw.String()).To(ContainSubstring("Note: 'heron' ended when its terminal closed (after its turn, "))
 		Expect(f.errw.String()).To(ContainSubstring("All sessions ended this way: " + hostdirs.SessionEndsLog(f.state)))
 		f.errw.Reset()
 		f.run("--new")
-		Expect(f.errw.String()).NotTo(ContainSubstring("dunlin"))
+		Expect(f.errw.String()).NotTo(ContainSubstring("heron"))
 	})
 
 	It("CS-LNCH-212: headless claims nothing", func() {
 		f.env.IsTerminal = func(io.Writer) bool { return true }
 		Expect(sessionend.WriteNotice(f.state, sessionend.Notice{V: 1, Project: f.proj, At: now.UnixMilli(),
-			Entries: []sessionend.NoticeEntry{{Instance: "dunlin"}}})).To(Succeed())
+			Entries: []sessionend.NoticeEntry{{Instance: "heron"}}})).To(Succeed())
 		f.run("headless", "--")
-		Expect(f.errw.String()).NotTo(ContainSubstring("dunlin"))
+		Expect(f.errw.String()).NotTo(ContainSubstring("heron"))
 	})
 
 	It("CS-LNCH-208: the hidden session-end subcommand runs the helper with the launcher's dirs and logs its outcome", func() {
