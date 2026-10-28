@@ -40,8 +40,24 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
   Scenario: CS-SESS-003 Session count includes joined sessions
     Given a container running 3 claude processes
     When sessions are discovered
-    Then "docker top" runs for that container
+    Then "docker top" runs for that container with "-o pid,ppid,args"
     And the session count is 3
+
+  Scenario: CS-SESS-099 Only a claude session process counts, not a process whose command line mentions claude
+    # Observed on a container running exactly one claude, which was counted 4:
+    #   /sbin/docker-init -- /opt/claude-sandbox/bin/entrypoint.sh claude --dangerously-skip-permissions
+    #   tini -s -- claude --dangerously-skip-permissions
+    #   claude --dangerously-skip-permissions
+    #   node /opt/claude-sandbox/mcp/discord-notify/dist/index.mjs
+    Given a container whose "docker top" rows are the four above
+    When sessions are discovered
+    Then the session count is 1
+    And a row counts only when the base name of its first argument (argv[0]) is exactly "claude" or "ralph"
+    And docker-init, tini, the pidslot helper (claude-sandbox pidslot -- claude), entrypoint.sh and node never count, whatever their arguments name
+    And a join's rows (claude-sandbox pidslot -- claude, tini -s -- claude, claude) add exactly 1
+    And a separate claude process, such as a background --bg session, counts as a session
+    And a claude process whose parent is a counted ralph loop is that loop's iteration and does not count again, so a ralph container counts 1
+    And the columns are found by the header row (PID, PPID, then the command last), so output without a PPID column still counts by argv[0]
 
   Scenario: CS-SESS-004 A failing docker top degrades instead of failing discovery
     Given "docker top" exits non-zero for one container

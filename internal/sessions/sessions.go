@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -102,8 +103,9 @@ type Session struct {
 	// MarkOOM does (CS-SESS-061).
 	OOMKilled bool `json:"oomKilled,omitempty"`
 
-	// Count is the number of live claude processes, so joined sessions are
-	// visible and not just the container that hosts them.
+	// Count is the number of live claude sessions (processes whose argv[0] is
+	// claude, or a ralph loop; CS-SESS-099), so joined sessions are visible
+	// and not just the container that hosts them.
 	Count int `json:"sessions"`
 
 	// State is docker's container state: "running", "paused", or "created"
@@ -401,41 +403,82 @@ func listAll(r execx.Runner, filter string, count bool) ([]Session, []Session, e
 	return out2, removing, nil
 }
 
-// countSessions counts live claude processes in a container (CS-SESS-003).
-// A failure here degrades to 0 rather than failing the whole listing: not being
-// able to count processes is no reason to hide a container that is running
-// (CS-SESS-004).
+// countSessions counts live claude sessions in a container (CS-SESS-003,
+// CS-SESS-099). A failure here degrades to 0 rather than failing the whole
+// listing: not being able to count processes is no reason to hide a container
+// that is running (CS-SESS-004).
 func countSessions(r execx.Runner, name string) int {
 	out, err := r.Output(execx.Cmd{
 		Name:   "docker",
-		Args:   []string{"top", name, "-o", "pid,args"},
+		Args:   []string{"top", name, "-o", "pid,ppid,args"},
 		Stderr: io.Discard,
 	})
 	if err != nil {
 		return 0
 	}
-	n := 0
-	for i, line := range strings.Split(strings.TrimSpace(out), "\n") {
-		if i == 0 {
-			continue // header row
+	return countTop(out)
+}
+
+// topRow is one parsed "docker top" row.
+type topRow struct {
+	pid, ppid, argv0 string
+}
+
+// countTop counts the session processes in "docker top -o pid,ppid,args"
+// output (CS-SESS-099). A row counts only when the base name of its argv[0]
+// is exactly "claude" (an interactive, joined or --bg session) or "ralph"
+// (the ralph loop) — never docker-init, tini, the pidslot helper,
+// entrypoint.sh or node, whose ARGUMENTS name claude (a container running one
+// claude used to count 4). A claude whose parent is a counted ralph loop is
+// that loop's iteration, not another session.
+//
+// The columns are found by the header row: the command is last (it holds
+// spaces) and PPID is optional, so output without it still counts by argv[0].
+func countTop(out string) int {
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) < 2 {
+		return 0
+	}
+	header := strings.Fields(lines[0])
+	cmdCol := len(header) - 1
+	if cmdCol < 1 {
+		return 0
+	}
+	pidCol, ppidCol := 0, -1
+	for i, h := range header[:cmdCol] {
+		switch h {
+		case "PID":
+			pidCol = i
+		case "PPID":
+			ppidCol = i
 		}
-		if isClaudeProcess(line) {
+	}
+	var rows []topRow
+	ralph := map[string]bool{}
+	for _, line := range lines[1:] {
+		f := strings.Fields(line)
+		if len(f) <= cmdCol {
+			continue
+		}
+		row := topRow{pid: f[pidCol], argv0: path.Base(f[cmdCol])}
+		if ppidCol >= 0 {
+			row.ppid = f[ppidCol]
+		}
+		if row.argv0 == "ralph" {
+			ralph[row.pid] = true
+		}
+		rows = append(rows, row)
+	}
+	n := 0
+	for _, row := range rows {
+		switch {
+		case row.argv0 == "ralph":
+			n++
+		case row.argv0 == "claude" && !ralph[row.ppid]:
 			n++
 		}
 	}
 	return n
-}
-
-// isClaudeProcess reports whether a `docker top` row is a claude session, as
-// opposed to a helper process the session spawned.
-func isClaudeProcess(row string) bool {
-	fields := strings.Fields(row)
-	if len(fields) < 2 {
-		return false
-	}
-	cmd := strings.Join(fields[1:], " ")
-	// The ralph loop runs the binary directly; interactive sessions run claude.
-	return strings.Contains(cmd, "claude") || strings.Contains(cmd, "/bin/ralph")
 }
 
 // Attachable returns the host pid of the container's attachable process, i.e.

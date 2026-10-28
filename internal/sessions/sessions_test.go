@@ -69,6 +69,61 @@ var _ = Describe("session discovery", func() {
 			got, err := sessions.Discover(fake, "/one")
 			Expect(err).NotTo(HaveOccurred())
 			Expect(got[0].Count).To(Equal(3), "helper processes must not be counted as sessions")
+			Expect(fake.CommandLines()).To(ContainElement("docker top a -o pid,ppid,args"))
+		})
+
+		Describe("CS-SESS-099: only a claude session process counts", func() {
+			count := func(top string) int {
+				fake.On("docker ps", row("a", "Up 1s", "/one", "claude", "otter", "", "", "", "")+"\n", nil)
+				fake.On("docker top", top, nil)
+				got, err := sessions.Discover(fake, "/one")
+				Expect(err).NotTo(HaveOccurred())
+				return got[0].Count
+			}
+			primary := []string{
+				"PID                 PPID                COMMAND",
+				"100                 90                  /sbin/docker-init -- /opt/claude-sandbox/bin/entrypoint.sh claude --dangerously-skip-permissions",
+				"107                 100                 tini -s -- claude --dangerously-skip-permissions",
+				"108                 107                 claude --dangerously-skip-permissions",
+				"120                 108                 node /opt/claude-sandbox/mcp/discord-notify/dist/index.mjs",
+			}
+
+			It("counts the observed one-claude container as 1", func() {
+				Expect(count(strings.Join(primary, "\n"))).To(Equal(1))
+			})
+
+			It("counts a join once, not its pidslot and tini rows", func() {
+				rows := append(append([]string{}, primary...),
+					"200                 80                  /opt/claude-sandbox/bin/claude-sandbox pidslot -- claude --dangerously-skip-permissions",
+					"263                 200                 tini -s -- claude --dangerously-skip-permissions",
+					"264                 263                 claude --dangerously-skip-permissions",
+				)
+				Expect(count(strings.Join(rows, "\n"))).To(Equal(2))
+			})
+
+			It("counts a separate claude process, such as a --bg session, and an absolute argv[0]", func() {
+				rows := append(append([]string{}, primary...),
+					"300                 108                 /home/u/.local/bin/claude --bg",
+					"310                 108                 bash -c claude-helper --claude",
+					"311                 108                 /usr/bin/claudette",
+				)
+				Expect(count(strings.Join(rows, "\n"))).To(Equal(2))
+			})
+
+			It("counts a ralph container as 1: the loop, not its iteration's claude", func() {
+				Expect(count(strings.Join([]string{
+					"PID   PPID  COMMAND",
+					"100   90    /sbin/docker-init -- /opt/claude-sandbox/bin/entrypoint.sh /opt/claude-sandbox/bin/ralph",
+					"107   100   tini -s -- /opt/claude-sandbox/bin/ralph",
+					"108   107   /opt/claude-sandbox/bin/ralph",
+					"130   108   claude -p --output-format stream-json",
+					"131   108   node /opt/claude-sandbox/logstream/run-logger.js",
+				}, "\n"))).To(Equal(1))
+			})
+
+			It("finds the command by the header, so output without a PPID column still counts by argv[0]", func() {
+				Expect(count("PID COMMAND\n1 tini -s -- claude\n2 claude\n")).To(Equal(1))
+			})
 		})
 
 		It("CS-SESS-004: a failing docker top degrades to zero without failing discovery", func() {
