@@ -85,26 +85,37 @@ FROM claude-sandbox
 # operator's `!` commands and Claude Code's Bash tool run NON-interactive
 # shells, and the Bash tool's start-up snapshot of ~/.bashrc / ~/.zshrc keeps
 # aliases, functions and shell options, not environment variables
-# (code.claude.com/docs/en/tools-reference, "Bash tool behavior"). So:
-#   zsh  reads /etc/zsh/zshenv on every invocation: export there.
-#   bash reads no rc file when non-interactive; nothing short of BASH_ENV
-#        reaches it. ENV BASH_ENV here is fine (only env files refuse it); the
-#        root entrypoint runs `bash -p`, which ignores it. It runs for every
-#        non-interactive bash (scripts too), and direnv evaluates .envrc in a
-#        bash of its own, so the DIRENV_BASH_ENV_RUNNING guard is required:
-#        without it each export starts another one until the container is
-#        killed. Narrower: drop BASH_ENV and set CLAUDE_ENV_FILE to the same
-#        file, which Claude Code runs before each Bash tool command only.
-# The bash.bashrc / zshrc hooks re-export on `cd` in interactive shells.
-# Drop zsh (and its two lines) if your SHELL is bash.
+# (code.claude.com/docs/en/tools-reference, "Bash tool behavior"). Non-
+# interactive bash reads no rc file; nothing short of BASH_ENV reaches it.
+# ENV BASH_ENV here is fine (only env files refuse it); the root entrypoint
+# runs `bash -p`, which ignores it. It runs for every non-interactive bash,
+# scripts too, and direnv itself evaluates .envrc in a bash, so the file skips
+# that bash (its parent is direnv) and anything the .envrc starts
+# (DIRENV_IN_ENVRC): without the guard each export starts another one until
+# the container is killed, or .envrc runs twice per command. Narrower: drop
+# BASH_ENV and set CLAUDE_ENV_FILE to the same file, which Claude Code runs
+# before each Bash tool command only. Either way a slow .envrc slows every
+# Bash tool command. The /etc/bash.bashrc hook re-exports on `cd`.
 # RUN --mount=type=cache,id=claude-sandbox-apt,target=/var/cache/apt,sharing=locked \
 #     --mount=type=cache,id=claude-sandbox-apt-lists,target=/var/lib/apt,sharing=locked \
-#     apt-get update && apt-get install -y --no-install-recommends direnv zsh \
-#     && printf '%s\n' 'command -v direnv >/dev/null 2>&1 && eval "$(direnv export zsh 2>/dev/null)"' >> /etc/zsh/zshenv \
-#     && printf '%s\n' 'eval "$(direnv hook zsh)"' >> /etc/zsh/zshrc \
-#     && printf '%s\n' '[ -z "${DIRENV_BASH_ENV_RUNNING:-}" ] && command -v direnv >/dev/null 2>&1 && eval "$(DIRENV_BASH_ENV_RUNNING=1 direnv export bash 2>/dev/null)"' > /etc/direnv-bash-env.sh \
+#     apt-get update && apt-get install -y --no-install-recommends direnv \
+#     && printf '%s\n' 'if [ -z "${DIRENV_IN_ENVRC:-}" ] && { read -r _dv_p < /proc/$PPID/comm; [ "$_dv_p" != direnv ]; } 2>/dev/null && command -v direnv >/dev/null 2>&1; then eval "$(direnv export bash 2>/dev/null)"; fi; unset _dv_p' > /etc/direnv-bash-env.sh \
 #     && printf '%s\n' 'eval "$(direnv hook bash)"' >> /etc/bash.bashrc
 # ENV BASH_ENV=/etc/direnv-bash-env.sh
+#
+# --- zsh (optional; after the direnv step) -----------------------------------
+# INSTALLING ZSH SWITCHES CLAUDE CODE'S SHELL: with no bash/zsh $SHELL, Claude
+# Code runs the Bash tool and `!` commands in the first working zsh, then bash.
+# Pin the one you want with CLAUDE_CODE_SHELL (/usr/bin/zsh here, or /bin/bash
+# to keep bash with zsh installed). zsh reads /etc/zsh/zshenv on every start,
+# interactive or not, so the export goes there; /etc/zsh/zshrc re-exports on
+# `cd` in interactive shells.
+# RUN --mount=type=cache,id=claude-sandbox-apt,target=/var/cache/apt,sharing=locked \
+#     --mount=type=cache,id=claude-sandbox-apt-lists,target=/var/lib/apt,sharing=locked \
+#     apt-get update && apt-get install -y --no-install-recommends zsh \
+#     && printf '%s\n' 'command -v direnv >/dev/null 2>&1 && eval "$(direnv export zsh 2>/dev/null)"' >> /etc/zsh/zshenv \
+#     && printf '%s\n' 'eval "$(direnv hook zsh)"' >> /etc/zsh/zshrc
+# ENV CLAUDE_CODE_SHELL=/usr/bin/zsh
 
 # --- TypeScript / JavaScript language servers --------------------------------
 # RUN --mount=type=cache,id=claude-sandbox-npm,target=/root/.npm \
