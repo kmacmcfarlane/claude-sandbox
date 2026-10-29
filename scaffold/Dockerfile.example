@@ -78,7 +78,33 @@ FROM claude-sandbox
 # --- apt packages ------------------------------------------------------------
 # RUN --mount=type=cache,id=claude-sandbox-apt,target=/var/cache/apt,sharing=locked \
 #     --mount=type=cache,id=claude-sandbox-apt-lists,target=/var/lib/apt,sharing=locked \
-#     apt-get update && apt-get install -y --no-install-recommends direnv
+#     apt-get update && apt-get install -y --no-install-recommends jq
+
+# --- direnv: load an allowed .envrc in every shell, not just interactive ones -
+# A prompt hook (`direnv hook bash|zsh`) fires only in interactive shells. The
+# operator's `!` commands and Claude Code's Bash tool run NON-interactive
+# shells, and the Bash tool's start-up snapshot of ~/.bashrc / ~/.zshrc keeps
+# aliases, functions and shell options, not environment variables
+# (code.claude.com/docs/en/tools-reference, "Bash tool behavior"). So:
+#   zsh  reads /etc/zsh/zshenv on every invocation: export there.
+#   bash reads no rc file when non-interactive; nothing short of BASH_ENV
+#        reaches it. ENV BASH_ENV here is fine (only env files refuse it); the
+#        root entrypoint runs `bash -p`, which ignores it. It runs for every
+#        non-interactive bash (scripts too), and direnv evaluates .envrc in a
+#        bash of its own, so the DIRENV_BASH_ENV_RUNNING guard is required:
+#        without it each export starts another one until the container is
+#        killed. Narrower: drop BASH_ENV and set CLAUDE_ENV_FILE to the same
+#        file, which Claude Code runs before each Bash tool command only.
+# The bash.bashrc / zshrc hooks re-export on `cd` in interactive shells.
+# Drop zsh (and its two lines) if your SHELL is bash.
+# RUN --mount=type=cache,id=claude-sandbox-apt,target=/var/cache/apt,sharing=locked \
+#     --mount=type=cache,id=claude-sandbox-apt-lists,target=/var/lib/apt,sharing=locked \
+#     apt-get update && apt-get install -y --no-install-recommends direnv zsh \
+#     && printf '%s\n' 'command -v direnv >/dev/null 2>&1 && eval "$(direnv export zsh 2>/dev/null)"' >> /etc/zsh/zshenv \
+#     && printf '%s\n' 'eval "$(direnv hook zsh)"' >> /etc/zsh/zshrc \
+#     && printf '%s\n' '[ -z "${DIRENV_BASH_ENV_RUNNING:-}" ] && command -v direnv >/dev/null 2>&1 && eval "$(DIRENV_BASH_ENV_RUNNING=1 direnv export bash 2>/dev/null)"' > /etc/direnv-bash-env.sh \
+#     && printf '%s\n' 'eval "$(direnv hook bash)"' >> /etc/bash.bashrc
+# ENV BASH_ENV=/etc/direnv-bash-env.sh
 
 # --- TypeScript / JavaScript language servers --------------------------------
 # RUN --mount=type=cache,id=claude-sandbox-npm,target=/root/.npm \

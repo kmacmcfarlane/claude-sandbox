@@ -2056,6 +2056,8 @@ Tagging this way means every project resolving the same shared Dockerfile — a 
 
 See `scaffold/Dockerfile.example` in this repo for a commented template (`claude-sandbox init` seeds it into the project as `.claude-sandbox/Dockerfile.example`).
 
+**direnv:** a prompt hook (`direnv hook bash|zsh` in `/etc/bash.bashrc`) never fires in `!` commands or Claude Code's Bash tool, which run non-interactive shells, so an allowed `.envrc` reaches neither. The template's direnv block also exports from `/etc/zsh/zshenv` (zsh reads it on every start) and, for bash, from a `BASH_ENV` file set with `ENV` (allowed in a Dockerfile; only env files refuse it) or from `CLAUDE_ENV_FILE`.
+
 ### LSP plugins
 
 The base image ships no language servers; a child Dockerfile may add them. Register the
