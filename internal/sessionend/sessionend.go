@@ -74,7 +74,8 @@ var (
 // may change it to SIGHUP (03 § 2).
 const StopSignal = "SIGTERM"
 
-// StopGrace is docker stop's --time: SIGKILL follows after it.
+// StopGrace is docker stop's -t (the short form works on every docker
+// version; docker 29 deprecates --time for --timeout): SIGKILL follows after it.
 const StopGrace = 30
 
 // Outcomes, as logged.
@@ -587,7 +588,7 @@ const (
 
 // StopArgs is the stop's argv (02 § 4 step 4).
 func StopArgs(id string) []string {
-	return []string{"stop", "--signal", StopSignal, "--time", strconv.Itoa(StopGrace), id}
+	return []string{"stop", "--signal", StopSignal, "-t", strconv.Itoa(StopGrace), id}
 }
 
 func (r *run) stop() stopAnswer {

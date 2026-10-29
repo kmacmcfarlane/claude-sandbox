@@ -218,7 +218,7 @@ var _ = Describe("the session-end helper", func() {
 		f.record(7, conv1, "idle", "", t0.Add(time.Second))
 		res := f.run()
 		Expect(res.Outcome).To(Equal(sessionend.OutcomeEnded))
-		Expect(f.stops()).To(Equal([]string{"docker stop --signal SIGTERM --time 30 " + cid}))
+		Expect(f.stops()).To(Equal([]string{"docker stop --signal SIGTERM -t 30 " + cid}))
 		es := f.entries()
 		Expect(es).To(HaveLen(1))
 		Expect(es[0].Outcome).To(Equal("ended"))

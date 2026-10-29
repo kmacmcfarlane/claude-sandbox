@@ -272,7 +272,7 @@ or choose `[r]` in the menu above. What it does:
    attached cannot be told (macOS). With nothing else affected there is no question, just one line
    saying what happens.
 4. **Builds the new launch** first — images included — and only then stops the old container
-   (`docker stop --signal SIGTERM --time 30`, as when a terminal closes), waits for docker to remove
+   (`docker stop --signal SIGTERM -t 30`, as when a terminal closes), waits for docker to remove
    it, and starts the new one: `--resume <id>`, the conversation's own `--name`, the session's
    worktree (explicitly, both ways), the `--model` given at its launch, and the claude flags a resume
    replays (`--effort`, `--add-dir`, `--append-system-prompt`, …). Your own flags on the restart
@@ -475,7 +475,7 @@ with docker's status. The helper:
 - **keeps the container whenever it cannot see**: no live registry record within 30 seconds, an
   unreadable registry or `/proc`, a paused container, its own SIGTERM or SIGHUP, its systemd unit
   stopping (the IDE's scope, `tmux.service`) or the host shutting down;
-- **then stops it**: `docker stop --signal SIGTERM --time 30 <id>` — claude gets SIGTERM, as a
+- **then stops it**: `docker stop --signal SIGTERM -t 30 <id>` — claude gets SIGTERM, as a
   host claude gets its hang-up, and SIGKILL follows 30 seconds later if it does not exit. The
   container is `--rm`, so it is gone; the conversation is not.
 

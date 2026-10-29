@@ -316,7 +316,7 @@ var _ = Describe("restart a session in place (CS-SESS-105..108, CS-LNCH-218..221
 			Expect(f.run("--restart=dunlin")).To(Equal(0), f.errw.String())
 			Expect(f.errw.String()).To(ContainSubstring("Restarting 'dunlin' ('fix the tests', " + rsConv + "): its container is stopped"))
 			Expect(f.errw.String()).To(ContainSubstring("anything else running in that container ends with it"))
-			Expect(f.index("docker stop --signal SIGTERM --time 30 " + rsOldID)).To(BeNumerically(">=", 0))
+			Expect(f.index("docker stop --signal SIGTERM -t 30 " + rsOldID)).To(BeNumerically(">=", 0))
 		})
 
 		It("CS-SESS-105: a bare --restart uses the only candidate, named in the restart line", func() {
@@ -358,7 +358,7 @@ var _ = Describe("restart a session in place (CS-SESS-105..108, CS-LNCH-218..221
 			Expect(f.run()).To(Equal(0), f.errw.String())
 			Expect(f.errw.String()).To(ContainSubstring("[r] restart a session in a new container"))
 			Expect(f.asked()).To(Equal([]string{"Choice [n/b/j/a/r/q]:", "Which session to restart? [dunlin/heron]:"}))
-			Expect(f.index("docker stop --signal SIGTERM --time 30 " + rsOldID)).To(BeNumerically(">=", 0))
+			Expect(f.index("docker stop --signal SIGTERM -t 30 " + rsOldID)).To(BeNumerically(">=", 0))
 			Expect(labelsOf(f.launched().Args)).To(HaveKeyWithValue("claude-sandbox.instance", "dunlin"))
 		})
 
@@ -800,7 +800,7 @@ var _ = Describe("restart a session in place (CS-SESS-105..108, CS-LNCH-218..221
 		It("CS-LNCH-218: image work, then the stop, then the removal wait, then the lock, the guard and the create", func() {
 			f.primary("idle")
 			Expect(f.run("--restart=dunlin")).To(Equal(0), f.errw.String())
-			stop := f.index("docker stop --signal SIGTERM --time 30 " + rsOldID)
+			stop := f.index("docker stop --signal SIGTERM -t 30 " + rsOldID)
 			Expect(stop).To(BeNumerically(">", f.index("docker buildx")), "the image work runs first")
 			Expect(f.lock.acquiredAt).To(HaveLen(1))
 			Expect(f.lock.acquiredAt[0]).To(BeNumerically(">", stop), "the stop is outside the lock")

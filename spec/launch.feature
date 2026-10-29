@@ -3326,7 +3326,7 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       client may be present, the verdict must still be end (or the cap still
       reached), and the unit and system guards must not keep; any change goes
       back to polling
-    And the stop is "docker stop --signal SIGTERM --time 30 <64-hex id>",
+    And the stop is "docker stop --signal SIGTERM -t 30 <64-hex id>",
       bounded at 40 s (the signal explicit, so a child image's STOPSIGNAL never
       applies); "No such container" means ended on its own; any other failure
       is retried once at the next poll, then kept: stop failed
@@ -3533,7 +3533,7 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       resumeguard.ReadClass (a malformed one exits 2 before the turn rule runs), the
       primary and its conversation, the turn rule, then the clients
     And then the pane marks naming it are unset (CS-TMUX-080), and
-      "docker stop --signal SIGTERM --time 30 <64-hex id>" runs, bounded at 40 s
+      "docker stop --signal SIGTERM -t 30 <64-hex id>" runs, bounded at 40 s
     And then the restart waits, polling every 250 ms for at most 10 s, until docker
       removed the container
     And the launch then reserves its container as any launch does: the resume guard runs
