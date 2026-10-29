@@ -108,12 +108,14 @@ FROM claude-sandbox
 # Code runs the Bash tool and `!` commands in the first working zsh, then bash.
 # Pin the one you want with CLAUDE_CODE_SHELL (/usr/bin/zsh here, or /bin/bash
 # to keep bash with zsh installed). zsh reads /etc/zsh/zshenv on every start,
-# interactive or not, so the export goes there; /etc/zsh/zshrc re-exports on
-# `cd` in interactive shells.
+# interactive or not, so the export goes there. It skips shells the .envrc
+# starts (DIRENV_IN_ENVRC): without that, an .envrc that runs zsh recurses
+# until killed (direnv itself evaluates .envrc in bash, never zsh).
+# /etc/zsh/zshrc re-exports on `cd` in interactive shells.
 # RUN --mount=type=cache,id=claude-sandbox-apt,target=/var/cache/apt,sharing=locked \
 #     --mount=type=cache,id=claude-sandbox-apt-lists,target=/var/lib/apt,sharing=locked \
 #     apt-get update && apt-get install -y --no-install-recommends zsh \
-#     && printf '%s\n' 'command -v direnv >/dev/null 2>&1 && eval "$(direnv export zsh 2>/dev/null)"' >> /etc/zsh/zshenv \
+#     && printf '%s\n' '[ -z "${DIRENV_IN_ENVRC:-}" ] && command -v direnv >/dev/null 2>&1 && eval "$(direnv export zsh 2>/dev/null)"' >> /etc/zsh/zshenv \
 #     && printf '%s\n' 'eval "$(direnv hook zsh)"' >> /etc/zsh/zshrc
 # ENV CLAUDE_CODE_SHELL=/usr/bin/zsh
 
