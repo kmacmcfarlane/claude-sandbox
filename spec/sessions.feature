@@ -1270,8 +1270,8 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
     And the container's claude-sandbox.configdir label must equal this launcher's raw
       CLAUDE_CONFIG_DIR, else exit 2 printing the command with the right
       CLAUDE_CONFIG_DIR; a container without the labels (an older launcher) exits 2
-    And nothing the restart decides on is read from the docker ps row (a "\x1f"-split text
-      a session-written label can shift): it runs its own docker inspect of the target, by
+    And nothing the restart decides on is read from the docker ps row: it runs its own
+      docker inspect of the target, by
       its 64-hex id when known, of {{json .Name}}, {{json .Config.Cmd}},
       {{json .Config.Labels}}, {{json .Created}} and {{json .State.Status}}, split on the
       raw "\x1f" (JSON escapes control characters); when the name or any of the project,

@@ -3242,8 +3242,9 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       fingerprint and never hashed (a per-session choice, no drift): end when
       the setting resolved on; keep when it resolved off, and always for
       --detach, ralph and headless
-    And discovery reads it as a docker ps field just before {{.Mounts}}, which
-      stays the last field; a row of the format before it keeps everything else
+    And discovery reads it as a JSON field of the docker ps row, in the format's
+      exact field count (CS-SESS-118); an empty value means a container created
+      before the label
     When an attach chooses its container
     Then whether its hang-up ends the container is, in order: its own
       launcher's CLAUDE_SANDBOX_END_ON_HANGUP when set to a recognised value;
