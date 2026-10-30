@@ -2056,7 +2056,7 @@ Tagging this way means every project resolving the same shared Dockerfile — a 
 
 See `scaffold/Dockerfile.example` in this repo for a commented template (`claude-sandbox init` seeds it into the project as `.claude-sandbox/Dockerfile.example`).
 
-**direnv:** a prompt hook (`direnv hook bash|zsh` in `/etc/bash.bashrc` or `/etc/zsh/zshrc`) never fires in `!` commands or Claude Code's Bash tool, which run non-interactive shells, so an allowed `.envrc` reaches neither. The template's direnv block also exports from `/etc/zsh/zshenv` (zsh reads it on every start) and, for bash, from a guarded `BASH_ENV` file set with `ENV` (allowed in a Dockerfile; only env files refuse it) or from `CLAUDE_ENV_FILE`. Installing zsh switches the Bash tool and `!` commands to zsh (Claude Code prefers zsh when `$SHELL` is neither), so the template pins the shell with `CLAUDE_CODE_SHELL`.
+**direnv:** a prompt hook (`direnv hook bash|zsh` in `/etc/bash.bashrc` or `/etc/zsh/zshrc`) never fires in `!` commands or Claude Code's Bash tool, which run non-interactive shells, so an allowed `.envrc` reaches neither. The template's direnv block also exports from a guarded file sourced by one line appended to `/etc/zsh/zshenv` (zsh reads it on every start) and, for bash, from a guarded `BASH_ENV` file set with `ENV` (allowed in a Dockerfile; only env files refuse it) or from `CLAUDE_ENV_FILE`; both files are written with `COPY <<'EOF'` heredocs whose comments explain each guard (no syntax directive needed). Installing zsh switches the Bash tool and `!` commands to zsh (Claude Code prefers zsh when `$SHELL` is neither), so the template pins the shell with `CLAUDE_CODE_SHELL`.
 
 ### LSP plugins
 
