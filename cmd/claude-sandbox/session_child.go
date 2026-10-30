@@ -40,7 +40,7 @@ type sessionOpts struct {
 	// carry no limit label.
 	fallback oomreport.Limit
 	// headless suppresses the terminal reset: its stdio is an SDK client's
-	// pipe (CS-LNCH-092).
+	// pipe (CS-LNCH-092, CS-LNCH-227).
 	headless bool
 	// after runs once the session ended and its reports are printed, while
 	// the signal handlers are still installed, so a signal during it still
@@ -61,6 +61,11 @@ type sessionOpts struct {
 	// resolved on, on a Linux host, outside a sandbox. Never for a join,
 	// ralph or headless. The helper reads the session from mark.
 	endOnHangup bool
+	// enable is written to the launcher's terminal right before the child
+	// starts (CS-LNCH-228: an attach's oomreport.AttachModes); "" for none.
+	// A child that could not be run is followed by the reset, so the modes
+	// it turned on never stay on in the shell.
+	enable string
 	// onChild runs right after the pane is marked and right before the
 	// session child starts: a restore releases its start lock there after
 	// an attach, or starts its readiness watcher (CS-TMUX-060/061). nil on
@@ -88,6 +93,31 @@ func (e *Env) isTerminal(w io.Writer) bool {
 	return execx.IsTerminal(w)
 }
 
+// terminalOf is the launcher's terminal for the session's TUI modes: stdout,
+// where docker's TTY output went, else stderr; nil for a headless launch
+// (its stdio is an SDK client's pipe) or when neither is a terminal.
+func terminalOf(env *Env, headless bool) io.Writer {
+	switch {
+	case headless:
+		return nil
+	case env.isTerminal(env.Out):
+		return env.Out
+	case env.isTerminal(env.Err):
+		return env.Err
+	}
+	return nil
+}
+
+// resetTerminal writes the TUI-mode reset to the launcher's terminal
+// (CS-LNCH-227) and returns where it went; nil when nothing was written.
+func resetTerminal(env *Env, o sessionOpts) io.Writer {
+	w := terminalOf(env, o.headless)
+	if w != nil {
+		io.WriteString(w, oomreport.TerminalReset)
+	}
+	return w
+}
+
 // runSession runs c for container and reports an OOM kill when the session
 // ends (CS-LNCH-087..092). The child's signal handlers stay installed until
 // the report is written (CS-LNCH-097).
@@ -113,6 +143,12 @@ func runSession(env *Env, c execx.Cmd, container string, o sessionOpts) (end ses
 		o.onChild()
 	}
 
+	var enabledOn io.Writer
+	if o.enable != "" {
+		if enabledOn = terminalOf(env, o.headless); enabledOn != nil {
+			io.WriteString(enabledOn, o.enable)
+		}
+	}
 	started := env.now()
 	res, err := env.Runner.RunSession(c)
 	defer res.Done()
@@ -135,6 +171,10 @@ func runSession(env *Env, c execx.Cmd, container string, o sessionOpts) (end ses
 		}
 	}()
 	if err != nil {
+		if enabledOn != nil {
+			// CS-LNCH-228: undo what was turned on for a child that never ran.
+			io.WriteString(enabledOn, oomreport.TerminalReset)
+		}
 		return sessionEnd{code: res.Code}, err
 	}
 	end = sessionEnd{code: res.Code}
@@ -150,6 +190,22 @@ func runSession(env *Env, c execx.Cmd, container string, o sessionOpts) (end ses
 		putBack = true
 		pane.decided = true
 	}
+	if res.Forwarded == nil && o.kind == reservedSession {
+		// CS-LNCH-096: a start that never ran leaves a "created" container:
+		// no die will ever come, so there is nothing to wait for.
+		if state, _ := sessions.Inspect(env.Runner, container); state == sessions.StateCreated {
+			end.neverStarted = true
+			return end, nil
+		}
+	}
+	// CS-LNCH-227: the TUI's modes off at once, on a detach (claude runs on
+	// and never turns them off) and on every other end alike — which one it
+	// was is known only after the die wait, and the reset is harmless when
+	// the TUI already restored them. Not after a hang-up: no terminal.
+	var resetTo io.Writer
+	if !hungUp {
+		resetTo = resetTerminal(env, o)
+	}
 	if res.Forwarded != nil {
 		// CS-LNCH-091: whoever sent the signal ended the session on
 		// purpose, and an SDK client expects a prompt exit: no die wait, no
@@ -160,15 +216,6 @@ func runSession(env *Env, c execx.Cmd, container string, o sessionOpts) (end ses
 			settle = markPending
 		}
 		return end, nil
-	}
-
-	if o.kind == reservedSession {
-		// CS-LNCH-096: a start that never ran leaves a "created" container:
-		// no die will ever come, so there is nothing to wait for.
-		if state, _ := sessions.Inspect(env.Runner, container); state == sessions.StateCreated {
-			end.neverStarted = true
-			return end, nil
-		}
 	}
 
 	var stopped bool
@@ -207,10 +254,11 @@ func runSession(env *Env, c execx.Cmd, container string, o sessionOpts) (end ses
 	}
 	switch verdict {
 	case oomreport.Killed:
-		if !o.headless && env.isTerminal(env.Err) {
-			// The TUI died with its modes set; the docker client restored
-			// only the termios (CS-LNCH-092).
-			io.WriteString(env.Err, oomreport.TerminalReset+"\n")
+		if resetTo != nil {
+			// The TUI died with its modes set and the reset is already
+			// written (CS-LNCH-227); the report starts on its own line
+			// (CS-LNCH-092).
+			io.WriteString(resetTo, "\n")
 		}
 		fmt.Fprint(env.Err, oomreport.KilledReport(out.OOMKills, lim))
 	case oomreport.Survived:

@@ -833,7 +833,10 @@ func attachToWith(env *Env, s sessions.Session, configuredKeys string, mark *pan
 	end, err := runSession(env, execx.Cmd{
 		Name: "docker",
 		Args: []string{"attach", "--detach-keys=" + detachKeys, target},
-	}, s.Name, sessionOpts{kind: primarySession, after: func() { checkGlobalConfig(env, pre) }, mark: mark, onChild: onChild, lease: lease, endOnHangup: endOnHangup})
+	}, s.Name, sessionOpts{kind: primarySession, after: func() { checkGlobalConfig(env, pre) }, mark: mark, onChild: onChild, lease: lease, endOnHangup: endOnHangup,
+		// CS-LNCH-228: the modes claude set at startup and does not re-send
+		// on docker attach's resize nudge, which a detach's reset turned off.
+		enable: oomreport.AttachModes})
 	if err != nil {
 		return err
 	}

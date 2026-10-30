@@ -2097,7 +2097,7 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
 
   Scenario: CS-LNCH-092 The terminal is reset before the report, only on a terminal
     Given the session was OOM-killed (CS-LNCH-089), the launch is not headless,
-      and the launcher's stderr is a terminal
+      and the launcher's stdout or stderr is a terminal (CS-LNCH-227)
     Then before the report the launcher writes only the resets of the modes
       Claude Code's TUI sets: synchronized update (?2026l), bracketed paste
       (?2004l), focus events (?1004l), theme notifications (?2031l), mouse
@@ -2107,8 +2107,10 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       (DECSTBM), which move the cursor on a terminal that never entered them
     And a headless launch, or a stderr that is not a terminal, gets the plain
       report lines only
-    And the non-fatal note (CS-LNCH-090) never resets anything: the TUI exited
-      on its own and restored its modes
+    And the non-fatal note (CS-LNCH-090) adds no reset of its own: the TUI
+      exited on its own and restored its modes
+    And this reset is the one every end of the session child writes
+      (CS-LNCH-227): the report follows it on its own line, never a second copy
 
   Scenario: CS-LNCH-093 The memory limit and its source are recorded on the container
     When a new container is created
@@ -3661,3 +3663,43 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     And the terminal label already goes through registry.Printable, and the
       timezone label is a validated ASCII shape; the mode, pid class, resume,
       continue, detached and clipboard labels are fixed forms
+
+  # ---- terminal modes across a detach and a re-attach ----
+  # Claude Code's fullscreen TUI turns on mouse tracking, bracketed paste,
+  # focus events and more. On a detach it keeps running in the container and
+  # never turns them off, so the user's shell got mouse reports on every move.
+
+  Scenario: CS-LNCH-227 Every end of an interactive session child resets the terminal
+    Given an interactive session child — a new container's "docker start -ai",
+      a "docker attach" (a tmux restore attach included) or a join's
+      "docker exec" — ran and returned, the launch is not headless,
+      and the launcher's stdout (else its stderr) is a terminal
+    Then right after the child returns, before the die wait and before any
+      report or note, the launcher writes the CS-LNCH-092 reset once to that
+      terminal, on a detach and on every other end alike: a detach cannot be
+      told from an end until the die wait is over, and the reset only turns off
+      modes that are already off when the TUI restored them itself
+    And never the alternate screen exit (?1049l) or a scroll-region reset (DECSTBM)
+    And nothing is written for a headless launch, when neither stdout nor
+      stderr is a terminal, when the child could not be run, when a reserved
+      container never started (CS-LNCH-096), or after a hang-up (the terminal
+      is gone)
+    And an OOM report (CS-LNCH-092) writes no second reset: it follows the one
+      already written, on its own line
+
+  Scenario: CS-LNCH-228 An attach turns back on the modes Claude Code does not re-send on a resize
+    Given a "docker attach" to a container's claude (a tmux restore attach
+      included), the launcher's stdout (else stderr) is a terminal
+    Then right before the attach starts the launcher writes the enables of the
+      modes Claude Code sets once at startup and does not re-send on a resize:
+      bracketed paste (?2004h), focus events (?1004h) and theme notifications
+      (?2031h)
+    And when the attach's docker client could not be run at all, the
+      CS-LNCH-092 reset follows at once, so those modes never stay on in the shell
+    And mouse tracking is not written: docker attach resizes the container's
+      tty to one row and column more and back, and Claude Code re-sends mouse
+      tracking (?1000h ?1002h ?1003h ?1006h) on each resize (observed on
+      Claude Code 2.1.314)
+    And a join writes nothing: its claude is a new process that sets its own modes
+    And the kitty keyboard flags and modifyOtherKeys, which Claude Code sets
+      only on terminals that answer its query, are not re-sent (a host check)

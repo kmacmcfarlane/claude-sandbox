@@ -56,7 +56,8 @@ type Env struct {
 	// means time.Now.
 	Now func() time.Time
 	// IsTerminal decides whether a writer is a terminal, for the terminal
-	// reset before an OOM report (CS-LNCH-092); nil means execx.IsTerminal.
+	// reset after a session child and before an OOM report (CS-LNCH-092,
+	// CS-LNCH-227); nil means execx.IsTerminal.
 	IsTerminal func(io.Writer) bool
 	// TempRoot is where shadow directories are made and swept
 	// (CS-LNCH-080..084); "" means os.TempDir(). Tests must point it at a
