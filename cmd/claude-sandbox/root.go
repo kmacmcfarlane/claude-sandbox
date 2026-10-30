@@ -29,6 +29,7 @@ import (
 	"github.com/kmacmcfarlane/claude-sandbox/internal/pidslot"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/prompt"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/ralphloop"
+	"github.com/kmacmcfarlane/claude-sandbox/internal/sessionend"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/tmuxpane"
 )
 
@@ -117,12 +118,22 @@ type Env struct {
 	// file; the MachineIDPath rule). Fixtures point both at scratch.
 	Readlink        func(string) (string, error)
 	EtcTimezonePath string
+	// GOOS is runtime.GOOS unless set: ending a session on hang-up stands
+	// down on a host other than Linux (CS-LNCH-210).
+	GOOS string
 
 	// restore is set only on the Env copy a "tmux restore" resumes with
 	// (CS-TMUX-058, plan 10 § 5.2): the pane's pending row to put back and
 	// the hook that starts the readiness watcher. Never an environment
 	// variable; nil on every other path.
 	restore *restoreHooks
+	// restart is set only on the Env copy of a launch that restarts a
+	// session (CS-LNCH-218): the stop before the lock and the watcher of the
+	// new session. nil on every other path.
+	restart *restartState
+	// restartSignals is the restart's signal seam (CS-LNCH-220): nil
+	// means signal.Notify on SIGINT, SIGTERM and SIGHUP.
+	restartSignals func() (<-chan os.Signal, func())
 	// interrupt is the Ctrl-C context a restore waits under (docker, the
 	// start lock); nil means signal.NotifyContext on os.Interrupt.
 	interrupt func() (context.Context, context.CancelFunc)
@@ -228,7 +239,7 @@ func Main(args []string) int {
 // path so "claude-sandbox --rebuild init" errors instead of routing to init.
 func isSubcommand(a string) bool {
 	switch a {
-	case "init", "init-ralph", "ralph", "help", "completion", "sessions", "pidslot", "headless", "global-config", "tmux", cacheBudgetCheckCmd, imagebuild.PrefetchSubcommand, clipboard.HelperSubcommand:
+	case "init", "init-ralph", "ralph", "help", "completion", "sessions", "pidslot", "headless", "global-config", "tmux", cacheBudgetCheckCmd, imagebuild.PrefetchSubcommand, clipboard.HelperSubcommand, sessionend.Subcommand:
 		return true
 	// CS-COMP-002/003: the hidden commands the generated completion scripts
 	// call on every keystroke. Without these they fall through to runLaunch,
@@ -304,7 +315,7 @@ func newRootCmd(env *Env) *cobra.Command {
 	}
 	ralphCmd := newRalphCmd(env)
 	registerRalphCompletions(ralphCmd)
-	root.AddCommand(newInitCmd(env, false), newInitCmd(env, true), ralphCmd, newSessionsCmd(env), newGlobalConfigCmd(env), newTmuxCmd(env), newPidslotCmd(env), newHeadlessCmd(env), newCacheBudgetCheckCmd(env), newCLIPrefetchCmd(env), newClipboardBridgeCmd(env))
+	root.AddCommand(newInitCmd(env, false), newInitCmd(env, true), ralphCmd, newSessionsCmd(env), newGlobalConfigCmd(env), newTmuxCmd(env), newPidslotCmd(env), newHeadlessCmd(env), newCacheBudgetCheckCmd(env), newCLIPrefetchCmd(env), newClipboardBridgeCmd(env), newSessionEndCmd(env))
 	// CS-INIT-002: a rejected flag names itself and lists the command's valid
 	// options (inherited by init/init-ralph/ralph).
 	root.SetFlagErrorFunc(func(c *cobra.Command, err error) error {
@@ -341,6 +352,7 @@ const launchUsage = `Usage:
   claude-sandbox --ralph --limit 5        # run ralph for 5 iterations
   claude-sandbox sessions                 # list sandbox sessions
   claude-sandbox --attach                 # reattach after losing a terminal
+  claude-sandbox --restart                # restart a session: a fresh screen with its history
   claude-sandbox --detach                 # start a new session in the background, attach later
   claude-sandbox --branch                 # fork a conversation into a new container
   claude-sandbox --worktree               # work in a private worktree, not the shared checkout
@@ -419,6 +431,11 @@ Multiple sessions (when a session is already running for this project):
                             works with or without running sessions). Add claude's
                             --name "my-name" to set the fork's display name
   --attach[=INSTANCE]       Reattach to a running session (recovers a lost terminal)
+  --restart[=INSTANCE]      Restart a running session in a new container: stops the old one
+                            (after its turn; refused while busy) and resumes its conversation
+                            here with a fresh screen, the same noun and place, and the old
+                            launch's access options. Joined sessions and anything else in
+                            that container end with it
   --join[=INSTANCE]         Start another session inside a running container
   --no-session-check        Skip the multi-session prompt and just launch
   --allow-config-drift      Attach or join even if the config has changed since it started
@@ -468,11 +485,15 @@ type launchFlags struct {
 	NewSession bool
 	Branch     bool
 	// Detach starts the new container without attaching (CS-LNCH-113..118).
-	Detach           bool
-	Attach           bool
-	AttachTarget     string
-	Join             bool
-	JoinTarget       string
+	Detach       bool
+	Attach       bool
+	AttachTarget string
+	Join         bool
+	JoinTarget   string
+	// Restart replaces a running session's container with a new one that
+	// resumes its conversation (CS-SESS-105); RestartTarget is its noun.
+	Restart          bool
+	RestartTarget    string
 	NoSessionCheck   bool
 	AllowConfigDrift bool
 }
@@ -598,6 +619,9 @@ func scanArgs(args []string, headless bool) (*launchFlags, error) {
 		case "--join":
 			f.Join = true
 			i++
+		case "--restart":
+			f.Restart = true
+			i++
 		case "--":
 			f.Passthrough = args[i+1:]
 			return f, nil
@@ -611,6 +635,11 @@ func scanArgs(args []string, headless bool) (*launchFlags, error) {
 			}
 			if v, ok := flagValue(a, "--join"); ok {
 				f.Join, f.JoinTarget = true, v
+				i++
+				continue
+			}
+			if v, ok := flagValue(a, "--restart"); ok {
+				f.Restart, f.RestartTarget = true, v
 				i++
 				continue
 			}
@@ -964,6 +993,8 @@ func headlessRejection(f *launchFlags) error {
 		return exitErr(2, "Error: --branch is not valid with headless; pass claude's own --resume/--fork-session after --")
 	case f.Detach:
 		return exitErr(2, "Error: --detach is not valid with headless: an SDK client's session is its stdio stream")
+	case f.Restart:
+		return exitErr(2, "Error: --restart is not valid with headless: a restart gives a terminal a fresh screen")
 	}
 	return nil
 }
@@ -1002,6 +1033,10 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 		return err
 	}
 	if err := validateDetach(f); err != nil {
+		return err
+	}
+	// CS-SESS-105, CS-LNCH-221: before any docker call.
+	if err := validateRestart(env, f); err != nil {
 		return err
 	}
 	if f.Detach {
@@ -1077,6 +1112,22 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 	if err != nil {
 		return err
 	}
+	if decision.Action == actionRestart {
+		// CS-SESS-105..108: the restart's decision phase, before any image
+		// work; it rewrites f into the launch that resumes the conversation,
+		// whose worktree is then the target's (explicit both ways).
+		rs, rerr := prepareRestart(env, projectDir, f, cfg, wt, decision.Target, !f.Restart)
+		if rerr != nil {
+			return rerr
+		}
+		renv := *env
+		renv.restart = rs
+		env = &renv
+		// Its signal handlers (CS-LNCH-220) end at the session child; on any
+		// earlier return, here (idempotent).
+		defer rs.stopSignals()
+		wt = resolveWorktree(env, projectDir, f, cfg, headless)
+	}
 	if decision.Action != actionQuit && !headless && !f.Detach && env.restore == nil && env.isTerminal(env.Err) {
 		// CS-TMUX-050: a hand launch, attach or join in a terminal prints a
 		// pending sparse-restore notice before its session, and claims it
@@ -1084,6 +1135,11 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 		// already did); nor does a scripted one whose stderr is no terminal
 		// (nobody would read it).
 		claimNotice(env)
+		if !f.Ralph {
+			// CS-LNCH-212: sessions here that ended when their terminal
+			// hung up, once.
+			claimEndedNotices(env, projectDir)
+		}
 	}
 	switch decision.Action {
 	case actionQuit:
@@ -1202,7 +1258,13 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 	// The instance noun names the container AND its worktree, so it is picked
 	// here, before the banner, from the nouns neither running nor already
 	// checked out under .claude/worktrees/ (CS-SESS-007, CS-SESS-045).
-	instance := newInstance(env, projectDir, f, wt.Root)
+	instance := ""
+	if env.restart != nil {
+		// CS-LNCH-218: the restart keeps the old container's noun.
+		instance = env.restart.target.Instance
+	} else {
+		instance = newInstance(env, projectDir, f, wt.Root)
+	}
 	worktree := wt.nameFor(instance, f.Ralph)
 	if b := wt.banner(worktree); b != "" {
 		fmt.Fprintln(env.Out, b)
@@ -1333,7 +1395,7 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 		ProjectDir: projectDir, Home: home,
 		HostUID: uid, HostGID: gid, HostUser: uname,
 		Getenv:    env.Getenv,
-		RalphMode: f.Ralph, Limit: f.Limit, SkipPermissions: dangerous,
+		RalphMode: f.Ralph, Limit: f.Limit, SkipPermissions: dangerous, CLIDangerous: f.Dangerous,
 		CLIModel: f.Model, Passthrough: passthrough,
 		CLISSH: f.SSH, CLIGit: f.Git, CLIDockerSocket: f.DockerSocket, CLIAWS: f.AWS,
 		CLIPackageCaches: f.PackageCaches,
@@ -1341,9 +1403,10 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 		ImageID: imageID,
 		// CS-LNCH-213/217: rendered by Build, never hashed.
 		Timezone: tz.Value, TimezoneLabel: tz.Label,
-		Instance: instance,
-		Worktree: worktree,
-		Linked:   linked,
+		Instance:     instance,
+		KeepInstance: env.restart != nil,
+		Worktree:     worktree,
+		Linked:       linked,
 		// CS-LNCH-163..165: the nested host-visibility checks.
 		MountInfo: env.MountInfo,
 		Version:   version,
@@ -1368,6 +1431,9 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 	// work and outside the launch lock; a tmux restore resume writes none
 	// (nobody sits at that pane) and stands down silently.
 	in.ClipboardWanted = launch.ClipboardWanted(env.Getenv, cfg, headless, f.Ralph)
+	// CS-LNCH-206: the label records the choice; Build keeps --detach, ralph
+	// and headless at keep.
+	in.EndOnHangup = launch.EndOnHangupWanted(env.Getenv, cfg)
 	in.ClipboardQuiet = env.restore != nil
 	if in.ClipboardWanted && env.restore == nil && !hostdirs.InSandbox(env.Getenv) {
 		res := resolveClipboard(env)
@@ -1380,13 +1446,35 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 	// before the lock and the create, so it never widens the window between
 	// the create and the start (CS-SESS-052).
 	pre := checkGlobalConfig(env, nil)
+	if env.restart != nil {
+		// CS-LNCH-218: after the image work and the health check, before
+		// the lock: end.lock, the re-check, the marks, docker stop and the
+		// removal wait. It may rewrite the passthrough (a switch the
+		// re-check accepted).
+		if err := env.restart.beforeReserve(env, projectDir, &in); err != nil {
+			return err
+		}
+		passthrough = in.Passthrough
+	}
 	// CS-TMUX-011: the pane mark's "since" is taken before the create.
 	since := env.now()
 	// Reserve under the host lock: re-validate the noun, pick the pid class,
 	// docker create (CS-SESS-048). The lock is released before the start.
 	plan, err := reserveContainer(env, in, wt, f.Ralph, shadowRoot)
 	if err != nil {
+		if rs := env.restart; rs != nil && rs.stopped {
+			outcome := sessionend.OutcomeRefusedAfterStop
+			if rs.caughtNow() {
+				outcome = sessionend.OutcomeInterrupted
+			}
+			return rs.failAfterStop(env, err, outcome)
+		}
 		return err
+	}
+	if rs := env.restart; rs != nil && rs.stopped && rs.caughtNow() {
+		// CS-LNCH-220: a signal since the stop began: no session starts.
+		removeReservation(env, plan)
+		return rs.failAfterStop(env, exitErr(128+signalNumber(rs.caught), "Interrupted."), sessionend.OutcomeInterrupted)
 	}
 	if f.Detach {
 		// CS-TMUX-014: never marked; its launcher exits at once.
@@ -1406,7 +1494,11 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 			mark.prior = &prior
 		}
 	}
-	return startReserved(env, plan, headless, pre, mark)
+	err = startReserved(env, plan, headless, pre, mark)
+	if env.restart != nil {
+		return env.restart.afterSession(env, err)
+	}
+	return err
 }
 
 // resumeLabel is the claude-sandbox.resume label's value for a launch

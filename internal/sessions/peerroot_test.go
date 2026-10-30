@@ -22,7 +22,7 @@ var _ = Describe("discovery for the peers-root pin (CS-DIR-011/012)", func() {
 		}
 		return sessionstest.Row(name, status, "/p", "claude", "", "v1", "", "", "", "3", "",
 			state, "2026-09-30 12:00:00 +0000 UTC", "", "", "",
-			"", "", "", "", "", peerRoot, "none", "", "", "", mounts)
+			"", "", "", "", "", peerRoot, "none", "", "", "", "", "", mounts)
 	}
 
 	It("CS-DIR-011: rows carry the peerroot label and the split bind sources; an exited --rm row is returned as removing", func() {
@@ -72,7 +72,7 @@ var _ = Describe("discovery of the terminal label (CS-SESS-091)", func() {
 
 	It("CS-SESS-091: the label is a ps field just before {{.Mounts}}, which stays last", func() {
 		fake := &execx.Fake{}
-		fake.On("docker ps", sessionstest.Row(append(head("a"), "TERMINAL_EMULATOR=JetBrains-JediTerm", "", "", "", "/h/.cache/claude-sandbox/peers")...)+"\n", nil)
+		fake.On("docker ps", sessionstest.Row(append(head("a"), "TERMINAL_EMULATOR=JetBrains-JediTerm", "", "", "", "", "", "/h/.cache/claude-sandbox/peers")...)+"\n", nil)
 		found, err := sessions.DiscoverAllUncounted(fake)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(found).To(HaveLen(1))
@@ -102,9 +102,9 @@ var _ = Describe("discovery of the continue label (CS-LNCH-182)", func() {
 	It("CS-LNCH-182: the label is a ps field just before {{.Mounts}}; \"1\" sets it, anything else does not", func() {
 		fake := &execx.Fake{}
 		fake.On("docker ps", strings.Join([]string{
-			sessionstest.Row(append(head("a"), "1", "", "", "/m1")...),
-			sessionstest.Row(append(head("b"), "", "", "", "/m2")...),
-			sessionstest.Row(append(head("c"), "yes", "", "", "/m3")...),
+			sessionstest.Row(append(head("a"), "1", "", "", "", "", "/m1")...),
+			sessionstest.Row(append(head("b"), "", "", "", "", "", "/m2")...),
+			sessionstest.Row(append(head("c"), "yes", "", "", "", "", "/m3")...),
 		}, "\n")+"\n", nil)
 		found, err := sessions.DiscoverAllUncounted(fake)
 		Expect(err).NotTo(HaveOccurred())
@@ -113,14 +113,41 @@ var _ = Describe("discovery of the continue label (CS-LNCH-182)", func() {
 		Expect(found[0].Terminal).To(Equal("none"))
 		Expect(found[0].Mounts).To(Equal([]string{"/m1"}))
 		line := strings.Join(fake.Calls[0].Args, " ")
-		Expect(line).To(ContainSubstring(`{{json (.Label "claude-sandbox.continue")}}` + sep + `{{json (.Label "claude-sandbox.clipboard")}}` + sep + `{{json (.Label "claude-sandbox.shadowdir")}}` + sep + "{{json .Mounts}} "))
+		Expect(line).To(ContainSubstring(`{{json (.Label "claude-sandbox.continue")}}` + sep + `{{json (.Label "claude-sandbox.clipboard")}}` + sep + `{{json (.Label "claude-sandbox.shadowdir")}}` + sep))
+	})
+
+	It("CS-LNCH-206, CS-LNCH-223: onhangup and access are the fields just before {{json .Mounts}}; an empty access is a container from before the label", func() {
+		base := sessionstest.Set(head("a"), nil)
+		row := func(name, onhangup, access, mounts string) string {
+			return sessionstest.Row(sessionstest.Set(base, map[int]string{sessionstest.Name: name,
+				sessionstest.OnHangup: onhangup, sessionstest.Access: access, sessionstest.Mounts: mounts})...)
+		}
+		fake := &execx.Fake{}
+		fake.On("docker ps", strings.Join([]string{
+			row("a", "end", "ssh=flag", "/m1"),
+			row("b", "keep", "none", "/m2"),
+			row("c", "", "", "/m3"),
+		}, "\n")+"\n", nil)
+		found, err := sessions.DiscoverAllUncounted(fake)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(found).To(HaveLen(3))
+		Expect(found[0].OnHangup).To(Equal("end"))
+		Expect(found[0].Access).To(Equal("ssh=flag"))
+		Expect(found[0].HasAccess).To(BeTrue())
+		Expect(found[0].Mounts).To(Equal([]string{"/m1"}))
+		Expect(found[1].HasAccess).To(BeTrue(), "none: the launch applied nothing")
+		Expect(found[2].HasAccess).To(BeFalse(), "empty: the label is absent")
+		Expect(found[2].OnHangup).To(BeEmpty())
+		line := strings.Join(fake.Calls[0].Args, " ")
+		Expect(line).To(ContainSubstring(`{{json (.Label "claude-sandbox.shadowdir")}}` + sep + `{{json (.Label "claude-sandbox.onhangup")}}` + sep +
+			`{{json (.Label "claude-sandbox.access")}}` + sep + "{{json .Mounts}} "))
 	})
 
 	It("CS-LNCH-197: the clipboard and shadowdir labels sit before {{.Mounts}}", func() {
 		fake := &execx.Fake{}
 		fake.On("docker ps", strings.Join([]string{
-			sessionstest.Row(append(head("a"), "", "bridge", "/tmp/claude-sandbox1", "/m1")...),
-			sessionstest.Row(append(head("b"), "", "", "", "/m2")...),
+			sessionstest.Row(append(head("a"), "", "bridge", "/tmp/claude-sandbox1", "", "", "/m1")...),
+			sessionstest.Row(append(head("b"), "", "", "", "", "", "/m2")...),
 		}, "\n")+"\n", nil)
 		found, err := sessions.DiscoverAllUncounted(fake)
 		Expect(err).NotTo(HaveOccurred())

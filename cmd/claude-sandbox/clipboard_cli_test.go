@@ -27,7 +27,7 @@ import (
 func psRowClip(name, project, instance, clip, shadow, resume, worktree string, mounts ...string) string {
 	return sessionstest.Row(name, "Up 1 hour", project, "claude", instance, "v1", "", "", "", "3", worktree,
 		"running", "2026-09-30 12:00:00 +0000 UTC", "", "", "",
-		strings.Repeat("b", 64), "", "", "", resume, "none", "none", "", clip, shadow, strings.Join(mounts, ","))
+		strings.Repeat("b", 64), "", "", "", resume, "none", "none", "", clip, shadow, "", "", strings.Join(mounts, ","))
 }
 
 // signalRunner wraps the fake and hands back, for the clipboard helper's

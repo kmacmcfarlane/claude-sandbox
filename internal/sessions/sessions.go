@@ -69,6 +69,11 @@ const (
 	LabelClipboard = clipboard.LabelClipboard
 	// LabelShadowDir names the container's shadow directory.
 	LabelShadowDir = launch.LabelShadowDir
+	// LabelOnHangup records whether a hang-up ends the session (CS-LNCH-206).
+	LabelOnHangup = launch.LabelOnHangup
+	// LabelAccess records the access options applied and their sources
+	// (CS-LNCH-223).
+	LabelAccess = launch.LabelAccess
 )
 
 // ModeRalph marks a ralph loop container.
@@ -146,6 +151,15 @@ type Session struct {
 	// and the display target live.
 	Clipboard string `json:"-"`
 	ShadowDir string `json:"-"`
+	// OnHangup is the claude-sandbox.onhangup label (CS-LNCH-206): "end",
+	// "keep", or "" for a container that predates it.
+	OnHangup string `json:"-"`
+	// Access is the claude-sandbox.access label (CS-LNCH-223); HasAccess is
+	// false for a container created before it: docker renders an absent
+	// label and an empty one alike, so a launch that applied nothing writes
+	// "none".
+	Access    string `json:"-"`
+	HasAccess bool   `json:"-"`
 	// Mounts are the container's bind sources ({{.Mounts}} under --no-trunc,
 	// split on ","), read for the peers-root pin (CS-DIR-011). nil on an
 	// older row.
@@ -254,6 +268,8 @@ var psFormat = strings.Join([]string{
 	jsonLabel(LabelContinue),  // CS-LNCH-182
 	jsonLabel(LabelClipboard), // CS-LNCH-197
 	jsonLabel(LabelShadowDir), // CS-LNCH-197
+	jsonLabel(LabelOnHangup),  // CS-LNCH-206
+	jsonLabel(LabelAccess),    // CS-LNCH-223
 	// CS-DIR-011: every bind source, comma-joined; last. docker prints a
 	// source raw, so a path holding a newline would have cut the row in two
 	// before this field was JSON.
@@ -474,8 +490,13 @@ func listAll(r execx.Runner, filter string, count bool) ([]Session, []Session, e
 			Continue: strings.TrimSpace(f[23]) == "1", // CS-LNCH-182
 			// CS-LNCH-197
 			Clipboard: strings.TrimSpace(f[24]), ShadowDir: f[25],
-			Mounts: launch.SplitMounts(f[26]),
+			OnHangup: strings.TrimSpace(f[26]), // CS-LNCH-206
+			// CS-LNCH-223: "" only for a container created before the label
+			// (every launch writes it, "none" when nothing was applied).
+			Access: strings.TrimSpace(f[27]),
+			Mounts: launch.SplitMounts(f[28]),
 		}
+		s.HasAccess = s.Access != ""
 		if why := rowProblem(s); why != "" {
 			dropRow(f, why)
 			continue

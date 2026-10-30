@@ -194,15 +194,12 @@ func sessionNames(env *Env, found []sessions.Session) map[string]string {
 	if configDir == "" && home != "" {
 		configDir = filepath.Join(home, ".claude")
 	}
-	var dirs []string
-	if filepath.IsAbs(configDir) {
-		dirs = append(dirs, filepath.Join(configDir, "sessions"))
-	}
-	if filepath.IsAbs(home) {
-		dirs = append(dirs, filepath.Join(home, launch.LegacyPeerRegistryRoot, "sessions"))
-	}
 	return sessions.SessionNames(found, sessions.NameLookup{
-		FallbackDirs: dirs,
+		// One builder of the dirs (resumeguard.RegistryDirs); dropping a
+		// relative one is this display's own policy.
+		Dirs: func(label string) []string {
+			return keepAbs(resumeguard.RegistryDirs(label, configDir, home))
+		},
 		OwnDomain: func() string {
 			d, err := resumeguard.Check{ProcRoot: env.ProcRoot, MachineIDPath: env.MachineIDPath}.OwnDomain()
 			if err != nil {
@@ -211,6 +208,17 @@ func sessionNames(env *Env, found []sessions.Session) map[string]string {
 			return d
 		},
 	})
+}
+
+// keepAbs keeps the absolute paths of dirs.
+func keepAbs(dirs []string) []string {
+	var out []string
+	for _, d := range dirs {
+		if filepath.IsAbs(d) {
+			out = append(out, d)
+		}
+	}
+	return out
 }
 
 // namedLabel is sessionLabel with the friendly name beside it, as the
@@ -262,6 +270,9 @@ const (
 	actionNew sessionAction = iota // launch a new container (the normal pipeline)
 	actionAttach
 	actionJoin
+	// actionRestart replaces the target's container with a new one that
+	// resumes its conversation (CS-SESS-105).
+	actionRestart
 	actionQuit
 )
 
@@ -315,6 +326,14 @@ func decideSessions(env *Env, projectDir string, f *launchFlags) (sessionDecisio
 		return sessionDecision{Action: actionNew}, nil
 	}
 
+	// CS-SESS-105: --restart[=NOUN] picks its target as --attach does.
+	if f.Restart {
+		s, serr := resolveRestartTarget(env, found, f.RestartTarget)
+		if serr != nil {
+			return sessionDecision{}, serr
+		}
+		return sessionDecision{Action: actionRestart, Target: s}, nil
+	}
 	// An explicit target bypasses both prompts.
 	if f.Attach || f.Join {
 		target := f.AttachTarget
@@ -359,8 +378,9 @@ func decideSessions(env *Env, projectDir string, f *launchFlags) (sessionDecisio
 	fmt.Fprintln(env.Err, "  [b] branch the newest conversation into a new container   (fork it; both continue independently)")
 	fmt.Fprintln(env.Err, "  [j] new session in an existing container   (dies with that container's primary; not attachable later)")
 	fmt.Fprintln(env.Err, "  [a] attach to an existing session   (shares the terminal if someone is already using it)")
+	fmt.Fprintln(env.Err, "  [r] restart a session in a new container   (resumes its conversation here with a fresh screen; stops the old container)")
 	fmt.Fprintln(env.Err, "  [q] quit")
-	switch strings.ToLower(strings.TrimSpace(env.Prompter.Ask("", "Choice [n/b/j/a/q]:", promptTimeout))) {
+	switch strings.ToLower(strings.TrimSpace(env.Prompter.Ask("", "Choice [n/b/j/a/r/q]:", promptTimeout))) {
 	case "n", "new":
 		return sessionDecision{Action: actionNew}, nil
 	case "b", "branch":
@@ -373,6 +393,19 @@ func decideSessions(env *Env, projectDir string, f *launchFlags) (sessionDecisio
 	case "a", "attach":
 		s, serr := selectInstance(env, candidates, "attach", names)
 		return sessionDecision{Action: actionAttach, Target: s}, serr
+	case "r", "restart":
+		// CS-SESS-105: a paused container cannot be stopped gracefully.
+		var running []sessions.Session
+		for _, c := range candidates {
+			if c.State != "paused" {
+				running = append(running, c)
+			}
+		}
+		if len(running) == 0 {
+			return sessionDecision{}, exitErr(2, "Error: no running session for this project to restart (paused ones must be unpaused first).")
+		}
+		s, serr := selectInstance(env, running, "restart", names)
+		return sessionDecision{Action: actionRestart, Target: s}, serr
 	default:
 		// Includes "q" and the empty answer: Ask returns "" on Enter, on EOF and
 		// on timeout, none of which is consent to start or join anything.
@@ -477,6 +510,10 @@ func joinExistingSession(env *Env, projectDir string, f *launchFlags, cfg *casca
 	}
 	lease := takeLease(env, d.Target.ID, kind)
 	defer lease.Release()
+	// CS-LNCH-212: a container ended (on hang-up) while the menu was read.
+	if err := endedBeforeAttach(env, projectDir, d.Target, lease); err != nil {
+		return true, err
+	}
 
 	model := f.Model
 	if model == "" {
@@ -518,13 +555,13 @@ func joinExistingSession(env *Env, projectDir string, f *launchFlags, cfg *casca
 		_, _, _, home := hostIdentity(env.Getenv)
 		if snapErr == nil {
 			// CS-LNCH-202: the JetBrains note, after the target is written.
-			return true, attachToWith(env, d.Target, cfg.DetachKeys, attachMark(d.Target, home, wt.Root), nil, lease, clipboard.ByAttach, func(eff *clipboard.Target, bridged bool) {
+			return true, attachToWith(env, d.Target, cfg.DetachKeys, attachMark(d.Target, home, wt.Root), nil, lease, endOnHangupFor(env, d.Target, cfg), clipboard.ByAttach, func(eff *clipboard.Target, bridged bool) {
 				if bridged && launch.ClipboardWanted(env.Getenv, cfg, false, false) {
 					jetbrainsNote(env, projectDir, snap, eff)
 				}
 			})
 		}
-		return true, attachTo(env, d.Target, cfg.DetachKeys, attachMark(d.Target, home, wt.Root), nil, lease)
+		return true, attachToWith(env, d.Target, cfg.DetachKeys, attachMark(d.Target, home, wt.Root), nil, lease, endOnHangupFor(env, d.Target, cfg), clipboard.ByAttach, nil)
 	}
 	_, _, hostUser, _ := hostIdentity(env.Getenv)
 	// CS-SESS-092: an unreadable snapshot leaves the container's identity
@@ -768,13 +805,14 @@ func newInstance(env *Env, projectDir string, f *launchFlags, gitRoot string) st
 // 64-hex id when it is known, else the name; the event filter keeps the name,
 // which oomreport matches exactly (CS-TMUX-056, CS-LNCH-095).
 func attachTo(env *Env, s sessions.Session, configuredKeys string, mark *paneMark, onChild func(), lease *clients.Lease) error {
-	return attachToWith(env, s, configuredKeys, mark, onChild, lease, clipboard.ByAttach, nil)
+	return attachToWith(env, s, configuredKeys, mark, onChild, lease, false, clipboard.ByAttach, nil)
 }
 
 // attachToWith is attachTo with a hook that sees the clipboard bridge's
 // effective target once the attach re-pointed it (CS-LNCH-197/202). lease is
 // the attach's client lease (CS-LNCH-204), taken and released by the caller.
-func attachToWith(env *Env, s sessions.Session, configuredKeys string, mark *paneMark, onChild func(), lease *clients.Lease, by string, clip func(*clipboard.Target, bool)) error {
+// endOnHangup: this attach's hang-up ends the container (CS-LNCH-206).
+func attachToWith(env *Env, s sessions.Session, configuredKeys string, mark *paneMark, onChild func(), lease *clients.Lease, endOnHangup bool, by string, clip func(*clipboard.Target, bool)) error {
 	// CS-LNCH-197: re-point the bridge to this shell's display, never
 	// downgrading, and restart a dead helper.
 	eff, bridged := refreshClipboardBridge(env, s, by)
@@ -795,7 +833,7 @@ func attachToWith(env *Env, s sessions.Session, configuredKeys string, mark *pan
 	end, err := runSession(env, execx.Cmd{
 		Name: "docker",
 		Args: []string{"attach", "--detach-keys=" + detachKeys, target},
-	}, s.Name, sessionOpts{kind: primarySession, after: func() { checkGlobalConfig(env, pre) }, mark: mark, onChild: onChild, lease: lease})
+	}, s.Name, sessionOpts{kind: primarySession, after: func() { checkGlobalConfig(env, pre) }, mark: mark, onChild: onChild, lease: lease, endOnHangup: endOnHangup})
 	if err != nil {
 		return err
 	}

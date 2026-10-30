@@ -61,6 +61,26 @@ var _ = Describe("registry", func() {
 			ProcStart: "34", PIDDomain: "linux::pid:[1]", Name: "n", NameSource: "user"}))
 	})
 
+	It("CS-LNCH-208: status, waitingFor and the update times are read leniently; another JSON type is absent, never malformed", func() {
+		write("8.json", fmt.Sprintf(`{"pid":8,"sessionId":%q,"status":"waiting","waitingFor":"input\u001b[31m needed",`+
+			`"statusUpdatedAt":1792076685000,"updatedAt":1792076686000}`, convID))
+		write("9.json", fmt.Sprintf(`{"pid":9,"sessionId":%q,"status":{"x":1},"waitingFor":3,"statusUpdatedAt":"soon","updatedAt":-5}`, convID))
+		write("10.json", fmt.Sprintf(`{"pid":10,"sessionId":%q,"status":"compacting‮"}`, convID))
+		res := byName()
+		Expect(res["8.json"].Err).NotTo(HaveOccurred())
+		r := res["8.json"].Record
+		Expect(r.Status).To(Equal(registry.StatusWaiting))
+		Expect(r.WaitingFor).To(Equal("input [31m needed"))
+		Expect(r.StatusUpdatedAt).To(Equal(int64(1792076685000)))
+		Expect(r.UpdatedAt).To(Equal(int64(1792076686000)))
+		Expect(res["9.json"].Err).NotTo(HaveOccurred())
+		Expect(res["9.json"].Record.Status).To(BeEmpty())
+		Expect(res["9.json"].Record.WaitingFor).To(BeEmpty())
+		Expect(res["9.json"].Record.StatusUpdatedAt).To(BeZero())
+		Expect(res["9.json"].Record.UpdatedAt).To(BeZero())
+		Expect(res["10.json"].Record.Status).To(Equal("compacting"))
+	})
+
 	It("CS-SESS-067: a bad record wraps ErrMalformed, and ErrPartial only when a partial write could explain it", func() {
 		write("1.json", "{")
 		write("2.json", fmt.Sprintf(`{"pid":2,"sessionId":%q,"pad":%q}`, convID, strings.Repeat("x", registry.MaxRecordSize)))

@@ -75,14 +75,14 @@ var _ = Describe("label values end to end (CS-LNCH-224/225, CS-SESS-118)", func(
 	It("CS-SESS-118: a forged row (raw, one field too many) is dropped with one warning; a real one is listed", func() {
 		evil := strings.Join([]string{"cs-evil", "Up 1 hour", f.proj, "claude", "otter", "v1", "opus", "x", "", "", "",
 			"running", "2026-09-30 12:00:00 +0000 UTC", "8g", "default", "",
-			"", "", "", "", "", "none", "none", "", "none", "", "", ""}, psSep)
+			"", "", "", "", "", "none", "none", "", "none", "", "", "", "", ""}, psSep)
 		good := psRow("cs-good", "Up 2 hours", f.proj, "heron")
 		f.fake.On("docker ps", evil+"\n"+good+"\n", nil)
 		f.fake.On("docker top", "PID  COMMAND\n1  claude\n", nil)
 		Expect(f.run("sessions")).To(Equal(0), f.errw.String())
 		Expect(f.out.String()).To(ContainSubstring("heron"))
 		Expect(f.out.String()).NotTo(ContainSubstring("cs-evil"))
-		Expect(strings.Count(f.errw.String(), "WARNING: ignoring container cs-evil in the sandbox listing (28 fields, not 27)")).To(Equal(1))
+		Expect(strings.Count(f.errw.String(), "WARNING: ignoring container cs-evil in the sandbox listing (30 fields, not 29)")).To(Equal(1))
 	})
 
 	It("CS-LNCH-224: a cascade mount host holding a newline exits 2 naming the file, before any image work", func() {

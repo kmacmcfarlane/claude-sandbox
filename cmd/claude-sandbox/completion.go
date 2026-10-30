@@ -39,7 +39,7 @@ const (
 )
 
 // instanceFlags take an optional instance noun in the "--flag=noun" form.
-var instanceFlags = []string{"--attach", "--join"}
+var instanceFlags = []string{"--attach", "--join", "--restart"}
 
 // completeInstanceValue completes "--attach=<noun>" / "--join=<noun>" from the
 // live sessions of the current project (CS-COMP-024).
@@ -154,6 +154,7 @@ var launchFlagSpecs = []launchFlagSpec{
 	// are valueNone here, and instanceFlags drives completion of the "=" form.
 	{Name: "--attach", Desc: "Reattach to a running session (recovers a lost terminal)"},
 	{Name: "--join", Desc: "Start another session inside a running container"},
+	{Name: "--restart", Desc: "Restart a running session in a new container: a fresh screen with its conversation (stops the old one)"},
 	{Name: "--no-session-check", Desc: "Skip the multi-session prompt and just launch"},
 	{Name: "--allow-config-drift", Desc: "Attach or join even if the config has changed since it started"},
 }

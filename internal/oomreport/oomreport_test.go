@@ -190,6 +190,22 @@ var _ = Describe("oomreport", func() {
 		Expect(time.Since(start)).To(BeNumerically("<", 100*time.Millisecond))
 	})
 
+	It("CS-LNCH-207: the outcome lists the signal that ended the wait and every one queued behind it, in order", func() {
+		w := oomreport.Start(openStream{&execx.Fake{}}, "cs-x", time.Now())
+		defer w.Stop()
+		stop := make(chan os.Signal, 3)
+		stop <- syscall.SIGHUP
+		stop <- syscall.SIGTERM
+		stop <- syscall.SIGINT
+		o, stopped := w.AwaitDeath(stop)
+		Expect(stopped).To(BeTrue())
+		Expect(o.Signals).To(Equal([]os.Signal{syscall.SIGHUP, syscall.SIGTERM, syscall.SIGINT}))
+
+		o, stopped = w.Await(10*time.Millisecond, oomreport.Never, nil)
+		Expect(stopped).To(BeFalse())
+		Expect(o.Signals).To(BeEmpty())
+	})
+
 	It("CS-LNCH-097: a pending signal wins over a die and a stream end that are ready too — every time", func() {
 		for i := 0; i < 200; i++ {
 			for _, stream := range []string{"", ev("die", "0")} {

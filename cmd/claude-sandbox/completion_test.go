@@ -233,7 +233,7 @@ var _ = Describe("shell completion", func() {
 	// ---- headless ----
 
 	Describe("CS-COMP-025: headless completes the launcher flags valid for headless", func() {
-		rejected := []string{"--ralph", "--limit", "--attach", "--join", "--branch", "--detach"} // --detach: CS-LNCH-115
+		rejected := []string{"--ralph", "--limit", "--attach", "--join", "--branch", "--detach", "--restart"} // --detach: CS-LNCH-115; --restart: CS-LNCH-221
 		claudeOwned := []string{"--help", "-h", "--version"}
 
 		It("offers the headless launcher flags with descriptions, and \"--\"", func() {
@@ -342,6 +342,22 @@ var _ = Describe("shell completion", func() {
 			f.out.Reset()
 			j := f.complete("--join=")
 			Expect(j.names).To(ConsistOf("--join=otter", "--join=heron"))
+		})
+
+		It("CS-COMP-028: completes --restart= from the live sessions, and offers --restart with a description", func() {
+			f.fake.On("docker ps", strings.Join([]string{
+				sessionstest.Row("cs-a", "Up 1h", f.proj, "claude", "otter", "v1", "", "", "", "", ""),
+				sessionstest.Row("cs-b", "Up 2h", f.proj, "claude", "heron", "v1", "", "", "", "", ""),
+			}, "\n")+"\n", nil)
+			f.fake.On("docker top", "PID  COMMAND\n1  claude\n", nil)
+			r := f.complete("--restart=")
+			Expect(r.names).To(ConsistOf("--restart=otter", "--restart=heron"))
+			Expect(r.directive).To(Equal(cobra.ShellCompDirectiveNoFileComp))
+
+			f.out.Reset()
+			all := f.complete("--re")
+			Expect(all.has("--restart")).To(BeTrue())
+			Expect(all.descs["--restart"]).NotTo(BeEmpty())
 		})
 
 		It("narrows to the typed prefix", func() {

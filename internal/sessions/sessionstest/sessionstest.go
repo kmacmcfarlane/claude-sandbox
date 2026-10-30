@@ -9,7 +9,7 @@ import (
 )
 
 // Fields is the number of fields of one discovery row.
-const Fields = 27
+const Fields = 29
 
 // Field indexes of a discovery row, in the format's order.
 const (
@@ -39,6 +39,8 @@ const (
 	Continue
 	Clipboard
 	ShadowDir
+	OnHangup
+	Access
 	Mounts
 )
 

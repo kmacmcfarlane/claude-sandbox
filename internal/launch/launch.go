@@ -15,6 +15,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -47,12 +48,22 @@ type Inputs struct {
 	RalphMode       bool
 	Limit           string
 	SkipPermissions bool
-	CLIModel        string
-	Passthrough     []string
+	// CLIDangerous is --dangerous given on the command line: with
+	// SkipPermissions it says which source turned dangerous mode on, for
+	// the access label (CS-LNCH-223).
+	CLIDangerous bool
+	CLIModel     string
+	Passthrough  []string
 
 	// Instance is the noun identifying this session among the project's
 	// containers (CS-LNCH-026). Empty for ralph, which is single-instance.
 	Instance string
+	// KeepInstance is a restart reusing the old container's noun
+	// (CS-LNCH-218): the reservation keeps it unless a discovered container
+	// (running, reserved, or still being removed) holds it, and never checks
+	// it against existing worktrees — that worktree is the one reopened. Not
+	// hashed: a per-session choice, like the noun.
+	KeepInstance bool
 
 	// Worktree is the name handed to claude's --worktree (CS-LNCH-041); empty
 	// means the session works in the shared checkout. Rendered as the
@@ -153,6 +164,12 @@ type Inputs struct {
 	// banner, the context paragraph (CS-LNCH-191) and the hash input.
 	Network string
 
+	// EndOnHangup is the resolved endOnHangup / CLAUDE_SANDBOX_END_ON_HANGUP
+	// (EndOnHangupWanted, CS-LNCH-206), rendered as the LabelOnHangup label:
+	// "end" when set, "keep" when not, and always "keep" for a --detach,
+	// ralph or headless launch. Never hashed.
+	EndOnHangup bool
+
 	// ClipboardWanted is the resolved hostClipboard / CLAUDE_SANDBOX_HOST_CLIPBOARD
 	// for this kind of launch (ClipboardWanted, CS-LNCH-194): on by default,
 	// never for headless or ralph. The zero value is off.
@@ -250,6 +267,122 @@ const LabelResume = "claude-sandbox.resume"
 // as opening a conversation there until its registry record exists. Outside
 // the config hash, like every label.
 const LabelContinue = "claude-sandbox.continue"
+
+// LabelAccess records the access options a launch applied and the source
+// that turned each on (CS-LNCH-223): "ssh=flag,package-caches=config", ""
+// for none. Launcher-written at create and never hashed; a restart reads
+// only it to carry options over (CS-SESS-107).
+const LabelAccess = "claude-sandbox.access"
+
+// Access sources, as LabelAccess records them; AccessNone is the value of a
+// launch that applied no access option.
+const (
+	AccessNone   = "none"
+	AccessFlag   = "flag"
+	AccessEnv    = "env"
+	AccessConfig = "config"
+)
+
+// AccessOptions are LabelAccess's option names, in label order; each is the
+// launcher flag without its dashes.
+var AccessOptions = []string{"dangerous", "ssh", "git", "docker-socket", "aws", "package-caches"}
+
+// accessSource is resolveFlag's answer with the source that decided it: ""
+// when off. A falsy switch is never "env": resolveFlag then falls to the
+// config.
+func accessSource(cli *bool, envVal string, yaml *bool) string {
+	if cli != nil {
+		if *cli {
+			return AccessFlag
+		}
+		return ""
+	}
+	switch envVal {
+	case "1", "true", "yes":
+		return AccessEnv
+	}
+	if yaml != nil && *yaml {
+		return AccessConfig
+	}
+	return ""
+}
+
+// DangerousSource is the source that turned dangerous mode on, under its
+// OR rule (CS-LNCH-038): the command-line flag, else a truthy
+// CLAUDE_SANDBOX_DANGEROUS, else the config; "" when off.
+func DangerousSource(cli bool, envVal string, cfg bool) string {
+	switch {
+	case cli:
+		return AccessFlag
+	case envVal == "1" || envVal == "true" || envVal == "yes":
+		return AccessEnv
+	case cfg:
+		return AccessConfig
+	}
+	return ""
+}
+
+// ParseAccess reads a LabelAccess value into option → source; entries that
+// are not an AccessOptions name with a known source are dropped.
+func ParseAccess(v string) map[string]string {
+	out := map[string]string{}
+	for _, kv := range strings.Split(v, ",") {
+		k, src, ok := strings.Cut(strings.TrimSpace(kv), "=")
+		if !ok || !slices.Contains(AccessOptions, k) {
+			continue
+		}
+		switch src {
+		case AccessFlag, AccessEnv, AccessConfig:
+			out[k] = src
+		}
+	}
+	return out
+}
+
+// LabelOnHangup records whether the container ends after its turn when its
+// terminal hangs up (CS-LNCH-206): OnHangupEnd or OnHangupKeep. Outside the
+// config hash, like every label: a per-session choice.
+const LabelOnHangup = "claude-sandbox.onhangup"
+
+// The LabelOnHangup values.
+const (
+	OnHangupEnd  = "end"
+	OnHangupKeep = "keep"
+)
+
+// EndOnHangupEnv is the endOnHangup key's environment override.
+const EndOnHangupEnv = "CLAUDE_SANDBOX_END_ON_HANGUP"
+
+// EndOnHangupWanted resolves the key (CS-LNCH-206): CLAUDE_SANDBOX_END_ON_HANGUP
+// (1/true/yes on, 0/false/no off) > endOnHangup > ON. Host parity: claude on
+// the host ends when its terminal closes.
+func EndOnHangupWanted(getenv func(string) string, cfg *cascade.Config) bool {
+	var key *bool
+	if cfg != nil {
+		key = cfg.EndOnHangup
+	}
+	return ResolveTristate(nil, getenv(EndOnHangupEnv), key, true)
+}
+
+// EndOnHangupEnvSet reports the env override when it holds a recognised
+// value (an attach's first source, CS-LNCH-206).
+func EndOnHangupEnvSet(getenv func(string) string) (on, set bool) {
+	switch strings.ToLower(strings.TrimSpace(getenv(EndOnHangupEnv))) {
+	case "1", "true", "yes":
+		return true, true
+	case "0", "false", "no":
+		return false, true
+	}
+	return false, false
+}
+
+// OnHangupLabelValue is a launch's LabelOnHangup value.
+func OnHangupLabelValue(in Inputs) string {
+	if in.EndOnHangup && !in.Detached && !in.RalphMode && !in.Headless {
+		return OnHangupEnd
+	}
+	return OnHangupKeep
+}
 
 // HeadlessEnv is the exact list of variables a headless launch forwards from
 // its own environment (CS-LNCH-063): what the Claude Agent SDK and Paseo set
@@ -398,6 +531,10 @@ type Plan struct {
 	Resume string
 	// Continue: the container carries claude-sandbox.continue (CS-LNCH-182).
 	Continue bool
+	// Access is the LabelAccess value (CS-LNCH-223).
+	Access string
+	// OnHangup is the LabelOnHangup value (CS-LNCH-206).
+	OnHangup string
 	// Terminal is the claude-sandbox.terminal label's value (CS-LNCH-181).
 	Terminal string
 
@@ -504,6 +641,38 @@ func Build(in Inputs) (*Plan, error) {
 	}
 
 	// CS-LNCH-014: host access precedence CLI > env var > YAML.
+	// CS-LNCH-223: what each option's resolution applied, and from where.
+	access := []string{}
+	if in.SkipPermissions {
+		if src := DangerousSource(in.CLIDangerous, in.getenv("CLAUDE_SANDBOX_DANGEROUS"), in.Cfg.Dangerous); src != "" {
+			access = append(access, "dangerous="+src)
+		} else {
+			// Set by a caller that resolved it otherwise: say it was given.
+			access = append(access, "dangerous="+AccessFlag)
+		}
+	}
+	for _, o := range []struct {
+		name   string
+		cli    *bool
+		envVar string
+		yaml   *bool
+	}{
+		{"ssh", in.CLISSH, "CLAUDE_SANDBOX_HOST_ACCESS_SSH_ENABLED", in.Cfg.HostAccess.SSH.Enabled},
+		{"git", in.CLIGit, "CLAUDE_SANDBOX_HOST_ACCESS_GIT_ENABLED", in.Cfg.HostAccess.Git.Enabled},
+		{"docker-socket", in.CLIDockerSocket, "CLAUDE_SANDBOX_HOST_ACCESS_DOCKER_SOCKET_ENABLED", in.Cfg.HostAccess.DockerSocket.Enabled},
+		{"aws", in.CLIAWS, "CLAUDE_SANDBOX_HOST_ACCESS_AWS_ENABLED", in.Cfg.HostAccess.AWS.Enabled},
+		{"package-caches", in.CLIPackageCaches, "CLAUDE_SANDBOX_HOST_ACCESS_PACKAGE_CACHES_ENABLED", in.Cfg.HostAccess.PackageCaches.Enabled},
+	} {
+		if src := accessSource(o.cli, in.getenv(o.envVar), o.yaml); src != "" {
+			access = append(access, o.name+"="+src)
+		}
+	}
+	// "none" for nothing applied: docker renders an absent label as "", the
+	// mark of a container created before this label.
+	p.Access = strings.Join(access, ",")
+	if p.Access == "" {
+		p.Access = AccessNone
+	}
 	ssh := resolveFlag(in.CLISSH, in.getenv("CLAUDE_SANDBOX_HOST_ACCESS_SSH_ENABLED"), in.Cfg.HostAccess.SSH.Enabled)
 	git := resolveFlag(in.CLIGit, in.getenv("CLAUDE_SANDBOX_HOST_ACCESS_GIT_ENABLED"), in.Cfg.HostAccess.Git.Enabled)
 	dockerSocket := resolveFlag(in.CLIDockerSocket, in.getenv("CLAUDE_SANDBOX_HOST_ACCESS_DOCKER_SOCKET_ENABLED"), in.Cfg.HostAccess.DockerSocket.Enabled)
@@ -625,21 +794,19 @@ func Build(in Inputs) (*Plan, error) {
 		if in.SkipPermissions {
 			p.Command = append(p.Command, "--dangerously-skip-permissions")
 		}
+		// CS-LNCH-041/045: launcher-owned flags precede --model and the
+		// passthrough tail, so a passthrough claude flag can still override
+		// them.
+		if in.Worktree != "" {
+			p.Command = append(p.Command, "--worktree", in.Worktree)
+		}
+		if model != "" {
+			p.Command = append(p.Command, "--model", model)
+		}
 	} else {
 		// The instance noun distinguishes concurrent sessions in one project.
 		p.ContainerName = "claude-sandbox-" + slug + "-" + in.Instance
-		p.Command = []string{"claude"}
-		if in.SkipPermissions {
-			p.Command = append(p.Command, "--dangerously-skip-permissions")
-		}
-	}
-	// CS-LNCH-041/045: launcher-owned flags precede --model and the
-	// passthrough tail, so a passthrough claude flag can still override them.
-	if in.Worktree != "" {
-		p.Command = append(p.Command, "--worktree", in.Worktree)
-	}
-	if model != "" {
-		p.Command = append(p.Command, "--model", model)
+		p.Command = CommandPrefix(in.SkipPermissions, in.Worktree, model)
 	}
 	p.Command = append(p.Command, in.Passthrough...)
 
@@ -849,6 +1016,11 @@ func Build(in Inputs) (*Plan, error) {
 	}
 	p.Labels = append(p.Labels, LabelContinue+"="+continueLabel) // CS-SESS-120
 	p.Continue = in.Continue
+	// CS-LNCH-206: whether a hang-up ends the session, for an attach later.
+	p.OnHangup = OnHangupLabelValue(in)
+	p.Labels = append(p.Labels, LabelOnHangup+"="+p.OnHangup)
+	// CS-LNCH-223: the access applied, after the fingerprint (unhashed).
+	p.Labels = append(p.Labels, LabelAccess+"="+p.Access)
 
 	// CS-LNCH-178..181: the terminal identity. After the fingerprint, and
 	// neither EnvFlags nor labels are hashed, so a launch from another
@@ -1825,6 +1997,37 @@ func ResolveTristate(cli *bool, envVal string, yaml *bool, def bool) bool {
 }
 
 // resolveFlag implements the CLI > env var > YAML precedence.
+// CommandPrefix is the launcher-owned head of an interactive container's
+// command (CS-LNCH-026/041): "claude", --dangerously-skip-permissions when
+// dangerous mode resolved on, then --worktree <w> and --model <m> when set;
+// the passthrough follows it. The one definition Build and the restart's
+// reading of an old container's Config.Cmd share (CS-SESS-107).
+func CommandPrefix(skipPermissions bool, worktree, model string) []string {
+	c := []string{"claude"}
+	if skipPermissions {
+		c = append(c, "--dangerously-skip-permissions")
+	}
+	if worktree != "" {
+		c = append(c, "--worktree", worktree)
+	}
+	if model != "" {
+		c = append(c, "--model", model)
+	}
+	return c
+}
+
+// PackageCacheVars maps each package-cache toolchain variable to its
+// directory name under PackageCacheRoot (CS-LNCH-035): a container whose
+// environment sets one to that directory had the caches on (the restart's
+// reading of an old container, CS-SESS-107).
+func PackageCacheVars() map[string]string {
+	out := map[string]string{}
+	for _, c := range packageCaches {
+		out[c.env] = c.dir
+	}
+	return out
+}
+
 func resolveFlag(cli *bool, envVal string, yaml *bool) bool {
 	if cli != nil {
 		return *cli

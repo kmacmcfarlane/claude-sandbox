@@ -156,7 +156,13 @@ type Config struct {
 	// SharedPeerRegistry's reasons: a falsy CLAUDE_SANDBOX_HOST_CLIPBOARD
 	// must turn an upstream "true" off, and the WANTED value is hashed
 	// explicitly (CS-LNCH-201).
-	HostClipboard *bool      `yaml:"hostClipboard" json:"-"`
+	HostClipboard *bool `yaml:"hostClipboard" json:"-"`
+	// EndOnHangup ends a session after its turn when its terminal hangs up
+	// (CS-LNCH-206..210). Default ON (host parity: claude on the host ends
+	// with its terminal); false keeps the container running, reattachable.
+	// Tri-state for SharedPeerRegistry's reason; json:"-" because it is a
+	// per-session choice, recorded in a label and never hashed.
+	EndOnHangup   *bool      `yaml:"endOnHangup" json:"-"`
 	TrackInHost   *bool      `yaml:"trackInHost"`
 	BaseOnly      bool       `yaml:"baseOnly"`
 	DockerfileDir string     `yaml:"dockerfileDir"`

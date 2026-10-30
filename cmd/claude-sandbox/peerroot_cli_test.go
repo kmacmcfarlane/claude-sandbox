@@ -30,7 +30,7 @@ func mountsRow(name, project, class, state, peerRoot string, mounts ...string) s
 	}
 	return sessionstest.Row(name, status, project, "claude", "", "v1", "", "", "", class, "",
 		state, "2026-09-30 12:00:00 +0000 UTC", "", "", "",
-		"", "", "", "", "", peerRoot, "none", "", "", "", strings.Join(mounts, ","))
+		"", "", "", "", "", peerRoot, "none", "", "", "", "", "", strings.Join(mounts, ","))
 }
 
 var _ = Describe("peers root move: drain-then-switch (CS-DIR-010..019)", func() {

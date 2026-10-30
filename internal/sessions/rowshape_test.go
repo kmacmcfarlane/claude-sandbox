@@ -31,7 +31,7 @@ func fullFields(name, model string) []string {
 		name, "Up 1 hour", "/w/proj", "claude", "otter", "v1", model, "hash", "[]", "37", "",
 		"running", "2026-09-30 12:00:00 +0000 UTC", "8g", "default", "",
 		rowID, "", "/h/.claude/sessions", "--model", rowResume, "none",
-		"TERMINAL_EMULATOR=x", "", "bridge", "/tmp/claude-sandbox1", "/w/proj,/h/.claude",
+		"TERMINAL_EMULATOR=x", "", "bridge", "/tmp/claude-sandbox1", "end", "ssh=flag", "/w/proj,/h/.claude",
 	}
 }
 
@@ -130,13 +130,13 @@ var _ = Describe("discovery row shapes (CS-SESS-118/119)", func() {
 	It("CS-SESS-118: any other field count is dropped, earlier formats' counts included", func() {
 		full := fullFields("cs-a", "")
 		rows := []string{}
-		for _, n := range []int{11, 13, 15, 16, 20, 21, 23, 24, 25, 26} {
+		for _, n := range []int{11, 13, 15, 16, 20, 21, 23, 24, 25, 26, 27, 28} {
 			rows = append(rows, sessionstest.Raw(full[:n]...))
 		}
 		rows = append(rows, sessionstest.Raw(append(full, "extra")...))
 		Expect(discover(rows...)).To(BeEmpty())
 		Expect(strings.Count(warn.String(), "WARNING: ignoring container cs-a")).To(Equal(len(rows)))
-		Expect(warn.String()).To(ContainSubstring("(28 fields, not 27)"))
+		Expect(warn.String()).To(ContainSubstring("(30 fields, not 29)"))
 	})
 
 	It("CS-SESS-118: a row whose first field is no container name is named as 'a container'", func() {

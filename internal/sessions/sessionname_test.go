@@ -11,6 +11,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	"github.com/kmacmcfarlane/claude-sandbox/internal/registry"
 	"github.com/kmacmcfarlane/claude-sandbox/internal/sessions"
 )
 
@@ -24,6 +25,32 @@ func writeRecord(dir string, pid int, started time.Time, name, domain string) {
 	Expect(err).NotTo(HaveOccurred())
 	Expect(os.WriteFile(filepath.Join(dir, strconv.Itoa(pid)+".json"), b, 0o600)).To(Succeed())
 }
+
+var _ = Describe("the primary record's rule (CS-SESS-114, CS-SESS-106)", func() {
+	created := time.Date(2026, 10, 28, 9, 0, 0, 700_000_000, time.UTC)
+	rec := func(pid int, at time.Time, domain string) registry.Record {
+		return registry.Record{PID: pid, StartedAt: at.UnixMilli(), PIDDomain: domain}
+	}
+	DescribeTable("CS-SESS-106: PickPrimary is the earliest record at the class, at or after the creation second, not the launcher's own",
+		func(recs []registry.Record, own string, wantPID int) {
+			got, ok := sessions.PickPrimary(recs, 7, created, own)
+			if wantPID == 0 {
+				Expect(ok).To(BeFalse())
+				return
+			}
+			Expect(ok).To(BeTrue())
+			Expect(got.PID).To(Equal(wantPID))
+		},
+		Entry("none", nil, "", 0),
+		Entry("another class only", []registry.Record{rec(8, created.Add(time.Second), "")}, "", 0),
+		Entry("an earlier container's leftover only", []registry.Record{rec(7, created.Add(-2*time.Second), "")}, "", 0),
+		Entry("within the creation second (truncated)", []registry.Record{rec(263, created.Add(-500*time.Millisecond), "")}, "", 263),
+		Entry("the earliest wins", []registry.Record{rec(519, created.Add(time.Minute), ""), rec(263, created.Add(time.Second), "")}, "", 263),
+		Entry("a tie goes to the lower pid", []registry.Record{rec(519, created.Add(time.Second), ""), rec(263, created.Add(time.Second), "")}, "", 263),
+		Entry("the launcher's own domain is skipped", []registry.Record{rec(263, created.Add(time.Second), "linux:m:pid"), rec(519, created.Add(time.Minute), "")}, "linux:m:pid", 519),
+		Entry("an unknown own domain skips nothing", []registry.Record{rec(263, created.Add(time.Second), "linux:m:pid")}, "", 263),
+	)
+})
 
 var _ = Describe("friendly session names (CS-SESS-114, CS-SESS-117)", func() {
 	var (
@@ -57,7 +84,10 @@ var _ = Describe("friendly session names (CS-SESS-114, CS-SESS-117)", func() {
 		legacy := filepath.Join(base, "home", ".cache", "claude-sandbox", "peers", "sessions")
 		writeRecord(legacy, 12, created.Add(time.Second), "from legacy", "")
 		got := sessions.SessionNames([]sessions.Session{sess("cs-a", "12", "")},
-			sessions.NameLookup{FallbackDirs: []string{cfg, legacy}})
+			sessions.NameLookup{Dirs: func(label string) []string {
+				Expect(label).To(BeEmpty())
+				return []string{cfg, legacy}
+			}})
 		Expect(got).To(Equal(map[string]string{"cs-a": "from legacy"}))
 	})
 

@@ -311,7 +311,11 @@ terminal outside tmux: stopping the unit ends every pane.
 
 1. With a few sandbox sessions running, save (`prefix + C-s`) and check `--list` as above.
 2. `systemctl --user stop tmux.service`. The containers keep running: they were created with a
-   TTY, and losing the terminal does not stop them.
+   TTY, and losing the terminal does not stop them. A unit stop sends SIGTERM first, which is not
+   a hang-up; if a launcher still reads it as one, its session-end helper sees the unit stopping
+   (or gets the unit's SIGTERM itself) and keeps the container (README "When the terminal
+   closes"). Without the unit, `tmux kill-server` is a hang-up for every pane: those sessions end
+   after their turn, and the restore resumes them instead of reattaching.
 3. `systemctl --user start tmux.service`, then `tmux attach`.
 4. Each sandbox pane prints its restore and reattaches, one at a time. `claude-sandbox
    sessions` shows the same containers as before.

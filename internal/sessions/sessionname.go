@@ -23,13 +23,16 @@ import (
 // longer one is cut and ends in an ellipsis (CS-SESS-117).
 const NameDisplayMax = 40
 
-// NameLookup says where records of containers without a registry label are
-// looked for, and whose records are never a container's.
+// NameLookup says where a container's records are looked for, and whose
+// records are never a container's.
 type NameLookup struct {
-	// FallbackDirs are read for a container without the registry label
-	// (one from before the label, and so from before the peers move): the
-	// launcher's <config dir>/sessions and the legacy peers root's sessions.
-	FallbackDirs []string
+	// Dirs returns the registry directories of a container from its
+	// claude-sandbox.registry label: the label's directory when set, else —
+	// a container from before the label, and so from before the peers move —
+	// the launcher's <config dir>/sessions and the legacy peers root's
+	// sessions (resumeguard.RegistryDirs, which this package cannot import).
+	// nil reads the label's directory alone.
+	Dirs func(registryLabel string) []string
 	// OwnDomain returns the launcher's own pid domain ("" when unknown): a
 	// record from it is a claude on the host that shares the directory, never
 	// the container's. Called at most once, and only when a record is read;
@@ -58,8 +61,11 @@ func SessionNames(found []Session, lk NameLookup) map[string]string {
 		if err != nil || class < 0 || class > 255 || s.CreatedAt.IsZero() || s.Reserved() {
 			continue
 		}
-		dirs := lk.FallbackDirs
-		if s.RegistryDir != "" {
+		var dirs []string
+		switch {
+		case lk.Dirs != nil:
+			dirs = lk.Dirs(s.RegistryDir)
+		case s.RegistryDir != "":
 			dirs = []string{s.RegistryDir}
 		}
 		w := want{s: s, class: class}
@@ -94,27 +100,42 @@ func SessionNames(found []Session, lk NameLookup) map[string]string {
 	}
 	out := map[string]string{}
 	for _, w := range wants {
-		since := w.s.CreatedAt.Truncate(time.Second).UnixMilli()
-		var best *registry.Record
+		var recs []registry.Record
 		for _, d := range w.dirs {
-			for i := range records[d] {
-				r := &records[d][i]
-				if r.PID%256 != w.class || r.StartedAt < since {
-					continue
-				}
-				if domain != "" && r.PIDDomain == domain {
-					continue
-				}
-				if best == nil || r.StartedAt < best.StartedAt || (r.StartedAt == best.StartedAt && r.PID < best.PID) {
-					best = r
-				}
-			}
+			recs = append(recs, records[d]...)
 		}
-		if best != nil && best.Name != "" {
+		if best, ok := PickPrimary(recs, w.class, w.s.CreatedAt, domain); ok && best.Name != "" {
 			out[w.s.Name] = best.Name
 		}
 	}
 	return out
+}
+
+// PickPrimary is CS-SESS-114's rule, shared by the friendly names and the
+// restart (CS-SESS-106): of recs, the records at class (pid % 256) whose
+// startedAt is at or after created (truncated to the second) and whose
+// pidDomain is not ownDomain ("" = unknown, skip nothing), the earliest, ties
+// to the lower pid. The primary claude starts before any join. Pure: no I/O,
+// and a caller decides what a failed read means.
+func PickPrimary(recs []registry.Record, class int, created time.Time, ownDomain string) (registry.Record, bool) {
+	since := created.Truncate(time.Second).UnixMilli()
+	var best *registry.Record
+	for i := range recs {
+		r := &recs[i]
+		if r.PID%256 != class || r.StartedAt < since {
+			continue
+		}
+		if ownDomain != "" && r.PIDDomain == ownDomain {
+			continue
+		}
+		if best == nil || r.StartedAt < best.StartedAt || (r.StartedAt == best.StartedAt && r.PID < best.PID) {
+			best = r
+		}
+	}
+	if best == nil {
+		return registry.Record{}, false
+	}
+	return *best, true
 }
 
 // readClasses reads the records at the given classes in one registry

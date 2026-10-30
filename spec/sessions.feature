@@ -8,7 +8,9 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
   mechanisms is durability:
 
     - a session in its OWN container is PID 1, so it can be reattached with
-      `docker attach` and survives losing its terminal;
+      `docker attach`; it survives losing its terminal when the detach keys or
+      --detach were used, or with endOnHangup: false, and otherwise ends after
+      its turn when its terminal hangs up (CS-LNCH-207);
     - a session JOINED into an existing container (docker exec) is cheaper but
       its stdio dies with its client and cannot be recovered, and it dies when
       that container's primary process exits (the container is created `--rm`).
@@ -145,7 +147,7 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
     Given a session is already running for this project
     Then sessions are discovered before any base or child image build runs
 
-  Scenario: CS-SESS-016 Tier-1 prompt offers new/branch/join/attach/quit
+  Scenario: CS-SESS-016 Tier-1 prompt offers new/branch/join/attach/restart/quit
     Given 2 sessions are running for this project
     And a terminal is attached
     Then the running sessions are printed with instance, uptime, and session count
@@ -155,9 +157,13 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
       | b   | new container forking the newest conversation |
       | j   | new session in an existing container       |
       | a   | attach to an existing session              |
+      | r   | restart a session in a new container (CS-SESS-105) |
       | q   | quit                                       |
+    And the prompt reads "Choice [n/b/j/a/r/q]:"
     And the join choice warns it dies with the container's primary and is not attachable
     And the attach choice warns the terminal is shared if someone is already using it
+    And the restart choice says it resumes the conversation with a fresh screen and stops
+      the old container
 
   Scenario: CS-SESS-017 Tier-2 selection is skipped when there is one candidate
     Given exactly 1 session is running
@@ -1206,6 +1212,139 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
       cannot be listed, the answer is "cannot tell", never "no client"
     And the reader removes nothing
 
+  # ---- restart a session in place ----
+  # "docker attach" is a raw TTY splice: the TUI redraws and the scroll-back
+  # is gone. A restart stops the session's container gracefully and resumes
+  # its conversation in a new one: a fresh screen with the whole history.
+  # The stop, the lock and the failures are in launch.feature (CS-LNCH-218,
+  # CS-LNCH-220, CS-LNCH-221); the pane marks in tmux.feature (CS-TMUX-080).
+
+  @new
+  Scenario: CS-SESS-105 --restart[=NOUN] and the tier-1 [r] pick the session to restart
+    When "claude-sandbox --restart=dunlin" or "claude-sandbox --restart" is run, or [r] is
+      chosen in the tier-1 menu (CS-SESS-016)
+    Then the candidates are this project's interactive sessions (CS-SESS-055: no ralph, no
+      headless, no reservation) that are not paused
+    And "--restart=NOUN" names one; a bare --restart uses the only candidate and names it,
+      and several prompt "Which session to restart? [...]" (tier 2, CS-SESS-017/018), or
+      exit 3 without a terminal; no candidate exits 2
+    And a named headless, ralph, reserved or paused container is refused by name, exit 2
+      (CS-LNCH-221)
+    And these are refused with exit 2 before any docker call:
+      | with                                                         | because                                            |
+      | --attach, --join, --branch, --new, --no-session-check        | a restart picks a session and replaces its container |
+      | --detach                                                     | the point is a fresh screen in this terminal       |
+      | --ralph, headless                                            | not restartable                                    |
+      | --worktree, --worktree=NAME, --no-worktree                   | the transcript is in the session's own place       |
+      | passthrough --continue/-c, --fork-session, --session-id, --from-pr, --teleport, -w/--worktree, a --resume without an id | a restart resumes the session's conversation by id, where it is |
+    And a passthrough "--resume <id>" must name the session's conversation, else exit 2
+      naming both ids; an id a joined session of that container holds is refused, exit 2,
+      naming the container (a restart moves only a container's main conversation)
+    And the tier-1 [r] drops a worktree flag the menu came with, with one note when it named
+      another place than the session's
+    And --restart is completed like --attach (CS-COMP-028) and named in the usage
+
+  @new
+  Scenario: CS-SESS-106 The conversation a restart resumes, and where
+    Given a restart's target
+    Then its records are read from resumeguard.RegistryDirs (the claude-sandbox.registry
+      label's dir, else <config dir>/sessions and the legacy peers root's) at its pid class
+      with resumeguard.ReadClass, the resume guard's own reader: a record still malformed
+      after its retries, or failing structurally, refuses with exit 2 ("cannot tell which
+      conversation ... has open"), never falling back to another record
+    And the primary's record is sessions.PickPrimary's (CS-SESS-114's rule: at the class,
+      at or after the creation second, not the launcher's own pid domain, the earliest) that
+      started within tmuxpane.PrimaryWindow of the creation, else there is none (the
+      earliest may then be a join's)
+    And it is confirmed alive with resumeguard.AliveRecord (CS-SESS-089); a primary
+      confirmed dead in a running container refuses, exit 2
+    And its sessionId is the conversation, its cleaned name and name source come with it,
+      and every other live record at the class is a joined session
+    And claude must run in the session's own place: the record's cwd must be the project
+      (no worktree label) or <git root>/.claude/worktrees/<worktree label>, else exit 2
+      printing the cwd (registry.Printable)
+    And with no primary record: a container younger than 30 s exits 1 ("not up yet");
+      else a tmux pane mark of the container naming a conversation (passing ValidateRow),
+      else its claude-sandbox.resume label, is the conversation, behind CS-SESS-108's
+      question; neither exits 2
+    And the container's claude-sandbox.configdir label must equal this launcher's raw
+      CLAUDE_CONFIG_DIR, else exit 2 printing the command with the right
+      CLAUDE_CONFIG_DIR; a container without the labels (an older launcher) exits 2
+    And nothing the restart decides on is read from the docker ps row: it runs its own
+      docker inspect of the target, by
+      its 64-hex id when known, of {{json .Name}}, {{json .Config.Cmd}},
+      {{json .Config.Labels}}, {{json .Created}} and {{json .State.Status}}, split on the
+      raw "\x1f" (JSON escapes control characters); when the name or any of the project,
+      mode, instance, registry, configdir, pidclass, worktree, resume, launchflags or model
+      labels differs from the row, exactly, it refuses with exit 2: "the container's labels
+      do not match its listing"
+    And past that check every field it decides on — those labels, the access label, the
+      creation time (RFC 3339) and the state — is the inspect's; only the 64-hex id it
+      inspected by is the row's
+    And nothing is stopped by any of these refusals
+
+  @new
+  Scenario: CS-SESS-107 The new container's launch
+    Then it is tmuxpane.ResumeArgs of the session's mark, read as a command line:
+      "--new --worktree=<w>|--no-worktree [--model m] -- --resume <id> [--name n] <replay>",
+      in the target's project (the project the decision discovered it in; a mismatch
+      refuses before any stop), with the same noun (CS-LNCH-218)
+    And the replay comes from the old container's Config.Cmd (one docker inspect): the
+      launcher's prefix (launch.CommandPrefix, shared with Build) is stripped as its labels
+      predict, and tmuxpane.Record keeps the allowlisted claude flags with their values; a
+      command line not in that shape replays nothing, with one note
+    And the model is the launcher's --model when the launchflags label names it, else
+      claude's own --model from the command line, else none (the cascade decides); this
+      launch's own --model replaces it
+    And a passthrough --name sets the name and makes it the user's; the user's passthrough,
+      stripped of the session family (tmuxpane.StripSessionFamily), follows the replay
+    And the old launch's access options (--dangerous, --ssh, --git, --docker-socket, --aws,
+      --package-caches) are read ONLY from the old container's claude-sandbox.access label
+      (CS-LNCH-223), which the launcher wrote at its create from its own resolution, as the
+      restart's own inspect decodes it (CS-SESS-106) — never from the docker ps row
+    And an option recorded from a flag or a switch ("flag", "env"), that this launch would
+      not give on its own (its flags, its env, its config), is set as its flag, and one
+      line names what was carried and how: "given as a flag at its launch", or
+      "<CLAUDE_SANDBOX_*> was on at its launch", so a re-grant is never silent; this
+      launch's own flags always win
+    And an option recorded from the config ("config") that today's config no longer gives
+      is never re-granted, only named: "Note: '<noun>' had <opt> from its config, which no
+      longer gives it; pass it again to keep it."
+    And the container's mounts, environment and command line are never read for access
+      (an env file and a cascade config.yaml are session-writable); whether the command
+      line's launcher prefix holds --dangerously-skip-permissions is the label's word too
+    And a container without the access label (created before it) carries nothing, with one
+      note: "'<noun>' predates access tracking; pass any access options again."
+    And claude flags the restart does not replay are named in one note, by name only; a
+      --dangerously-skip-permissions given to claude after -- is one of them, never granted
+    And --resume is first after "--", so the resume guard and the resume label
+      (CS-LNCH-110) read the conversation
+
+  @new
+  Scenario: CS-SESS-108 When a restart asks first
+    Then the restart reads, at its decision: the turn rule over every live record of the
+      container (sessionend.Turn, the session-end helper's rule), the clients
+      (clients.Present: leases and the docker CLI scan), and the joined sessions
+    And a running turn (a record busy, shell, unknown or malformed) refuses, exit 1:
+      "busy ...; retry when its turn has ended, or attach"; nothing is stopped
+    And with nothing else affected (no other client, no join, no waiting prompt, presence
+      known, a primary record) there is no question: one line says the container is
+      stopped and the conversation resumes here, and that anything else running there ends
+    And it asks "Restart '<noun>'? [y/N]" (default No; No, Enter or a timeout exits 1 with
+      nothing stopped; no terminal exits 3) when: a terminal client is attached (named:
+      kind, tmux pane, since), a joined session runs there (named with its conversation,
+      and that it is SIGKILLed with the container and its resume command printed and
+      logged after the stop), a prompt is waiting (the prompt is dropped), presence cannot
+      be told (off Linux, an unreadable /proc), or there is no primary record (the turn
+      state and the open conversation are unknown; it shows the id, says a /resume or
+      /clear since would stop the open one, and prints claude's picker command,
+      tmuxpane.ResumePickerCommand)
+    And right before the stop it reads everything again (CS-LNCH-218): a turn started
+      since refuses, exit 1, with no mark touched; a new waiting prompt, a new client or
+      join, or a switch of the conversation asks again with the new facts (a switch away
+      from an id the user named exits 2); records that appeared on the no-record path
+      naming another id ask again
+
   # ---- friendly session names ----
   # The instance noun is random; the name Claude Code shows in its terminal
   # title (a /rename, --name, or the name it derives) is what a person
@@ -1223,7 +1362,8 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
       startedAt is at or after the container's creation (truncated to the
       second), and its pidDomain is not the launcher's own (a claude on the
       host sharing the directory)
-    And of those the earliest is the primary's (it starts before any join),
+    And of those the earliest is the primary's (it starts before any join;
+      the rule is sessions.PickPrimary, shared with the restart, CS-SESS-106),
       and its cleaned name (internal/registry: printable, at most 200
       characters, not starting with "-") is the session's name
     And a container without a class or a creation time, a reservation, a
