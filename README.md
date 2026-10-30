@@ -2544,7 +2544,7 @@ kill (see [Memory limit](#memory-limit)). What changes:
   size and Claude Code re-sends it on every resize. The kitty keyboard protocol and
   modifyOtherKeys are not turned back on by the launcher.
 
-Spec: `spec/launch.feature` CS-LNCH-085..098, `spec/sessions.feature` CS-SESS-059/060.
+Spec: `spec/launch.feature` CS-LNCH-085..098, CS-LNCH-227/228, `spec/sessions.feature` CS-SESS-059/060.
 
 #### Shadow directory cleanup
 

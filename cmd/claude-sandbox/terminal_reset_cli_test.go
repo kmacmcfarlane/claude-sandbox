@@ -6,6 +6,7 @@ package main
 // on before an attach for the ones Claude Code does not re-send on a resize.
 
 import (
+	"errors"
 	"io"
 	"strings"
 	"syscall"
@@ -122,6 +123,25 @@ var _ = Describe("terminal modes across a detach (CS-LNCH-227/228)", func() {
 		Expect(strings.Count(out, oomreport.TerminalReset)).To(Equal(1))
 		Expect(out).NotTo(ContainSubstring("\x1b[?1000h"), "mouse tracking is claude's to re-send on the resize")
 		neverCursorMoves()
+	})
+
+	It("CS-LNCH-228: an attach whose docker client could not be run resets what it turned on", func() {
+		existing()
+		onTerminal(false)
+		f.fake.On("docker attach", "", errors.New("exec: \"docker\": executable file not found in $PATH"))
+		f.run("--attach=otter")
+		out := f.out.String()
+		on := strings.Index(out, oomreport.AttachModes)
+		Expect(on).To(BeNumerically(">=", 0))
+		Expect(strings.LastIndex(out, oomreport.TerminalReset)).To(BeNumerically(">", on), "the reset follows the enables")
+		Expect(strings.Count(out, oomreport.TerminalReset)).To(Equal(1))
+	})
+
+	It("CS-LNCH-227: a primary child that could not be run writes nothing", func() {
+		onTerminal(true)
+		f.fake.On("docker start", "", errors.New("exec: \"docker\": executable file not found in $PATH"))
+		f.run()
+		Expect(all()).NotTo(ContainSubstring("\x1b"))
 	})
 
 	It("CS-LNCH-228: an attach off a terminal writes no enables", func() {

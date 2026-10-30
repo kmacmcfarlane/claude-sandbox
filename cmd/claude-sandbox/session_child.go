@@ -61,6 +61,11 @@ type sessionOpts struct {
 	// resolved on, on a Linux host, outside a sandbox. Never for a join,
 	// ralph or headless. The helper reads the session from mark.
 	endOnHangup bool
+	// enable is written to the launcher's terminal right before the child
+	// starts (CS-LNCH-228: an attach's oomreport.AttachModes); "" for none.
+	// A child that could not be run is followed by the reset, so the modes
+	// it turned on never stay on in the shell.
+	enable string
 	// onChild runs right after the pane is marked and right before the
 	// session child starts: a restore releases its start lock there after
 	// an attach, or starts its readiness watcher (CS-TMUX-060/061). nil on
@@ -138,6 +143,12 @@ func runSession(env *Env, c execx.Cmd, container string, o sessionOpts) (end ses
 		o.onChild()
 	}
 
+	var enabledOn io.Writer
+	if o.enable != "" {
+		if enabledOn = terminalOf(env, o.headless); enabledOn != nil {
+			io.WriteString(enabledOn, o.enable)
+		}
+	}
 	started := env.now()
 	res, err := env.Runner.RunSession(c)
 	defer res.Done()
@@ -160,6 +171,10 @@ func runSession(env *Env, c execx.Cmd, container string, o sessionOpts) (end ses
 		}
 	}()
 	if err != nil {
+		if enabledOn != nil {
+			// CS-LNCH-228: undo what was turned on for a child that never ran.
+			io.WriteString(enabledOn, oomreport.TerminalReset)
+		}
 		return sessionEnd{code: res.Code}, err
 	}
 	end = sessionEnd{code: res.Code}

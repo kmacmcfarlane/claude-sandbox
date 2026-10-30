@@ -2097,7 +2097,7 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
 
   Scenario: CS-LNCH-092 The terminal is reset before the report, only on a terminal
     Given the session was OOM-killed (CS-LNCH-089), the launch is not headless,
-      and the launcher's stderr is a terminal
+      and the launcher's stdout or stderr is a terminal (CS-LNCH-227)
     Then before the report the launcher writes only the resets of the modes
       Claude Code's TUI sets: synchronized update (?2026l), bracketed paste
       (?2004l), focus events (?1004l), theme notifications (?2031l), mouse
@@ -3694,6 +3694,8 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       modes Claude Code sets once at startup and does not re-send on a resize:
       bracketed paste (?2004h), focus events (?1004h) and theme notifications
       (?2031h)
+    And when the attach's docker client could not be run at all, the
+      CS-LNCH-092 reset follows at once, so those modes never stay on in the shell
     And mouse tracking is not written: docker attach resizes the container's
       tty to one row and column more and back, and Claude Code re-sends mouse
       tracking (?1000h ?1002h ?1003h ?1006h) on each resize (observed on
