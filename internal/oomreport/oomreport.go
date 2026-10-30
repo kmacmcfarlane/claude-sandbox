@@ -382,7 +382,8 @@ func Joined(code int, o Outcome) Verdict {
 }
 
 // TerminalReset undoes the terminal modes Claude Code's TUI sets, for a TUI
-// that was killed before it could (CS-LNCH-092). Read from Claude Code
+// that was killed before it could (CS-LNCH-092) or that keeps running in the
+// container after a detach (CS-LNCH-227). Read from Claude Code
 // 2.1.277: at startup it enables bracketed paste (2004), focus events (1004)
 // and theme notifications (2031) and hides the cursor; it enables the kitty
 // keyboard protocol and xterm modifyOtherKeys on terminals that support them,
@@ -400,6 +401,16 @@ const TerminalReset = "\x1b[?2026l" + // synchronized update off
 	"\x1b[>4m" + // modifyOtherKeys reset
 	"\x1b[0m" + // attributes reset
 	"\x1b[?25h" // cursor visible
+
+// AttachModes turns back on, before a "docker attach", the modes Claude
+// Code sets once at startup and does not re-send on a resize: bracketed
+// paste, focus events and theme notifications (CS-LNCH-228). The reset a
+// detach wrote (CS-LNCH-227) turned them off while claude kept running.
+// Mouse tracking is left out: docker attach nudges the tty size, and Claude
+// Code re-sends mouse tracking on every resize (observed on 2.1.314).
+const AttachModes = "\x1b[?2004h" + // bracketed paste on
+	"\x1b[?1004h" + // focus events on
+	"\x1b[?2031h" // theme-change notifications on
 
 // KilledReport is the report of a session the OOM killer ended
 // (CS-LNCH-089). kills is the number of oom events seen. It names both

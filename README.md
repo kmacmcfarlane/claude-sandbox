@@ -2101,6 +2101,8 @@ detachKeys: ctrl-^
 
 Accepts Docker's `--detach-keys` syntax: a single `a-z`, `ctrl-<char>`, or a comma-separated sequence. Docker's own default of `ctrl-p,ctrl-q` is deliberately *not* used, because the Claude Code TUI binds `ctrl+p`. If you change this, avoid keys the TUI uses — `ctrl+o/x/b/e/s/k/g/t/v/r/d/n/a/u/p/z/l/j`, and `ctrl+]`, `ctrl+\`, `ctrl+_` — which leaves `ctrl-q`, `ctrl-^` and `ctrl-@` as the safe choices.
 
+On a detach the launcher switches off the terminal modes the TUI left on (mouse tracking among them), and turns the ones Claude Code does not restore itself back on when you attach again — see the session child's **Terminal** note.
+
 #### Extra mounts
 
 Add extra volume mounts to the container for shared libraries, data directories, or other paths.
@@ -2529,11 +2531,18 @@ kill (see [Memory limit](#memory-limit)). What changes:
 - **Failed starts.** A `docker start` that never ran the container (it is still `created`)
   removes the reservation and its shadow directory at once instead of leaving them to the next
   launch's sweep.
-- **Terminal.** Before an OOM report on a terminal, the launcher switches off the modes Claude
-  Code's TUI sets (bracketed paste, focus and theme reporting, mouse tracking, the kitty
-  keyboard protocol, modifyOtherKeys, synchronized output; cursor shown). It never sends the
+- **Terminal.** Whenever a session's docker client returns to your shell — a detach (Claude Code
+  keeps running in the container and never switches its modes off, so mouse moves would type
+  escape codes into your shell), a normal exit, an OOM kill — the launcher switches off the
+  modes Claude Code's TUI sets (bracketed paste, focus and theme reporting, mouse tracking, the
+  kitty keyboard protocol, modifyOtherKeys, synchronized output; cursor shown), once, on stdout
+  (or stderr when only that is a terminal); an OOM report follows it. It never sends the
   alternate-screen exit or a scroll-region reset, which would move the cursor. Headless
-  sessions and redirected stderr get plain lines.
+  sessions, output that is not a terminal and a terminal that hung up get nothing. On
+  `--attach` the launcher turns bracketed paste, focus and theme reporting back on before
+  docker attaches; mouse tracking comes back by itself, since docker attach nudges the window
+  size and Claude Code re-sends it on every resize. The kitty keyboard protocol and
+  modifyOtherKeys are not turned back on by the launcher.
 
 Spec: `spec/launch.feature` CS-LNCH-085..098, `spec/sessions.feature` CS-SESS-059/060.
 

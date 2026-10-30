@@ -830,6 +830,11 @@ func attachToWith(env *Env, s sessions.Session, configuredKeys string, mark *pan
 	if fullID.MatchString(s.ID) {
 		target = s.ID
 	}
+	// CS-LNCH-228: the modes claude set at startup and does not re-send on
+	// docker attach's resize nudge, which a detach's reset turned off.
+	if w := terminalOf(env, false); w != nil {
+		io.WriteString(w, oomreport.AttachModes)
+	}
 	end, err := runSession(env, execx.Cmd{
 		Name: "docker",
 		Args: []string{"attach", "--detach-keys=" + detachKeys, target},
