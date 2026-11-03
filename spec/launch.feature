@@ -3771,7 +3771,19 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       created as the invoking user, 0700, create-only, before docker create, as
       CS-LNCH-230 does for the levels below an existing ~/.aws; any refusal or
       failure stands down to "readonly" with one WARNING
+    And the ~/.aws so created is then mounted read-only and exported in
+      CLAUDE_SANDBOX_AWS_HOME, exactly as an existing one is, so this launch
+      and every later build (the attach/join drift build included) hash alike
     And when it is any other bind, nothing is created, one WARNING, "readonly"
+    Given the deepest launch mount holding ~/.aws is a read-write same-path bind
+      (sandbox or host mode, ~/.aws existing or not)
+    Then the levels are made through directory handles — an os.Root on the
+      bind's root, then each component opened and checked against the Lstat
+      that decided (the CS-LNCH-169 walk) — never by full path, so a level a
+      session swaps for a symlink meanwhile is refused, not followed
+    And a symlinked ~/.aws there is not followed: "readonly", one WARNING
+    # A session can write that tree while the launcher works in it. A
+    # symlinked ~/.aws under no such bind is still followed (CS-LNCH-230).
     # Otherwise runc would make them through that bind, on the host, as root
     # (the CS-LNCH-169 class): the host's aws breaks and later launches stand
     # down until a sudo rm.

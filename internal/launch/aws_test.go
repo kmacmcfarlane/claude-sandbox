@@ -629,6 +629,63 @@ var _ = Describe("AWS sign-in folders (CS-LNCH-229..240)", func() {
 		Expect(filepath.Join(awsDir, "cli", "cache")).To(BeADirectory())
 	})
 
+	// ---- fix round 2: CS-LNCH-234 ----
+
+	It("CS-LNCH-234: the ~/.aws it created is mounted read-only and exported, so a later drift build agrees", func() {
+		in.ProjectDir = home
+		off, on := false, true
+		in.CLIAWS = &off
+		build() // the project-is-home shadow placeholders (CS-LNCH-169)
+		in.CLIAWS = &on
+		p := build()
+		Expect(p.Volumes).To(ContainElement(awsDir + ":" + awsDir + ":ro"))
+		v, _ := envValue(p, launch.AWSHomeEnv)
+		Expect(v).To(Equal(awsDir))
+		launchText := hashText
+		// What wouldBeFingerprint builds on the next attach: ~/.aws now exists.
+		in.NoCreatePeerDirs = true
+		drift := build()
+		Expect(hashText).To(Equal(launchText))
+		Expect(drift.ConfigHash).To(Equal(p.ConfigHash))
+	})
+
+	It("CS-LNCH-234: under a read-write same-path cover a symlinked ~/.aws is not followed: readonly, one warning", func() {
+		in.ProjectDir = home
+		target := filepath.Join(home, "dotfiles", "aws")
+		mkdir(target)
+		Expect(os.Symlink(target, awsDir)).To(Succeed())
+		p := build()
+		expectReadonly(p)
+		Expect(strings.Count(errw.String(), "is a symlink under the read-write mount")).To(Equal(1))
+		Expect(filepath.Join(target, "sso")).NotTo(BeAnExistingFile())
+		// The drift build says the same.
+		in.NoCreatePeerDirs = true
+		errw.Reset()
+		expectReadonly(build())
+	})
+
+	It("CS-LNCH-234: under a read-write same-path cover a symlinked level is refused through the handle walk, never followed", func() {
+		in.ProjectDir = home
+		mkdir(awsDir)
+		elsewhere := filepath.Join(home, "elsewhere")
+		mkdir(elsewhere)
+		Expect(os.Symlink(elsewhere, filepath.Join(awsDir, "cli"))).To(Succeed())
+		expectReadonly(build())
+		Expect(strings.Count(errw.String(), "WARNING: AWS sign-ins in this session use the host's read-only cache: cannot prepare "+filepath.Join(awsDir, "cli"))).To(Equal(1))
+		Expect(filepath.Join(elsewhere, "cache")).NotTo(BeAnExistingFile())
+	})
+
+	It("CS-LNCH-234: under a read-write same-path cover an existing level keeps its mode, and host mode walks the same way", func() {
+		in.ProjectDir = home
+		mkdir(awsDir) // 0755
+		env[launch.AWSTokenCacheEnv] = "host"
+		p := build()
+		Expect(modeOf(awsDir)).To(Equal(os.FileMode(0o755)))
+		Expect(modeOf(filepath.Join(awsDir, "sso", "cache"))).To(Equal(os.FileMode(0o700)))
+		sso := filepath.Join(awsDir, "sso/cache")
+		Expect(cacheBinds(p)).To(ContainElement(sso + ":" + sso))
+	})
+
 	It("CS-LNCH-234: when ~/.aws cannot be created under that bind, readonly with one warning", func() {
 		in.ProjectDir = home
 		scope := scopeFor(filepath.Join(home, ".claude"))

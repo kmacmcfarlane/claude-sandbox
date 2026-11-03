@@ -325,12 +325,7 @@ func (in *Inputs) awsSandboxMode(p *Plan, st *awsState) {
 	// no host ~/.aws, runc makes them inside whatever mount holds that path —
 	// the container's own filesystem, or a bind (the project mount when the
 	// project is the home), where they would land on the host as root.
-	if st.homeMounted {
-		if d, err := in.awsMountPoints(st.dir, false); err != nil {
-			in.awsStandDown(st, d, err)
-			return
-		}
-	} else if !in.awsNoHomeMountPoints(p, st) {
+	if !in.awsPrepareMountPoints(p, st) {
 		return
 	}
 	if !in.NoCreatePeerDirs {
@@ -358,29 +353,114 @@ func (in *Inputs) awsSandboxMode(p *Plan, st *awsState) {
 	in.awsBanner(st)
 }
 
-// awsNoHomeMountPoints is CS-LNCH-234 when there is no host ~/.aws: the
-// deepest mount that would hold ~/.aws/sso/cache decides. None: the
-// container's own filesystem, nothing to do. A read-write same-path bind
-// (the project mount of a project that is the home, say): ~/.aws and the
-// four levels are created as the user, create-only, as for an existing
-// ~/.aws. Any other bind (read-only, or another host path): readonly with
-// one warning — runc would fail through it, or create root-owned
-// directories on the host. False when it stood down.
-func (in *Inputs) awsNoHomeMountPoints(p *Plan, st *awsState) bool {
-	cover, ok := deepestMountOf(p.Volumes, filepath.Join(st.dir, "sso/cache"))
-	if !ok {
+// awsPrepareMountPoints makes sure the cache mount points exist where runc
+// needs them (CS-LNCH-230, CS-LNCH-234). False when it stood down to
+// readonly (one warning).
+//
+// The deepest launch mount holding ~/.aws itself (a strict ancestor, so not
+// CS-LNCH-018's own ~/.aws:ro) decides:
+//   - a read-write same-path bind (the project mount of a project that is
+//     the home, or the config-dir mount when CLAUDE_CONFIG_DIR is the home):
+//     a session can write that tree while the launcher works in it, so a
+//     symlinked ~/.aws is refused rather than followed, and every level is
+//     made through directory handles (awsCreateUnderCover, the CS-LNCH-169
+//     walk), never by full path. With no host ~/.aws before, ~/.aws is
+//     created too, and then mounted read-only like an existing one, so this
+//     launch and every later one (the drift build included) agree.
+//   - any other bind, with no host ~/.aws: readonly, since runc would fail
+//     through it or create root-owned directories on the host.
+//   - none: an existing ~/.aws (a symlink followed) gets CS-LNCH-230's
+//     create-only levels; with none, nothing is created and runc makes the
+//     mount points in the container's own filesystem.
+func (in *Inputs) awsPrepareMountPoints(p *Plan, st *awsState) bool {
+	cover, covered := deepestMountOf(p.Volumes, st.dir)
+	rwCover := covered && isSamePathRW(cover)
+	switch {
+	case rwCover:
+		if fi, err := os.Lstat(st.dir); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+			st.mode = AWSCacheReadonly
+			fmt.Fprintf(in.Err, "WARNING: AWS sign-ins in this session use the host's read-only cache: %s is a symlink under the read-write mount %s, which a session can re-point, so the launcher does not follow it to create the sign-in folders. Replace it with a directory, or set hostAccess.aws.tokenCache: readonly.\n", st.dir, cover)
+			return false
+		}
+		var (
+			d   string
+			err error
+		)
+		if in.NoCreatePeerDirs {
+			d, err = in.awsMountPoints(st.dir, !st.homeMounted)
+		} else {
+			d, err = in.awsCreateUnderCover(filepath.Clean(strings.Split(cover, ":")[1]), st.dir)
+		}
+		if err != nil {
+			in.awsStandDown(st, d, err)
+			return false
+		}
+		if !st.homeMounted {
+			p.Volumes = append(p.Volumes, fmt.Sprintf("%s:%s:ro", st.dir, st.dir))
+			st.homeMounted = true
+		}
 		return true
-	}
-	if !isSamePathRW(cover) {
+	case !st.homeMounted && covered:
 		st.mode = AWSCacheReadonly
 		fmt.Fprintf(in.Err, "WARNING: AWS sign-ins are not kept in this session: there is no %s, and the mount %s holds where it would be, so docker would create its folders on the host as root. Create %s on the host and relaunch.\n", st.dir, cover, st.dir)
 		return false
+	case !st.homeMounted:
+		return true
 	}
-	if d, err := in.awsMountPoints(st.dir, true); err != nil {
+	if d, err := in.awsMountPoints(st.dir, false); err != nil {
 		in.awsStandDown(st, d, err)
 		return false
 	}
 	return true
+}
+
+// awsCreateUnderCover makes ~/.aws/sso/cache and ~/.aws/cli/cache (and every
+// missing level from coverRoot down) through directory handles: os.OpenRoot
+// on the cover's root, then openChildDir per component, whose handle is
+// checked against the Lstat that decided — so a level swapped for a symlink
+// by a session writing the same tree is refused, never followed. Missing
+// levels are made 0700; existing ones keep their mode. Every level at or
+// below ~/.aws must be the invoking user's. Returns the path that failed.
+func (in *Inputs) awsCreateUnderCover(coverRoot, awsDir string) (string, error) {
+	getuid := os.Getuid
+	if in.Getuid != nil {
+		getuid = in.Getuid
+	}
+	for _, c := range awsCacheDirs {
+		leaf := filepath.Join(awsDir, c.under)
+		rel, err := filepath.Rel(coverRoot, leaf)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, "../") {
+			return leaf, fmt.Errorf("it is not under %s", coverRoot)
+		}
+		dir, err := os.OpenRoot(coverRoot)
+		if err != nil {
+			return coverRoot, err
+		}
+		cur := coverRoot
+		for _, comp := range strings.Split(rel, string(filepath.Separator)) {
+			cur = filepath.Join(cur, comp)
+			next, err := openChildDir(dir, comp, cur)
+			dir.Close()
+			if err != nil {
+				return cur, err
+			}
+			dir = next
+			if cur != awsDir && !strings.HasPrefix(cur, awsDir+"/") {
+				continue
+			}
+			fi, err := dir.Stat(".")
+			if err != nil {
+				dir.Close()
+				return cur, err
+			}
+			if st, ok := fi.Sys().(*syscall.Stat_t); ok && int(st.Uid) != getuid() {
+				dir.Close()
+				return cur, fmt.Errorf("it is owned by uid %d, not by the invoking user (uid %d)", st.Uid, getuid())
+			}
+		}
+		dir.Close()
+	}
+	return "", nil
 }
 
 // bindAWSScope binds the scope's two folders over the read-only ~/.aws.
@@ -403,8 +483,7 @@ func (in *Inputs) awsHostMode(p *Plan, st *awsState) {
 		fmt.Fprintf(in.Err, "WARNING: hostAccess.aws.tokenCache: host has no host folders to share: %s does not exist. Sign in on the host once (it creates them), or use tokenCache: sandbox.\n", st.dir)
 		return
 	}
-	if d, err := in.awsMountPoints(st.dir, false); err != nil {
-		in.awsStandDown(st, d, err)
+	if !in.awsPrepareMountPoints(p, st) {
 		return
 	}
 	in.bindAWSHost(p, st)
