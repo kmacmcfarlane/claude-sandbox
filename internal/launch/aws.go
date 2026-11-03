@@ -387,7 +387,7 @@ func (in *Inputs) awsPrepareMountPoints(p *Plan, st *awsState) bool {
 			err error
 		)
 		if in.NoCreatePeerDirs {
-			d, err = in.awsMountPoints(st.dir, !st.homeMounted)
+			d, err = in.awsMountPoints(st.dir, true) // ~/.aws itself owner-checked, as the walk does
 		} else {
 			d, err = in.awsCreateUnderCover(filepath.Clean(strings.Split(cover, ":")[1]), st.dir)
 		}

@@ -675,6 +675,34 @@ var _ = Describe("AWS sign-in folders (CS-LNCH-229..240)", func() {
 		Expect(filepath.Join(elsewhere, "cache")).NotTo(BeAnExistingFile())
 	})
 
+	It("CS-LNCH-234: under a read-write same-path cover a ~/.aws another uid owns is readonly in the launch and the drift build alike", func() {
+		for _, d := range []string{"sso/cache", "cli/cache"} {
+			mkdir(filepath.Join(awsDir, d))
+		}
+		// The Getuid seam makes every directory "another uid's"; the helper
+		// runs the mount-point step alone, so the scope folders Build checks
+		// first do not refuse before ~/.aws is reached.
+		in.Getuid = func() int { return 4242 }
+		vols := []string{home + ":" + home, awsDir + ":" + awsDir + ":ro"}
+		ok, mode := launch.PrepareAWSMountPoints(in, vols, awsDir, true)
+		Expect(ok).To(BeFalse())
+		Expect(mode).To(Equal("readonly"))
+		Expect(errw.String()).To(ContainSubstring("cannot prepare " + awsDir + " ("))
+		in.NoCreatePeerDirs = true
+		errw.Reset()
+		ok, mode = launch.PrepareAWSMountPoints(in, vols, awsDir, true)
+		Expect(ok).To(BeFalse())
+		Expect(mode).To(Equal("readonly"))
+		Expect(errw.String()).To(ContainSubstring("cannot prepare " + awsDir + " ("))
+		// And the user's own ~/.aws passes both.
+		in.Getuid = nil
+		ok, _ = launch.PrepareAWSMountPoints(in, vols, awsDir, true)
+		Expect(ok).To(BeTrue())
+		in.NoCreatePeerDirs = false
+		ok, _ = launch.PrepareAWSMountPoints(in, vols, awsDir, true)
+		Expect(ok).To(BeTrue())
+	})
+
 	It("CS-LNCH-234: under a read-write same-path cover an existing level keeps its mode, and host mode walks the same way", func() {
 		in.ProjectDir = home
 		mkdir(awsDir) // 0755

@@ -20,3 +20,17 @@ func CaptureFingerprintText(f func(string)) func() {
 
 // EscapeBidi exposes the inputs label's bidi escaping (CS-LNCH-226).
 var EscapeBidi = escapeBidi
+
+// PrepareAWSMountPoints runs awsPrepareMountPoints alone over the given
+// volumes (CS-LNCH-234), so a test can point the Getuid seam at ~/.aws
+// without it refusing the scope folders first (which Build checks before the
+// mount points). It returns whether they passed and the mode they left.
+func PrepareAWSMountPoints(in Inputs, volumes []string, awsDir string, homeMounted bool) (bool, string) {
+	if in.Err == nil {
+		in.Err = os.Stderr
+	}
+	p := &Plan{Volumes: volumes}
+	st := &awsState{on: true, dir: awsDir, homeMounted: homeMounted, mode: AWSCacheSandbox}
+	ok := in.awsPrepareMountPoints(p, st)
+	return ok, st.mode
+}
