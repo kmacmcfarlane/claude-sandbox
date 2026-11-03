@@ -22,7 +22,7 @@ as open questions.
 *Approved by the operator 2026-10-22.*
 
 Two operator principles govern every default and every change; weigh them
-together.
+together, and with consistency and least astonishment below.
 
 - **Host parity:** "the behavior is in alignment with what running `claude`
   outside the sandbox would do". Defaults make a sandboxed claude behave as
@@ -46,6 +46,22 @@ together.
   and sharing the host's cache writably lets a session sign out every org on
   the host and write host files through planted symlinks. Softened by the
   `AWS:` line every such launch prints, which names the cost and both fixes.
+
+*Approved by the operator 2026-11-02: "consistency and avoiding astonishment
+should be documented as valuable in this repo's Principles".* Weigh both
+together with host parity and isolation.
+
+- **Consistency:** the same setting means the same thing and behaves the same
+  wherever it is set (shell environment, env file, `config.yaml`, CLI flag),
+  and the same situation gets the same handling on every path (interactive,
+  headless, ralph, attach/join, nested). Where a deliberate difference exists,
+  it is documented with its reason. The motivating case: an `AWS_CONFIG_FILE`
+  set in an env file reached the container but its file was not mounted,
+  while the same value from the shell was mounted.
+- **Least astonishment:** a user who knows the documented model is not
+  surprised. When the launcher cannot do what a setting asks, it says so where
+  the user will see it, never silently. This widens the transparent-defaults
+  corollary from defaults to every setting.
 
 ### Where today's defaults stand
 
@@ -133,6 +149,9 @@ then, into the Approved section with its date.*
    linked-worktree fallbacks (back-link mismatch, a timed-out lookup), which
    today warn and launch without the main checkout's cascade (UC-16), would
    stop the launch too.
+   *Partly covered (2026-11-02):* approved least astonishment already
+   requires the one line when a feature stands down; the fail-closed half
+   stays proposed.
 
 2. **Never silently change a user's files; when the launcher must, narrow
    only, say so once, and keep an off switch.** Files outside the launcher's
@@ -158,6 +177,9 @@ then, into the Approved section with its date.*
    least a stderr line on every headless launch it reaches. Ralph is in scope
    too: the same cascade key reaches every ralph iteration silently today
    (UC-36), and would have to be printed in the run's banner.
+   *Partly covered (2026-11-02):* approved least astonishment already asks
+   that what a setting does, or cannot do, be said where the operator will
+   see it; the never-prompt and refuse-or-print rules stay proposed.
 
 4. **Secrets never reach argv, logs or images.** Tokens and webhook URLs pass
    only by file or by bare env name, never as a docker or curl argument, never
@@ -203,6 +225,9 @@ then, into the Approved section with its date.*
    bytes checked are the bytes used and no path can forget a flag.
    *Evidence:* P9, P10; UC-14, UC-20, UC-28, UC-32. *Would change:* nothing at
    runtime; a value resolved in two places becomes a review finding.
+   *Partly covered (2026-11-02):* approved consistency requires the outcome
+   (one setting, one meaning, on every path and from every source); this
+   principle stays proposed as the implementation rule that delivers it.
 
 9. **Test seams never touch the real home, config or state.** Every test
    reaches the host only through a seam, and a seam left unset under
