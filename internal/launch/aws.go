@@ -46,7 +46,7 @@ const (
 )
 
 // The evidence a launch exports for a launcher run inside its container
-// (CS-LNCH-236): every launch, aws on or off, passes all three as
+// (CS-LNCH-236): every launch, aws on or off, passes all four as
 // "-e NAME=<value or empty>", so an env file can never set them.
 const (
 	// AWSHomeEnv is the host ~/.aws this launch mounted, "" when none.
@@ -55,10 +55,15 @@ const (
 	AWSCacheEnv = "CLAUDE_SANDBOX_AWS_CACHE"
 	// AWSCacheDirEnv is the scope directory for an applied "sandbox", else "".
 	AWSCacheDirEnv = "CLAUDE_SANDBOX_AWS_CACHE_DIR"
+	// AWSConfigDirEnv is the raw CLAUDE_CONFIG_DIR the scope was keyed on, for
+	// an applied "sandbox", else "": an inner launch whose own raw value
+	// equals it shares the scope even when the key's symlink resolution
+	// differs inside the container.
+	AWSConfigDirEnv = "CLAUDE_SANDBOX_AWS_CONFIG_DIR"
 )
 
-// AWSEvidenceEnv lists the three, in -e order.
-var AWSEvidenceEnv = []string{AWSHomeEnv, AWSCacheEnv, AWSCacheDirEnv}
+// AWSEvidenceEnv lists the four, in -e order.
+var AWSEvidenceEnv = []string{AWSHomeEnv, AWSCacheEnv, AWSCacheDirEnv, AWSConfigDirEnv}
 
 // AWSLoginCacheVar is where "aws login" keeps its sign-in (CS-LNCH-239).
 const AWSLoginCacheVar = "AWS_LOGIN_CACHE_DIRECTORY"
@@ -231,15 +236,25 @@ func (in *Inputs) awsStandDown(st *awsState, what string, err error) {
 // awsMountPoints makes sure the four levels under the host ~/.aws exist as
 // the user's own directories, create-only (CS-LNCH-230): an existing one is
 // never re-moded; a symlink, a non-directory or another uid's directory is
-// refused. ~/.aws itself may be a symlink (followed). The drift build
-// creates nothing; a missing level is not a refusal there.
-func (in *Inputs) awsMountPoints(awsDir string) (string, error) {
-	for _, rel := range awsMountPointDirs {
+// refused. ~/.aws itself may be a symlink (followed) — unless withSelf, when
+// ~/.aws is created too and checked like the levels below it (CS-LNCH-234: no
+// host ~/.aws, and a read-write same-path bind holds where it would be). The
+// drift build creates nothing; a missing level is no refusal there when the
+// launch could create it (CS-LNCH-237).
+func (in *Inputs) awsMountPoints(awsDir string, withSelf bool) (string, error) {
+	levels := awsMountPointDirs
+	if withSelf {
+		levels = append([]string{"."}, levels...)
+	}
+	for _, rel := range levels {
 		d := filepath.Join(awsDir, rel)
 		if err := hostdirs.CheckOwnedDir(d, in.Getuid); err != nil {
 			return d, err
 		}
 		if in.NoCreatePeerDirs {
+			if err := wouldCreate(d); err != nil {
+				return d, err
+			}
 			continue
 		}
 		if _, err := os.Lstat(d); errors.Is(err, os.ErrNotExist) {
@@ -259,9 +274,37 @@ func (in *Inputs) awsMountPoints(awsDir string) (string, error) {
 // no refusal, since the launch would create it).
 func (in *Inputs) awsOwnedDir(d string) error {
 	if in.NoCreatePeerDirs {
-		return hostdirs.CheckOwnedDir(d, in.Getuid)
+		if err := hostdirs.CheckOwnedDir(d, in.Getuid); err != nil {
+			return err
+		}
+		return wouldCreate(d)
 	}
 	return hostdirs.EnsureOwnedDir(d, hostdirs.OwnedDirMode, &hostdirs.Ops{Getuid: in.Getuid})
+}
+
+// wouldCreate is the drift build's stand-in for the launch's mkdir
+// (CS-LNCH-237): nil when d exists, or when its nearest existing ancestor is
+// a directory the invoking user may write, so a launch would create d; else
+// the error the launch's stand-down would have met. It creates nothing.
+func wouldCreate(d string) error {
+	if _, err := os.Lstat(d); err == nil || !errors.Is(err, os.ErrNotExist) {
+		return nil // exists (checked by the caller), or not ours to judge
+	}
+	for p := filepath.Dir(d); ; p = filepath.Dir(p) {
+		fi, err := os.Stat(p)
+		if err == nil {
+			if !fi.IsDir() {
+				return fmt.Errorf("creating it: %s is not a directory", p)
+			}
+			if err := syscall.Access(p, 0x2); err != nil { // W_OK
+				return fmt.Errorf("creating it: %s is not writable: %w", p, err)
+			}
+			return nil
+		}
+		if !errors.Is(err, os.ErrNotExist) || p == filepath.Dir(p) {
+			return fmt.Errorf("creating it: %w", err)
+		}
+	}
 }
 
 // awsSandboxMode is CS-LNCH-229/230/234/239/240 on the host.
@@ -278,14 +321,17 @@ func (in *Inputs) awsSandboxMode(p *Plan, st *awsState) {
 			return
 		}
 	}
-	// CS-LNCH-230: the mount points under the host ~/.aws; CS-LNCH-234: with
-	// no host ~/.aws nothing is created there, and runc makes the mount
-	// points in the container's own home.
+	// CS-LNCH-230: the mount points under the host ~/.aws. CS-LNCH-234: with
+	// no host ~/.aws, runc makes them inside whatever mount holds that path —
+	// the container's own filesystem, or a bind (the project mount when the
+	// project is the home), where they would land on the host as root.
 	if st.homeMounted {
-		if d, err := in.awsMountPoints(st.dir); err != nil {
+		if d, err := in.awsMountPoints(st.dir, false); err != nil {
 			in.awsStandDown(st, d, err)
 			return
 		}
+	} else if !in.awsNoHomeMountPoints(p, st) {
+		return
 	}
 	if !in.NoCreatePeerDirs {
 		for _, c := range awsCacheDirs {
@@ -294,16 +340,47 @@ func (in *Inputs) awsSandboxMode(p *Plan, st *awsState) {
 	}
 	in.bindAWSScope(p, st, scope)
 	// CS-LNCH-239: aws login follows, unless an env file sets its folder
-	// (docker -e would beat it, the CS-LNCH-135 rule).
+	// (docker -e would beat it, the CS-LNCH-135 rule). The folder is made
+	// the user's either way, so a nested launcher whose own variable names
+	// it never has docker create it as root.
+	login := filepath.Join(scope, "login")
+	loginErr := in.awsOwnedDir(login)
 	if !in.envFilesDefine(AWSLoginCacheVar) {
-		login := filepath.Join(scope, "login")
-		if err := in.awsOwnedDir(login); err != nil {
-			fmt.Fprintf(in.Err, "WARNING: \"aws login\" sign-ins are not kept in this session: cannot prepare %s (%v). Make it a directory you own (chown it, or remove it and relaunch).\n", login, err)
+		if loginErr != nil {
+			fmt.Fprintf(in.Err, "WARNING: \"aws login\" sign-ins are not kept in this session: cannot prepare %s (%v). Make it a directory you own (chown it, or remove it and relaunch).\n", login, loginErr)
 		} else {
+			if !in.NoCreatePeerDirs {
+				in.sweepNonRegular(login) // CS-LNCH-240
+			}
 			in.bindAWSLogin(p, login)
 		}
 	}
 	in.awsBanner(st)
+}
+
+// awsNoHomeMountPoints is CS-LNCH-234 when there is no host ~/.aws: the
+// deepest mount that would hold ~/.aws/sso/cache decides. None: the
+// container's own filesystem, nothing to do. A read-write same-path bind
+// (the project mount of a project that is the home, say): ~/.aws and the
+// four levels are created as the user, create-only, as for an existing
+// ~/.aws. Any other bind (read-only, or another host path): readonly with
+// one warning — runc would fail through it, or create root-owned
+// directories on the host. False when it stood down.
+func (in *Inputs) awsNoHomeMountPoints(p *Plan, st *awsState) bool {
+	cover, ok := deepestMountOf(p.Volumes, filepath.Join(st.dir, "sso/cache"))
+	if !ok {
+		return true
+	}
+	if !isSamePathRW(cover) {
+		st.mode = AWSCacheReadonly
+		fmt.Fprintf(in.Err, "WARNING: AWS sign-ins are not kept in this session: there is no %s, and the mount %s holds where it would be, so docker would create its folders on the host as root. Create %s on the host and relaunch.\n", st.dir, cover, st.dir)
+		return false
+	}
+	if d, err := in.awsMountPoints(st.dir, true); err != nil {
+		in.awsStandDown(st, d, err)
+		return false
+	}
+	return true
 }
 
 // bindAWSScope binds the scope's two folders over the read-only ~/.aws.
@@ -326,7 +403,7 @@ func (in *Inputs) awsHostMode(p *Plan, st *awsState) {
 		fmt.Fprintf(in.Err, "WARNING: hostAccess.aws.tokenCache: host has no host folders to share: %s does not exist. Sign in on the host once (it creates them), or use tokenCache: sandbox.\n", st.dir)
 		return
 	}
-	if d, err := in.awsMountPoints(st.dir); err != nil {
+	if d, err := in.awsMountPoints(st.dir, false); err != nil {
 		in.awsStandDown(st, d, err)
 		return
 	}
@@ -342,23 +419,55 @@ func (in *Inputs) bindAWSHost(p *Plan, st *awsState) {
 	st.mode = AWSCacheHost
 }
 
+// nestedScope is the outer's scope directory when it is this launch's too
+// (CS-LNCH-236): CLAUDE_SANDBOX_AWS_CACHE_DIR equals the scope this launch
+// computes, or — the key resolves symlinks on the host, which may not
+// resolve the same way in the container — the outer's raw CLAUDE_CONFIG_DIR
+// (CLAUDE_SANDBOX_AWS_CONFIG_DIR) equals this launch's own, and the outer's
+// dir is a scope directory under this home's AWSCacheRoot.
+func (in *Inputs) nestedScope() (string, bool) {
+	d := in.getenv(AWSCacheDirEnv)
+	if d == "" {
+		return "", false
+	}
+	d = filepath.Clean(d)
+	raw := in.getenv("CLAUDE_CONFIG_DIR")
+	if ev := in.getenv(AWSConfigDirEnv); ev != "" && ev == raw && filepath.Dir(d) == filepath.Join(in.Home, AWSCacheRoot) {
+		return d, true
+	}
+	scope, ok := in.awsScope()
+	return scope, ok && d == scope
+}
+
+// nestedMountPointsOK: with no host ~/.aws mounted, runc makes the cache
+// mount points inside whatever mount holds ~/.aws, and a nested launch
+// creates nothing — so a bind there (it resolves on the host) rules the
+// scope binds out (CS-LNCH-234, CS-LNCH-236).
+func (in *Inputs) nestedMountPointsOK(p *Plan, st *awsState) bool {
+	if st.homeMounted {
+		return true
+	}
+	_, covered := deepestMountOf(p.Volumes, filepath.Join(st.dir, "sso/cache"))
+	return !covered
+}
+
 // awsCacheNested is CS-LNCH-236's inner rules: nothing is created, and a bind
 // source is used only when the outer launch's evidence shows it exists on
 // the host.
 func (in *Inputs) awsCacheNested(p *Plan, st *awsState, want string) {
 	ev := in.getenv(AWSCacheEnv)
 	switch {
-	case want == AWSCacheSandbox && ev == AWSCacheSandbox:
-		if scope, ok := in.awsScope(); ok {
-			if d := in.getenv(AWSCacheDirEnv); d != "" && filepath.Clean(d) == scope {
-				in.bindAWSScope(p, st, scope)
-				login := filepath.Join(scope, "login")
-				if v := in.getenv(AWSLoginCacheVar); !in.envFilesDefine(AWSLoginCacheVar) && v != "" && filepath.Clean(v) == login {
-					in.bindAWSLogin(p, login)
-				}
-				in.awsBanner(st)
-				return
+	case want == AWSCacheSandbox && ev == AWSCacheSandbox && in.nestedMountPointsOK(p, st):
+		if scope, ok := in.nestedScope(); ok {
+			in.bindAWSScope(p, st, scope)
+			// The outer made <scope>/login the user's whatever its env files
+			// said (CS-LNCH-239), so it exists on the host.
+			login := filepath.Join(scope, "login")
+			if v := in.getenv(AWSLoginCacheVar); !in.envFilesDefine(AWSLoginCacheVar) && v != "" && filepath.Clean(v) == login {
+				in.bindAWSLogin(p, login)
 			}
+			in.awsBanner(st)
+			return
 		}
 	case want == AWSCacheHost && ev == AWSCacheHost && st.homeMounted:
 		in.bindAWSHost(p, st)
@@ -422,12 +531,12 @@ func (in *Inputs) sweepNonRegular(dir string) {
 	}
 }
 
-// exportAWSEvidence passes CS-LNCH-236's three variables on EVERY launch, aws
+// exportAWSEvidence passes CS-LNCH-236's four variables on EVERY launch, aws
 // on or off, each with its value or empty: -e beats --env-file, so a value a
 // session wrote into an env file never reaches the container. An env file
 // defining one gets one warning naming it.
 func (in *Inputs) exportAWSEvidence(p *Plan, st awsState) {
-	home, cache, dir := "", "", ""
+	home, cache, dir, cfg := "", "", "", ""
 	if st.on {
 		cache = st.mode
 		if st.homeMounted && !st.covered {
@@ -435,9 +544,10 @@ func (in *Inputs) exportAWSEvidence(p *Plan, st awsState) {
 		}
 		if st.mode == AWSCacheSandbox {
 			dir = st.scope
+			cfg = in.getenv("CLAUDE_CONFIG_DIR")
 		}
 	}
-	p.EnvFlags = append(p.EnvFlags, AWSHomeEnv+"="+home, AWSCacheEnv+"="+cache, AWSCacheDirEnv+"="+dir)
+	p.EnvFlags = append(p.EnvFlags, AWSHomeEnv+"="+home, AWSCacheEnv+"="+cache, AWSCacheDirEnv+"="+dir, AWSConfigDirEnv+"="+cfg)
 	for _, k := range AWSEvidenceEnv {
 		if in.envFilesDefine(k) {
 			fmt.Fprintf(in.Err, "WARNING: %s in an env file is ignored: the launcher sets it on every launch, for launchers run inside this sandbox. Remove it from the env file.\n", k)

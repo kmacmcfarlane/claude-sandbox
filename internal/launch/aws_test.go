@@ -92,7 +92,7 @@ var _ = Describe("AWS sign-in folders (CS-LNCH-229..240)", func() {
 	}
 	evidence := func(p *launch.Plan) []string {
 		var outv []string
-		for _, k := range launch.AWSEvidenceEnv {
+		for _, k := range launch.AWSEvidenceEnv[:3] { // the fourth is asserted where it matters
 			v, ok := envValue(p, k)
 			Expect(ok).To(BeTrue(), k)
 			outv = append(outv, v)
@@ -440,6 +440,63 @@ var _ = Describe("AWS sign-in folders (CS-LNCH-229..240)", func() {
 			Expect(p.Volumes).To(ContainElement(awsDir + ":" + awsDir + ":ro"))
 			noneCreated()
 		})
+
+		It("CS-LNCH-236: the outer's raw CLAUDE_CONFIG_DIR matching this launch's own shares the scope though symlinks resolve differently", func() {
+			// The host keyed the scope on the resolved path; here the raw
+			// path resolves to itself, so the computed scope differs.
+			raw := filepath.Join(home, "cfg-link")
+			hostScope := filepath.Join(home, ".cache", "claude-sandbox", "aws", "0123456789ab")
+			env["CLAUDE_CONFIG_DIR"] = raw
+			env[launch.AWSHomeEnv] = awsDir
+			env[launch.AWSCacheEnv] = "sandbox"
+			env[launch.AWSCacheDirEnv] = hostScope
+			env[launch.AWSConfigDirEnv] = raw
+			p := build()
+			Expect(cacheBinds(p)).To(ContainElement(filepath.Join(hostScope, "sso") + ":" + filepath.Join(awsDir, "sso/cache")))
+			v, _ := envValue(p, launch.AWSConfigDirEnv)
+			Expect(v).To(Equal(raw))
+			noneCreated()
+		})
+
+		It("CS-LNCH-236: a different raw CLAUDE_CONFIG_DIR, or a dir outside the AWS cache root, does not match", func() {
+			env["CLAUDE_CONFIG_DIR"] = filepath.Join(home, "cfg-a")
+			env[launch.AWSHomeEnv] = awsDir
+			env[launch.AWSCacheEnv] = "sandbox"
+			env[launch.AWSCacheDirEnv] = filepath.Join(home, ".cache", "claude-sandbox", "aws", "0123456789ab")
+			env[launch.AWSConfigDirEnv] = filepath.Join(home, "cfg-b")
+			Expect(build().Tmpfs).To(HaveLen(2))
+			env[launch.AWSConfigDirEnv] = env["CLAUDE_CONFIG_DIR"]
+			env[launch.AWSCacheDirEnv] = filepath.Join(home, "elsewhere", "0123456789ab")
+			Expect(build().Tmpfs).To(HaveLen(2))
+		})
+
+		It("CS-LNCH-236: with no ~/.aws mounted, a bind holding ~/.aws rules the scope binds out", func() {
+			Expect(os.RemoveAll(awsDir)).To(Succeed())
+			env[launch.AWSCacheEnv] = "sandbox"
+			env[launch.AWSCacheDirEnv] = scope
+			in.ProjectDir = home
+			in.MountInfo = func() (string, error) { return withBind(home), nil }
+			p := build()
+			Expect(cacheBinds(p)).To(BeEmpty())
+			Expect(hashText).To(ContainSubstring("awsTokenCache=none\n"))
+			Expect(awsDir).NotTo(BeAnExistingFile())
+		})
+
+		It("CS-LNCH-236: a path-var directory needs the outer's mount too (nestedBindSourceOK)", func() {
+			env[launch.AWSHomeEnv] = awsDir
+			env[launch.AWSCacheEnv] = "readonly"
+			creds := filepath.Join(home, "creds", "credentials")
+			touch(creds, "")
+			env["AWS_SHARED_CREDENTIALS_FILE"] = creds
+			in.MountInfo = func() (string, error) { return rootOnly, nil }
+			p := build()
+			Expect(p.Volumes).NotTo(ContainElement(ContainSubstring(filepath.Dir(creds))))
+			Expect(strings.Count(errw.String(), "WARNING: AWS_SHARED_CREDENTIALS_FILE="+creds)).To(Equal(1))
+			in.MountInfo = func() (string, error) { return withBind(filepath.Dir(creds)), nil }
+			errw.Reset()
+			p = build()
+			Expect(p.Volumes).To(ContainElement(filepath.Dir(creds) + ":" + filepath.Dir(creds) + ":ro"))
+		})
 	})
 
 	// ---- CS-LNCH-237 ----
@@ -507,16 +564,105 @@ var _ = Describe("AWS sign-in folders (CS-LNCH-229..240)", func() {
 		Expect(v).To(Equal(login))
 	})
 
-	It("CS-LNCH-239: an env file defining AWS_LOGIN_CACHE_DIRECTORY wins, silently", func() {
+	It("CS-LNCH-239: an env file defining AWS_LOGIN_CACHE_DIRECTORY wins, silently; the folder is still made the user's", func() {
 		ef := filepath.Join(proj, "env")
 		touch(ef, "AWS_LOGIN_CACHE_DIRECTORY=/work/login\n")
 		in.EnvFiles = []string{ef}
 		p := build()
 		login := filepath.Join(scopeFor(filepath.Join(home, ".claude")), "login")
-		Expect(login).NotTo(BeAnExistingFile())
+		Expect(modeOf(login)).To(Equal(os.FileMode(0o700)))
+		Expect(p.Volumes).NotTo(ContainElement(ContainSubstring(login)))
 		_, ok := envValue(p, "AWS_LOGIN_CACHE_DIRECTORY")
 		Expect(ok).To(BeFalse())
 		Expect(errw.String()).NotTo(ContainSubstring("login"))
+	})
+
+	It("CS-LNCH-240: the login folder is swept too, but not by the drift build", func() {
+		login := filepath.Join(scopeFor(filepath.Join(home, ".claude")), "login")
+		mkdir(login)
+		link := filepath.Join(login, "planted")
+		Expect(os.Symlink(filepath.Join(home, "victim"), link)).To(Succeed())
+		in.NoCreatePeerDirs = true
+		build()
+		_, err := os.Lstat(link)
+		Expect(err).NotTo(HaveOccurred())
+		in.NoCreatePeerDirs = false
+		build()
+		_, err = os.Lstat(link)
+		Expect(os.IsNotExist(err)).To(BeTrue())
+	})
+
+	// ---- fix round 1: CS-LNCH-234, 236, 237 ----
+
+	It("CS-LNCH-234: no host ~/.aws and the project is the home: ~/.aws and its four levels are created as the user", func() {
+		in.ProjectDir = home
+		p := build()
+		Expect(modeOf(awsDir)).To(Equal(os.FileMode(0o700)))
+		for _, d := range []string{"sso", "sso/cache", "cli", "cli/cache"} {
+			Expect(modeOf(filepath.Join(awsDir, d))).To(Equal(os.FileMode(0o700)), d)
+		}
+		Expect(cacheBinds(p)).To(HaveLen(2))
+		Expect(hashText).To(ContainSubstring("awsTokenCache=sandbox\n"))
+	})
+
+	It("CS-LNCH-234: the drift build of that launch creates nothing and hashes alike", func() {
+		in.ProjectDir = home
+		// A first launch with aws off makes the project-is-home shadow
+		// placeholders (CS-LNCH-169), which would differ otherwise.
+		off, on := false, true
+		in.CLIAWS = &off
+		build()
+		in.CLIAWS = &on
+		in.NoCreatePeerDirs = true
+		drift := build()
+		driftText := hashText
+		Expect(awsDir).NotTo(BeAnExistingFile())
+		in.NoCreatePeerDirs = false
+		p2 := build()
+		Expect(hashText).To(Equal(driftText))
+		Expect(p2.ConfigHash).To(Equal(drift.ConfigHash))
+	})
+
+	It("CS-LNCH-234: the config dir mount holding ~/.aws counts the same way", func() {
+		env["CLAUDE_CONFIG_DIR"] = home
+		build()
+		Expect(filepath.Join(awsDir, "cli", "cache")).To(BeADirectory())
+	})
+
+	It("CS-LNCH-234: when ~/.aws cannot be created under that bind, readonly with one warning", func() {
+		in.ProjectDir = home
+		scope := scopeFor(filepath.Join(home, ".claude"))
+		for _, d := range []string{"sso", "cli", "login"} {
+			mkdir(filepath.Join(scope, d))
+		}
+		mkdir(filepath.Join(home, ".cache", "claude-sandbox", "pre-commit"))
+		Expect(os.Chmod(home, 0o500)).To(Succeed())
+		DeferCleanup(func() { _ = os.Chmod(home, 0o755) })
+		if syscall.Access(home, 0x2) == nil {
+			Skip("running as a user that can write a 0500 directory (root)")
+		}
+		p := build()
+		Expect(cacheBinds(p)).To(BeEmpty())
+		Expect(hashText).To(ContainSubstring("awsTokenCache=readonly\n"))
+		Expect(strings.Count(errw.String(), "WARNING: AWS sign-ins in this session use the host's read-only cache: cannot prepare "+awsDir)).To(Equal(1))
+		Expect(awsDir).NotTo(BeAnExistingFile())
+	})
+
+	It("CS-LNCH-237: the drift build of a launch whose mkdir would fail reads readonly, as the launch does", func() {
+		mkdir(awsDir)
+		Expect(os.Chmod(awsDir, 0o500)).To(Succeed())
+		DeferCleanup(func() { _ = os.Chmod(awsDir, 0o755) })
+		if syscall.Access(awsDir, 0x2) == nil {
+			Skip("running as a user that can write a 0500 directory (root)")
+		}
+		in.NoCreatePeerDirs = true
+		drift := build()
+		Expect(hashText).To(ContainSubstring("awsTokenCache=readonly\n"))
+		in.NoCreatePeerDirs = false
+		errw.Reset()
+		launch := build()
+		Expect(hashText).To(ContainSubstring("awsTokenCache=readonly\n"))
+		Expect(launch.ConfigHash).To(Equal(drift.ConfigHash))
 	})
 
 	// ---- CS-LNCH-240 ----

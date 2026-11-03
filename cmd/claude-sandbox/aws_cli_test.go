@@ -38,7 +38,7 @@ var _ = Describe("AWS sign-in folders through the CLI (CS-LNCH-231, 236, 238)", 
 	It("CS-LNCH-236: every create passes the three evidence variables, empty with aws off", func() {
 		Expect(f.run()).To(Equal(0), f.errw.String())
 		e := createFlag(f, "-e")
-		Expect(e).To(ContainElements("CLAUDE_SANDBOX_AWS_HOME=", "CLAUDE_SANDBOX_AWS_CACHE=", "CLAUDE_SANDBOX_AWS_CACHE_DIR="))
+		Expect(e).To(ContainElements("CLAUDE_SANDBOX_AWS_HOME=", "CLAUDE_SANDBOX_AWS_CACHE=", "CLAUDE_SANDBOX_AWS_CACHE_DIR=", "CLAUDE_SANDBOX_AWS_CONFIG_DIR="))
 	})
 
 	It("CS-LNCH-238: headless prints the AWS: line on stderr only", func() {

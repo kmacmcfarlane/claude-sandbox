@@ -3758,11 +3758,23 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
 
   Scenario: CS-LNCH-234 No host ~/.aws: the cache is still mounted
     Given aws access is enabled, tokenCache "sandbox", and ~/.aws does not exist
+    And no mount of the launch holds ~/.aws/sso/cache
     Then nothing is created under ~/.aws on the host
     And the cache dirs are bound over ~/.aws/sso/cache and ~/.aws/cli/cache
     And CLAUDE_SANDBOX_AWS_HOME is empty in the container
     # Sign-ins persist the same way with or without a host ~/.aws; runc makes
     # the mount points in the container's own home.
+    Given ~/.aws does not exist and a mount of the launch holds ~/.aws/sso/cache
+      (the deepest one: the project mount when the project is the home, or the
+      config dir mount when CLAUDE_CONFIG_DIR is the home)
+    Then when it is a read-write same-path bind, ~/.aws and its four levels are
+      created as the invoking user, 0700, create-only, before docker create, as
+      CS-LNCH-230 does for the levels below an existing ~/.aws; any refusal or
+      failure stands down to "readonly" with one WARNING
+    And when it is any other bind, nothing is created, one WARNING, "readonly"
+    # Otherwise runc would make them through that bind, on the host, as root
+    # (the CS-LNCH-169 class): the host's aws breaks and later launches stand
+    # down until a sudo rm.
 
   Scenario: CS-LNCH-235 A cascade mount covering a cache dir is kept
     Given aws access is enabled, tokenCache is "sandbox" or "host", and a
@@ -3775,14 +3787,16 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
 
   Scenario: CS-LNCH-236 A nested launch creates nothing and mounts only what the outer proved
     Given any launch, aws access on or off
-    Then docker create gets all three of "-e CLAUDE_SANDBOX_AWS_HOME=<v>",
-      "-e CLAUDE_SANDBOX_AWS_CACHE=<v>" and "-e CLAUDE_SANDBOX_AWS_CACHE_DIR=<v>",
+    Then docker create gets all four of "-e CLAUDE_SANDBOX_AWS_HOME=<v>",
+      "-e CLAUDE_SANDBOX_AWS_CACHE=<v>", "-e CLAUDE_SANDBOX_AWS_CACHE_DIR=<v>"
+      and "-e CLAUDE_SANDBOX_AWS_CONFIG_DIR=<v>",
       each with its value or empty — never left to an env file
     And CLAUDE_SANDBOX_AWS_HOME is the host ~/.aws only when that was mounted,
       CLAUDE_SANDBOX_AWS_CACHE the applied mode when aws is on,
-      CLAUDE_SANDBOX_AWS_CACHE_DIR the scope dir only when that mode is "sandbox"
+      CLAUDE_SANDBOX_AWS_CACHE_DIR the scope dir and CLAUDE_SANDBOX_AWS_CONFIG_DIR
+      the raw CLAUDE_CONFIG_DIR it was keyed on, only when that mode is "sandbox"
     And an inner launch reads an empty value as absent
-    Given a cascade env file defines any of the three
+    Given a cascade env file defines any of the four
     Then the -e above still wins and one WARNING names the key
     # The CLAUDE_SANDBOX_GLOBAL_CONFIG precedent (CS-GCFG-032): otherwise an
     # env-file forgery could make an inner launch's docker create a
@@ -3791,9 +3805,17 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     Then it creates no directory for AWS on either side
     And it mounts the host ~/.aws (and any CS-LNCH-019 path-var directory)
       only when CLAUDE_SANDBOX_AWS_HOME equals its own ~/.aws; otherwise one Note
+    And a path-var directory not already mounted with ~/.aws is mounted only
+      when it is also host-visible (CS-LNCH-163's rule); otherwise one WARNING
     And it binds the scope dirs only when its mode is "sandbox",
       CLAUDE_SANDBOX_AWS_CACHE is "sandbox" and CLAUDE_SANDBOX_AWS_CACHE_DIR
-      equals its own scope dir
+      equals its own scope dir — or, since the key resolves symlinks on the
+      host that need not resolve alike in the container, when
+      CLAUDE_SANDBOX_AWS_CONFIG_DIR equals its own raw CLAUDE_CONFIG_DIR and
+      CLAUDE_SANDBOX_AWS_CACHE_DIR is a directory directly under its own
+      ~/.cache/claude-sandbox/aws
+    And with ~/.aws not mounted it binds them only when no mount of the launch
+      holds ~/.aws/sso/cache (it cannot create the mount points, CS-LNCH-234)
     And it binds the host's cache dirs only when its mode is "host",
       CLAUDE_SANDBOX_AWS_CACHE is "host" and ~/.aws is mounted
     And otherwise, when ~/.aws is mounted and CLAUDE_SANDBOX_AWS_CACHE is
@@ -3813,7 +3835,10 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       container or none); a stood-down launch hashes "readonly"
     And with aws off nothing moves
     And the attach/join drift build creates, re-modes and sweeps nothing; a
-      refused directory makes its would-be mode "readonly"; a missing one does not
+      refused directory makes its would-be mode "readonly"; a missing one does not,
+      when its nearest existing ancestor is a directory the user may write (the
+      launch would create it); otherwise "readonly", as the launch's failed
+      mkdir would make it
     # sandbox and host give the same normalized mount lines.
 
   Scenario: CS-LNCH-238 The banner names where AWS sign-ins live
@@ -3829,10 +3854,12 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     Then <scope dir>/login exists, 0700, is bound read-write at its own path, and
       "-e AWS_LOGIN_CACHE_DIRECTORY=<scope dir>/login" is passed
     Given an env file defines AWS_LOGIN_CACHE_DIRECTORY
-    Then nothing is created, mounted or passed for it, silently (the CS-LNCH-135 rule)
+    Then nothing is mounted or passed for it, silently (the CS-LNCH-135 rule);
+      <scope dir>/login is still made the user's, 0700
     # Nested: only when the launcher's own AWS_LOGIN_CACHE_DIRECTORY names that
-    # dir (the outer bound it). It does not hide the host's ~/.aws/login/cache
-    # from reading.
+    # dir. The outer made it whatever its env files said, so an inner bind
+    # never has docker create it as root. It does not hide the host's
+    # ~/.aws/login/cache from reading.
 
   Scenario: CS-LNCH-240 The scope dirs are re-checked and swept at every host launch
     Given tokenCache "sandbox" and the launcher is not in a sandbox
@@ -3840,7 +3867,8 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       to 0700 as the invoking user (hostdirs.EnsureOwnedDir)
     And a symlinked, non-directory or foreign-owned one stands the caches down
       to "readonly" with one WARNING
-    And every entry of sso/ and cli/ that Lstat shows is not a regular file is
+    And every entry of sso/, cli/ and (when it is mounted) login/ that Lstat
+      shows is not a regular file is
       unlinked (an empty directory removed; a non-empty one left with one WARNING),
       without following any link or reading any file
     # Partial: catches only entries planted before this launch.

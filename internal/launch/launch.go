@@ -1568,6 +1568,13 @@ func (in *Inputs) assembleAWS(p *Plan) awsState {
 			continue
 		}
 		if !mounted[dir] {
+			// CS-LNCH-236: nested, the outer's ~/.aws evidence does not cover
+			// a directory elsewhere; only one the outer sandbox bound in is the
+			// same path on the host (the CS-LNCH-163 rule).
+			if ok, why := in.nestedBindSourceOK(dir); !ok {
+				fmt.Fprintf(in.Err, "WARNING: %s=%s: %s is not mounted: this launcher runs inside a sandbox that does not mount it at the same path (%s), so docker would bind an empty host directory.\n", v, path, dir, why)
+				continue
+			}
 			p.Volumes = append(p.Volumes, fmt.Sprintf("%s:%s:ro", dir, dir))
 			mounted[dir] = true
 		}
