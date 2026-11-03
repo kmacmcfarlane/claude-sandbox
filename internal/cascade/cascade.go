@@ -104,12 +104,23 @@ type HostAccessEntry struct {
 	Enabled *bool `yaml:"enabled"`
 }
 
+// AWSAccess is the aws host-access entry: Enabled as for every entry, plus
+// where AWS sign-ins live (CS-LNCH-229..240).
+type AWSAccess struct {
+	Enabled *bool `yaml:"enabled"`
+	// TokenCache is "sandbox" (the default), "host" or "readonly"
+	// (CS-LNCH-231). json:"-": the APPLIED mode is hashed on its own line
+	// (CS-LNCH-237), so an unset key and an explicit default hash alike, and
+	// the merged config's JSON form stays what it was before the key existed.
+	TokenCache *string `yaml:"tokenCache" json:"-"`
+}
+
 // HostAccess groups the mountable host resources.
 type HostAccess struct {
 	SSH          HostAccessEntry `yaml:"ssh"`
 	Git          HostAccessEntry `yaml:"git"`
 	DockerSocket HostAccessEntry `yaml:"dockerSocket"`
-	AWS          HostAccessEntry `yaml:"aws"`
+	AWS          AWSAccess       `yaml:"aws"`
 	// PackageCaches keeps go/npm/pip downloads on the host under
 	// ~/.cache/claude-sandbox (CS-LNCH-035..037).
 	PackageCaches HostAccessEntry `yaml:"packageCaches"`
@@ -467,13 +478,33 @@ func KeySource(files []string, key string) string {
 // KeySourceOf is KeySource over a snapshot (CS-CASC-046): the launch names a
 // key's file from the same bytes it merged.
 func KeySourceOf(snap []ConfigFile, key string) string {
+	return KeyPathSourceOf(snap, key)
+}
+
+// KeyPathSourceOf is KeySourceOf for a nested key, e.g. ("hostAccess", "aws",
+// "tokenCache"): the most-local file whose YAML holds the whole path, ""
+// when none does.
+func KeyPathSourceOf(snap []ConfigFile, path ...string) string {
 	src := ""
 	for _, f := range snap {
 		var doc map[string]any
 		if yaml.Unmarshal(f.Content, &doc) != nil {
 			continue
 		}
-		if _, ok := doc[key]; ok {
+		var cur any = doc
+		found := len(path) > 0
+		for _, k := range path {
+			m, ok := cur.(map[string]any)
+			if !ok {
+				found = false
+				break
+			}
+			if cur, ok = m[k]; !ok {
+				found = false
+				break
+			}
+		}
+		if found {
 			src = f.Path
 		}
 	}

@@ -35,11 +35,17 @@ together.
   states its isolation cost and keeps it bounded.
 - **Corollary, transparent defaults:** any default a user must discover by
   losing something is the wrong default. Isolation a person would trip over is
-  opt-in for people, default-on only for ralph's unattended loop. One named
-  exception, answer 102 a: `sandboxNetwork` is on by default although a
+  opt-in for people, default-on only for ralph's unattended loop. Two named
+  exceptions: answer 102 a: `sandboxNetwork` is on by default although a
   sibling on Docker's default bridge stops being reachable by IP — softened by
   the `Network:` line every launch on it prints, which names the cost and the
-  fix.
+  fix; and answer 173 b: `hostAccess.aws.tokenCache` defaults to `sandbox`, so
+  a host `aws sso login` does not reach `--aws` sandboxes — sandboxes on one
+  Claude config dir share one sign-in made inside a sandbox. Licensed because
+  the read-only alternative already fails whenever the host's caches go cold,
+  and sharing the host's cache writably lets a session sign out every org on
+  the host and write host files through planted symlinks. Softened by the
+  `AWS:` line every such launch prints, which names the cost and both fixes.
 
 ### Where today's defaults stand
 
@@ -88,6 +94,24 @@ together.
   another container (until the cap) or end it early (one turn's remainder)
   after that container's own terminal hung up. Stand-downs: a launcher in a
   sandbox, macOS.
+
+- `hostAccess.aws.tokenCache`: `sandbox` with `--aws` on (answer 173 b, the
+  named exception above): `~/.aws/sso/cache` and `~/.aws/cli/cache` are the
+  sandboxes' own `~/.cache/claude-sandbox/aws/<key>/{sso,cli}`, one per Claude
+  config dir, so sign-in, refresh and sign-out work inside. Isolation gain:
+  sandboxes never write the host's sign-ins and no longer read its Identity
+  Center tokens or CLI role credentials. Its limits: `~/.aws/credentials`,
+  `~/.aws/login/cache` and the rest of `~/.aws` stay readable; a session with
+  the docker socket can mount the host's `~/.aws` (or another config dir's
+  folder) itself; scope-mates on one config dir share sign-outs, can read each
+  other's tokens and plant files the others' AWS tools use. Parity cost: a host
+  sign-in does not reach these sandboxes (one sign-in inside per config dir).
+  Off switches: `tokenCache: host` (the host's folders, read-write: a sandbox
+  sign-out signs the host out) or `readonly` (the read-only mount alone), or
+  `CLAUDE_SANDBOX_AWS_TOKEN_CACHE`. Stand-downs: a folder the launcher cannot
+  make the user's, a relative `CLAUDE_CONFIG_DIR` or a covering `mounts:` entry
+  → `readonly`, one warning; a launcher in a sandbox without the outer's
+  evidence mounts no host `~/.aws` (a private tmpfs or nothing for the caches).
 
 ## Proposed (awaiting operator approval)
 
