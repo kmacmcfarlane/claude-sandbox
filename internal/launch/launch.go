@@ -91,8 +91,14 @@ type Inputs struct {
 	// NoCreatePeerDirs makes the bridge create and re-mode nothing: the
 	// drift check hashes a would-be plan and must not plant a peers root on
 	// the host (CS-DIR-019). The refusals of an existing directory still
-	// stand the bridge down, as they would the launch.
+	// stand the bridge down, as they would the launch. The AWS sign-in
+	// folders follow it too (CS-LNCH-237): nothing created, re-moded or
+	// swept, a refusal still stands them down.
 	NoCreatePeerDirs bool
+	// AWSTokenCacheSource is the config file that set
+	// hostAccess.aws.tokenCache (cascade.KeyPathSourceOf), named when its
+	// value is invalid (CS-LNCH-231).
+	AWSTokenCacheSource string
 	// DriftOnly marks the attach/join drift check's would-be build: it
 	// creates nothing, so Build skips the label and mount value checks
 	// (CS-LNCH-226) — a value that went bad since the container was created
@@ -474,6 +480,7 @@ type Plan struct {
 	Image         string
 	ContainerName string
 	Volumes       []string // -v specs
+	Tmpfs         []string // --tmpfs specs (CS-LNCH-236's nested AWS stand-down)
 	EnvFlags      []string // -e KEY=VAL, or bare KEY read from the launcher env (CS-LNCH-102)
 	EnvFiles      []string // --env-file paths
 	MemoryLimit   string
@@ -684,8 +691,9 @@ func Build(in Inputs) (*Plan, error) {
 		p.Volumes = append(p.Volumes, "/var/run/docker.sock:/var/run/docker.sock")
 		dockerGID = socketGID("/var/run/docker.sock")
 	}
+	var awsSt awsState
 	if aws {
-		in.assembleAWS(p)
+		awsSt = in.assembleAWS(p)
 	}
 	if git {
 		if err := in.shadowGitconfig(p); err != nil {
@@ -711,6 +719,16 @@ func Build(in Inputs) (*Plan, error) {
 			p.Volumes = append(p.Volumes, fmt.Sprintf("%s:%s:ro", m.Host, m.Container))
 		}
 	}
+
+	// CS-LNCH-229..240: where AWS sign-ins live. After the cascade mounts,
+	// so one that covers a cache dir wins (CS-LNCH-235). The evidence for a
+	// nested launcher goes on every launch, aws on or off (CS-LNCH-236).
+	if aws {
+		if err := in.assembleAWSCache(p, &awsSt); err != nil {
+			return nil, err
+		}
+	}
+	in.exportAWSEvidence(p, awsSt)
 
 	// CS-LNCH-035..037, 155..157: package caches. After the cascade mounts,
 	// so one that already covers a cache dir wins (CS-LNCH-157).
@@ -904,7 +922,7 @@ func Build(in Inputs) (*Plan, error) {
 	// is joining a container built from the config now on disk.
 	p.ConfigHash, p.ConfigInputs = in.configFingerprint(p, hostAccess{
 		SSH: ssh, Git: git, DockerSocket: dockerSocket, AWS: aws, PackageCaches: packageCaches,
-	}, bridged, globalLinked)
+	}, bridged, globalLinked, awsSt.mode)
 
 	// CS-LNCH-032: identity labels. Discovery filters on these rather than
 	// parsing container names, which are lossy.
@@ -1081,6 +1099,9 @@ func (p *Plan) CreateArgs(workdir string) []string {
 	}
 	for _, v := range p.Volumes {
 		args = append(args, "-v", v)
+	}
+	for _, t := range p.Tmpfs {
+		args = append(args, "--tmpfs", t) // CS-LNCH-236
 	}
 	if p.ClipboardDir != "" {
 		args = append(args, "--mount", ClipboardMountArg(p.ClipboardDir)) // CS-LNCH-195
@@ -1499,12 +1520,25 @@ var awsEnvAllowlist = []string{
 
 var awsPathVars = []string{"AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE", "AWS_WEB_IDENTITY_TOKEN_FILE"}
 
-func (in *Inputs) assembleAWS(p *Plan) {
+func (in *Inputs) assembleAWS(p *Plan) awsState {
 	mounted := map[string]bool{}
 	awsDir := filepath.Join(in.Home, ".aws")
-	if dirExists(awsDir) {
+	st := awsState{on: true, dir: awsDir}
+	// CS-LNCH-236: nested, a bind source resolves on the host, and dirExists
+	// reads this container's view. Only the outer launch's own evidence that
+	// it mounted the host ~/.aws here admits it (and the path-var dirs).
+	hostOK := true
+	if hostdirs.InSandbox(in.getenv) {
+		ev := in.getenv(AWSHomeEnv)
+		hostOK = ev != "" && filepath.Clean(ev) == awsDir
+		if !hostOK {
+			fmt.Fprintf(in.Out, "Note: the host's %s is not mounted: this launcher runs inside a sandbox that did not mount it, so docker could bind a host path the outer never showed. AWS in this session uses the container's own %s.\n", awsDir, awsDir)
+		}
+	}
+	if hostOK && dirExists(awsDir) {
 		p.Volumes = append(p.Volumes, fmt.Sprintf("%s:%s:ro", awsDir, awsDir))
 		mounted[awsDir] = true
+		st.homeMounted = true
 	}
 	// CS-LNCH-103: bare "-e NAME" for the whole allowlist, so the key id,
 	// secret and session token never reach argv; docker reads each value from
@@ -1520,7 +1554,7 @@ func (in *Inputs) assembleAWS(p *Plan) {
 	// (CS-LNCH-019/020).
 	for _, v := range awsPathVars {
 		path := in.getenv(v)
-		if path == "" {
+		if path == "" || !hostOK {
 			continue
 		}
 		if !fileExists(path) {
@@ -1538,6 +1572,7 @@ func (in *Inputs) assembleAWS(p *Plan) {
 			mounted[dir] = true
 		}
 	}
+	return st
 }
 
 // SandboxHomeRoot is the one tree under $HOME that belongs to the sandbox

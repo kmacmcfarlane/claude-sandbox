@@ -548,7 +548,7 @@ var _ = Describe("launch.Build", func() {
 					cfg.HostAccess.DockerSocket = entry
 					in.CLIDockerSocket = cli
 				case "aws":
-					cfg.HostAccess.AWS = entry
+					cfg.HostAccess.AWS = cascade.AWSAccess{Enabled: yaml}
 					in.CLIAWS = cli
 				case "packageCaches":
 					cfg.HostAccess.PackageCaches = entry

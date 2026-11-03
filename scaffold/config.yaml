@@ -61,6 +61,15 @@
 #   # Mount ~/.aws/ read-only (AWS CLI/SDK credentials)
 #   aws:
 #     enabled: false
+#     # Where AWS sign-ins live (the writable ~/.aws/sso/cache and
+#     # ~/.aws/cli/cache). sandbox: sandboxes on one Claude config folder share
+#     # their own sign-in, made inside a sandbox; a host sign-in does not reach
+#     # them, and a sign-out signs out every one of them. host: the host's own,
+#     # read-write; a sign-out in any sandbox signs the host out too. readonly:
+#     # the host's, read-only; signing in inside fails, and the CLI fails once
+#     # the host's cached sign-in goes stale. Env: CLAUDE_SANDBOX_AWS_TOKEN_CACHE.
+#     # Default: sandbox
+#     tokenCache: sandbox
 #   # Keep package downloads made INSIDE sessions (go modules, the go build
 #   # cache, npm, pip) on the host so they survive the container. Mounts
 #   # ~/.cache/claude-sandbox/{go-mod,go-build,npm,pip} writable at the same

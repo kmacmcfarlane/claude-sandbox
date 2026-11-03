@@ -99,7 +99,7 @@ These flags are consumed by the launcher and control the container environment. 
 |---|---|---|
 | `--version` | | Print claude-sandbox version (host checkout, tools image, Claude Code image) and exit |
 | `--host-access-docker-socket-enabled` | `--docker-socket` | Mount the host Docker socket |
-| `--host-access-aws-enabled` | `--aws` | Mount `~/.aws/` read-only |
+| `--host-access-aws-enabled` | `--aws` | Mount `~/.aws/` read-only, with writable sign-in folders of the sandboxes' own (see [AWS sign-ins](#aws-sign-ins)) |
 | `--host-access-git-enabled` | `--git` | Mount `~/.gitconfig` read-only |
 | `--host-access-ssh-enabled` | `--ssh` | Mount `~/.ssh/` read-only |
 | `--host-access-package-caches-enabled` | `--package-caches` | Keep go/npm/pip downloads made inside sessions in `~/.cache/claude-sandbox/` on the host |
@@ -2267,6 +2267,7 @@ If no `.claude-sandbox/Dockerfile` is found anywhere up to `/`, the launcher war
 | `CLAUDE_SANDBOX_HOST_ACCESS_GIT_ENABLED` | (unset) | Mount `~/.gitconfig` read-only (equivalent to `--git`) |
 | `CLAUDE_SANDBOX_HOST_ACCESS_DOCKER_SOCKET_ENABLED` | (unset) | Mount host Docker socket (equivalent to `--docker-socket`) |
 | `CLAUDE_SANDBOX_HOST_ACCESS_AWS_ENABLED` | (unset) | Mount `~/.aws/` read-only (equivalent to `--aws`) |
+| `CLAUDE_SANDBOX_AWS_TOKEN_CACHE` | (unset: `sandbox`) | Where AWS sign-ins live with `--aws`: `sandbox`, `host` or `readonly`; overrides `hostAccess.aws.tokenCache` (see [AWS sign-ins](#aws-sign-ins)); any other value refuses the launch |
 | `CLAUDE_SANDBOX_HOST_ACCESS_PACKAGE_CACHES_ENABLED` | (unset) | Keep session package downloads in `~/.cache/claude-sandbox/` (equivalent to `--package-caches`) |
 | `CLAUDE_SANDBOX_DOCKERFILE_DIR` | `$PROJECT_DIR` | Directory containing the child Dockerfile |
 | `CLAUDE_SANDBOX_DOCKERFILE` | `Dockerfile` | Filename of the child Dockerfile |
@@ -2325,7 +2326,7 @@ The container only has access to:
 - `~/.mcp.json` — user-scope MCP server config (read-only)
 - `~/.gitconfig` — git identity (read-only, opt-in via `--git`)
 - `~/.ssh/` — SSH keys for git remotes (read-only, opt-in via `--ssh`)
-- `~/.aws/` — AWS credentials and config (read-only, opt-in via `--aws`)
+- `~/.aws/` — AWS credentials and config (read-only, opt-in via `--aws`), with `~/.aws/sso/cache` and `~/.aws/cli/cache` writable: by default `~/.cache/claude-sandbox/aws/<key>/{sso,cli}`, the sign-in folders of the sandboxes on one Claude config folder (see [AWS sign-ins](#aws-sign-ins))
 - `/var/run/docker.sock` — host Docker daemon (opt-in via `--docker-socket`)
 - `~/.cache/claude-sandbox/{go-mod,go-build,npm,pip}` — package caches for sessions (writable, opt-in via `--package-caches`)
 - `~/.cache/claude-sandbox/pre-commit` — the sandboxes' own pre-commit cache (writable, always on; see [pre-commit cache](#pre-commit-cache))
@@ -2412,13 +2413,58 @@ SSH, git, Docker socket, AWS and package-cache mounts are all opt-in. Enable the
 
 **Docker socket** — when enabled, the entrypoint adds the container user to the socket's group automatically, so Claude can run `docker compose`, `make up`, etc. Note: Docker socket access is effectively root-equivalent on the host. This setup trusts Claude not to abuse it (e.g., launching a container that mounts `/` read-write). The goal is to prevent *accidental* damage to the host, not to defend against a deliberately adversarial agent.
 
-**AWS** — mounts `~/.aws/` read-only, giving Claude access to your credentials, config, and SSO cache for the AWS CLI or SDKs. Also forwards an allowlist of host `AWS_*` env vars (`AWS_PROFILE`, `AWS_DEFAULT_PROFILE`, `AWS_REGION`, `AWS_DEFAULT_REGION`, `AWS_SHARED_CREDENTIALS_FILE`, `AWS_CONFIG_FILE`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_ROLE_ARN`, `AWS_WEB_IDENTITY_TOKEN_FILE`, `AWS_ENDPOINT_URL`) when set, each by name only (a bare `-e NAME`, so no key or token value appears in the `docker create` argv) — so direnv-managed profile/region selection takes effect inside the container. For path-valued vars (`AWS_SHARED_CREDENTIALS_FILE`, `AWS_CONFIG_FILE`, `AWS_WEB_IDENTITY_TOKEN_FILE`) the file's **parent directory** is bind-mounted read-only at its host path so the AWS CLI/SDK can read them regardless of where they live on the host (e.g. a project-local `.aws/` dir). Mounting the directory (rather than the individual file) means credential refreshes on the host — which write a temp file and atomically rename it over the original — propagate live into a running container instead of hitting `EBUSY` on a pinned single-file mount. (If such a var points at a file sitting directly in a broad directory like your home root, the mount is refused with a warning rather than exposing the whole directory — move it into a dedicated subdir.)
+**AWS** — mounts `~/.aws/` read-only, giving Claude access to your credentials and config for the AWS CLI or SDKs; the two folders AWS sign-ins are written to are handled separately (see [AWS sign-ins](#aws-sign-ins)). Also forwards an allowlist of host `AWS_*` env vars (`AWS_PROFILE`, `AWS_DEFAULT_PROFILE`, `AWS_REGION`, `AWS_DEFAULT_REGION`, `AWS_SHARED_CREDENTIALS_FILE`, `AWS_CONFIG_FILE`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_ROLE_ARN`, `AWS_WEB_IDENTITY_TOKEN_FILE`, `AWS_ENDPOINT_URL`) when set, each by name only (a bare `-e NAME`, so no key or token value appears in the `docker create` argv) — so direnv-managed profile/region selection takes effect inside the container. For path-valued vars (`AWS_SHARED_CREDENTIALS_FILE`, `AWS_CONFIG_FILE`, `AWS_WEB_IDENTITY_TOKEN_FILE`) the file's **parent directory** is bind-mounted read-only at its host path so the AWS CLI/SDK can read them regardless of where they live on the host (e.g. a project-local `.aws/` dir). Mounting the directory (rather than the individual file) means credential refreshes on the host — which write a temp file and atomically rename it over the original — propagate live into a running container instead of hitting `EBUSY` on a pinned single-file mount. (If such a var points at a file sitting directly in a broad directory like your home root, the mount is refused with a warning rather than exposing the whole directory — move it into a dedicated subdir.)
 
 **Git** — mounts a read-only **copy** of `~/.gitconfig` so Claude can make commits with your identity. A copy is used (rather than the host file directly) because `git config` and many editors save via lock-and-rename, which would fail with `EBUSY` against a live single-file mountpoint — so your host-side `git config` keeps working while the sandbox runs. Host edits to `~/.gitconfig` are picked up on the next launch, not live.
 
 **SSH** — mounts `~/.ssh/` read-only so Claude can access git remotes over SSH.
 
 **Package caches** — downloads a session makes (Go modules, the Go build cache, npm, pip) otherwise die with the container. When enabled, the launcher creates `~/.cache/claude-sandbox/{go-mod,go-build,npm,pip}` on the host (as you, mode `0700`, before `docker create`, so the entrypoint's mount-point rule leaves them writable; an existing one you own is tightened to `0700`), mounts each **writable** at the same path, and sets `GOMODCACHE`, `GOCACHE`, `npm_config_cache` and `PIP_CACHE_DIR` to point at them. A cache directory that cannot be made yours (a file or symlink in its place, another user's directory) is left out with one warning and the launch goes on; a `mounts:` entry that already covers a cache directory at the same path is kept instead of adding a second mount. A launcher run **inside** a sandbox mounts a cache only when the outer sandbox mounted it (its own `GOMODCACHE` etc. names that directory) — otherwise docker would create the host directory as root — and prints one note for the ones it leaves out. A `.claude-sandbox/env` file that sets one of those variables wins for that cache: the launcher then creates, mounts and sets nothing for it (the others are unaffected; mount a location outside the project yourself via `mounts:`), and a bare `GOMODCACHE` line passes your shell's value through. The tree is sandbox-only on purpose: it is never your own `~/go`, `~/.npm` or `~/.cache/pip`. Go verifies module zips on download but trusts extracted directories, so a shared cache would let a session plant a module your host toolchain then trusts; confined to its own tree, the blast radius is other sandbox sessions, which already share a trust level. The caches are content-addressed and lock-safe, so concurrent sessions are fine. Nothing evicts them — delete the directory to reset.
+
+### AWS sign-ins
+
+The AWS CLI and SDKs have to **write** two folders under `~/.aws`: `~/.aws/sso/cache` (IAM Identity Center sign-in tokens, and their refresh) and `~/.aws/cli/cache` (the role credentials the CLI caches). None of them takes another location for these, so under the read-only `~/.aws` mount a sign-in inside a sandbox fails, and the CLI also fails on its own whenever the host's cached sign-in goes stale (often after an hour, and in a token's last 15 minutes). With `--aws` on, the launcher therefore binds a writable folder at each of the two paths. Whose folders they are is the `hostAccess.aws.tokenCache` key (or `CLAUDE_SANDBOX_AWS_TOKEN_CACHE`, which wins; any value but the three below refuses the launch, naming where it came from):
+
+```yaml
+hostAccess:
+  aws:
+    enabled: true
+    tokenCache: sandbox   # sandbox (default) | host | readonly
+```
+
+| `tokenCache` | Sign in inside a sandbox | Your host sign-in reaches sandboxes | A sign-out in a sandbox signs out | Cost |
+|---|---|---|---|---|
+| `sandbox` (default) | yes, once per Claude config folder | no | every sandbox on the same Claude config folder | you sign in again inside, once per config folder |
+| `host` | yes | yes | your host, and every sandbox with `host` | a session can delete or replace your host's sign-ins, plant role credentials your host CLI then uses, and make your host's next sign-in write through a planted symlink |
+| `readonly` | no | yes, until the host's cache goes stale | — | the behaviour before this key existed: the CLI fails inside whenever the host's cached sign-in is stale |
+
+**`sandbox`: one sign-in per Claude config folder.** The launcher keeps the sandboxes' own sign-in folders in `~/.cache/claude-sandbox/aws/<key>/{sso,cli}`, where `<key>` is the first 12 hex digits of the sha256 of the Claude config folder the launch mounts: `CLAUDE_CONFIG_DIR` when set (cleaned, and symlinks resolved), else `~/.claude`. Every sandbox launched on the same config folder shares one sign-in; trees you keep apart with their own `CLAUDE_CONFIG_DIR` (a work and a personal tree, say) keep their AWS sign-ins apart too. Inside a sandbox, sign in with `aws sso login --use-device-code` (add `--no-browser` if no browser opens); the CLI's own "token has expired" error already says to. What one sign-in shares:
+
+- **A sign-out signs out every sandbox on the same config folder.** `aws sso logout` deletes the shared files, so every concurrent session on that folder, an unattended agent's included, loses its sign-in mid-task. Do not have agents sign out when a task ends; sessions expire on their own.
+- Sandboxes on one config folder can read each other's tokens, and a session can plant a file there that another sandbox's AWS tools then use. Your host's sign-in folders are never written, and no longer read by sandboxes.
+- A host sign-in does not reach these sandboxes — the one thing this default costs (a named exception in [PRINCIPLES.md](PRINCIPLES.md)). Every such launch prints one line saying where sign-ins live and both ways back:
+
+  ```
+  AWS: sign-ins here are shared by every sandbox on the Claude config folder /home/you/.claude (kept in /home/you/.cache/claude-sandbox/aws/0123456789ab); sign in with "aws sso login --use-device-code". A host sign-in does not reach here: hostAccess.aws.tokenCache: host shares the host's, readonly mounts it read-only.
+  ```
+
+  Headless launches print it on stderr, like every launcher message.
+- `aws login` (the console-credentials sign-in) follows too: `AWS_LOGIN_CACHE_DIRECTORY` is set to `<that folder>/login`, which is mounted at its own path. An env file that sets `AWS_LOGIN_CACHE_DIRECTORY` wins, silently. Your host's `~/.aws/login/cache` stays readable through the read-only `~/.aws`, as do `~/.aws/credentials` and the rest of `~/.aws`.
+- **The Docker socket undoes the separation.** A session that also has `--docker-socket` can start a container that mounts your host `~/.aws`, or another config folder's sign-in folder, itself. With the socket on, this keeps sign-ins apart by accident, not by force.
+
+At every launch the launcher makes `~/.cache/claude-sandbox/aws`, the `<key>` folder, `sso` and `cli` yours with mode `0700` (an existing one you own is tightened), and removes anything in `sso` and `cli` that is not a regular file — a symlink, a FIFO, an empty directory — without following or reading it; a directory that is not empty is left with one warning. That sweep catches only what was planted before the launch. A folder it cannot make yours (a symlink, a file, another user's directory) stands the launch down to `readonly` with one warning naming it.
+
+The two mount points must exist under your host `~/.aws` before `docker create` — docker would otherwise try to create them through the read-only mount. The launcher creates any missing `~/.aws/sso`, `sso/cache`, `cli` and `cli/cache` as you, mode `0700`, and never changes the mode of one that exists; a symlink, a file or another user's directory at any of those four levels stands the launch down to `readonly` with one warning. If `~/.aws` is itself a symlink (a dotfiles manager), it is followed: the four folders are created in the link's target, e.g. your dotfiles checkout (git ignores empty directories). With no host `~/.aws` at all, nothing is created under it: the sign-in folders are still mounted and the container's own `~/.aws` holds the mount points. A relative or `~` `CLAUDE_CONFIG_DIR` cannot name a folder, so it stands down to `readonly` with one warning. A `mounts:` entry that covers `~/.aws/sso/cache` or `~/.aws/cli/cache` (or a parent of either) is kept, and nothing is added (`readonly`); a read-only one warns that sign-ins cannot be saved.
+
+**`host`** binds your host's own `~/.aws/sso/cache` and `~/.aws/cli/cache` read-write: a host sign-in works in every sandbox and a sandbox sign-in works on the host — and a sign-out in any sandbox signs out every AWS organisation on the host, which also deletes the files. The launch prints one `AWS:` line saying so. It needs a host `~/.aws`; with none, it stands down to `readonly` with one warning.
+
+**`readonly`** mounts `~/.aws` read-only and nothing else, as before this key existed.
+
+**Turning AWS off for one project.** The env var `CLAUDE_SANDBOX_HOST_ACCESS_AWS_ENABLED` can only turn `--aws` on; to turn off an `enabled: true` inherited from a workspace config, set `hostAccess.aws.enabled: false` in the project's own `.claude-sandbox/config.yaml`. With `--aws` off nothing is mounted at `~/.aws`, so a sign-in inside writes the container's own `~/.aws` and ends with the container.
+
+**Launchers inside a sandbox.** A nested launcher creates nothing for AWS and mounts only what its outer launch shows exists on the host. Every launch passes `CLAUDE_SANDBOX_AWS_HOME` (the host `~/.aws` it mounted), `CLAUDE_SANDBOX_AWS_CACHE` (the mode it applied) and `CLAUDE_SANDBOX_AWS_CACHE_DIR` (its sign-in folder, in `sandbox` mode) as `-e NAME=<value or empty>`, `--aws` on or off, so an env file can never set them (one that tries gets a warning). The inner launch mounts the host `~/.aws` only when `CLAUDE_SANDBOX_AWS_HOME` names its own, shares the sign-in folder only when the mode and folder match its own, and otherwise gives the session a private in-memory sign-in folder (one note) or none.
+
+Changing the mode, or the first launch with this feature, is config drift for an attach or join (the mounts and the hashed mode change); a drift check creates and sweeps nothing.
 
 ### pre-commit cache
 

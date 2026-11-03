@@ -3703,3 +3703,144 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     And a join writes nothing: its claude is a new process that sets its own modes
     And the kitty keyboard flags and modifyOtherKeys, which Claude Code sets
       only on terminals that answer its query, are not re-sent (a host check)
+
+  # ---- where AWS sign-ins live (hostAccess.aws.tokenCache) ----
+  # With aws access on, the host's ~/.aws is mounted read-only (CS-LNCH-018),
+  # but the AWS CLI and SDKs must WRITE ~/.aws/sso/cache (sign-in tokens and
+  # their refresh) and ~/.aws/cli/cache (the CLI's role credentials), and no
+  # CLI or SDK takes another location for them (aws-cli#1804, #8945). So a
+  # writable directory is bound AT each path, over the read-only ~/.aws. The
+  # default keeps sandboxes' sign-ins apart from the host's — a named
+  # exception to the transparency corollary (PRINCIPLES.md, answer 173 b).
+
+  Scenario: CS-LNCH-229 With aws access on, sandboxes on one config dir share an AWS cache of their own
+    Given aws access is enabled and tokenCache resolves to "sandbox"
+    Then ~/.cache/claude-sandbox/aws/<key>/sso and …/cli are bound read-write
+      over ~/.aws/sso/cache and ~/.aws/cli/cache, after "-v ~/.aws:~/.aws:ro"
+    And <key> is the first 12 hex digits of the sha256 of the config dir the
+      launch mounts: the launcher's CLAUDE_CONFIG_DIR, filepath.Clean'ed, then
+      symlink-resolved when that resolves; unset = "<home>/.claude"
+    And two launches with different CLAUDE_CONFIG_DIRs get different dirs
+    Given CLAUDE_CONFIG_DIR is relative or starts with "~"
+    Then no cache is mounted, one WARNING says why, and the mode applied is "readonly"
+    # The key comes from the launcher's environment only, so an env file
+    # cannot steer it (-e CLAUDE_CONFIG_DIR wins).
+
+  Scenario: CS-LNCH-230 Missing mount points under the read-only ~/.aws are made create-only
+    Given aws access is enabled, tokenCache "sandbox" or "host", and ~/.aws exists
+    And ~/.aws/sso, ~/.aws/sso/cache, ~/.aws/cli or ~/.aws/cli/cache does not
+    Then each missing one is created 0700 as the invoking user before docker create
+    And an existing one keeps its mode (never re-moded)
+    And a symlinked ~/.aws is followed (the folders land in its target); a
+      symlink, non-directory or another uid's directory at any of the four
+      levels below it is refused
+    Then no cache is mounted, one WARNING names it and the remedy,
+      and the launch goes on read-only as before ("readonly")
+    # runc would otherwise mkdir the mount points through the read-only ~/.aws bind.
+
+  Scenario: CS-LNCH-231 tokenCache resolution
+    Then CLAUDE_SANDBOX_AWS_TOKEN_CACHE wins, then the more-local config's
+      hostAccess.aws.tokenCache, then "sandbox"; an empty value falls through
+    And any value but sandbox, host, readonly (in any case) exits 2 naming the
+      variable or the file, before any image work
+
+  Scenario: CS-LNCH-232 tokenCache host shares the host's caches
+    Given aws access is enabled and tokenCache is "host"
+    Then ~/.aws/sso/cache and ~/.aws/cli/cache are bound read-write at their own paths
+    And one "AWS:" line says a sign-out here signs out every session on the host
+    Given there is no host ~/.aws
+    Then nothing is created on the host, one WARNING says so, and the mode applied is "readonly"
+
+  Scenario: CS-LNCH-233 tokenCache readonly is today's mount
+    Given aws access is enabled and tokenCache is "readonly"
+    Then only CS-LNCH-018/019's read-only mounts are added, nothing is created,
+      and no "AWS:" line is printed
+
+  Scenario: CS-LNCH-234 No host ~/.aws: the cache is still mounted
+    Given aws access is enabled, tokenCache "sandbox", and ~/.aws does not exist
+    Then nothing is created under ~/.aws on the host
+    And the cache dirs are bound over ~/.aws/sso/cache and ~/.aws/cli/cache
+    And CLAUDE_SANDBOX_AWS_HOME is empty in the container
+    # Sign-ins persist the same way with or without a host ~/.aws; runc makes
+    # the mount points in the container's own home.
+
+  Scenario: CS-LNCH-235 A cascade mount covering a cache dir is kept
+    Given aws access is enabled, tokenCache is "sandbox" or "host", and a
+      cascade mounts: entry's container side is ~/.aws/sso/cache or
+      ~/.aws/cli/cache or a parent of either
+    Then no cache mount is added and nothing is created; a read-only cover warns
+    And the container gets CLAUDE_SANDBOX_AWS_CACHE=readonly, an empty
+      CLAUDE_SANDBOX_AWS_HOME and an empty CLAUDE_SANDBOX_AWS_CACHE_DIR
+    And the hash line is "awsTokenCache=readonly"
+
+  Scenario: CS-LNCH-236 A nested launch creates nothing and mounts only what the outer proved
+    Given any launch, aws access on or off
+    Then docker create gets all three of "-e CLAUDE_SANDBOX_AWS_HOME=<v>",
+      "-e CLAUDE_SANDBOX_AWS_CACHE=<v>" and "-e CLAUDE_SANDBOX_AWS_CACHE_DIR=<v>",
+      each with its value or empty — never left to an env file
+    And CLAUDE_SANDBOX_AWS_HOME is the host ~/.aws only when that was mounted,
+      CLAUDE_SANDBOX_AWS_CACHE the applied mode when aws is on,
+      CLAUDE_SANDBOX_AWS_CACHE_DIR the scope dir only when that mode is "sandbox"
+    And an inner launch reads an empty value as absent
+    Given a cascade env file defines any of the three
+    Then the -e above still wins and one WARNING names the key
+    # The CLAUDE_SANDBOX_GLOBAL_CONFIG precedent (CS-GCFG-032): otherwise an
+    # env-file forgery could make an inner launch's docker create a
+    # root-owned ~/.aws or cache dir on the host.
+    Given the launcher runs inside a sandbox with aws access enabled
+    Then it creates no directory for AWS on either side
+    And it mounts the host ~/.aws (and any CS-LNCH-019 path-var directory)
+      only when CLAUDE_SANDBOX_AWS_HOME equals its own ~/.aws; otherwise one Note
+    And it binds the scope dirs only when its mode is "sandbox",
+      CLAUDE_SANDBOX_AWS_CACHE is "sandbox" and CLAUDE_SANDBOX_AWS_CACHE_DIR
+      equals its own scope dir
+    And it binds the host's cache dirs only when its mode is "host",
+      CLAUDE_SANDBOX_AWS_CACHE is "host" and ~/.aws is mounted
+    And otherwise, when ~/.aws is mounted and CLAUDE_SANDBOX_AWS_CACHE is
+      sandbox, host or container, it mounts
+      "--tmpfs <path>:rw,nosuid,nodev,noexec,mode=0700,uid=<uid>,gid=<gid>"
+      at both paths with one Note (hash "awsTokenCache=container")
+    And when ~/.aws is mounted and CLAUDE_SANDBOX_AWS_CACHE is anything else,
+      or its own mode is "readonly", only the read-only mount (hash "awsTokenCache=readonly")
+    And when ~/.aws is not mounted and no scope dir is bound, nothing for AWS
+      (hash "awsTokenCache=none")
+    # Accepted residual, as CS-LNCH-155: a cache cleaner removing the scope
+    # dir between the outer's launch and this one lets docker recreate it as root.
+
+  Scenario: CS-LNCH-237 The applied cache mode is in the drift fingerprint
+    Given aws access is enabled
+    Then the hash gains "awsTokenCache=<applied mode>" (sandbox, host, readonly,
+      container or none); a stood-down launch hashes "readonly"
+    And with aws off nothing moves
+    And the attach/join drift build creates, re-modes and sweeps nothing; a
+      refused directory makes its would-be mode "readonly"; a missing one does not
+    # sandbox and host give the same normalized mount lines.
+
+  Scenario: CS-LNCH-238 The banner names where AWS sign-ins live
+    Given aws access is enabled and the mode applied is "sandbox"
+    Then one line: "AWS: sign-ins here are shared by every sandbox on the Claude
+      config folder <config dir> (kept in <scope dir>); sign in with
+      "aws sso login --use-device-code". A host sign-in does not reach here:
+      hostAccess.aws.tokenCache: host shares the host's, readonly mounts it read-only."
+    And headless prints it on stderr, like every launcher message (CS-LNCH-060)
+
+  Scenario: CS-LNCH-239 The aws login cache follows
+    Given the mode applied is "sandbox" and no env file defines AWS_LOGIN_CACHE_DIRECTORY
+    Then <scope dir>/login exists, 0700, is bound read-write at its own path, and
+      "-e AWS_LOGIN_CACHE_DIRECTORY=<scope dir>/login" is passed
+    Given an env file defines AWS_LOGIN_CACHE_DIRECTORY
+    Then nothing is created, mounted or passed for it, silently (the CS-LNCH-135 rule)
+    # Nested: only when the launcher's own AWS_LOGIN_CACHE_DIRECTORY names that
+    # dir (the outer bound it). It does not hide the host's ~/.aws/login/cache
+    # from reading.
+
+  Scenario: CS-LNCH-240 The scope dirs are re-checked and swept at every host launch
+    Given tokenCache "sandbox" and the launcher is not in a sandbox
+    Then aws/, aws/<key>, aws/<key>/sso and aws/<key>/cli are made or tightened
+      to 0700 as the invoking user (hostdirs.EnsureOwnedDir)
+    And a symlinked, non-directory or foreign-owned one stands the caches down
+      to "readonly" with one WARNING
+    And every entry of sso/ and cli/ that Lstat shows is not a regular file is
+      unlinked (an empty directory removed; a non-empty one left with one WARNING),
+      without following any link or reading any file
+    # Partial: catches only entries planted before this launch.

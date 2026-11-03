@@ -59,7 +59,7 @@ var fingerprintTextHook func(string)
 
 // configFingerprint hashes the effective launch and returns the hash plus the
 // per-file digests used to explain a mismatch.
-func (in *Inputs) configFingerprint(p *Plan, ha hostAccess, sharedPeerRegistry, globalLinked bool) (string, []InputDigest) {
+func (in *Inputs) configFingerprint(p *Plan, ha hostAccess, sharedPeerRegistry, globalLinked bool, awsTokenCache string) (string, []InputDigest) {
 	inputs := make([]InputDigest, 0, len(in.Env)+len(in.shadowDigests)+2)
 
 	// (1) The merged cascade config. Canonical JSON of the post-merge struct:
@@ -105,6 +105,13 @@ func (in *Inputs) configFingerprint(p *Plan, ha hostAccess, sharedPeerRegistry, 
 		fmt.Fprintf(&env, "mount=%s\n", v)
 	}
 	fmt.Fprintf(&env, "ssh=%t git=%t docker=%t aws=%t packageCaches=%t\n", ha.SSH, ha.Git, ha.DockerSocket, ha.AWS, ha.PackageCaches)
+	// CS-LNCH-237: where AWS sign-ins live, as APPLIED (a stood-down launch
+	// hashes "readonly"). Only with aws on, so no other launch moves. The
+	// mount lines above cannot tell "sandbox" from "host" (container path and
+	// flag only), and the tmpfs of "container" is not a -v at all.
+	if ha.AWS {
+		fmt.Fprintf(&env, "awsTokenCache=%s\n", awsTokenCache)
+	}
 	// CS-LNCH-052: hashed, unlike the per-session choices excluded below. It
 	// is a property of the environment — identical for every session of one
 	// config — and attach/join skip mount assembly, so a container launched

@@ -1215,6 +1215,12 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 	if err != nil {
 		return exitErr(2, "Error: %v", err)
 	}
+	// CS-LNCH-231: hostAccess.aws.tokenCache and its env override, the same
+	// way; Build resolves it again when aws is on.
+	awsTokenCacheSource := cascade.KeyPathSourceOf(configSnap, "hostAccess", "aws", "tokenCache")
+	if _, err := launch.ResolveAWSTokenCache(env.Getenv, cfg, awsTokenCacheSource); err != nil {
+		return exitErr(2, "Error: %v", err)
+	}
 	// CS-LNCH-224: every configured value that becomes a container label is
 	// checked here, before any image work, and named with its source; Build
 	// re-checks every label as a backstop (CS-LNCH-226).
@@ -1412,9 +1418,10 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 		MountInfo: env.MountInfo,
 		Version:   version,
 		// CS-LNCH-093: recorded on the container for the OOM report.
-		MemoryLimitSource: cascade.MemoryLimitSourceOf(configSnap),
-		OOMScoreAdjSource: oomSource,
-		Headless:          headless, LookupEnv: env.lookupEnv,
+		MemoryLimitSource:   cascade.MemoryLimitSourceOf(configSnap),
+		OOMScoreAdjSource:   oomSource,
+		AWSTokenCacheSource: awsTokenCacheSource,
+		Headless:            headless, LookupEnv: env.lookupEnv,
 		Detached: f.Detach,
 		// CS-LNCH-109: names only, for an attach's pane mark (CS-TMUX-012).
 		LaunchFlags: rec.LabelValue(),
