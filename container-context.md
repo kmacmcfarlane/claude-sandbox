@@ -103,6 +103,27 @@ older `.claude-sandbox/agent/LSP_TOOLS.md`) tells you to run it, run the
   unbridged sandbox shares that real registry, so the host may list it —
   messaging it is unverified — but the sandbox cannot reach the host's socket
   either way. No config key changes this.
+- **A name the user gives may be a session's title, not its peer name.**
+  `/rename` and `--name` set the peer name, but an automatic title (`aiTitle`)
+  on a session with a derived name (`nameSource` `derived`), or a title the
+  session was since renamed away from, lives only in its transcript. Before
+  saying a session is not running, map the title to a peer: a title often
+  matches several transcripts (titles get reused, most are ended sessions), and
+  a match on an old title returns the current peer name. A title containing `"`
+  or `\` is stored escaped, so type it escaped.
+
+  ```sh
+  C=${CLAUDE_CONFIG_DIR:-$HOME/.claude}; T='the title'
+  ids=$(grep -lF -e "\"customTitle\":\"$T\"" -e "\"aiTitle\":\"$T\"" -e "\"agentName\":\"$T\"" "$C"/projects/*/*.jsonl | sed 's|.*/||; s|\.jsonl$||')
+  jq -r --arg ids "$ids" 'select(.sessionId as $s | $ids | split("\n") | index($s)) | .name' "$C"/sessions/*.json | sort -u
+  ```
+
+  The names printed are the ones to pass to `SendMessage`. No name means the
+  session is not running, is not on this registry, or keeps its transcripts under
+  another config folder (then ask the user for its peer name). A record can
+  outlive its session: check the name against the live peer list (`/peers`)
+  before or after a failed `SendMessage`. These fields are Claude Code internals
+  and may change.
 - **You may be inside a worktree.** Ralph runs by default, and interactive
   sessions launched with `--worktree` (or config `worktree: true`), start
   `claude` with `--worktree <name>`, so your working directory is
