@@ -124,6 +124,22 @@ older `.claude-sandbox/agent/LSP_TOOLS.md`) tells you to run it, run the
   outlive its session: check the name against the live peer list (`/peers`)
   before or after a failed `SendMessage`. These fields are Claude Code internals
   and may change.
+- **A derived peer name can change at a restart.** A name set with `/rename`
+  or `--name` stays; a derived one (`nameSource` `derived`) is the folder name
+  plus a suffix that is usually drawn again each time claude starts, so after a
+  restart look for the same folder prefix, not the same name. Whatever the name,
+  a restart usually moves the session to a new pid, so its socket path and
+  `[ref]` change; a `[ref]` can also grow longer while a session runs, when
+  another peer's ref starts with the same characters. A session others will
+  address over a long task should ask the operator for `/rename <exact name>`
+  (e.g. `<ticket> - review`), or be launched with `--name`. Never write a
+  derived peer name or a `[ref]` into a durable record (a ticket, a stage file,
+  a commit): name the role ("the reviewer session") or a `/rename`d name. After
+  your own restart, read your current name (`jq -r .name
+  "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/sessions/$CLAUDE_PID.json"`) and tell the
+  sessions you work with. Before sending to a peer you last heard from before a
+  restart, check `ListAgents` again instead of reusing an old name or ref; an
+  older record may still show the old name, so use the one the live list shows.
 - **You may be inside a worktree.** Ralph runs by default, and interactive
   sessions launched with `--worktree` (or config `worktree: true`), start
   `claude` with `--worktree <name>`, so your working directory is

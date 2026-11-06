@@ -294,6 +294,13 @@ stay on PID 7 until relaunched; check the session's stderr for `Warning: pid cla
 that sessions Claude spawns itself (`claude --bg`, `/bg`) are not slotted. `ls
 ~/.claude/sessions/*.json` on the host shows which pids hold records.
 
+A peer that is not missing but renamed looks the same: a session's derived peer name (its folder
+name plus a suffix) can change at a restart, and any session's `[ref]` and socket usually change
+with its pid. Check the live peer list (`ListAgents` or `/peers`) again and match by the folder
+prefix, cwd or role rather than the old name; sessions that others address over a long task should
+be named with `/rename` (by the operator) or `--name`. The rules for sessions are in the
+container-context bullet "A derived peer name can change at a restart".
+
 With `sharedPeerRegistry` on, bridged sessions on different peers roots cannot see each other:
 the root moved from `~/.cache/claude-sandbox/peers` to `~/.local/state/claude-sandbox-peers`, and
 a launch stays on the old one while any container still mounts it (usually until a reboot). Compare
