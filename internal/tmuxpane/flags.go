@@ -579,16 +579,33 @@ func isWorktreeFlag(n string) bool { return n == "--worktree" || n == "-w" }
 //   - An uncertain resume never replaces or clears an id already set.
 func WalkClaudeArgs(args []string) ClaudeArgs { return walkClaudeArgs(args, nil) }
 
+// continueAt says where a token holding a continue flag stands, for
+// DropContinue: whether it can go without changing how any other token is
+// read.
+type continueAt int
+
+const (
+	// continueFree: an option in a certain position after a token that takes
+	// nothing more; the whole token can go.
+	continueFree continueAt = iota
+	// continueOpen: an option right after a token that would take the next
+	// one as a value had this one not been an option (an optional-value flag
+	// that took nothing, a variadic's list): only a short cluster's "c" can
+	// go, the token itself staying an option.
+	continueOpen
+	// continueFixed: a flag's value, right after an unknown flag, or in an
+	// uncertain tail: nothing can go.
+	continueFixed
+)
+
 // walkClaudeArgs is WalkClaudeArgs; onContinue, when set, is called with the
-// index of every token that holds a continue flag, and whether that token
-// stands in a value-consuming position (where claude reads it as a flag's
-// value, and the walk counts it only to err toward refusal).
-func walkClaudeArgs(args []string, onContinue func(i int, value bool)) ClaudeArgs {
+// index of every token that holds a continue flag and where it stands.
+func walkClaudeArgs(args []string, onContinue func(i int, at continueAt)) ClaudeArgs {
 	var w ClaudeArgs
-	sawContinue := func(i int, value bool) {
+	sawContinue := func(i int, at continueAt) {
 		w.Continue = true
 		if onContinue != nil {
-			onContinue(i, value)
+			onContinue(i, at)
 		}
 	}
 	resume := func(value string, uncertain bool) {
@@ -632,8 +649,11 @@ func walkClaudeArgs(args []string, onContinue func(i int, value bool)) ClaudeArg
 	valueOfVariadic := false // the value-consuming flag is variadic
 	variadicOn := false      // later non-option tokens are a variadic's values
 	tail := false            // an uncertain tail: "--" after an unknown flag
+	optOpen := false         // the token before was an optional-value flag that took nothing
 	for i := 0; i < len(args); i++ {
 		t := args[i]
+		prevOpen := optOpen
+		optOpen = false
 		if pos == posValue {
 			// The flag's value, whatever it is. Only continue and resume
 			// count here (rule 2): an uncertain resume.
@@ -642,7 +662,7 @@ func walkClaudeArgs(args []string, onContinue func(i int, value bool)) ClaudeArg
 				for _, f := range flags {
 					switch {
 					case isContinueFlag(f.name):
-						sawContinue(i, true)
+						sawContinue(i, continueFixed)
 					case isResumeFlag(f.name) && !f.badEq:
 						resume(f.value, true)
 					case isWorktreeFlag(f.name) && !f.badEq:
@@ -676,8 +696,15 @@ func walkClaudeArgs(args []string, onContinue func(i int, value bool)) ClaudeArg
 		if variadicOn && !optionLike(t) {
 			continue // a variadic's later value
 		}
+		at := continueFree
+		if variadicOn || prevOpen {
+			at = continueOpen
+		}
 		variadicOn = false
 		uncertain := tail || pos == posAfterUnknown
+		if uncertain {
+			at = continueFixed
+		}
 		pos = posCertain
 		if !optionLike(t) {
 			continue // an operand
@@ -686,7 +713,7 @@ func walkClaudeArgs(args []string, onContinue func(i int, value bool)) ClaudeArg
 		for _, f := range flags {
 			switch {
 			case isContinueFlag(f.name):
-				sawContinue(i, false)
+				sawContinue(i, at)
 			case f.badEq:
 				// Unknown, or a value claude rejects.
 			case isResumeFlag(f.name):
@@ -724,6 +751,8 @@ func walkClaudeArgs(args []string, onContinue func(i int, value bool)) ClaudeArg
 			}
 			if took {
 				i++
+			} else {
+				optOpen = true
 			}
 		}
 	}
@@ -804,27 +833,37 @@ func StripSessionFamily(args []string) []string {
 }
 
 // DropContinue removes claude's --continue from a passthrough (a restart
-// resumes its session's conversation by id, CS-SESS-105): every "--continue",
-// "-c" or "--continue=..." token the walk reads as an option goes, and a
-// short cluster loses its "c" ("-pc" becomes "-p"). It reports whether
-// anything was dropped, and ok: false when WalkClaudeArgs still reads a
-// continue afterwards (one standing where claude would read it as a flag's
-// value cannot be dropped without changing that value), when the caller
-// keeps its refusal.
+// resumes its session's conversation by id, CS-SESS-105), only where removing
+// it changes how no other token is read: a "--continue", "-c" or
+// "--continue=..." token goes when the token before it takes nothing more,
+// and a short cluster loses its "c" ("-pc" becomes "-p") wherever it is read
+// as an option in a certain position, since it stays an option. A continue
+// that is a flag's value, follows an optional-value flag that took nothing or
+// a variadic's list as a whole token (its removal would hand the next token to
+// that flag: "--debug --continue fix-it"), follows an unknown flag, or stands
+// in an uncertain tail is kept. It reports whether anything was dropped, and
+// ok: false when WalkClaudeArgs still reads a continue afterwards, when the
+// caller keeps its refusal.
 func DropContinue(args []string) (out []string, dropped, ok bool) {
-	drop := map[int]bool{}
-	walkClaudeArgs(args, func(i int, value bool) {
-		if !value {
-			drop[i] = true
+	at := map[int]continueAt{}
+	walkClaudeArgs(args, func(i int, a continueAt) {
+		if prev, seen := at[i]; !seen || a > prev {
+			at[i] = a
 		}
 	})
 	for i, t := range args {
-		if !drop[i] {
+		a, has := at[i]
+		if !has || a == continueFixed {
 			out = append(out, t)
 			continue
 		}
+		rest := withoutContinue(t)
+		if rest == "" && a == continueOpen {
+			out = append(out, t) // the whole token would go: kept
+			continue
+		}
 		dropped = true
-		if rest := withoutContinue(t); rest != "" {
+		if rest != "" {
 			out = append(out, rest)
 		}
 	}

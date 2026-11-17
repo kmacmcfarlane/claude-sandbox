@@ -315,8 +315,11 @@ launcher inside a sandbox (it cannot see who is attached or reach the host's tmu
 
 **`--continue` is dropped, not refused:** a restart resumes the session's own conversation by id, so a
 `--continue` given after `--` (to `--restart`, or the launch whose menu you chose `[r]` from) is left
-out of the new claude's command line with one `Note:` line. Only a `--continue` written right after a
-flag that takes a value (where claude may read it as that value) is still refused.
+out of the new claude's command line with one `Note:` line — but only where removing it changes how
+no other argument is read. Right after a flag that takes a value or a list of values (`--debug
+--continue fix-it` would make `fix-it` the debug filter; `--allowedTools Bash --continue "go on"`,
+`--add-dir /x -c prompt`), or after a flag claude-sandbox does not know, it is still refused: drop it
+yourself.
 
 **What a restart does not keep:** joined sessions and anything else running in the old container
 (a dev server, a background task) end with it; session state that `--resume` does not restore — a

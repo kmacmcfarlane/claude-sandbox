@@ -1252,9 +1252,14 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
       one stderr line "Note: a restart resumes the session's own conversation by id, so
       --continue is not used; it was dropped." — never refused, and it reaches neither the
       new claude's argv nor its pane mark's replay; the other refusals above still stand
-      beside it (then no note). Only a --continue standing where claude may read it as
-      another flag's value (right after a value-taking flag) is not dropped, since dropping
-      it would change that value: that one is still refused, exit 2
+      beside it (then no note)
+    And a --continue is dropped only where removing it changes how no other argument is
+      read; it is still refused, exit 2 ("drop --continue"), when it is a flag's value, a
+      whole token right after an optional-value flag that took nothing (--debug --continue
+      fix-it would hand fix-it to --debug) or after a variadic's values (--allowedTools Bash
+      --continue "go on", --add-dir /x -c prompt), right after an unknown flag, or in the
+      uncertain tail after one; a short cluster's c can still go there (--debug -pc fix-it
+      becomes --debug -p fix-it), since the token stays an option
     And a passthrough "--resume <id>" must name the session's conversation, else exit 2
       naming both ids; an id a joined session of that container holds is refused, exit 2,
       naming the container (a restart moves only a container's main conversation)

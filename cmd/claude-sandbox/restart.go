@@ -165,9 +165,9 @@ const restartContinueNote = "Note: a restart resumes the session's own conversat
 // restartPassthrough checks a restart's passthrough (CS-SESS-105): a
 // --continue is dropped from f.Passthrough with one note — the restart
 // resumes the session's own conversation by id — and every other flag that
-// selects another conversation or place is refused. A --continue the walk
-// reads where claude may take it as another flag's value is not dropped
-// (that would change the value): it is refused, as before.
+// selects another conversation or place is refused. A --continue is dropped
+// only where removing it changes how no other argument is read
+// (tmuxpane.DropContinue); anywhere else it is refused, as before.
 func restartPassthrough(env *Env, f *launchFlags) error {
 	out, dropped, ok := tmuxpane.DropContinue(f.Passthrough)
 	if !ok {
@@ -190,7 +190,7 @@ func restartPassthroughRefusal(pt []string) error {
 	ca := tmuxpane.WalkClaudeArgs(pt)
 	switch {
 	case ca.Continue:
-		return exitErr(2, "Error: a restart resumes the session's conversation by id; this --continue may be another flag's value, so it is not dropped for you: drop --continue")
+		return exitErr(2, "Error: a restart resumes the session's conversation by id; removing this --continue would change how the arguments around it are read, so it is not dropped for you: drop --continue")
 	case ca.Fork:
 		return exitErr(2, "Error: a restart resumes the session's conversation itself; to fork it, use --branch, or claude-sandbox -- --resume <id> --fork-session, instead of restarting")
 	case ca.WorktreeGiven:

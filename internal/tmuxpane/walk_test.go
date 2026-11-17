@@ -194,5 +194,15 @@ var _ = Describe("CS-SESS-105: DropContinue", func() {
 		Entry("after a real --, a prompt word", sp("-- --continue"), sp("-- --continue"), false, true),
 		Entry("none", sp("--verbose"), sp("--verbose"), false, true),
 		Entry("a flag's value: kept, refused", sp("--append-system-prompt --continue"), sp("--append-system-prompt --continue"), false, false),
+		// Only where removing it changes how no other token is read.
+		Entry("after an optional value that took nothing: kept, refused", sp("--debug --continue fix-it"), sp("--debug --continue fix-it"), false, false),
+		Entry("ending a variadic list: kept, refused", []string{"--allowedTools", "Bash", "--continue", "go on"}, []string{"--allowedTools", "Bash", "--continue", "go on"}, false, false),
+		Entry("right after a variadic flag's first value: kept, refused", sp("--add-dir /x -c prompt"), sp("--add-dir /x -c prompt"), false, false),
+		Entry("after an unknown flag: kept, refused", sp("--unknownflag --continue foo"), sp("--unknownflag --continue foo"), false, false),
+		Entry("in an uncertain tail: kept, refused", sp("--unknownflag -- --continue"), sp("--unknownflag -- --continue"), false, false),
+		Entry("a cluster's c after an open optional value: the token stays an option", sp("--debug -pc fix-it"), sp("--debug -p fix-it"), true, true),
+		Entry("a cluster's c ending a variadic list", sp("--add-dir /x -pc prompt"), sp("--add-dir /x -p prompt"), true, true),
+		Entry("after an optional value that took its value", sp("--debug api --continue fix-it"), sp("--debug api fix-it"), true, true),
+		Entry("after a boolean flag", sp("--verbose --continue fix-it"), sp("--verbose fix-it"), true, true),
 	)
 })
