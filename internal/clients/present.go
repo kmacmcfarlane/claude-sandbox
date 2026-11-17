@@ -4,6 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -29,6 +32,10 @@ type Client struct {
 	Lease string
 	// Proc is the scanned process (SourceScan).
 	Proc *Proc
+	// Child is, on a lease row, the scanned docker client whose parent is
+	// the lease's holder: the launcher's own session child, folded into
+	// its lease so one client is listed once (CS-SESS-098). nil otherwise.
+	Child *Proc
 }
 
 // Presence is Present's answer.
@@ -80,9 +87,17 @@ type Options struct {
 // lease, then every docker CLI process of the invoking user that is a
 // client of c. all is every discovered container (for docker's
 // unique-prefix rule). It removes nothing.
+//
+// A scanned process whose parent pid is the pid a held lease's file name
+// carries ("<pid>.<rand>.lease") is that launcher's own session child: it is
+// folded into the lease row (Client.Child) instead of being listed again —
+// one launcher, one client. At most one process folds into a lease; a second
+// child of the same launcher, and every process of any other parent, stays
+// its own row, so a real second client is never hidden.
 func Present(o Options, c Target, all []Target) Presence {
 	var p Presence
 	var errs []error
+	holders := map[int]int{} // a held lease's holder pid -> its row
 	if IsFullID(c.ID) {
 		leases, err := ReadLeases(o.StateRoot, c.ID)
 		if err != nil {
@@ -91,6 +106,11 @@ func Present(o Options, c Target, all []Target) Presence {
 		for _, l := range leases {
 			if !l.Held {
 				continue
+			}
+			if pid := LeaseHolder(l.Path); pid > 0 {
+				if _, dup := holders[pid]; !dup {
+					holders[pid] = len(p.Clients)
+				}
 			}
 			p.Clients = append(p.Clients, Client{Kind: l.Record.Kind, Source: SourceLease,
 				Since: time.UnixMilli(l.Record.Since), TmuxPane: l.Record.TmuxPane, Lease: l.Path})
@@ -105,10 +125,35 @@ func Present(o Options, c Target, all []Target) Presence {
 		errs = append(errs, fmt.Errorf("process scan: %w", err))
 	}
 	for i := range procs {
-		if procs[i].Of(c, all) {
-			p.Clients = append(p.Clients, Client{Kind: procs[i].Inv.Kind, Source: SourceScan, Proc: &procs[i]})
+		if !procs[i].Of(c, all) {
+			continue
 		}
+		if row, ok := holders[procs[i].PPID]; ok && procs[i].PPID > 0 && p.Clients[row].Child == nil {
+			lr := &p.Clients[row]
+			lr.Child = &procs[i]
+			if lr.Kind == "" {
+				// The lease's record was unreadable: the process says what
+				// it is.
+				lr.Kind = procs[i].Inv.Kind
+			}
+			continue
+		}
+		p.Clients = append(p.Clients, Client{Kind: procs[i].Inv.Kind, Source: SourceScan, Proc: &procs[i]})
 	}
 	p.Err = errors.Join(errs...)
 	return p
+}
+
+// LeaseHolder is the holder pid a lease's file name carries
+// ("<pid>.<rand>.lease"), 0 when the name carries none.
+func LeaseHolder(path string) int {
+	head, _, ok := strings.Cut(filepath.Base(path), ".")
+	if !ok {
+		return 0
+	}
+	pid, err := strconv.Atoi(head)
+	if err != nil || pid <= 0 {
+		return 0
+	}
+	return pid
 }

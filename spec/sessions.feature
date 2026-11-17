@@ -1208,6 +1208,16 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
       match
     And a scan hit carries its pid, argv and kind: start -a|-i = primary,
       attach = attach, exec = join; a lease's kind is its own
+    And a scanned process whose parent (the PPid line of <proc>/<pid>/status) is
+      the pid a held lease's file name carries (<pid>.<rand>.lease) is that
+      launcher's own session child: it is folded into the lease's row — one
+      client, with the lease's kind (the process's when the lease's record
+      cannot be read), since and tmux pane, the process kept beside it — never
+      listed twice
+    And at most one process folds into a lease: a second child of the same
+      launcher, a process of any other parent (a docker attach typed in a
+      shell), one without a PPid line and the child of a lease that is not held
+      each stay their own row, so a real second client is never hidden
     And when the clients directory exists but cannot be read, or <proc>
       cannot be listed, the answer is "cannot tell", never "no client"
     And the reader removes nothing
@@ -1236,7 +1246,15 @@ Feature: Sessions — discovery, multi-instance launch, attach/join, config drif
       | --detach                                                     | the point is a fresh screen in this terminal       |
       | --ralph, headless                                            | not restartable                                    |
       | --worktree, --worktree=NAME, --no-worktree                   | the transcript is in the session's own place       |
-      | passthrough --continue/-c, --fork-session, --session-id, --from-pr, --teleport, -w/--worktree, a --resume without an id | a restart resumes the session's conversation by id, where it is |
+      | passthrough --fork-session, --session-id, --from-pr, --teleport, -w/--worktree, a --resume without an id | a restart resumes the session's conversation by id, where it is |
+    And a passthrough --continue (--continue, -c, --continue=..., or the c of a short cluster
+      such as -pc, which becomes -p) given to --restart or to the tier-1 [r] is dropped, with
+      one stderr line "Note: a restart resumes the session's own conversation by id, so
+      --continue is not used; it was dropped." — never refused, and it reaches neither the
+      new claude's argv nor its pane mark's replay; the other refusals above still stand
+      beside it (then no note). Only a --continue standing where claude may read it as
+      another flag's value (right after a value-taking flag) is not dropped, since dropping
+      it would change that value: that one is still refused, exit 2
     And a passthrough "--resume <id>" must name the session's conversation, else exit 2
       naming both ids; an id a joined session of that container holds is refused, exit 2,
       naming the container (a restart moves only a container's main conversation)

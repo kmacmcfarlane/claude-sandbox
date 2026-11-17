@@ -577,8 +577,20 @@ func isWorktreeFlag(n string) bool { return n == "--worktree" || n == "-w" }
 //     In both, continue and resume still count, a fork never does.
 //   - --continue and --resume count wherever they appear (a value included).
 //   - An uncertain resume never replaces or clears an id already set.
-func WalkClaudeArgs(args []string) ClaudeArgs {
+func WalkClaudeArgs(args []string) ClaudeArgs { return walkClaudeArgs(args, nil) }
+
+// walkClaudeArgs is WalkClaudeArgs; onContinue, when set, is called with the
+// index of every token that holds a continue flag, and whether that token
+// stands in a value-consuming position (where claude reads it as a flag's
+// value, and the walk counts it only to err toward refusal).
+func walkClaudeArgs(args []string, onContinue func(i int, value bool)) ClaudeArgs {
 	var w ClaudeArgs
+	sawContinue := func(i int, value bool) {
+		w.Continue = true
+		if onContinue != nil {
+			onContinue(i, value)
+		}
+	}
 	resume := func(value string, uncertain bool) {
 		w.ResumeGiven = true
 		id := ResumeValueID(value)
@@ -630,7 +642,7 @@ func WalkClaudeArgs(args []string) ClaudeArgs {
 				for _, f := range flags {
 					switch {
 					case isContinueFlag(f.name):
-						w.Continue = true
+						sawContinue(i, true)
 					case isResumeFlag(f.name) && !f.badEq:
 						resume(f.value, true)
 					case isWorktreeFlag(f.name) && !f.badEq:
@@ -674,7 +686,7 @@ func WalkClaudeArgs(args []string) ClaudeArgs {
 		for _, f := range flags {
 			switch {
 			case isContinueFlag(f.name):
-				w.Continue = true
+				sawContinue(i, false)
 			case f.badEq:
 				// Unknown, or a value claude rejects.
 			case isResumeFlag(f.name):
@@ -789,4 +801,57 @@ func StripSessionFamily(args []string) []string {
 		}
 	}
 	return append(out, args[i:]...)
+}
+
+// DropContinue removes claude's --continue from a passthrough (a restart
+// resumes its session's conversation by id, CS-SESS-105): every "--continue",
+// "-c" or "--continue=..." token the walk reads as an option goes, and a
+// short cluster loses its "c" ("-pc" becomes "-p"). It reports whether
+// anything was dropped, and ok: false when WalkClaudeArgs still reads a
+// continue afterwards (one standing where claude would read it as a flag's
+// value cannot be dropped without changing that value), when the caller
+// keeps its refusal.
+func DropContinue(args []string) (out []string, dropped, ok bool) {
+	drop := map[int]bool{}
+	walkClaudeArgs(args, func(i int, value bool) {
+		if !value {
+			drop[i] = true
+		}
+	})
+	for i, t := range args {
+		if !drop[i] {
+			out = append(out, t)
+			continue
+		}
+		dropped = true
+		if rest := withoutContinue(t); rest != "" {
+			out = append(out, rest)
+		}
+	}
+	return out, dropped, !WalkClaudeArgs(out).Continue
+}
+
+// withoutContinue is token t with its continue flags taken out: "" for a
+// token that is only a continue, else the short cluster rebuilt from the
+// flags interpretToken expands it to.
+func withoutContinue(t string) string {
+	flags, pending, _ := interpretToken(t)
+	var b strings.Builder
+	for _, f := range flags {
+		switch {
+		case isContinueFlag(f.name):
+			continue
+		case strings.HasPrefix(f.name, "--"):
+			return t // a long flag beside a continue: no cluster to rebuild; kept, and the caller's check refuses
+		}
+		b.WriteString(strings.TrimPrefix(f.name, "-"))
+		if f.hasValue {
+			b.WriteString(f.value)
+		}
+	}
+	b.WriteString(strings.TrimPrefix(pending, "-"))
+	if b.Len() == 0 {
+		return ""
+	}
+	return "-" + b.String()
 }

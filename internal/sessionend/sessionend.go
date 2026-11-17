@@ -512,15 +512,27 @@ func describe(c clients.Client) string {
 func (r *run) isNew(c clients.Client) bool {
 	switch c.Source {
 	case clients.SourceLease:
-		return !c.Since.IsZero() && c.Since.UnixMilli() >= r.o.HangupAt.UnixMilli()
-	case clients.SourceScan:
-		if c.Proc == nil {
-			return false
+		if !c.Since.IsZero() && c.Since.UnixMilli() >= r.o.HangupAt.UnixMilli() {
+			return true
 		}
-		started := c.Proc.Started(r.boot)
-		return !started.IsZero() && !started.Before(r.o.HangupAt.Add(time.Second))
+		// The launcher's own docker client folded into its lease
+		// (CS-SESS-098) is new when either is: the verdict is the one the
+		// two rows gave before they were merged.
+		return r.procNew(c.Child)
+	case clients.SourceScan:
+		return r.procNew(c.Proc)
 	}
 	return false
+}
+
+// procNew reports whether a scanned process started at least 1 s after the
+// hang-up.
+func (r *run) procNew(p *clients.Proc) bool {
+	if p == nil {
+		return false
+	}
+	started := p.Started(r.boot)
+	return !started.IsZero() && !started.Before(r.o.HangupAt.Add(time.Second))
 }
 
 // guardsKeep is the unit and system guard (03 § 1.3, 04 M1).

@@ -304,7 +304,7 @@ var _ = Describe("restart a session in place (CS-SESS-105..108, CS-LNCH-218..221
 			Entry("--worktree", "no --worktree", "--restart", "--worktree"),
 			Entry("--worktree=NAME", "no --worktree", "--restart", "--worktree=x"),
 			Entry("--no-worktree", "no --worktree", "--restart", "--no-worktree"),
-			Entry("--continue", "drop --continue", "--restart", "--", "--continue"),
+			Entry("a --continue that may be a flag's value", "drop --continue", "--restart", "--", "--append-system-prompt", "--continue"),
 			Entry("--fork-session", "to fork it", "--restart", "--", "--resume", rsConv, "--fork-session"),
 			Entry("--session-id", "--session-id is not valid", "--restart", "--", "--session-id", rsConv),
 			Entry("claude's -w", "claude's -w", "--restart", "--", "-w", "x"),
@@ -369,6 +369,44 @@ var _ = Describe("restart a session in place (CS-SESS-105..108, CS-LNCH-218..221
 			Expect(f.run("--worktree=elsewhere")).To(Equal(0), f.errw.String())
 			Expect(f.errw.String()).To(ContainSubstring("Note: you asked for --worktree=elsewhere; 'dunlin' runs in the shared checkout"))
 			Expect(f.createdCmd()).NotTo(ContainElement("--worktree"))
+		})
+
+		It("CS-SESS-105: --restart drops a passthrough --continue with one note; it reaches neither the new claude nor its pane mark", func() {
+			f.primary("idle")
+			f.envmap["TMUX"] = "/tmp/tmux-1000/default,1,0"
+			f.envmap["TMUX_PANE"] = "%7"
+			Expect(f.run("--restart=dunlin", "--", "--continue")).To(Equal(0), f.errw.String())
+			Expect(strings.Count(f.errw.String(), restartContinueNote)).To(Equal(1))
+			cmd := f.createdCmd()
+			Expect(cmd).To(ContainElements("--resume", rsConv))
+			Expect(cmd).NotTo(ContainElement("--continue"))
+			Expect(cmd).NotTo(ContainElement("-c"))
+			Expect(labelsOf(f.launched().Args)["claude-sandbox.launchflags"]).NotTo(ContainSubstring("continue"))
+			i := f.index("tmux set-option -p -t %7 @claude-sandbox")
+			Expect(i).To(BeNumerically(">=", 0))
+			Expect(f.fake.CommandLines()[i]).NotTo(ContainSubstring("continue"))
+		})
+
+		It("CS-SESS-105: the tier-1 [r] under --continue drops it with one note and restarts", func() {
+			f.primary("idle")
+			f.extra = append(f.extra, f.otherRow("claude-sandbox-work-proj-abc123-heron", "heron", "claude", "running", ""))
+			f.tty("r", "dunlin")
+			Expect(f.run("--", "-c")).To(Equal(0), f.errw.String())
+			Expect(f.errw.String()).To(ContainSubstring("[r] restart a session in a new container"))
+			Expect(strings.Count(f.errw.String(), restartContinueNote)).To(Equal(1))
+			Expect(f.errw.String()).NotTo(ContainSubstring("drop --continue"))
+			cmd := f.createdCmd()
+			Expect(cmd).To(ContainElements("--resume", rsConv))
+			Expect(cmd).NotTo(ContainElement("-c"))
+			Expect(cmd).NotTo(ContainElement("--continue"))
+			Expect(f.index("docker stop --signal SIGTERM -t 30 " + rsOldID)).To(BeNumerically(">=", 0))
+		})
+
+		It("CS-SESS-105: the other passthrough refusals stand beside a --continue, and no note is printed", func() {
+			Expect(f.run("--restart", "--", "--continue", "--fork-session")).To(Equal(2))
+			Expect(f.errw.String()).To(ContainSubstring("to fork it"))
+			Expect(f.errw.String()).NotTo(ContainSubstring(restartContinueNote))
+			f.noDocker()
 		})
 
 		It("CS-SESS-105: a --resume naming another conversation is refused; one a join holds names the container", func() {
@@ -503,6 +541,26 @@ var _ = Describe("restart a session in place (CS-SESS-105..108, CS-LNCH-218..221
 			f.tty("n")
 			Expect(f.run("--restart=dunlin")).To(Equal(1))
 			Expect(f.errw.String()).To(ContainSubstring("'dunlin' is attached in another terminal (attach, tmux pane %12, since "))
+			Expect(f.count("docker stop")).To(BeZero())
+		})
+
+		It("CS-SESS-108: a launcher's own docker client is one attached terminal, named by its lease", func() {
+			f.primary("idle")
+			l, err := clients.Take(f.state, rsOldID, clients.KindPrimary, f.now.Add(-5*time.Minute), "%28")
+			Expect(err).NotTo(HaveOccurred())
+			defer l.Release()
+			// The fixture's scratch /proc, plus the launcher's docker child.
+			dir := filepath.Join(f.env.ProcRoot, "22425")
+			Expect(os.MkdirAll(dir, 0o755)).To(Succeed())
+			Expect(os.WriteFile(filepath.Join(dir, "cmdline"), []byte("docker\x00start\x00-ai\x00--detach-keys=ctrl-q,ctrl-q\x00"+rsName+"\x00"), 0o644)).To(Succeed())
+			uid := strconv.Itoa(os.Getuid())
+			Expect(os.WriteFile(filepath.Join(dir, "status"), []byte("Name:\tdocker\nPPid:\t"+strconv.Itoa(os.Getpid())+"\nUid:\t"+uid+"\t"+uid+"\t"+uid+"\t"+uid+"\n"), 0o644)).To(Succeed())
+			f.tty("n")
+			Expect(f.run("--restart=dunlin")).To(Equal(1))
+			out := f.errw.String()
+			Expect(strings.Count(out, "'dunlin' is attached in another terminal")).To(Equal(1), out)
+			Expect(out).To(ContainSubstring("'dunlin' is attached in another terminal (primary, tmux pane %28, since "))
+			Expect(out).NotTo(ContainSubstring("pid 22425"))
 			Expect(f.count("docker stop")).To(BeZero())
 		})
 

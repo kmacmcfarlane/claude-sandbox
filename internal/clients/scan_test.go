@@ -37,6 +37,15 @@ func fakeProc(root string, pid, uid int, argv ...string) {
 	Expect(os.WriteFile(filepath.Join(dir, "stat"), []byte(stat), 0o644)).To(Succeed())
 }
 
+// fakeChild is fakeProc for a process whose parent is ppid (the PPid line,
+// before Uid as Linux writes it).
+func fakeChild(root string, pid, ppid, uid int, argv ...string) {
+	fakeProc(root, pid, uid, argv...)
+	u := strconv.Itoa(uid)
+	status := "Name:\tdocker\nPPid:\t" + strconv.Itoa(ppid) + "\nUid:\t" + u + "\t" + u + "\t" + u + "\t" + u + "\n"
+	Expect(os.WriteFile(filepath.Join(root, strconv.Itoa(pid), "status"), []byte(status), 0o644)).To(Succeed())
+}
+
 func inv(argv ...string) (clients.Invocation, bool) { return clients.ParseInvocation(argv) }
 
 // clientOf parses argv and reports whether it is a client of container A.
@@ -195,6 +204,74 @@ var _ = Describe("the /proc scan and Present (CS-SESS-098)", func() {
 		l.Release()
 		p = clients.Present(clients.Options{StateRoot: state, ProcRoot: proc, UID: me}, a, all)
 		Expect(p.Terminal()).To(BeEmpty())
+	})
+
+	It("CS-SESS-098: a launcher's own docker client is folded into its lease: one client, the lease's description", func() {
+		l, err := clients.Take(state, idA, clients.KindPrimary, time.UnixMilli(5), "%28")
+		Expect(err).NotTo(HaveOccurred())
+		defer l.Release()
+		Expect(clients.LeaseHolder(l.Path)).To(Equal(os.Getpid()))
+		fakeChild(proc, 300, os.Getpid(), me, "docker", "start", "-ai", "--detach-keys=ctrl-q,ctrl-q", nameA)
+
+		p := clients.Present(clients.Options{StateRoot: state, ProcRoot: proc, UID: me}, a, all)
+		Expect(p.Clients).To(HaveLen(1))
+		c := p.Clients[0]
+		Expect(c.Source).To(Equal(clients.SourceLease))
+		Expect(c.Kind).To(Equal(clients.KindPrimary))
+		Expect(c.TmuxPane).To(Equal("%28"))
+		Expect(c.Since).To(Equal(time.UnixMilli(5)))
+		Expect(c.Proc).To(BeNil())
+		Expect(c.Child).NotTo(BeNil())
+		Expect(c.Child.PID).To(Equal(300))
+		Expect(c.Child.PPID).To(Equal(os.Getpid()))
+		Expect(p.Terminal()).To(HaveLen(1))
+	})
+
+	It("CS-SESS-098: a real second client is never hidden: another parent, a second child, or a dead lease's child stay their own rows", func() {
+		l, err := clients.Take(state, idA, clients.KindAttach, time.UnixMilli(5), "")
+		Expect(err).NotTo(HaveOccurred())
+		defer l.Release()
+		fakeChild(proc, 400, os.Getpid(), me, "docker", "attach", nameA) // folded
+		fakeChild(proc, 401, os.Getpid(), me, "docker", "attach", nameA) // a second child of the same launcher
+		fakeChild(proc, 402, 77, me, "docker", "attach", nameA)          // a hand docker attach in a shell
+		fakeProc(proc, 403, me, "docker", "attach", nameA)               // no PPid line
+		// A dead lease's holder pid never folds a process.
+		dead := filepath.Join(clients.ContainerDir(state, idA), "88.00.lease")
+		Expect(os.WriteFile(dead, []byte(`{"v":1,"kind":"primary","since":1}`), 0o600)).To(Succeed())
+		fakeChild(proc, 404, 88, me, "docker", "start", "-ai", nameA)
+
+		p := clients.Present(clients.Options{StateRoot: state, ProcRoot: proc, UID: me}, a, all)
+		Expect(p.Clients).To(HaveLen(5))
+		Expect(p.Clients[0].Source).To(Equal(clients.SourceLease))
+		Expect(p.Clients[0].Child.PID).To(Equal(400))
+		var scanned []int
+		for _, c := range p.Clients[1:] {
+			Expect(c.Source).To(Equal(clients.SourceScan))
+			scanned = append(scanned, c.Proc.PID)
+		}
+		Expect(scanned).To(ConsistOf(401, 402, 403, 404))
+		Expect(p.Terminal()).To(HaveLen(5))
+	})
+
+	It("CS-SESS-098: a held lease whose record cannot be read takes its folded process's kind", func() {
+		l, err := clients.Take(state, idA, clients.KindJoin, time.UnixMilli(5), "")
+		Expect(err).NotTo(HaveOccurred())
+		defer l.Release()
+		Expect(os.WriteFile(l.Path, []byte("not json"), 0o600)).To(Succeed())
+		fakeChild(proc, 500, os.Getpid(), me, "docker", "exec", "-it", nameA, "claude")
+
+		p := clients.Present(clients.Options{StateRoot: state, ProcRoot: proc, UID: me}, a, all)
+		Expect(p.Clients).To(HaveLen(1))
+		Expect(p.Clients[0].Kind).To(Equal(clients.KindJoin))
+		Expect(p.Terminal()).To(BeEmpty())
+		Expect(p.Joins()).To(HaveLen(1))
+	})
+
+	It("CS-SESS-098: a lease name that carries no pid folds nothing", func() {
+		Expect(clients.LeaseHolder("/x/abc.00.lease")).To(BeZero())
+		Expect(clients.LeaseHolder("/x/0.00.lease")).To(BeZero())
+		Expect(clients.LeaseHolder("/x/lease")).To(BeZero())
+		Expect(clients.LeaseHolder("/x/42.ab.lease")).To(Equal(42))
 	})
 
 	It("CS-SESS-098: an unreadable /proc or clients dir is cannot tell, never no client", func() {

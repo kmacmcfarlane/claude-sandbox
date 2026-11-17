@@ -155,7 +155,32 @@ func validateRestart(env *Env, f *launchFlags) error {
 	case f.Worktree != nil:
 		return exitErr(2, "Error: --restart takes no --worktree or --no-worktree: the conversation's transcript is in the session's own place, and the restart resumes it there")
 	}
-	return restartPassthroughRefusal(f.Passthrough)
+	return restartPassthrough(env, f)
+}
+
+// restartContinueNote is printed when a restart drops a passthrough
+// --continue (CS-SESS-105).
+const restartContinueNote = "Note: a restart resumes the session's own conversation by id, so --continue is not used; it was dropped."
+
+// restartPassthrough checks a restart's passthrough (CS-SESS-105): a
+// --continue is dropped from f.Passthrough with one note — the restart
+// resumes the session's own conversation by id — and every other flag that
+// selects another conversation or place is refused. A --continue the walk
+// reads where claude may take it as another flag's value is not dropped
+// (that would change the value): it is refused, as before.
+func restartPassthrough(env *Env, f *launchFlags) error {
+	out, dropped, ok := tmuxpane.DropContinue(f.Passthrough)
+	if !ok {
+		return restartPassthroughRefusal(f.Passthrough)
+	}
+	if err := restartPassthroughRefusal(out); err != nil {
+		return err
+	}
+	if dropped {
+		f.Passthrough = out
+		fmt.Fprintln(env.Err, restartContinueNote)
+	}
+	return nil
 }
 
 // restartPassthroughRefusal refuses claude flags that select another
@@ -165,7 +190,7 @@ func restartPassthroughRefusal(pt []string) error {
 	ca := tmuxpane.WalkClaudeArgs(pt)
 	switch {
 	case ca.Continue:
-		return exitErr(2, "Error: a restart resumes the session's conversation by id; drop --continue")
+		return exitErr(2, "Error: a restart resumes the session's conversation by id; this --continue may be another flag's value, so it is not dropped for you: drop --continue")
 	case ca.Fork:
 		return exitErr(2, "Error: a restart resumes the session's conversation itself; to fork it, use --branch, or claude-sandbox -- --resume <id> --fork-session, instead of restarting")
 	case ca.WorktreeGiven:
@@ -337,7 +362,9 @@ func fromInspect(t sessions.Session, in inspected) sessions.Session {
 // must not do, asks when something else would be affected, and rewrites f
 // into the launch that resumes the conversation. Nothing is stopped here.
 func prepareRestart(env *Env, projectDir string, f *launchFlags, cfg *cascade.Config, wt worktreeChoice, target sessions.Session, tier1 bool) (*restartState, error) {
-	if err := restartPassthroughRefusal(f.Passthrough); err != nil {
+	// The tier-1 [r] reads the flags the menu came with: a --continue is
+	// dropped here with its note (--restart dropped it in validateRestart).
+	if err := restartPassthrough(env, f); err != nil {
 		return nil, err
 	}
 	if err := restartable(target); err != nil {
