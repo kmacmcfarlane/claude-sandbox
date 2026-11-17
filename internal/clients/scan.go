@@ -289,6 +289,9 @@ type Proc struct {
 	// 0 when unreadable: with BootTime it tells a client started after a
 	// moment from one started before it (F2's reattach rule).
 	StartTicks uint64
+	// PPID is the parent pid (the PPid line of <proc>/<pid>/status), 0 when
+	// unread: Present folds a launcher's own session child into its lease.
+	PPID int
 }
 
 // Of reports whether p is a client of c (all: every discovered container).
@@ -331,10 +334,11 @@ func Scan(procRoot string, uid int) ([]Proc, error) {
 		if !ok {
 			continue
 		}
-		if u, ok := realUID(filepath.Join(dir, "status")); !ok || u != uid {
+		u, ppid, ok := readStatus(filepath.Join(dir, "status"))
+		if !ok || u != uid {
 			continue
 		}
-		out = append(out, Proc{PID: pid, Argv: argv, Inv: inv, StartTicks: startTicks(filepath.Join(dir, "stat"))})
+		out = append(out, Proc{PID: pid, Argv: argv, Inv: inv, StartTicks: startTicks(filepath.Join(dir, "stat")), PPID: ppid})
 	}
 	return out, nil
 }
@@ -370,20 +374,31 @@ func readCmdline(p string) []string {
 	return strings.Split(string(b), "\x00")
 }
 
-// realUID reads the first (real) uid of a status file's Uid line.
-func realUID(p string) (int, bool) {
+// readStatus reads the first (real) uid of a status file's Uid line (ok is
+// false without one) and its PPid line (0 when absent or unparsable).
+func readStatus(p string) (uid, ppid int, ok bool) {
 	sc := bufio.NewScanner(bytes.NewReader(readSmall(p, 64<<10)))
 	for sc.Scan() {
-		if rest, ok := strings.CutPrefix(sc.Text(), "Uid:"); ok {
+		line := sc.Text()
+		if rest, found := strings.CutPrefix(line, "PPid:"); found {
+			if v, err := strconv.Atoi(strings.TrimSpace(rest)); err == nil && v > 0 {
+				ppid = v
+			}
+			continue
+		}
+		if rest, found := strings.CutPrefix(line, "Uid:"); found && !ok {
 			f := strings.Fields(rest)
 			if len(f) == 0 {
-				return 0, false
+				return 0, 0, false
 			}
 			u, err := strconv.Atoi(f[0])
-			return u, err == nil
+			if err != nil {
+				return 0, 0, false
+			}
+			uid, ok = u, true
 		}
 	}
-	return 0, false
+	return uid, ppid, ok
 }
 
 // startTicks reads field 22 of a stat file (after the last ')').

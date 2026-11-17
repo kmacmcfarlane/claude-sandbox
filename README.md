@@ -267,7 +267,8 @@ or choose `[r]` in the menu above. What it does:
 2. **Refuses a running turn** (exit 1, nothing stopped): retry once the session is idle, or
    attach. A prompt waiting for an answer is asked about, since restarting drops it.
 3. **Asks first (default No)** when something else would be affected: another terminal attached to
-   the session (named with its tmux pane and since when), a joined session in that container (it is
+   the session (named with its tmux pane and since when; each terminal once — a launcher and the
+   `docker` client it runs count as one), a joined session in that container (it is
    killed with the container; its resume command is printed and logged), or when whether someone is
    attached cannot be told (macOS). With nothing else affected there is no question, just one line
    saying what happens.
@@ -308,8 +309,17 @@ go pending for a conversation that now runs elsewhere).
 one still starting, one started by an older launcher, one using another `CLAUDE_CONFIG_DIR` than this
 shell (the message prints the right command), a `--resume <id>` naming a conversation the session does
 not have open (one a joined session holds: end that session first), `--worktree`/`--no-worktree`,
-`--new`, `--attach`, `--join`, `--branch`, `--detach`, and a launcher inside a sandbox (it cannot see who
-is attached or reach the host's tmux).
+`--new`, `--attach`, `--join`, `--branch`, `--detach`, claude flags after `--` that pick another
+conversation or place (`--fork-session`, `--session-id`, `-w`, a `--resume` without an id), and a
+launcher inside a sandbox (it cannot see who is attached or reach the host's tmux).
+
+**`--continue` is dropped, not refused:** a restart resumes the session's own conversation by id, so a
+`--continue` given after `--` (to `--restart`, or the launch whose menu you chose `[r]` from) is left
+out of the new claude's command line with one `Note:` line — but only where removing it changes how
+no other argument is read. Right after a flag that takes a value or a list of values (`--debug
+--continue fix-it` would make `fix-it` the debug filter; `--allowedTools Bash --continue "go on"`,
+`--add-dir /x -c prompt`), or after a flag claude-sandbox does not know, it is still refused: drop it
+yourself.
 
 **What a restart does not keep:** joined sessions and anything else running in the old container
 (a dev server, a background task) end with it; session state that `--resume` does not restore — a

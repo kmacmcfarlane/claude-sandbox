@@ -204,6 +204,14 @@ func (f *fixture) procEntry(pid int, start uint64, argv ...string) {
 	}
 }
 
+// procChild is procEntry for a process whose parent is ppid (the PPid line).
+func (f *fixture) procChild(pid, ppid int, start uint64, argv ...string) {
+	f.procEntry(pid, start, argv...)
+	uid := strconv.Itoa(os.Getuid())
+	status := "Name:\tdocker\nPPid:\t" + strconv.Itoa(ppid) + "\nUid:\t" + uid + "\t" + uid + "\t" + uid + "\t" + uid + "\n"
+	Expect(os.WriteFile(filepath.Join(f.proc, strconv.Itoa(pid), "status"), []byte(status), 0o644)).To(Succeed())
+}
+
 var _ = Describe("the session-end helper", func() {
 	var f *fixture
 	saved := []time.Duration{sessionend.TurnMax, sessionend.RecordGrace}
@@ -671,6 +679,29 @@ var _ = Describe("the session-end helper", func() {
 			}
 			Expect(f.run().Outcome).To(Equal(sessionend.OutcomeEnded))
 			Expect(f.clock.afters).To(Equal(1))
+		})
+
+		It("CS-LNCH-209: a launcher's own docker client folded into its lease keeps the verdicts of the two rows", func() {
+			// An older attach lease whose docker attach started after the
+			// hang-up: new by the process, reattached at once.
+			l, err := clients.Take(f.state, cid, clients.KindAttach, t0, "")
+			Expect(err).NotTo(HaveOccurred())
+			after := uint64((time.Hour + 12*time.Second) / time.Second * clients.ClockTicks)
+			f.procChild(5003, os.Getpid(), after, "docker", "attach", cid)
+			Expect(f.run().Outcome).To(Equal(sessionend.OutcomeReattached))
+			Expect(f.clock.afters).To(BeZero())
+			l.Release()
+
+			// Both older: one client, kept only on two sightings 3 s apart.
+			f = newFixture()
+			f.record(7, conv1, "idle", "", t0.Add(time.Second))
+			l, err = clients.Take(f.state, cid, clients.KindAttach, t0, "")
+			Expect(err).NotTo(HaveOccurred())
+			defer l.Release()
+			before := uint64((time.Hour + 5*time.Second) / time.Second * clients.ClockTicks)
+			f.procChild(5004, os.Getpid(), before, "docker", "attach", cid)
+			Expect(f.run().Outcome).To(Equal(sessionend.OutcomeReattached))
+			Expect(f.clock.afters).To(Equal(2))
 		})
 
 		It("CS-LNCH-209: presence that cannot be told keeps the container", func() {

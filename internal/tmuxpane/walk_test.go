@@ -168,3 +168,41 @@ var _ = Describe("CS-LNCH-183: WalkClaudeArgs", func() {
 		Expect(tmuxpane.GuardedContinue(sp("-- --continue"))).To(BeFalse())
 	})
 })
+
+// Spec: spec/sessions.feature CS-SESS-105 — a restart drops a passthrough
+// --continue (it resumes its session's conversation by id).
+var _ = Describe("CS-SESS-105: DropContinue", func() {
+	sp := func(s string) []string { return strings.Fields(s) }
+	DescribeTable("CS-SESS-105: drop rows",
+		func(args, want []string, dropped, ok bool) {
+			got, d, o := tmuxpane.DropContinue(args)
+			Expect(got).To(Equal(want), "%q", args)
+			Expect(d).To(Equal(dropped), "dropped %q", args)
+			Expect(o).To(Equal(ok), "ok %q", args)
+			if ok {
+				Expect(tmuxpane.WalkClaudeArgs(got).Continue).To(BeFalse())
+			}
+		},
+		Entry("--continue", sp("--continue"), []string(nil), true, true),
+		Entry("-c", sp("-c"), []string(nil), true, true),
+		Entry("--continue=x", sp("--continue=x"), []string(nil), true, true),
+		Entry("kept flags around it", sp("--model opus --continue --verbose"), sp("--model opus --verbose"), true, true),
+		Entry("after a prompt word", []string{"fix it", "--continue"}, []string{"fix it"}, true, true),
+		Entry("twice", sp("-c --continue"), []string(nil), true, true),
+		Entry("-pc", sp("-pc"), sp("-p"), true, true),
+		Entry("-cp", sp("-cp"), sp("-p"), true, true),
+		Entry("after a real --, a prompt word", sp("-- --continue"), sp("-- --continue"), false, true),
+		Entry("none", sp("--verbose"), sp("--verbose"), false, true),
+		Entry("a flag's value: kept, refused", sp("--append-system-prompt --continue"), sp("--append-system-prompt --continue"), false, false),
+		// Only where removing it changes how no other token is read.
+		Entry("after an optional value that took nothing: kept, refused", sp("--debug --continue fix-it"), sp("--debug --continue fix-it"), false, false),
+		Entry("ending a variadic list: kept, refused", []string{"--allowedTools", "Bash", "--continue", "go on"}, []string{"--allowedTools", "Bash", "--continue", "go on"}, false, false),
+		Entry("right after a variadic flag's first value: kept, refused", sp("--add-dir /x -c prompt"), sp("--add-dir /x -c prompt"), false, false),
+		Entry("after an unknown flag: kept, refused", sp("--unknownflag --continue foo"), sp("--unknownflag --continue foo"), false, false),
+		Entry("in an uncertain tail: kept, refused", sp("--unknownflag -- --continue"), sp("--unknownflag -- --continue"), false, false),
+		Entry("a cluster's c after an open optional value: the token stays an option", sp("--debug -pc fix-it"), sp("--debug -p fix-it"), true, true),
+		Entry("a cluster's c ending a variadic list", sp("--add-dir /x -pc prompt"), sp("--add-dir /x -p prompt"), true, true),
+		Entry("after an optional value that took its value", sp("--debug api --continue fix-it"), sp("--debug api fix-it"), true, true),
+		Entry("after a boolean flag", sp("--verbose --continue fix-it"), sp("--verbose fix-it"), true, true),
+	)
+})

@@ -3370,6 +3370,9 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
     And an older terminal client keeps it only when seen on two polls at least
       3 s apart (a sibling tab that hung up in the same moment has released its
       lease by then); one sighting only defers
+    And a lease row with the launcher's own docker client folded into it
+      (CS-SESS-098) is one client, new when either the lease or the process is
+      by the rules above, so the verdicts are those the two rows gave apart
     And a join client (a join lease, a scanned exec) holds the container with no
       cap: the helper waits, and goes on once the join is gone
     And presence that cannot be told (the leases or /proc unreadable) keeps the
