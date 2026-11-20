@@ -2133,6 +2133,8 @@ Each mount entry has:
 
 A container path that is not absolute (given, or a relative `host` with `container` omitted) stops the launch with an error naming the entry.
 
+Don't mount over your home: a `container` path (given, or a `host` of your home with `container` omitted) that is the container's home or a parent of it (`/` included) stops a new launch with exit 2, naming the entry and its `config.yaml`. The entrypoint moves the image's own home files (`~/.local/bin` and the like) into that home at start, which a mount there breaks. For a read-only view of your home, mount it under another container path, e.g. `{host: /home/you, container: /mnt/host-home}`; subdirectories of the home (`~/.ssh`, `~/shared`) are fine.
+
 #### Child Dockerfile
 
 Configure the child Dockerfile location (env vars take precedence over YAML):

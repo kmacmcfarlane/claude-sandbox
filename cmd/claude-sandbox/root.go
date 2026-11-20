@@ -1227,6 +1227,12 @@ func launchWith(env *Env, f *launchFlags, rr, version string, headless bool) err
 	if err := launch.CheckConfiguredLabels(configuredLabelValues(env, f, cfg, configSnap, projectDir)); err != nil {
 		return exitErr(2, "Error: %v.", err)
 	}
+	// CS-LNCH-241: a cascade mount over the container's home (or a parent of
+	// it) is refused here too, before any image work; an attach or join never
+	// gets this far, so the drift build is untouched.
+	if err := checkHomeMounts(env, cfg, configSnap); err != nil {
+		return err
+	}
 	if adj < 0 {
 		fmt.Fprintf(env.Err, "WARNING: oomScoreAdj %d is below 0: this sandbox is shielded from the host's OOM killer, which will prefer host processes (the desktop) over it.\n", adj)
 	}

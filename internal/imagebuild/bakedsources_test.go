@@ -237,7 +237,7 @@ var _ = Describe("baked sources", func() {
 		Expect(helper).To(ContainSubstring(`mp=${mp//\\/\\\\}; mp=${mp//\*/\\*}; mp=${mp//\?/\\?}; mp=${mp//\[/\\[}`))
 		Expect(helper).To(ContainSubstring(`_CS_PRUNE+=(-path "$mp" -prune -o)`))
 		// The home chown uses the same helper.
-		Expect(ep).To(ContainSubstring("_cs_prune_args \"$TARGET_HOME\"\nfind \"$TARGET_HOME\" \"${_CS_PRUNE[@]}\" \\( ! -uid \"$TARGET_UID\" -o ! -gid \"$TARGET_GID\" \\) -print0"))
+		Expect(ep).To(ContainSubstring("_cs_prune_args \"$TARGET_HOME\"\n    find \"$TARGET_HOME\" \"${_CS_PRUNE[@]}\" \\( ! -uid \"$TARGET_UID\" -o ! -gid \"$TARGET_GID\" \\) -print0"))
 		Expect(block).To(ContainSubstring(`-exec chown "$TARGET_UID:$TARGET_GID" {} +`))
 		Expect(block).NotTo(ContainSubstring("VIRTUAL_ENV"), "never a path an env file can set")
 		Expect(block).NotTo(ContainSubstring("-type f"), "files keep their owner (no overlay2 copy-up)")
@@ -350,6 +350,108 @@ var _ = Describe("baked sources", func() {
 		})
 	})
 
+	Describe("CS-IMG-080: the home relocation stands aside for a mounted home and a read-only destination", func() {
+		// The relocation's own lines, run by bash against a scratch tree with
+		// /home/claude replaced by a scratch source.
+		homeCheck := func(ep string) string {
+			i := strings.Index(ep, "_CS_HOME_MOUNTED=\n")
+			Expect(i).To(BeNumerically(">=", 0))
+			b := ep[i:]
+			return b[:strings.Index(b, "\ndone\n")+len("\ndone\n")]
+		}
+		relocation := func(ep, src string) string {
+			i := strings.Index(ep, `if [ "$TARGET_USER" != "claude" ] && [ "$TARGET_HOME" != "/home/claude" ]`)
+			Expect(i).To(BeNumerically(">=", 0))
+			b := ep[i:]
+			b = b[:strings.Index(b, "\nfi\n")+len("\nfi\n")]
+			return strings.ReplaceAll(b, "/home/claude", src)
+		}
+
+		It("is set only for a mount at the home or above it, never for / or below", func() {
+			block := homeCheck(repoFile("entrypoint.sh"))
+			run := func(home string, mps ...string) string {
+				script := "set -e\nTARGET_HOME=$1; shift\n_CS_MOUNT_POINTS=(\"$@\")\n" + block + "printf '%s' \"$_CS_HOME_MOUNTED\""
+				out, err := exec.Command("bash", append([]string{"-c", script, "_", home}, mps...)...).Output()
+				Expect(err).NotTo(HaveOccurred())
+				return string(out)
+			}
+			Expect(run("/home/rt", "/", "/home/rt/.claude", "/home/rt/proj")).To(Equal(""))
+			Expect(run("/home/rt", "/", "/home/rt")).To(Equal("1"))
+			Expect(run("/home/rt", "/", "/home")).To(Equal("1"))
+			Expect(run("/home/rt", "/", "/home/r")).To(Equal(""), "a sibling sharing a prefix")
+		})
+
+		It("skips the relocation for a mounted home, and keeps /home/claude when a destination is read-only", func() {
+			if os.Geteuid() == 0 {
+				Skip("root writes a 0555 directory; the read-only case needs a non-root run")
+			}
+			ep := repoFile("entrypoint.sh")
+			Expect(ep).To(ContainSubstring("    && [ -z \"$_CS_HOME_MOUNTED\" ] \\\n"))
+			// The home chown stands aside too.
+			Expect(ep).To(ContainSubstring("if [ -z \"$_CS_HOME_MOUNTED\" ]; then\n    _cs_prune_args \"$TARGET_HOME\"\n"))
+
+			setup := func() (src, home string) {
+				base := GinkgoT().TempDir()
+				src, home = filepath.Join(base, "build"), filepath.Join(base, "home")
+				for _, d := range []string{
+					filepath.Join(src, ".config", "go", "telemetry"),
+					filepath.Join(src, ".local", "bin"),
+					filepath.Join(home, ".config"),
+				} {
+					Expect(os.MkdirAll(d, 0o755)).To(Succeed())
+				}
+				Expect(os.WriteFile(filepath.Join(src, ".config", "go", "telemetry", "x"), nil, 0o644)).To(Succeed())
+				Expect(os.WriteFile(filepath.Join(src, ".local", "bin", "tool"), nil, 0o755)).To(Succeed())
+				return src, home
+			}
+			run := func(src, home, mounted string) (string, error) {
+				script := "set -e\nTARGET_USER=rt\nTARGET_HOME=$1\n_CS_HOME_MOUNTED=$2\n_CS_MOUNT_POINTS=(/)\n" +
+					relocation(ep, src) + "echo end\n"
+				var stderr strings.Builder
+				cmd := exec.Command("bash", "-c", script, "_", home, mounted)
+				cmd.Stderr = &stderr
+				out, err := cmd.Output()
+				Expect(stderr.String()).To(BeEmpty(), "quiet")
+				return string(out), err
+			}
+
+			// A mounted home: nothing moves, the source stays a directory.
+			src, home := setup()
+			out, err := run(src, home, "1")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(out).To(Equal("end\n"))
+			Expect(filepath.Join(home, ".local")).NotTo(BeAnExistingFile())
+			fi, err := os.Lstat(src)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(fi.IsDir()).To(BeTrue())
+
+			// A read-only destination directory: that entry is skipped, the
+			// rest moves, set -e never stops the script, and the source is kept.
+			src, home = setup()
+			Expect(os.Chmod(filepath.Join(home, ".config"), 0o555)).To(Succeed())
+			DeferCleanup(os.Chmod, filepath.Join(home, ".config"), os.FileMode(0o755))
+			out, err = run(src, home, "")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(out).To(Equal("end\n"))
+			Expect(filepath.Join(home, ".local", "bin", "tool")).To(BeAnExistingFile())
+			Expect(filepath.Join(home, ".config", "go")).NotTo(BeAnExistingFile())
+			Expect(filepath.Join(src, ".config", "go", "telemetry", "x")).To(BeAnExistingFile())
+			fi, err = os.Lstat(src)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(fi.IsDir()).To(BeTrue(), "kept, not replaced by the symlink")
+
+			// A later start walks again: with the destination writable now, the
+			// rest moves and the source becomes the symlink.
+			Expect(os.Chmod(filepath.Join(home, ".config"), 0o755)).To(Succeed())
+			_, err = run(src, home, "")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(filepath.Join(home, ".config", "go", "telemetry", "x")).To(BeAnExistingFile())
+			fi, err = os.Lstat(src)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(fi.Mode() & os.ModeSymlink).NotTo(BeZero())
+		})
+	})
+
 	It("CS-IMG-068: the entrypoint is idempotent on a restart of the same container", func() {
 		ep := repoFile("entrypoint.sh")
 		// The user is resolved by name, claude first, then the already-renamed
@@ -363,10 +465,10 @@ var _ = Describe("baked sources", func() {
 			`    usermod -l "$TARGET_USER" -d "$TARGET_HOME" "$_CS_USER"`))
 		// The relocation runs only while /home/claude is a real directory.
 		Expect(ep).To(ContainSubstring(`&& [ -d /home/claude ] && [ ! -L /home/claude ]; then`))
-		Expect(ep).To(ContainSubstring("    rm -rf /home/claude\n    ln -s \"$TARGET_HOME\" /home/claude\n"))
+		Expect(ep).To(ContainSubstring("        rm -rf /home/claude\n        ln -s \"$TARGET_HOME\" /home/claude\n"))
 		// The home chown skips what is already owned and runs no empty chown.
 		Expect(ep).To(ContainSubstring(`find "$TARGET_HOME" "${_CS_PRUNE[@]}" \( ! -uid "$TARGET_UID" -o ! -gid "$TARGET_GID" \) -print0 \` + "\n" +
-			`    | xargs -0 --no-run-if-empty chown -h "$TARGET_UID:$TARGET_GID"`))
+			`        | xargs -0 --no-run-if-empty chown -h "$TARGET_UID:$TARGET_GID"`))
 		// No other root-part chown can follow a link: the venv chown acts on
 		// -type d (lstat: a link never matches), and nothing else chowns.
 		n := 0

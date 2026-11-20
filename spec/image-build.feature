@@ -953,6 +953,27 @@ Feature: Image build lifecycle (CS-IMG)
     # root (markers written under /root) and printed the id error; with this one no
     # marker, no error, the session user, home symlink and PATH as on the first start.
 
+  Scenario: CS-IMG-080 The home relocation stands aside for a mounted home and a read-only destination
+    Given the entrypoint relocates /home/claude into $TARGET_HOME (CS-IMG-068)
+    When $TARGET_HOME or one of its ancestors other than "/" is a mount point
+      in /proc/self/mountinfo (a cascade mount over the home, which the
+      launcher refuses since CS-LNCH-241, from an older launcher or by hand)
+    Then the relocation is skipped quietly: nothing is moved into the mount,
+      /home/claude stays a real directory holding the build-time files, and
+      the home chown is skipped too (a bind mount never changes owner)
+    And the same holds for a project launched from the home itself, whose
+      project mount is at $TARGET_HOME: the image PATH names
+      /home/claude/.local/bin, so claude is still found there
+    When an entry's destination directory is on a read-only filesystem, or a
+      move fails
+    Then that entry is skipped quietly, the walk goes on (set -e never stops
+      the entrypoint), and /home/claude is kept, not removed or replaced by
+      the symlink, so what could not be moved is not lost
+    And a later start of the same container walks again and finds the moved
+      entries in place (CS-IMG-068)
+    And the root part's rules hold: no new environment is read, every tool
+      runs on the fixed PATH (CS-IMG-067)
+
   Scenario: CS-IMG-029 Base, tools and CLI Dockerfiles declare the shared cache-mount ids
     Then Dockerfile, Dockerfile.tools and Dockerfile.cli use "--mount=type=cache,id=claude-sandbox-<name>" mounts
     And the ids are apt, apt-lists, pip, npm, go-mod, go-build
