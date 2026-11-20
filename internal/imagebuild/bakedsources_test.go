@@ -404,51 +404,102 @@ var _ = Describe("baked sources", func() {
 				Expect(os.WriteFile(filepath.Join(src, ".local", "bin", "tool"), nil, 0o755)).To(Succeed())
 				return src, home
 			}
-			run := func(src, home, mounted string) (string, error) {
+			run := func(src, home, mounted string) (string, string, error) {
 				script := "set -e\nTARGET_USER=rt\nTARGET_HOME=$1\n_CS_HOME_MOUNTED=$2\n_CS_MOUNT_POINTS=(/)\n" +
 					relocation(ep, src) + "echo end\n"
 				var stderr strings.Builder
 				cmd := exec.Command("bash", "-c", script, "_", home, mounted)
 				cmd.Stderr = &stderr
 				out, err := cmd.Output()
-				Expect(stderr.String()).To(BeEmpty(), "quiet")
-				return string(out), err
+				return string(out), stderr.String(), err
+			}
+			isLink := func(p string) bool {
+				fi, err := os.Lstat(p)
+				Expect(err).NotTo(HaveOccurred())
+				return fi.Mode()&os.ModeSymlink != 0
+			}
+			isDir := func(p string) bool {
+				fi, err := os.Lstat(p)
+				Expect(err).NotTo(HaveOccurred())
+				return fi.IsDir()
 			}
 
-			// A mounted home: nothing moves, the source stays a directory.
+			// A mounted home: nothing moves, the source stays a directory, quietly.
 			src, home := setup()
-			out, err := run(src, home, "1")
+			out, stderr, err := run(src, home, "1")
 			Expect(err).NotTo(HaveOccurred())
 			Expect(out).To(Equal("end\n"))
+			Expect(stderr).To(BeEmpty())
 			Expect(filepath.Join(home, ".local")).NotTo(BeAnExistingFile())
-			fi, err := os.Lstat(src)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(fi.IsDir()).To(BeTrue())
+			Expect(isDir(src)).To(BeTrue())
 
 			// A read-only destination directory: that entry is skipped, the
-			// rest moves, set -e never stops the script, and the source is kept.
+			// rest moves, set -e never stops the script, the source is kept,
+			// and one stderr line names what was left.
 			src, home = setup()
 			Expect(os.Chmod(filepath.Join(home, ".config"), 0o555)).To(Succeed())
 			DeferCleanup(os.Chmod, filepath.Join(home, ".config"), os.FileMode(0o755))
-			out, err = run(src, home, "")
+			out, stderr, err = run(src, home, "")
 			Expect(err).NotTo(HaveOccurred())
 			Expect(out).To(Equal("end\n"))
+			Expect(strings.Count(stderr, "\n")).To(Equal(1))
+			Expect(stderr).To(HavePrefix("entrypoint: 1 build-time item(s) could not be moved into " + home))
+			Expect(stderr).To(ContainSubstring(filepath.Join(src, ".config", "go")))
 			Expect(filepath.Join(home, ".local", "bin", "tool")).To(BeAnExistingFile())
 			Expect(filepath.Join(home, ".config", "go")).NotTo(BeAnExistingFile())
 			Expect(filepath.Join(src, ".config", "go", "telemetry", "x")).To(BeAnExistingFile())
-			fi, err = os.Lstat(src)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(fi.IsDir()).To(BeTrue(), "kept, not replaced by the symlink")
+			Expect(isDir(src)).To(BeTrue(), "kept, not replaced by the symlink")
+			// What moved is still reached through the kept source (the image
+			// PATH's /home/claude/.local/bin).
+			Expect(isLink(filepath.Join(src, ".local"))).To(BeTrue())
+			Expect(filepath.Join(src, ".local", "bin", "tool")).To(BeAnExistingFile())
 
-			// A later start walks again: with the destination writable now, the
-			// rest moves and the source becomes the symlink.
+			// A later start walks again: the back-link is skipped, the rest
+			// moves, and the source becomes the one symlink.
 			Expect(os.Chmod(filepath.Join(home, ".config"), 0o755)).To(Succeed())
-			_, err = run(src, home, "")
+			_, stderr, err = run(src, home, "")
 			Expect(err).NotTo(HaveOccurred())
+			Expect(stderr).To(BeEmpty())
 			Expect(filepath.Join(home, ".config", "go", "telemetry", "x")).To(BeAnExistingFile())
-			fi, err = os.Lstat(src)
+			Expect(isLink(filepath.Join(home, ".local"))).To(BeFalse(), "the back-link is never moved")
+			Expect(isLink(src)).To(BeTrue())
+		})
+
+		It("never follows a link on either side of the root walk", func() {
+			ep := repoFile("entrypoint.sh")
+			base := GinkgoT().TempDir()
+			src, home, outside := filepath.Join(base, "build"), filepath.Join(base, "home"), filepath.Join(base, "etc")
+			for _, d := range []string{
+				filepath.Join(src, ".config", "go"),
+				filepath.Join(home, ".cache"),
+				outside,
+				filepath.Join(base, "secret"),
+			} {
+				Expect(os.MkdirAll(d, 0o755)).To(Succeed())
+			}
+			Expect(os.WriteFile(filepath.Join(src, ".config", "go", "x"), nil, 0o644)).To(Succeed())
+			Expect(os.WriteFile(filepath.Join(base, "secret", "shadow"), nil, 0o600)).To(Succeed())
+			// A destination planted as a link out of the home...
+			Expect(os.Symlink(outside, filepath.Join(home, ".config"))).To(Succeed())
+			// ...and a source planted as a link to a directory whose
+			// destination exists.
+			Expect(os.Symlink(filepath.Join(base, "secret"), filepath.Join(src, ".cache"))).To(Succeed())
+
+			script := "set -e\nTARGET_USER=rt\nTARGET_HOME=$1\n_CS_HOME_MOUNTED=\n_CS_MOUNT_POINTS=(/)\n" +
+				relocation(ep, src) + "echo end\n"
+			var stderr strings.Builder
+			cmd := exec.Command("bash", "-c", script, "_", home)
+			cmd.Stderr = &stderr
+			out, err := cmd.Output()
 			Expect(err).NotTo(HaveOccurred())
-			Expect(fi.Mode() & os.ModeSymlink).NotTo(BeZero())
+			Expect(string(out)).To(Equal("end\n"))
+			Expect(stderr.String()).To(ContainSubstring("1 build-time item(s)"))
+			entries, err := os.ReadDir(outside)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(entries).To(BeEmpty(), "nothing is moved through a destination link")
+			Expect(filepath.Join(base, "secret", "shadow")).To(BeAnExistingFile())
+			Expect(filepath.Join(home, ".cache", "shadow")).NotTo(BeAnExistingFile(), "a source link is never descended")
+			Expect(filepath.Join(src, ".config", "go", "x")).To(BeAnExistingFile())
 		})
 	})
 

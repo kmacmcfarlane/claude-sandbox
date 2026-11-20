@@ -140,19 +140,32 @@ if [ "$TARGET_USER" != "claude" ] && [ "$TARGET_HOME" != "/home/claude" ] \
     # (a read-only filesystem: access(2) says EROFS even to root) is skipped,
     # and a failed move is recorded rather than stopping the script (set -e):
     # either way /home/claude is then kept, so nothing left in it is lost, and
-    # the next start walks again (CS-IMG-080).
-    _CS_MERGE_LEFT=
+    # the next start walks again (CS-IMG-080). A kept /home/claude can carry
+    # what a session wrote there into that next root walk, so the walk never
+    # follows a link: a destination that is a link is left alone, and a
+    # source that is a link is moved as the link itself (mv renames it) or
+    # left, never descended into. Every entry moved leaves a link back at
+    # its source, so a kept /home/claude still reaches it (the image PATH names
+    # /home/claude/.local/bin); a complete merge replaces the whole directory
+    # with one link, as before.
+    _CS_MERGE_LEFT=()
     _cs_merge() {
         local src="$1" dst="$2" child base
         if [ -n "${_CS_MOUNTS[$dst]:-}" ]; then return; fi
+        if [ -L "$dst" ]; then _CS_MERGE_LEFT+=("$src"); return; fi
+        if [ -L "$src" ] && [ "$(readlink "$src")" = "$dst" ]; then return; fi
         if [ ! -e "$dst" ]; then
-            if [ -w "${dst%/*}" ] && mv "$src" "$dst" 2>/dev/null; then return; fi
-            _CS_MERGE_LEFT=1
+            if [ -w "${dst%/*}" ] && mv -T "$src" "$dst" 2>/dev/null; then
+                ln -s "$dst" "$src" 2>/dev/null || true
+                return
+            fi
+            _CS_MERGE_LEFT+=("$src")
             return
         fi
+        if [ -L "$src" ]; then return; fi
         if [ -d "$src" ] && [ -d "$dst" ]; then
             for child in "$src"/*; do
-                [ -e "$child" ] || continue
+                [ -e "$child" ] || [ -L "$child" ] || continue
                 base="$(basename "$child")"
                 _cs_merge "$child" "$dst/$base"
             done
@@ -165,9 +178,12 @@ if [ "$TARGET_USER" != "claude" ] && [ "$TARGET_HOME" != "/home/claude" ] \
         _cs_merge "$item" "$TARGET_HOME/$base"
     done
     shopt -u dotglob nullglob
-    if [ -z "$_CS_MERGE_LEFT" ]; then
+    if [ "${#_CS_MERGE_LEFT[@]}" -eq 0 ]; then
         rm -rf /home/claude
         ln -s "$TARGET_HOME" /home/claude
+    else
+        printf 'entrypoint: %d build-time item(s) could not be moved into %s (read-only, or a link in the way) and stay under /home/claude:%s\n' \
+            "${#_CS_MERGE_LEFT[@]}" "$TARGET_HOME" "$(printf ' %q' "${_CS_MERGE_LEFT[@]:0:3}")" >&2
     fi
 fi
 

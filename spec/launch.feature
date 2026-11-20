@@ -3907,7 +3907,11 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       e.g. "container: /mnt/host-home", for a view of the home
     And an entry with the home as its host side and another container path,
       or a container path below the home (~/.ssh), launches as before
-    And a relative container path is left to docker (it is never an ancestor)
+    And a relative container path never gets here: the cascade already
+      refuses it, naming the entry
+    And a project launched from the home itself with an entry "container:
+      $HOME" is refused too (that entry used to be dropped as a duplicate of
+      the project mount)
     And an attach or join, which creates nothing and runs no entrypoint, is
       not refused: the check runs where CS-LNCH-224's does, after the session
       decision, so the attach/join drift build never reaches it

@@ -2128,12 +2128,12 @@ mounts:
 
 Each mount entry has:
 - `host` — absolute path on the host (required). It is passed to `-v` as written: `~` is not expanded.
-- `container` — absolute path inside the container (optional; omitted or empty means the same path as `host`). `{host: X}` and `{host: X, container: X}` are the same entry: they override each other across the cascade and give the same `-v` and the same configuration hash.
+- `container` — absolute path inside the container (optional; omitted or empty means the same path as `host`). On a launch from `~` (the home itself mounted), a directory docker creates under the home as the mount point of a `host` != `container` entry stays owned by root. `{host: X}` and `{host: X, container: X}` are the same entry: they override each other across the cascade and give the same `-v` and the same configuration hash.
 - `writable` — boolean, default `false` (mounts `:ro` unless set to `true`)
 
 A container path that is not absolute (given, or a relative `host` with `container` omitted) stops the launch with an error naming the entry.
 
-Don't mount over your home: a `container` path (given, or a `host` of your home with `container` omitted) that is the container's home or a parent of it (`/` included) stops a new launch with exit 2, naming the entry and its `config.yaml`. The entrypoint moves the image's own home files (`~/.local/bin` and the like) into that home at start, which a mount there breaks. For a read-only view of your home, mount it under another container path, e.g. `{host: /home/you, container: /mnt/host-home}`; subdirectories of the home (`~/.ssh`, `~/shared`) are fine.
+Don't mount over your home: a `container` path (given, or a `host` of your home with `container` omitted) that is the container's home or a parent of it (`/` included) stops a new launch with exit 2, naming the entry and its `config.yaml`. The entrypoint moves the image's own home files (`~/.local/bin` and the like) into that home at start, which a mount there breaks. For a read-only view of your home, mount it under another container path, e.g. `{host: /home/you, container: /mnt/host-home}`; subdirectories of the home (`~/.ssh`, `~/shared`) are fine. This also refuses a `container: $HOME` entry in a project launched from the home itself, which used to be dropped as a duplicate of the project mount.
 
 #### Child Dockerfile
 
@@ -2197,6 +2197,8 @@ ENV PATH="/home/claude/go/bin:$PATH"
 2. Moves build-time files from `/home/claude` to the host home path (e.g. `/home/rt`), skipping anything already present so bind mounts from the host are never overwritten
 3. Symlinks `/home/claude → /home/rt` so hardcoded paths still resolve
 4. Chowns all non-bind-mounted files under the home dir to match the host UID/GID
+
+When the home itself is a mount (a launch from `~`, whose project mount is `$HOME`), `/home/claude` stays a real directory and nothing is relocated or chowned, so build-time files are reachable through absolute `/home/claude` paths, not through `$HOME`.
 
 The entrypoint runs as root on every start of a container (a `docker start` of a stopped one
 included), so it trusts nothing from the container environment: it runs under `bash -p` (no
