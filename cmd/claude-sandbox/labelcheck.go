@@ -78,3 +78,23 @@ func mountSource(snap []cascade.ConfigFile, m cascade.Mount) string {
 	}
 	return src
 }
+
+// checkHomeMounts refuses a cascade mount whose container side is the
+// container's home or an ancestor of it (CS-LNCH-241): the entrypoint
+// relocates the image's build-time home there, so a read-only bind fails
+// every move and a read-write one takes the files into the host's home. The
+// container home is the launcher's HOME (hostIdentity), which the launch
+// hands the entrypoint as HOST_HOME.
+func checkHomeMounts(env *Env, cfg *cascade.Config, snap []cascade.ConfigFile) error {
+	_, _, _, home := hostIdentity(env.Getenv)
+	for i, m := range cfg.Mounts {
+		if !launch.CoversHome(m.Container, home) {
+			continue
+		}
+		return exitErr(2, "Error: mounts[%d] (%s) mounts over the container's home (container: %s; the home is %s).\n"+
+			"       The entrypoint moves the image's home files there, so a mount at or above it breaks the session.\n"+
+			"       For a view of the home, mount it under another container path, e.g. \"container: /mnt/host-home\".",
+			i, mountSource(snap, m), m.Container, home)
+	}
+	return nil
+}

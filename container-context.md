@@ -178,7 +178,7 @@ older `.claude-sandbox/agent/LSP_TOOLS.md`) tells you to run it, run the
   image's own (UTC unless a child image set one). `/etc/timezone` and the name
   of the `/etc/localtime` link keep the image's value, so read `echo $TZ` or
   `date`, not those files.
-- `/home/claude` is symlinked to the host user's home directory (e.g. `/home/rt`). Both paths work. Build-time files from the Dockerfile are relocated here automatically.
+- `/home/claude` is symlinked to the host user's home directory (e.g. `/home/rt`). Both paths work. Build-time files from the Dockerfile are relocated here automatically. Exception: when the home itself is a mount (a launch from `~`, whose project mount is `$HOME`), `/home/claude` stays a real directory and nothing is relocated, so build-time files are reachable through absolute `/home/claude` paths, not through `$HOME`.
 - **The scratchpad survives the container.** The launcher points
   `CLAUDE_CODE_TMPDIR` inside the host-mounted Claude config directory, so the
   session scratchpad named in your system prompt persists through session exit

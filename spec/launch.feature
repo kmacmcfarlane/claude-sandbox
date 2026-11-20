@@ -3887,3 +3887,31 @@ Feature: Launcher — flags, mounts, injections, container command (CS-LNCH)
       unlinked (an empty directory removed; a non-empty one left with one WARNING),
       without following any link or reading any file
     # Partial: catches only entries planted before this launch.
+
+  # ---- a cascade mount over the container's home ----
+  # The entrypoint relocates the image's build-time home (/home/claude) into
+  # the container $HOME, which is the host's home path. A mounts: entry whose
+  # container side is that home (or a parent of it) puts a bind mount where
+  # the files must go: read-only, every move failed and set -e stopped the
+  # entrypoint; read-write, the build-time files would land in the host home.
+
+  Scenario: CS-LNCH-241 A cascade mount over the container's home is refused before any image work
+    Given a new container launch (interactive, --detach, --branch, headless or ralph)
+    And a cascade "mounts" entry whose container side (the host when container
+      is absent, CS-CASC-048), path-cleaned, is the container $HOME (the
+      launcher's HOME, which the entrypoint gives the session user) or an
+      ancestor of it, "/" included
+    Then the launch exits 2 before any image build or docker create
+    And the message names the entry ("mounts[i]"), the config.yaml whose own
+      mounts list holds it, and says to mount under another container path,
+      e.g. "container: /mnt/host-home", for a view of the home
+    And an entry with the home as its host side and another container path,
+      or a container path below the home (~/.ssh), launches as before
+    And a relative container path never gets here: the cascade already
+      refuses it, naming the entry
+    And a project launched from the home itself with an entry "container:
+      $HOME" is refused too (that entry used to be dropped as a duplicate of
+      the project mount)
+    And an attach or join, which creates nothing and runs no entrypoint, is
+      not refused: the check runs where CS-LNCH-224's does, after the session
+      decision, so the attach/join drift build never reaches it

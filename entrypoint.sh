@@ -95,6 +95,19 @@ if [ "$_CS_USER" != "$TARGET_USER" ]; then
     groupmod -n "$TARGET_USER" "$_CS_GROUP" 2>/dev/null || true
 fi
 
+# A mount AT $TARGET_HOME or above it (other than /) — a cascade mount over the
+# home, which the launcher refuses (CS-LNCH-241), or a project launched from
+# the home itself — means the home is not this container's to fill: a
+# read-only one fails every move, a read-write one would take the build-time
+# files into the host's home, and a bind mount never changes owner. The
+# relocation and the home chown then stand aside quietly; /home/claude stays a
+# real directory, and the image PATH still names its .local/bin (CS-IMG-080).
+_CS_HOME_MOUNTED=
+for _mp in "${_CS_MOUNT_POINTS[@]}"; do
+    [ "$_mp" != / ] || continue
+    case "$TARGET_HOME" in "$_mp"|"$_mp"/*) _CS_HOME_MOUNTED=1 ;; esac
+done
+
 # Relocate build-time home (/home/claude) to the runtime home path
 # (e.g. /home/rt). Child Dockerfiles use /home/claude; the entrypoint
 # moves those files so they appear under the real $HOME at runtime.
@@ -105,6 +118,7 @@ fi
 # behind (-d follows it, -L tells), and the merge walk below would otherwise
 # crawl the whole home merging it into itself.
 if [ "$TARGET_USER" != "claude" ] && [ "$TARGET_HOME" != "/home/claude" ] \
+    && [ -z "$_CS_HOME_MOUNTED" ] \
     && [ -d /home/claude ] && [ ! -L /home/claude ]; then
     mkdir -p "$TARGET_HOME"
 
@@ -122,14 +136,36 @@ if [ "$TARGET_USER" != "claude" ] && [ "$TARGET_HOME" != "/home/claude" ] \
     # ~/.local/share/direnv mount), recurse and merge its children rather
     # than skipping the whole subtree — otherwise build-time files such as
     # the claude binary under ~/.local/bin get left behind. Actual bind
-    # mounts are never touched.
+    # mounts are never touched. A destination whose directory is not writable
+    # (a read-only filesystem: access(2) says EROFS even to root) is skipped,
+    # and a failed move is recorded rather than stopping the script (set -e):
+    # either way /home/claude is then kept, so nothing left in it is lost, and
+    # the next start walks again (CS-IMG-080). A kept /home/claude can carry
+    # what a session wrote there into that next root walk, so the walk never
+    # follows a link: a destination that is a link is left alone, and a
+    # source that is a link is moved as the link itself (mv renames it) or
+    # left, never descended into. Every entry moved leaves a link back at
+    # its source, so a kept /home/claude still reaches it (the image PATH names
+    # /home/claude/.local/bin); a complete merge replaces the whole directory
+    # with one link, as before.
+    _CS_MERGE_LEFT=()
     _cs_merge() {
         local src="$1" dst="$2" child base
         if [ -n "${_CS_MOUNTS[$dst]:-}" ]; then return; fi
-        if [ ! -e "$dst" ]; then mv "$src" "$dst"; return; fi
+        if [ -L "$dst" ]; then _CS_MERGE_LEFT+=("$src"); return; fi
+        if [ -L "$src" ] && [ "$(readlink "$src")" = "$dst" ]; then return; fi
+        if [ ! -e "$dst" ]; then
+            if [ -w "${dst%/*}" ] && mv -T "$src" "$dst" 2>/dev/null; then
+                ln -s "$dst" "$src" 2>/dev/null || true
+                return
+            fi
+            _CS_MERGE_LEFT+=("$src")
+            return
+        fi
+        if [ -L "$src" ]; then return; fi
         if [ -d "$src" ] && [ -d "$dst" ]; then
             for child in "$src"/*; do
-                [ -e "$child" ] || continue
+                [ -e "$child" ] || [ -L "$child" ] || continue
                 base="$(basename "$child")"
                 _cs_merge "$child" "$dst/$base"
             done
@@ -142,8 +178,13 @@ if [ "$TARGET_USER" != "claude" ] && [ "$TARGET_HOME" != "/home/claude" ] \
         _cs_merge "$item" "$TARGET_HOME/$base"
     done
     shopt -u dotglob nullglob
-    rm -rf /home/claude
-    ln -s "$TARGET_HOME" /home/claude
+    if [ "${#_CS_MERGE_LEFT[@]}" -eq 0 ]; then
+        rm -rf /home/claude
+        ln -s "$TARGET_HOME" /home/claude
+    else
+        printf 'entrypoint: %d build-time item(s) could not be moved into %s (read-only, or a link in the way) and stay under /home/claude:%s\n' \
+            "${#_CS_MERGE_LEFT[@]}" "$TARGET_HOME" "$(printf ' %q' "${_CS_MERGE_LEFT[@]:0:3}")" >&2
+    fi
 fi
 
 # Own all non-bind-mounted files under the home dir so that files created
@@ -155,9 +196,12 @@ fi
 # ~/.local/bin/x -> /usr/bin/tool would hand /usr/bin/tool, which the root
 # part runs, to the session user (and re-hand it on every start, the link
 # itself staying root's).
-_cs_prune_args "$TARGET_HOME"
-find "$TARGET_HOME" "${_CS_PRUNE[@]}" \( ! -uid "$TARGET_UID" -o ! -gid "$TARGET_GID" \) -print0 \
-    | xargs -0 --no-run-if-empty chown -h "$TARGET_UID:$TARGET_GID" 2>/dev/null || true
+# Skipped when the home itself is a mount (CS-IMG-080).
+if [ -z "$_CS_HOME_MOUNTED" ]; then
+    _cs_prune_args "$TARGET_HOME"
+    find "$TARGET_HOME" "${_CS_PRUNE[@]}" \( ! -uid "$TARGET_UID" -o ! -gid "$TARGET_GID" \) -print0 \
+        | xargs -0 --no-run-if-empty chown -h "$TARGET_UID:$TARGET_GID" 2>/dev/null || true
+fi
 
 # Let the session user `pip install` into the base venv (CS-IMG-052). The venv
 # is built as root (and children may pip-install into it as root at build

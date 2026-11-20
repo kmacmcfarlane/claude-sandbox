@@ -88,6 +88,9 @@
 #   container: absolute path inside the container (optional; omitted = same
 #              path as host, and the same entry as an explicit same-path one)
 #   writable:  boolean, default false (mounts :ro unless true)
+# Don't mount over $HOME (or a parent of it): the launch refuses it. For a
+# read-only view of your home use another container path, e.g.
+# container: /mnt/host-home.
 # mounts:
 #   - host: /home/user/shared-libs     # same path inside the container
 #   - host: /data/datasets
